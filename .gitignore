@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+checkpoints/
+data/demos/
+*.onnx
+*.pt
+*.log
+.env
