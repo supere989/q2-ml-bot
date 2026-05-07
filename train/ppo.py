@@ -17,6 +17,7 @@ import torch.nn as nn
 import torch.optim as optim
 from pathlib import Path
 from typing import List
+from torch.utils.tensorboard import SummaryWriter
 
 from models.policy import Q2BotPolicy, export_onnx, OBS_DIM, ACTION_DIM
 
@@ -128,6 +129,20 @@ def train(cfg: dict):
     save_dir        = Path("checkpoints")
     save_dir.mkdir(exist_ok=True)
 
+    # TensorBoard logging — view with: tensorboard --logdir runs
+    run_name = f"ppo_{cfg['map_name']}_{int(time.time())}"
+    writer   = SummaryWriter(log_dir=f"runs/{run_name}")
+    print(f"TensorBoard log: runs/{run_name}")
+    print(f"  view with:  tensorboard --logdir runs --bind_all")
+
+    # episode reward tracking per env
+    ep_rewards = np.zeros(cfg["n_envs"], dtype=np.float64)
+    ep_lengths = np.zeros(cfg["n_envs"], dtype=np.int64)
+    completed_ep_rewards = []
+    completed_ep_lengths = []
+    completed_ep_components = {k: 0.0 for k in
+        ["damage_dealt","damage_taken","kill","death","item","hook"]}
+
     start = time.time()
 
     while total_env_steps < cfg["total_steps"]:
@@ -152,10 +167,16 @@ def train(cfg: dict):
 
             for i, env in enumerate(envs):
                 o, r, term, trunc, _ = env.step(actions_np[i])
-                obs_np[i]   = o
-                rewards_np[i] = r
-                dones_np[i]   = float(term or trunc)
+                obs_np[i]      = o
+                rewards_np[i]  = r
+                dones_np[i]    = float(term or trunc)
+                ep_rewards[i] += r
+                ep_lengths[i] += 1
                 if term or trunc:
+                    completed_ep_rewards.append(float(ep_rewards[i]))
+                    completed_ep_lengths.append(int(ep_lengths[i]))
+                    ep_rewards[i] = 0
+                    ep_lengths[i] = 0
                     o, _ = env.reset()
                     obs_np[i]  = o
                     hx_list[i] = policy.init_hidden(1, device)
@@ -228,9 +249,36 @@ def train(cfg: dict):
 
         # logging
         elapsed = time.time() - start
-        sps = total_env_steps / elapsed
-        print(f"[{update_n:4d}] steps={total_env_steps:>8,}  "
-              f"sps={sps:>6.0f}  loss={total_loss:.4f}  "
+        sps     = total_env_steps / elapsed
+
+        # episode stats over completed episodes since last update
+        if completed_ep_rewards:
+            mean_ep_r   = float(np.mean(completed_ep_rewards))
+            min_ep_r    = float(np.min(completed_ep_rewards))
+            max_ep_r    = float(np.max(completed_ep_rewards))
+            mean_ep_len = float(np.mean(completed_ep_lengths))
+            n_ep        = len(completed_ep_rewards)
+
+            writer.add_scalar("episode/reward_mean", mean_ep_r,   total_env_steps)
+            writer.add_scalar("episode/reward_min",  min_ep_r,    total_env_steps)
+            writer.add_scalar("episode/reward_max",  max_ep_r,    total_env_steps)
+            writer.add_scalar("episode/length_mean", mean_ep_len, total_env_steps)
+            writer.add_scalar("episode/count",       n_ep,        total_env_steps)
+        else:
+            mean_ep_r = float("nan")
+            n_ep      = 0
+
+        # training metrics
+        writer.add_scalar("train/loss",       total_loss / cfg["n_epochs"], total_env_steps)
+        writer.add_scalar("train/sps",        sps,                          total_env_steps)
+        writer.add_scalar("train/value_mean", float(buf.values.mean()),     total_env_steps)
+        writer.add_scalar("train/return_mean",float(buf.returns.mean()),    total_env_steps)
+
+        completed_ep_rewards.clear()
+        completed_ep_lengths.clear()
+
+        print(f"[{update_n:4d}] steps={total_env_steps:>8,}  sps={sps:>6.0f}  "
+              f"loss={total_loss:.4f}  ep_r={mean_ep_r:>+7.2f} (n={n_ep})  "
               f"elapsed={elapsed/60:.1f}m")
 
         # checkpoint
