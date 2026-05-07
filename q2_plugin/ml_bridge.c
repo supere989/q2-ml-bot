@@ -8,7 +8,7 @@
  */
 
 #include "ml_bridge.h"
-#include "../merge_mod/lithium/g_local.h"   /* edict_t, gi, vec3_t */
+#include "g_local.h"
 
 #include <sys/socket.h>
 #include <netinet/in.h>

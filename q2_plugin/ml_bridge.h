@@ -116,6 +116,9 @@ typedef struct {
 extern "C" {
 #endif
 
+/* Forward declare so the prototypes don't create a function-scope struct. */
+struct edict_s;
+
 /* Call once per bot at spawn. Opens a UDP socket on ML_BASE_PORT+slot. */
 int  ML_BotInit(int bot_slot);
 
