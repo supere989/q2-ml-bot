@@ -9,6 +9,7 @@
 PORT=${1:-27910}
 BOTCOUNT=${2:-3}
 MAP=${3:-q2dm1}
+TIMEDEMO=${TIMEDEMO:-0}    # set TIMEDEMO=1 to run server uncapped (training)
 
 Q2_ROOT="${Q2_ROOT:-/home/raymond/q2_lithium_merge}"
 
@@ -33,4 +34,5 @@ exec stdbuf -oL -eL ./q2ded \
     +set ml_bot_slot 7 \
     +set maxclients  8 \
     +set timelimit   0 \
+    +set sv_timedemo "$TIMEDEMO" \
     +map             "$MAP"
