@@ -34,5 +34,5 @@ exec stdbuf -oL -eL ./q2ded \
     +set ml_bot_slot 7 \
     +set maxclients  8 \
     +set timelimit   0 \
-    +set sv_timedemo "$TIMEDEMO" \
+    +set timedemo "$TIMEDEMO" \
     +map             "$MAP"
