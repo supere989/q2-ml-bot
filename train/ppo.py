@@ -8,6 +8,7 @@ Usage:
     HSA_OVERRIDE_GFX_VERSION=9.0.0 python -m train.ppo
 """
 
+import atexit
 import os
 import json
 import random
@@ -17,11 +18,22 @@ import argparse
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from pathlib import Path
 from typing import Dict, List, Optional
 from torch.utils.tensorboard import SummaryWriter
-from models.policy import Q2BotPolicy, export_onnx, OBS_DIM, ACTION_DIM, HIDDEN_DIM
+from models.policy import (
+    ACTION_DIM,
+    ENT_CNT,
+    ENT_DIM,
+    ENT_OFF,
+    HIDDEN_DIM,
+    OBS_DIM,
+    WEAPON_CLASSES,
+    Q2BotPolicy,
+    export_onnx,
+)
 
 print("=== PPO MODULE LOADED ===")
 
@@ -89,6 +101,11 @@ DEFAULT = dict(
     chunk_len           = 16,
     timescale           = 8.0,   # wall-clock compression on q2ded (game time unchanged)
     aux_coef            = 0.05,  # auxiliary next-obs prediction loss weight
+    aim_anchor_coef     = 0.0,   # opt-in recurrent geometric aim/fire supervision
+    aim_anchor_look_weight = 16.0,
+    aim_anchor_fire_weight = 1.0,
+    aim_anchor_yaw_deg  = 12.0,
+    aim_anchor_pitch_deg = 14.0,
 )
 
 
@@ -224,6 +241,179 @@ def _explained_variance(prediction: torch.Tensor, target: torch.Tensor) -> torch
     return 1.0 - residual_var / target_var
 
 
+# Observation layout after entities: rays[16*4], hook zones[4*8], audio[5],
+# yaw, pitch. Extended observations are appended later and do not shift this.
+_AIM_PITCH_OBS_INDEX = ENT_OFF + ENT_CNT * ENT_DIM + 16 * 4 + 4 * 8 + 5 + 1
+
+
+def _wrap_degrees_tensor(angle: torch.Tensor) -> torch.Tensor:
+    return torch.remainder(angle + 180.0, 360.0) - 180.0
+
+
+@torch.no_grad()
+def _aim_anchor_targets(
+    obs: torch.Tensor,
+    yaw_threshold_deg: float = 12.0,
+    pitch_threshold_deg: float = 14.0,
+) -> Dict[str, torch.Tensor]:
+    """Build exact geometric aim/fire labels from normalized live observations.
+
+    Entity positions are already in Quake's bot-local forward/right/up basis.
+    The inverse below matches tools/behavior_clone_aim.py, including Quake's
+    yaw/right sign, current-pitch basis, per-tick look limits, and engine pitch
+    clamp. Dead terminal observations are excluded from both losses.
+    """
+    if yaw_threshold_deg < 0 or pitch_threshold_deg < 0:
+        raise ValueError("aim anchor alignment thresholds must be nonnegative")
+
+    entities = obs[..., ENT_OFF:ENT_OFF + ENT_CNT * ENT_DIM].reshape(
+        *obs.shape[:-1], ENT_CNT, ENT_DIM
+    )
+    xyz = entities[..., :3] * 4096.0
+    candidates = (
+        (entities[..., 6] > 0.0)
+        & (entities[..., 7] > 0.5)
+        & (entities[..., 8] > 0.5)
+    )
+    has_target = candidates.any(dim=-1)
+    distance_sq = xyz.square().sum(dim=-1).masked_fill(
+        ~candidates, torch.inf
+    )
+    nearest_index = distance_sq.argmin(dim=-1)
+    gather_index = nearest_index.unsqueeze(-1).unsqueeze(-1).expand(
+        *nearest_index.shape, 1, 3
+    )
+    nearest_xyz = xyz.gather(-2, gather_index).squeeze(-2)
+    nearest_xyz = torch.where(
+        has_target.unsqueeze(-1), nearest_xyz, torch.zeros_like(nearest_xyz)
+    )
+
+    current_pitch = obs[..., _AIM_PITCH_OBS_INDEX] * 90.0
+    pitch_rad = current_pitch * (torch.pi / 180.0)
+    x, y, z = nearest_xyz.unbind(dim=-1)
+    horizontal_forward = torch.cos(pitch_rad) * x + torch.sin(pitch_rad) * z
+    vertical = -torch.sin(pitch_rad) * x + torch.cos(pitch_rad) * z
+    horizontal_distance = torch.hypot(horizontal_forward, y).clamp_min(1e-3)
+    desired_yaw = _wrap_degrees_tensor(
+        -torch.atan2(y, horizontal_forward) * (180.0 / torch.pi)
+    )
+    target_pitch = -torch.atan2(vertical, horizontal_distance) * (
+        180.0 / torch.pi
+    )
+    desired_pitch = target_pitch - current_pitch
+
+    yaw_command = desired_yaw.clamp(-45.0, 45.0)
+    pitch_command = desired_pitch.clamp(-30.0, 30.0)
+    look_target = torch.stack((yaw_command, pitch_command), dim=-1)
+    look_target = torch.where(
+        has_target.unsqueeze(-1), look_target, torch.zeros_like(look_target)
+    )
+
+    self_alive = obs[..., 6] > 0.0
+    look_mask = self_alive & has_target
+    new_pitch = (current_pitch + pitch_command).clamp(-89.0, 89.0)
+    effective_pitch_command = new_pitch - current_pitch
+    yaw_residual = _wrap_degrees_tensor(-desired_yaw + yaw_command)
+    pitch_residual = -desired_pitch + effective_pitch_command
+    aligned_after_teacher = (
+        (yaw_residual.abs() <= float(yaw_threshold_deg))
+        & (pitch_residual.abs() <= float(pitch_threshold_deg))
+    )
+    fire_target = (look_mask & aligned_after_teacher).long()
+
+    return {
+        "look_target": look_target,
+        "look_mask": look_mask,
+        "fire_target": fire_target,
+        "fire_mask": self_alive,
+        "has_target": has_target,
+    }
+
+
+def _balanced_binary_class_weights(
+    targets: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Inverse-frequency binary weights, finite for one/no-class batches."""
+    valid_targets = targets[mask].long()
+    weights = torch.zeros(2, device=targets.device, dtype=torch.float32)
+    if valid_targets.numel() == 0:
+        return weights
+    # torch.bincount has no deterministic CUDA implementation in the PyTorch
+    # version on the training box. Binary equality reductions are exact here.
+    counts = torch.stack(
+        ((valid_targets == 0).sum(), (valid_targets == 1).sum())
+    ).to(dtype=torch.float32)
+    present = counts > 0
+    n_present = present.sum().to(dtype=torch.float32)
+    weights[present] = float(valid_targets.numel()) / (
+        n_present * counts[present]
+    )
+    return weights
+
+
+def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    weights = mask.to(dtype=values.dtype)
+    return (values * weights).sum() / weights.sum().clamp_min(1.0)
+
+
+def _aim_anchor_loss(
+    policy: Q2BotPolicy,
+    act_params: Dict[str, torch.Tensor],
+    recorded_actions: torch.Tensor,
+    targets: Dict[str, torch.Tensor],
+    fire_class_weights: torch.Tensor,
+    look_weight: float,
+    fire_weight: float,
+) -> Dict[str, torch.Tensor]:
+    """Aim/fire loss on the same recurrent features used by PPO."""
+    look_mask = targets["look_mask"]
+    look_error = act_params["cont_mean"][..., 2:4] - targets["look_target"]
+    look_scaled_sq = (look_error / look_error.new_tensor([45.0, 30.0])).square()
+    look_loss = _masked_mean(look_scaled_sq, look_mask.unsqueeze(-1).expand_as(look_scaled_sq))
+
+    weapon_idx = recorded_actions[..., 7].round().long().clamp(
+        0, WEAPON_CLASSES - 1
+    )
+    fire_logits = policy.fire_logits_for(act_params["feat"], weapon_idx)
+    fire_ce = F.cross_entropy(
+        fire_logits.reshape(-1, 2),
+        targets["fire_target"].reshape(-1),
+        reduction="none",
+    ).reshape_as(targets["fire_target"])
+    target_weights = fire_class_weights[targets["fire_target"]]
+    fire_mask = targets["fire_mask"]
+    fire_loss = _masked_mean(fire_ce * target_weights, fire_mask)
+
+    inner = float(look_weight) * look_loss + float(fire_weight) * fire_loss
+    with torch.no_grad():
+        yaw_mae = _masked_mean(look_error[..., 0].abs(), look_mask)
+        pitch_mae = _masked_mean(look_error[..., 1].abs(), look_mask)
+        fire_probability = fire_logits.softmax(dim=-1)[..., 1]
+        positive = fire_mask & (targets["fire_target"] > 0)
+        negative = fire_mask & ~positive
+        hidden_negative = negative & ~targets["has_target"]
+        fire_accuracy = _masked_mean(
+            (fire_logits.argmax(dim=-1) == targets["fire_target"]).float(),
+            fire_mask,
+        )
+        positive_probability = _masked_mean(fire_probability, positive)
+        negative_probability = _masked_mean(fire_probability, negative)
+        hidden_probability = _masked_mean(fire_probability, hidden_negative)
+
+    return {
+        "inner": inner,
+        "look": look_loss,
+        "fire": fire_loss,
+        "yaw_mae_deg": yaw_mae,
+        "pitch_mae_deg": pitch_mae,
+        "fire_accuracy": fire_accuracy,
+        "fire_positive_probability": positive_probability,
+        "fire_negative_probability": negative_probability,
+        "hidden_fire_probability": hidden_probability,
+    }
+
+
 # ── Device selection ─────────────────────────────────────────────────
 
 def _pick_device() -> torch.device:
@@ -265,10 +455,35 @@ def train(cfg: dict):
     policy    = Q2BotPolicy().to(device)
     optimizer = optim.Adam(policy.parameters(), lr=cfg["lr"])
     grad_diagnostics = os.environ.get("Q2_PPO_GRAD_DIAGNOSTICS", "0") == "1"
+    stateful = os.environ.get("Q2_POLICY_STATEFUL", "1").lower() in {
+        "1", "true", "yes", "on"
+    }
+    aim_anchor_coef = float(cfg.get("aim_anchor_coef", 0.0) or 0.0)
+    aim_anchor_look_weight = float(cfg.get("aim_anchor_look_weight", 16.0))
+    aim_anchor_fire_weight = float(cfg.get("aim_anchor_fire_weight", 1.0))
+    aim_anchor_yaw_deg = float(cfg.get("aim_anchor_yaw_deg", 12.0))
+    aim_anchor_pitch_deg = float(cfg.get("aim_anchor_pitch_deg", 14.0))
+    for name, value in (
+        ("aim_anchor_coef", aim_anchor_coef),
+        ("aim_anchor_look_weight", aim_anchor_look_weight),
+        ("aim_anchor_fire_weight", aim_anchor_fire_weight),
+        ("aim_anchor_yaw_deg", aim_anchor_yaw_deg),
+        ("aim_anchor_pitch_deg", aim_anchor_pitch_deg),
+    ):
+        if value < 0:
+            raise ValueError(f"{name} must be nonnegative, got {value}")
+    if aim_anchor_coef > 0 and not stateful:
+        raise ValueError("aim_anchor_coef > 0 requires Q2_POLICY_STATEFUL=1")
 
     print(f"Policy parameters: {policy.param_count():,}")
     if grad_diagnostics:
         print("PPO gradient diagnostics: ON")
+    if aim_anchor_coef > 0:
+        print(
+            "Recurrent aim anchor: ON "
+            f"coef={aim_anchor_coef:g} "
+            f"look={aim_anchor_look_weight:g} fire={aim_anchor_fire_weight:g}"
+        )
 
     # Per-run tag isolates parallel runs: separate checkpoint dir + TB run
     # name so stacked ablation trainers never overwrite each other or the
@@ -332,6 +547,15 @@ def train(cfg: dict):
         )
         for i in range(n_servers)
     ]
+
+    def _close_all_servers() -> None:
+        for server in servers:
+            server.close()
+
+    # An optimizer/assertion failure used to orphan q2ded children and leave
+    # their UDP ports occupied for the next experiment. Normal completion
+    # unregisters this after performing the same cleanup explicitly.
+    atexit.register(_close_all_servers)
 
     buf = RolloutBuffer(total_venvs, cfg["n_steps"], OBS_DIM, ACTION_DIM, HIDDEN_DIM, device)
 
@@ -445,8 +669,6 @@ def train(cfg: dict):
         policy.eval()
         rollout_behavior = {key: 0.0 for key in behavior_metric_keys}
         rollout_behavior_samples = 0
-
-        stateful = os.environ.get("Q2_POLICY_STATEFUL", "1").lower() in {"1", "true", "yes", "on"}
 
         for step in range(cfg["n_steps"]):
             # Store the current observation which produced the actions!
@@ -564,6 +786,33 @@ def train(cfg: dict):
         log_probs_chunked = buf.log_probs.reshape(num_chunks_per_env, chunk_len, N_envs).permute(0, 2, 1).reshape(total_chunks, chunk_len)
         dones_chunked = buf.dones.reshape(num_chunks_per_env, chunk_len, N_envs).permute(0, 2, 1).reshape(total_chunks, chunk_len)
 
+        aim_anchor_targets = None
+        aim_anchor_fire_class_weights = torch.zeros(2, device=device)
+        aim_anchor_target_stats = None
+        if aim_anchor_coef > 0:
+            aim_anchor_targets = _aim_anchor_targets(
+                obs_chunked,
+                yaw_threshold_deg=aim_anchor_yaw_deg,
+                pitch_threshold_deg=aim_anchor_pitch_deg,
+            )
+            aim_anchor_fire_class_weights = _balanced_binary_class_weights(
+                aim_anchor_targets["fire_target"],
+                aim_anchor_targets["fire_mask"],
+            )
+            fire_valid = aim_anchor_targets["fire_mask"].float()
+            fire_denom = fire_valid.sum().clamp_min(1.0)
+            aim_anchor_target_stats = {
+                "eligible_alive_rate": fire_valid.mean(),
+                "visible_alive_rate": (
+                    aim_anchor_targets["look_mask"].float().sum() / fire_denom
+                ),
+                "fire_positive_rate": (
+                    aim_anchor_targets["fire_target"].float().sum() / fire_denom
+                ),
+                "fire_class_weight_negative": aim_anchor_fire_class_weights[0],
+                "fire_class_weight_positive": aim_anchor_fire_class_weights[1],
+            }
+
         # Slice the recorded hidden states to get the initial state for each chunk
         chunk_starts = np.arange(0, T_steps, chunk_len)
         h_chunk_starts = buf.h_states[chunk_starts].reshape(total_chunks, HIDDEN_DIM)
@@ -571,12 +820,20 @@ def train(cfg: dict):
 
         chunks_per_batch = max(1, cfg["batch_size"] // chunk_len)
         aux_coef = float(cfg.get("aux_coef", 0.05) or 0.0)
+        if aim_anchor_coef > 0 and chunks_per_batch < total_chunks:
+            raise ValueError(
+                "recurrent aim anchor currently requires one full-rollout "
+                "minibatch so masked look/fire losses retain exact weighting; "
+                f"need batch_size >= {total_chunks * chunk_len}"
+            )
 
         diagnostic_metric_names = (
             "component_grad_norm_policy_weighted",
             "component_grad_norm_vf_weighted",
             "component_grad_norm_aux_weighted",
+            "component_grad_norm_aim_anchor_weighted",
             "shared_grad_cos_policy_vf",
+            "shared_grad_cos_policy_aim_anchor",
             "grad_norm_shared_pre_clip",
             "grad_norm_actor_pre_clip",
             "grad_norm_critic_pre_clip",
@@ -618,6 +875,16 @@ def train(cfg: dict):
             "entropy",
             "entropy_loss",
             "aux_loss",
+            "aim_anchor_inner_loss",
+            "aim_anchor_weighted_loss",
+            "aim_anchor_look_loss",
+            "aim_anchor_fire_loss",
+            "aim_anchor_yaw_mae_deg",
+            "aim_anchor_pitch_mae_deg",
+            "aim_anchor_fire_accuracy",
+            "aim_anchor_fire_positive_probability",
+            "aim_anchor_fire_negative_probability",
+            "aim_anchor_hidden_fire_probability",
             "approx_kl",
             "clip_fraction",
             "grad_norm_pre_clip",
@@ -687,8 +954,32 @@ def train(cfg: dict):
                     if denom > 0:
                         aux_loss = (((pred - target) ** 2) * keep).sum() / denom
 
+                anchor_zero = torch.zeros((), device=device)
+                aim_anchor_metrics = {
+                    "inner": anchor_zero,
+                    "look": anchor_zero,
+                    "fire": anchor_zero,
+                    "yaw_mae_deg": anchor_zero,
+                    "pitch_mae_deg": anchor_zero,
+                    "fire_accuracy": anchor_zero,
+                    "fire_positive_probability": anchor_zero,
+                    "fire_negative_probability": anchor_zero,
+                    "hidden_fire_probability": anchor_zero,
+                }
+                if aim_anchor_coef > 0:
+                    aim_anchor_metrics = _aim_anchor_loss(
+                        policy,
+                        act_params,
+                        act_b,
+                        {key: value[b] for key, value in aim_anchor_targets.items()},
+                        aim_anchor_fire_class_weights,
+                        look_weight=aim_anchor_look_weight,
+                        fire_weight=aim_anchor_fire_weight,
+                    )
+                aim_anchor_component = aim_anchor_coef * aim_anchor_metrics["inner"]
+
                 loss = (pg_loss + cfg["vf_coef"] * vf_loss + cfg["ent_coef"] * ent_loss
-                        + aux_coef * aux_loss)
+                        + aux_coef * aux_loss + aim_anchor_component)
 
                 diagnostic_component_values = None
                 if grad_diagnostics:
@@ -718,6 +1009,17 @@ def train(cfg: dict):
                         aux_component_grads = (None,) * len(
                             diagnostic_all_parameters
                         )
+                    if aim_anchor_component.requires_grad:
+                        aim_anchor_component_grads = torch.autograd.grad(
+                            aim_anchor_component,
+                            diagnostic_all_parameters,
+                            retain_graph=True,
+                            allow_unused=True,
+                        )
+                    else:
+                        aim_anchor_component_grads = (None,) * len(
+                            diagnostic_all_parameters
+                        )
                     policy_shared_grads = tuple(
                         policy_component_grads[index]
                         for index in diagnostic_shared_indices
@@ -726,12 +1028,22 @@ def train(cfg: dict):
                         vf_component_grads[index]
                         for index in diagnostic_shared_indices
                     )
+                    aim_anchor_shared_grads = tuple(
+                        aim_anchor_component_grads[index]
+                        for index in diagnostic_shared_indices
+                    )
                     diagnostic_component_values = (
                         _tensor_group_norm(policy_component_grads, device),
                         _tensor_group_norm(vf_component_grads, device),
                         _tensor_group_norm(aux_component_grads, device),
+                        _tensor_group_norm(aim_anchor_component_grads, device),
                         _gradient_cosine(
                             policy_shared_grads, vf_shared_grads, device
+                        ),
+                        _gradient_cosine(
+                            policy_shared_grads,
+                            aim_anchor_shared_grads,
+                            device,
                         ),
                     )
 
@@ -776,6 +1088,22 @@ def train(cfg: dict):
                             entropy.mean().detach(),
                             ent_loss.detach(),
                             aux_loss.detach(),
+                            aim_anchor_metrics["inner"].detach(),
+                            aim_anchor_component.detach(),
+                            aim_anchor_metrics["look"].detach(),
+                            aim_anchor_metrics["fire"].detach(),
+                            aim_anchor_metrics["yaw_mae_deg"].detach(),
+                            aim_anchor_metrics["pitch_mae_deg"].detach(),
+                            aim_anchor_metrics["fire_accuracy"].detach(),
+                            aim_anchor_metrics[
+                                "fire_positive_probability"
+                            ].detach(),
+                            aim_anchor_metrics[
+                                "fire_negative_probability"
+                            ].detach(),
+                            aim_anchor_metrics[
+                                "hidden_fire_probability"
+                            ].detach(),
                             approx_kl.detach(),
                             clip_fraction.detach(),
                             grad_norm_pre_clip_tensor,
@@ -943,6 +1271,28 @@ def train(cfg: dict):
             "train/entropy_loss", optimization_means["entropy_loss"], total_env_steps
         )
         writer.add_scalar("train/aux_loss", optimization_means["aux_loss"], total_env_steps)
+        if aim_anchor_coef > 0:
+            for metric_name in (
+                "aim_anchor_inner_loss",
+                "aim_anchor_weighted_loss",
+                "aim_anchor_look_loss",
+                "aim_anchor_fire_loss",
+                "aim_anchor_yaw_mae_deg",
+                "aim_anchor_pitch_mae_deg",
+                "aim_anchor_fire_accuracy",
+                "aim_anchor_fire_positive_probability",
+                "aim_anchor_fire_negative_probability",
+                "aim_anchor_hidden_fire_probability",
+            ):
+                writer.add_scalar(
+                    f"anchor/{metric_name.removeprefix('aim_anchor_')}",
+                    optimization_means[metric_name],
+                    total_env_steps,
+                )
+            for name, value in aim_anchor_target_stats.items():
+                writer.add_scalar(
+                    f"anchor/{name}", float(value.detach().cpu()), total_env_steps
+                )
         writer.add_scalar("train/approx_kl", optimization_means["approx_kl"], total_env_steps)
         writer.add_scalar(
             "train/clip_fraction", optimization_means["clip_fraction"], total_env_steps
@@ -1249,8 +1599,8 @@ def train(cfg: dict):
             print(f"  → saved {ckpt}")
             next_save_at = total_env_steps + cfg["save_every"]
 
-    for srv in servers:
-        srv.close()
+    _close_all_servers()
+    atexit.unregister(_close_all_servers)
 
     final_ckpt = save_dir / f"policy_{total_env_steps:08d}.pt"
     torch.save(policy.state_dict(), final_ckpt)
