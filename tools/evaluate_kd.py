@@ -8,6 +8,7 @@ bot in a four-player generated-map setup.
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -33,13 +34,6 @@ def _pick_device() -> torch.device:
     return torch.device("cpu")
 
 
-def _latest_checkpoint() -> Path:
-    candidates = sorted((ROOT / "checkpoints").glob("policy_[0-9]*.pt"))
-    if not candidates:
-        raise FileNotFoundError("no checkpoints/policy_*.pt found")
-    return candidates[-1]
-
-
 def _safe_ratio(kills: float, deaths: float) -> float:
     return kills / max(deaths, 1.0)
 
@@ -55,6 +49,7 @@ def evaluate_map(
     maxclients: int,
     ml_slot: int,
     deterministic: bool,
+    game_seed: int,
 ) -> Dict[str, object]:
     env = Q2MultiEnv(
         server_id=server_id,
@@ -64,6 +59,7 @@ def evaluate_map(
         port_offset=port_offset,
         maxclients=maxclients,
         ml_slot=ml_slot,
+        game_seed=None if game_seed < 0 else game_seed,
         max_ep_steps=max(steps + 5, 100),
     )
     kills = 0.0
@@ -114,7 +110,7 @@ def evaluate_map(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", default="", help="policy .pt checkpoint")
+    parser.add_argument("--checkpoint", required=True, help="policy .pt checkpoint")
     parser.add_argument("--map_name", default="q2dm1")
     parser.add_argument("--map_glob", default="mltrain_*.bsp")
     parser.add_argument("--map_dir", default="")
@@ -124,23 +120,29 @@ def main() -> int:
     parser.add_argument(
         "--server_id",
         type=int,
-        default=0,
-        help="server id for eval RNG/slot defaults",
+        default=50,
+        help="server id/ML UDP slab; 50 avoids the live trainer's IDs 0-11",
     )
     parser.add_argument(
         "--port_offset",
         type=int,
-        default=20,
-        help="q2ded port offset; default uses 27930 to avoid live training",
+        default=50,
+        help="q2ded port offset; default uses 27960 to avoid live training",
     )
     parser.add_argument("--maxclients", type=int, default=12)
     parser.add_argument("--ml_slot", type=int, default=11)
     parser.add_argument("--target_kd", type=float, default=15.0)
+    parser.add_argument(
+        "--game_seed", type=int, default=-1,
+        help="gameplay RNG seed; negative preserves normal game randomness",
+    )
     parser.add_argument("--stochastic", action="store_true")
     args = parser.parse_args()
+    if args.n_bots == 2:
+        parser.error("n_bots=2 uses the broken ml2sk1 botlist; use 4 or more")
 
     device = _pick_device()
-    ckpt = Path(args.checkpoint) if args.checkpoint else _latest_checkpoint()
+    ckpt = Path(args.checkpoint)
     policy = Q2BotPolicy().to(device)
     policy.load_state_dict(torch.load(ckpt, map_location=device))
     policy.eval()
@@ -157,7 +159,9 @@ def main() -> int:
     print(f"device={device}")
     print(f"maps={maps}")
     print(f"setup=1 ML bot + {args.n_bots - 1} opponents")
-    print(f"eval_server_id={args.server_id} q2_port={27910 + args.port_offset} "
+    print(f"game_seed={args.game_seed}")
+    sv_port_base = int(os.environ.get("Q2_SV_PORT_BASE", "27910"))
+    print(f"eval_server_id={args.server_id} q2_port={sv_port_base + args.port_offset} "
           f"ml_slot={args.ml_slot}")
 
     rows: List[Dict[str, object]] = []
@@ -173,6 +177,7 @@ def main() -> int:
             maxclients=args.maxclients,
             ml_slot=args.ml_slot,
             deterministic=not args.stochastic,
+            game_seed=args.game_seed,
         )
         rows.append(row)
         print(json.dumps(row))
@@ -189,6 +194,7 @@ def main() -> int:
         "kd_ratio": round(kd_ratio, 4),
         "target_kd": args.target_kd,
         "target_met": kd_ratio >= args.target_kd,
+        "game_seed": args.game_seed,
     }
     print("SUMMARY " + json.dumps(summary, sort_keys=True))
     return 0 if summary["target_met"] else 1

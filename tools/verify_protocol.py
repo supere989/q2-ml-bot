@@ -10,7 +10,16 @@ import struct
 import sys
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).parent.parent))
 
-from harness.protocol import OBS_FMT, ACT_FMT, OBS_SIZE, ACT_SIZE
+from harness.protocol import (
+    ACT_FMT,
+    ACT_SIZE,
+    EXT_OBS,
+    OBS_BASE_DIM,
+    OBS_EXT_DIM,
+    OBS_FMT,
+    OBS_SESSION_MEMORY_DIM,
+    OBS_SIZE,
+)
 
 print(f"OBS_SIZE (Python): {OBS_SIZE} bytes")
 print(f"ACT_SIZE (Python): {ACT_SIZE} bytes")
@@ -20,14 +29,16 @@ from models.policy import OBS_DIM
 import numpy as np
 from harness.protocol import Observation, ML_MAX_ENTITIES, ML_RAY_COUNT, ML_HOOK_ZONES
 
-vec_size = (
-    10                           # self_state
-    + ML_MAX_ENTITIES * 9        # entities
-    + ML_RAY_COUNT * 4           # rays
-    + ML_HOOK_ZONES * 8          # hook_zones
-    + 5                          # audio
-    + 2                          # normalised yaw/pitch
+base_size = (
+    10                            # self_state
+    + ML_MAX_ENTITIES * 9         # entities
+    + ML_RAY_COUNT * 4            # rays
+    + ML_HOOK_ZONES * 8           # hook_zones
+    + 5                           # audio
+    + 2                           # normalised yaw/pitch
 )
+assert base_size == OBS_BASE_DIM, f"base OBS_DIM mismatch: {base_size} vs {OBS_BASE_DIM}"
+vec_size = base_size + OBS_SESSION_MEMORY_DIM + (OBS_EXT_DIM if EXT_OBS else 0)
 assert vec_size == OBS_DIM, f"OBS_DIM mismatch: {vec_size} vs {OBS_DIM}"
 print(f"OBS_DIM vector: {OBS_DIM} floats ✓")
 
