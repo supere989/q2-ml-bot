@@ -4,8 +4,11 @@ ML-based bot engine for Quake 2 (Lithium II + 3ZB2 base).
 
 **Status:** Live-deployed. `checkpoints/policy_39929600.onnx` (39.9M training
 steps) runs a public 1v1 human-vs-bot server via `tools/live_match_onnx.py`
-(see **Live Deployment**). Movement/control is solid as of 2026-07-10; aim and
-lattice-driven tactics are not — see **Known Issues / Roadmap**.
+(see **Live Deployment**). Movement/control is solid as of 2026-07-10. Aim
+never converged through pure RL (root-caused and quantified 2026-07-11); a
+behavior-cloning warm-start fix is validated and improving it, in progress —
+see **Known Issues / Roadmap** item 2. **See `docs/HANDOFF-2026-07-11.md`
+for the current state and next steps if picking this up fresh.**
 
 ## Architecture
 
@@ -146,19 +149,39 @@ fixed checkpoint). Ordered by what's blocking what.
    cause was unrelated to either). Fixed with a bounded 50ms real timeout on
    the bootstrap check. Deployed to production.
 
-2. **[OPEN, likely highest-impact]** Aim/yaw-tracking of visible targets is
-   essentially non-functional post-fix. Measured across 318 frames with a
-   visible enemy (two live runs): mean facing error 97.5° (median 97.8°);
-   only 6% of frames within the training reward's own 12° alignment
-   threshold (`Q2_AIM_YAW_DEG`); **0 of 40 recorded fire events happened
-   while aligned within that threshold.** Movement and target-detection
-   clearly work (distance/contact correctly modulate behavior) — the
-   yaw-to-target coupling specifically does not. This is very likely why the
-   **KD Evaluation Gate** (15:1) has never been confirmed passed: an
-   unaimed bot cannot land hits at any real rate regardless of positioning
-   quality. Worth root-causing before further training runs — possibly
-   related to `ML_FRAMEWORK.md`'s planned target-sensing extraction
-   (`ml_sensors.c`) and richer exposure/confidence fields.
+2. **[IN PROGRESS, root cause confirmed, fix validated 2026-07-11]**
+   Aim/yaw-tracking of visible targets is essentially non-functional.
+   Measured across 318 frames with a visible enemy: mean facing error 97.5°
+   (median 97.8°); only 6% of frames within the training reward's own 12°
+   alignment threshold (`Q2_AIM_YAW_DEG`); 0 of 40 fire events happened
+   while aligned. Confirmed via four independent measurements: this live
+   telemetry, the historical TensorBoard training curve (`combat/kd_ratio`
+   plateaued at ~1.5:1 for the entire second half of the `CUR` run, `40M`
+   steps, no late-training improvement), a controlled `tools/evaluate_kd.py`
+   re-run (0.0 kd, confirming this is a policy-quality issue, not the
+   control-plane bug above), and an ML-vs-ML self-play match (1 kill/24
+   deaths vs. 5 kills/26 deaths — fails identically against its own
+   checkpoint, ruling out opponent-specific explanations).
+   **Root cause**: pure PPO exploration never discovered the aim→fire
+   association across 40M steps — the reward function has dozens of
+   competing terms, and movement/survival/exploration reward is easier to
+   accumulate than the sparse, precise skill of landing hits, so gradient
+   never favored aim. **Fix**: `tools/behavior_clone_aim.py` — a supervised
+   warm-start from a scripted geometric teacher (`atan2` toward nearest
+   visible enemy) — already existed in the repo but had never been
+   successfully run (see gotcha below). Fixed and run 2026-07-11
+   (`--synthetic`, default hyperparameters, ~20s of training): mean facing
+   error 97.5°→81.2°, within-12° rate 6.0%→8.0%, **fires-while-aligned
+   0.0%→7.7%**. Directionally correct on the first, cheapest attempt — not
+   yet good enough to deploy. New checkpoint: `checkpoints/policy_39929601.pt`
+   (+ `checkpoints/policy_latest.onnx`), does not overwrite `CUR`.
+   **Next steps**: more epochs/samples on `--synthetic`, then `collect()`
+   mode (real rollouts, in-distribution data) instead of synthetic, then
+   resume PPO fine-tuning *from this checkpoint* (not from scratch) so RL's
+   job becomes integrating already-working aim rather than discovering it —
+   watch `combat/kd_ratio` for a real break from the ~1.5:1 plateau, and
+   watch for regression (RL overwriting the imitation-learned behavior) if
+   fine-tuning LR is too high.
 
 3. **[OPEN]** Lattice pull signals are weak, one is inverted from intent.
    During pure exploration (no visible enemy — the lattice is the only
@@ -177,6 +200,30 @@ fixed checkpoint). Ordered by what's blocking what.
    back. Wiring this preload in would give freshly-generated maps (and
    `--live_maps` rounds especially) a populated lattice from spawn instead
    of building purely from in-episode contact.
+
+5. **[FIXED 2026-07-11]** `tools/behavior_clone_aim.py`'s `train_bc()` crashed
+   immediately on `KeyError: 'fire_logits'` — it predates `models/policy.py`'s
+   fire decision becoming an autoregressive head conditioned on the chosen
+   weapon (`Q2BotPolicy.fire_logits_for(feat, weapon_idx)`, not a plain key
+   in `forward()`'s output dict). This means the tool could never have run
+   successfully since that architecture change — it existed as dead code.
+   Fixed with teacher-forcing on the demonstration's ground-truth weapon
+   choice. If you hit the same `KeyError` elsewhere, the fix pattern is:
+   compute `weapon_idx = <ground-truth-or-sampled-weapon>.long().unsqueeze(1)`
+   then `policy.fire_logits_for(act_params["feat"], weapon_idx)`.
+
+6. **[environment gotcha, not a bug]** The `ml2sk1` botlist (2-bot server
+   configs, `n_bots=2`) doesn't spawn anything on the WSL/RTX2080 box —
+   server initializes cleanly, no error, but zero bots ever connect and the
+   harness times out waiting for obs. Root cause not investigated (likely a
+   missing/misconfigured `3zb2/` botlist file specific to that size). Every
+   working config this session used `n_bots=4`/`ml4sk1`-or-larger sizing
+   instead — e.g. a clean 1v1 ML-vs-ML match currently requires borrowing
+   the 4-bot config with 2 slots redirected to ML (`num_ml_bots=2`), which
+   leaves 2 incidental 3ZB2 opponents also in the match (see
+   `tools/ml_vs_ml.py`, added this session — pits N ONNX policy instances
+   against each other, zero 3ZB2 by default if `n_bots=num_ml_bots`, but see
+   this gotcha before using a small `n_bots`).
 
 See `docs/architecture-map.svg` for the full system diagram with these
 findings annotated in place.

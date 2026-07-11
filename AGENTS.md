@@ -72,6 +72,27 @@ so `http://127.0.0.1:6006` is always live (auto-reconnects after drops
 or while the WSL VM is down). `systemctl --user {status,restart}
 wsl-tunnel`; logs via `journalctl --user -u wsl-tunnel -f`.
 
+**Gotcha, fixed 2026-07-11**: this service had been silently broken (stuck
+in an `activating (auto-restart)` loop, TensorBoard never actually
+reachable) on nobara this whole time, independent of anything above — its
+`ControlPath=%d/.ssh/cm-wsl-box.sock` referenced systemd's per-unit
+credentials directory (`%d`), which is only created when the unit has a
+`LoadCredential=`/`SetCredential=` directive; without one, `%d` resolves to
+a path that's never created and ssh's `ControlMaster` socket bind fails
+with `unix_listener: cannot bind to path ... No such file or directory`.
+Fixed by switching to `%t` (the runtime directory, always exists) instead.
+The same service now also runs on procreator (same fix applied there from
+the start). If you ever add a similar persistent-tunnel unit, use `%t`, not
+`%d`, unless you're also adding `LoadCredential=`.
+
+**Training-data sync (added 2026-07-11)**: nobara pulls `checkpoints/` and
+`runs/` from the WSL box automatically via `systemd --user`
+`q2ml-training-sync.timer` (every 15 min, `~/sync_q2ml_training_data.sh`,
+one-way `rsync -a` with `--delete` deliberately OFF — nobara has its own
+unique recorded human-play session logs under `runs/` that must never be
+clobbered). WSL box remains the sole active training location; this is
+backup/visibility only, not a compute migration.
+
 - `~/q2-ml-bot` + `~/merge_mod/lithium` — clones of the trees above; keep in
   sync via git, do not rsync blindly.
 - Trainer runs in tmux session `q2_ppo`; log at `/tmp/q2_train.log.ppo`.

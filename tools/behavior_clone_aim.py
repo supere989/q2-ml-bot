@@ -205,6 +205,13 @@ def train_bc(policy: Q2BotPolicy, obs: np.ndarray, actions: np.ndarray, device: 
             idx = perm[start:start + args.batch_size]
             params, _value, _hx = policy(obs_t[idx].unsqueeze(1))
             cont_mean = params["cont_mean"].squeeze(1)
+            # Fire is an autoregressive head conditioned on the chosen weapon
+            # (see Q2BotPolicy.forward's docstring) -- not a plain key in
+            # act_params. Teacher-force on the demonstration's own weapon
+            # choice (ground truth), the standard approach for training
+            # autoregressive heads via behavior cloning.
+            weapon_idx = act_t[idx, 7].long().clamp(0, 9).unsqueeze(1)
+            fire_logits_raw = policy.fire_logits_for(params["feat"], weapon_idx)
             visible_w = torch.where(
                 act_t[idx, 5] > 0.5,
                 torch.full_like(act_t[idx, 5], args.visible_weight),
@@ -219,7 +226,7 @@ def train_bc(policy: Q2BotPolicy, obs: np.ndarray, actions: np.ndarray, device: 
             cont_loss = (cont_per * visible_w).sum() / visible_w.sum().clamp_min(1.0)
             jump_loss = F.cross_entropy(params["jump_logits"].squeeze(1), act_t[idx, 4].long().clamp(0, 1))
             fire_loss = F.cross_entropy(
-                params["fire_logits"].squeeze(1),
+                fire_logits_raw.squeeze(1),
                 act_t[idx, 5].long().clamp(0, 1),
                 weight=torch.tensor([1.0, args.fire_weight], device=device),
             )
