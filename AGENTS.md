@@ -93,13 +93,40 @@ unique recorded human-play session logs under `runs/` that must never be
 clobbered). WSL box remains the sole active training location; this is
 backup/visibility only, not a compute migration.
 
-- `~/q2-ml-bot` + `~/merge_mod/lithium` — clones of the trees above; keep in
-  sync via git, do not rsync blindly.
+- `~/merge_mod/lithium` is the C git checkout on branch
+  `ml-wip-20260611`. `~/q2-ml-bot` is currently an operational mirror with
+  **no `.git` directory**; GitHub/local canonical changes must be copied there
+  deliberately and checksum-verified. Do not assume `git pull` works in that
+  Python tree, and do not rsync it blindly over its gitignored checkpoints,
+  runs, maps, or machine-local diagnostics.
 - Trainer runs in tmux session `q2_ppo`; log at `/tmp/q2_train.log.ppo`.
 - TensorBoard on port 6006 (`http://100.86.206.50:6006` direct, the
   Windows portproxy at `http://100.104.16.95:6006`, or `http://127.0.0.1:6006`
   via the wsl-tunnel service above); events in `~/q2-ml-bot/runs/`.
 - Headless `q2ded` servers on ports 27910+, configs `ml_server_*.cfg`.
+
+**Active-runtime isolation (2026-07-11):** `q2_ppo` is still using
+`~/q2_lithium_merge/lithium/game.so`. Do not replace that file while the run
+is active: servers reload it on round/map restart, so a copy silently changes
+reward semantics mid-run. Build in `~/merge_mod/lithium`, then copy only to
+`~/q2_lithium_merge_eval/lithium/game.so` and launch experiments with
+`Q2_ROOT=~/q2_lithium_merge_eval` plus disjoint `Q2_SV_PORT_BASE` /
+`Q2_ML_PORT_BASE`. The reward-cap and terminal fixes are verified there but
+are intentionally not deployed to the active trainer or production yet.
+
+**Reproducible ablations (added 2026-07-11):** use all three controls together:
+`--seed N --game_seed N --deterministic 1`, and keep `Q2_ML_ASYNC=0`.
+`--seed` covers Python/NumPy/Torch/CUDA plus an independent RNG per spatial
+reward instance; `--game_seed` enables the C `ml_game_seed` stream (unique per
+server); `--deterministic 1` selects deterministic Torch/CUDA kernels. The
+harness also pre-binds UDP and removes the boot sleep in seeded mode. Named
+gameplay repeatability is lockstep-only; async mode still races wall time. The
+default game seed is `-1`, preserving normal behavior. A 500-transition proof
+matched SHA-256 across fresh same-seed launches and differed when only the game
+seed changed. `train/ppo.py` now registers exception-time q2ded cleanup too;
+if an older/abruptly-killed run leaves ports occupied, identify exact isolated
+PIDs/ports before killing anything and never use a pattern that can touch the
+active `~/q2_lithium_merge` servers.
 
 ## Live Deployment Gotchas
 
@@ -125,11 +152,18 @@ for the applied action actually being zero.
 
 ## Build, Test, and Development Commands
 
-- Engine: `cd engine/lithium && make` (builds `lithium/gamex86_64.so`).
+- Engine: from the standalone C clone, run `make` in
+  `/home/raymondj/q2-lithium-3zb2` (procreator) or `~/merge_mod/lithium`
+  (WSL); `engine/lithium` is only the path inside nobara's top-level workspace.
+  This builds `lithium/gamex86_64.so`. The
+  Makefile does not generate header dependencies: after changing `botstr.h`
+  or any shared layout/header, run **`make clean && make -j4`**. A plain
+  incremental build after the 2026-07-11 `zgcl_t` change linked mixed struct
+  offsets and crashed in the first `G_RunFrame`.
   **Deploy**: copy the build to `q2_lithium_merge/lithium/game.so` — that is
   the filename `q2ded` actually dlopens; `gamex86_64.so` in the runtime dir is
   dead weight. Servers respawn per round, so a copied `game.so` goes live on
-  the next round without touching the trainer.
+  the next round; use the isolated runtime above while training is active.
 - Train (on the WSL box): `python3 -m train.ppo --n_servers N --n_bots_per_server M --map_glob 'mltrain_*.bsp' --resume`.
 - Maps: `python3 maps/generator.py` then `maps/compile.sh` (q2tools/ericw).
 - Map sanity: `python3 tools/validate_maps.py` (4-player playability).

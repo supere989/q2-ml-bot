@@ -5,10 +5,12 @@ ML-based bot engine for Quake 2 (Lithium II + 3ZB2 base).
 **Status:** Live-deployed. `checkpoints/policy_39929600.onnx` (39.9M training
 steps) runs a public 1v1 human-vs-bot server via `tools/live_match_onnx.py`
 (see **Live Deployment**). Movement/control is solid as of 2026-07-10. Aim
-never converged through pure RL (root-caused and quantified 2026-07-11); a
-behavior-cloning warm-start fix is validated and improving it, in progress —
-see **Known Issues / Roadmap** item 2. **See `docs/HANDOFF-2026-07-11.md`
-for the current state and next steps if picking this up fresh.**
+never converged through pure RL; the first telemetry used to quantify that was
+later found geometrically invalid, but corrected BC/evaluation now provides a
+strong warm start and a reward/terminal-fixed PPO canary retained it. Combat is
+still far below the promotion target — see **Known Issues / Roadmap** item 2.
+**See `docs/HANDOFF-2026-07-11.md` for the current artifacts, evidence, and
+next controlled experiment if picking this up fresh.**
 
 ## Architecture
 
@@ -101,11 +103,17 @@ The project target is one ML bot versus three Lithium/3ZB2 opponents with a
 15:1 kill/death ratio. Evaluate the latest checkpoint with:
 
 ```bash
-python tools/evaluate_kd.py --map_glob 'mltrain_*.bsp' --steps 5000 --n_bots 4
+Q2_ROOT=/home/raymond/q2_lithium_merge_eval Q2_EXT_OBS=1 \
+python tools/evaluate_kd.py \
+  --checkpoint checkpoints/aim_ppo_canary_v2/policy_39940354.pt \
+  --map_glob 'mltrain_*.bsp' --max_maps 1 --steps 5000 --n_bots 4 \
+  --game_seed 8801
 ```
 
 The command exits non-zero until `kd_ratio >= 15.0`, so it can be used as the
-promotion gate before treating a training run as successful.
+promotion gate before treating a training run as successful. Use the
+reward/terminal-fixed isolated runtime for current aim artifacts; the active
+long-running trainer intentionally still has the older `game.so`.
 
 ## Live Deployment
 
@@ -149,39 +157,67 @@ fixed checkpoint). Ordered by what's blocking what.
    cause was unrelated to either). Fixed with a bounded 50ms real timeout on
    the bootstrap check. Deployed to production.
 
-2. **[IN PROGRESS, root cause confirmed, fix validated 2026-07-11]**
-   Aim/yaw-tracking of visible targets is essentially non-functional.
-   Measured across 318 frames with a visible enemy: mean facing error 97.5°
-   (median 97.8°); only 6% of frames within the training reward's own 12°
-   alignment threshold (`Q2_AIM_YAW_DEG`); 0 of 40 fire events happened
-   while aligned. Confirmed via four independent measurements: this live
-   telemetry, the historical TensorBoard training curve (`combat/kd_ratio`
-   plateaued at ~1.5:1 for the entire second half of the `CUR` run, `40M`
-   steps, no late-training improvement), a controlled `tools/evaluate_kd.py`
-   re-run (0.0 kd, confirming this is a policy-quality issue, not the
-   control-plane bug above), and an ML-vs-ML self-play match (1 kill/24
-   deaths vs. 5 kills/26 deaths — fails identically against its own
-   checkpoint, ruling out opponent-specific explanations).
-   **Root cause**: pure PPO exploration never discovered the aim→fire
-   association across 40M steps — the reward function has dozens of
-   competing terms, and movement/survival/exploration reward is easier to
-   accumulate than the sparse, precise skill of landing hits, so gradient
-   never favored aim. **Fix**: `tools/behavior_clone_aim.py` — a supervised
-   warm-start from a scripted geometric teacher (`atan2` toward nearest
-   visible enemy) — already existed in the repo but had never been
-   successfully run (see gotcha below). Fixed and run 2026-07-11
-   (`--synthetic`, default hyperparameters, ~20s of training): mean facing
-   error 97.5°→81.2°, within-12° rate 6.0%→8.0%, **fires-while-aligned
-   0.0%→7.7%**. Directionally correct on the first, cheapest attempt — not
-   yet good enough to deploy. New checkpoint: `checkpoints/policy_39929601.pt`
-   (+ `checkpoints/policy_latest.onnx`), does not overwrite `CUR`.
-   **Next steps**: more epochs/samples on `--synthetic`, then `collect()`
-   mode (real rollouts, in-distribution data) instead of synthetic, then
-   resume PPO fine-tuning *from this checkpoint* (not from scratch) so RL's
-   job becomes integrating already-working aim rather than discovering it —
-   watch `combat/kd_ratio` for a real break from the ~1.5:1 plateau, and
-   watch for regression (RL overwriting the imitation-learned behavior) if
-   fine-tuning LR is too high.
+2. **[IN PROGRESS — corrected BC, fixed-runtime PPO, and seeded ablations
+   validated 2026-07-11]** Aim/fire remains the main policy-quality blocker,
+   but the first investigation's 97.5°→81.2° telemetry must not be reused:
+   that scratch measurement subtracted global yaw even though the C bridge's
+   `rel_pos` is already bot-local, and the first BC run trained on
+   unnormalised synthetic vectors with an almost-always-fire teacher. The
+   formal tools now use the exact Quake `AngleVectors` inverse, post-command
+   alignment (look is applied before attack), pitch clamping, real legacy-bot
+   identity, and the policy's actual normalised input layout.
+
+   `tools/behavior_clone_aim.py` was rebuilt around those invariants. It now
+   uses `fire_logits_for()`, preserves non-aim behavior by distillation,
+   supports exact real-rollout observations plus synthetic replay, writes
+   isolated numeric PT/ONNX pairs atomically, and never collides with the
+   active trainer's `policy_latest.onnx`. The best balanced warm start is
+   `checkpoints/aim_bc_rollout_blend_v1/policy_39929602.pt` (WSL box,
+   gitignored): on a fixed 10k synthetic holdout it has 3.06° yaw MAE, 1.88°
+   pitch MAE, 28.96% predicted-post alignment, 92.51% aligned-fire precision,
+   0% hidden fire, and preserves the reference non-aim heads. Real q2dm1
+   rollouts are much harder/noisier (roughly 8–14% post alignment), so this
+   is a warm start, not a deployable bot.
+
+   PPO canary v2 started from that balanced BC checkpoint on the isolated,
+   reward/terminal-fixed runtime. It completed 10,752 environment steps at
+   `checkpoints/aim_ppo_canary_v2/policy_39940354.pt` with bounded optimizer
+   traces (loss 0.38–2.07; returns no longer contain 100,000-point sentinels).
+   Synthetic aim was retained: yaw MAE 3.05°, pitch MAE 1.93°, aligned-fire
+   precision 92.43%, hidden fire 0%, and 99.3–99.8% non-aim agreement. On the
+   same fixed generated-map 5k-step K/D gate it improved the BC baseline from
+   3/64 (0.0469, 373 damage) to 4/60 (0.0667, 552 damage); episodes exactly
+   matched deaths and both runs had zero timeouts. This is a real, modest
+   improvement, still nowhere near the 15:1 target. Do not extend canary v1:
+   it trained its critic/shared state on corrupted sentinel returns.
+
+   The follow-up `vf_coef` A/B is complete and **does not support lowering the
+   value weight**. Three deterministic training-seed pairs (3101/4201/5301),
+   each gated on gameplay seeds 8801 and 9901, produced fixed-map totals of
+   11/405 for `vf_coef=0.1` and 13/469 for `0.01`; real-q2dm1 totals were
+   7/118 and 5/96. Pair directions were inconsistent. Lowering the coefficient
+   cut weighted value gradients 90.4%, shared movement 35.3%, and clipping
+   pressure, but actor parameter movement stayed flat. Keep `0.1` by inertia,
+   not because three pairs prove it optimal; none of these artifacts is a
+   deployment candidate.
+
+   Reproducibility is now explicit: `--seed` covers Python/NumPy/Torch and
+   per-venv spatial shaping, `--game_seed` names the C gameplay RNG stream,
+   and `--deterministic 1` enables deterministic Torch/CUDA kernels. A
+   500-transition lockstep replay matched byte-for-byte across two launches
+   and changed when only the game seed changed. Repeatability is lockstep-only;
+   `Q2_ML_ASYNC=1` remains wall-scheduling-dependent.
+
+   A default-off recurrent aim/fire anchor (`--aim_anchor_coef`) was also
+   tested because the 3° synthetic holdout uses zero LSTM state while live
+   recurrent chunks initially showed roughly 34° yaw error. At coefficient
+   `0.1`, a seed-5301 canary retained the synthetic gate and improved pooled
+   real-q2dm1 post-alignment from 13.45% to about 21.35%, but failed the fixed
+   generated-map gate: 5/129 fell to 2/162. It remains an experimental switch,
+   default `0`; do not extend that checkpoint. If revisiting it, isolate a
+   weaker or look-only anchor and require the same multi-seed fixed-combat gate
+   before any longer PPO run. Leave expensive gradient diagnostics disabled
+   for ordinary training.
 
 3. **[OPEN]** Lattice pull signals are weak, one is inverted from intent.
    During pure exploration (no visible enemy — the lattice is the only
@@ -224,6 +260,41 @@ fixed checkpoint). Ordered by what's blocking what.
    `tools/ml_vs_ml.py`, added this session — pits N ONNX policy instances
    against each other, zero 3ZB2 by default if `n_bots=num_ml_bots`, but see
    this gotcha before using a small `n_bots`).
+
+7. **[FIXED IN SOURCE 2026-07-11; not deployed to the active trainer or
+   production]** ML reward accounting used raw Quake damage. Kill planes,
+   telefrags, crushers, and the out-of-bounds fallback deliberately pass
+   `100000`, which entered PPO returns unchanged; corpse hits could also add
+   damage and repeat ML kill credit. The impossible totals were exact
+   sentinel multiples (`3,704,740 = 37 × 100,000 + 4,740`). `T_Damage()` now
+   caps reward damage to actual live health removed, ignores corpse/gib
+   reward, requires a client attacker for proximity direction, and awards a
+   kill only on an alive→dead transition. Gameplay damage is unchanged. On
+   the same 5k gate, the old runtime reported 18/70 and 3,704,740 damage
+   taken; the fixed isolated runtime reported 1/70 and 7,121, proving that
+   17 of 18 apparent kills were corpse credits and the critic spikes were
+   sentinel returns, not useful learning.
+
+8. **[FIXED IN SOURCE 2026-07-11; isolated runtime verified]** Terminal
+   delivery had two independent bugs: lockstep sent the same death terminal
+   from both the frame pre-pass and dead `Bot_Think`, while every intermission
+   frame was terminal. The latter produced runs with 2,769 episode endings in
+   3,072 transitions and mean episode length 1.027. C now success-gates a
+   one-shot death/intermission flag on every sync/async send path and exits a
+   bot-only intermission only after every ML slot has sent its boundary.
+   Python discards a true same-tick replay but preserves a valid same-tick
+   nonterminal→terminal promotion, lower ticks after map reload, and
+   same-new-tick split deltas. Integration checks produced
+   three intermission terminals followed by three clean rounds, and 2 death
+   terminals for exactly 2 death rewards, with zero timeouts. Formal gates now
+   report episodes equal to deaths (64/64 and 60/60).
+
+9. **[build gotcha]** This C Makefile does not track header dependencies.
+   After changing `botstr.h`/another shared struct, plain `make` can link a
+   mixed-layout `game.so` that crashes immediately. Use `make clean && make
+   -j4` for header/layout changes. Continue copying only the resulting
+   `lithium/gamex86_64.so` to an isolated runtime's `lithium/game.so` while
+   the main trainer is live.
 
 See `docs/architecture-map.svg` for the full system diagram with these
 findings annotated in place.
