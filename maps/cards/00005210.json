@@ -1,0 +1,36 @@
+{
+  "map": "mltrain_00005210",
+  "seed": 5210,
+  "generator": "v2",
+  "features": {
+    "style": "canyon",
+    "rooms": 13,
+    "arenas": 3,
+    "towers": 1,
+    "lane_walls": 6,
+    "lava_pools": 0,
+    "platforms": 11,
+    "hook_required": 10,
+    "terrace_levels": 1,
+    "armor_total": 3
+  },
+  "judge_coherence": 0.66,
+  "runs": [
+    {
+      "run_tag": "D",
+      "t": "20260612",
+      "final_reward": -106.4,
+      "delta": 152.0,
+      "episodes": 1027,
+      "kd_recent": 0.212,
+      "learnability": 0.876,
+      "parts": {
+        "improvement": 1.0,
+        "competence": 0.645,
+        "survival": 1.0
+      }
+    }
+  ],
+  "learnability_mean": 0.876,
+  "learnability_n": 1
+}

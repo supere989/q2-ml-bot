@@ -1,0 +1,126 @@
+# Repository Guidelines
+
+ML-driven bot system for Quake 2 (Yamagi engine + Lithium II mod + 3ZB2 bots).
+A PPO-trained LSTM policy controls in-game bots over a UDP bridge; a voxel
+spatial-memory system supplies tactical context. See `docs/ML_FRAMEWORK.md`.
+
+## Project Structure
+
+- `q2-ml-bot/` — Python training stack (canonical).
+  `train/ppo.py` (PPO trainer), `models/policy.py` (LSTM actor-critic),
+  `harness/` (env, UDP protocol, voxel/spatial rewards, tactical-LLM sidecar),
+  `maps/generator.py` (procedural training maps), `tools/` (eval, monitoring).
+- `engine/lithium/` — game-mod C source. **Standalone git repo**
+  (`github.com/supere989/q2-lithium-3zb2`, branch `ml-wip-20260611`); the
+  ML modules are `ml_bridge.c`, `ml_obs.c`, `ml_sensors.c`.
+- `q2_lithium_merge/` — game runtime install (binaries/assets, untracked;
+  only the `lithium/*.cfg` ML server configs are versioned).
+- `docs/` — design notes, plus `architecture-map.svg` (full system diagram).
+
+A production live-deployment instance (`tools/live_match_onnx.py`, ONNX
+Runtime, human-joinable) has run on a separate Hetzner VPS since 2026-07 —
+see `q2-ml-bot/README.md` § Live Deployment / § Known Issues for topology
+and current findings.
+
+## Training Topology
+
+Training runs on the Windows RTX 2080 box (DESKTOP-KDLBAE7), inside WSL.
+
+**SSH — use the direct WSL path** (`~/.ssh/config` has both entries):
+- `ssh wsl-box` → WSL's own tailscaled at `100.86.206.50` (preferred).
+- `ssh win-box` → Windows host `100.104.16.95:2222`. **Trap:** this port
+  reaches WSL's sshd only via localhost-forwarding; when the WSL VM is
+  down (e.g. after a Windows update reboot — WSL never auto-starts), it
+  silently falls through to the **Windows** sshd. Symptoms: host-key-change
+  warning, cmd.exe errors like `'grep' is not recognized`, and `wsl -l -v`
+  reporting "no installed distributions" (the ssh `raymond` profile does
+  not own the distro — it belongs to another Windows profile; this does
+  NOT mean the distro is gone).
+
+**Recovery after a Windows reboot:** start WSL from the desktop session
+(run `wsl` / launch Ubuntu). systemd inside the distro brings sshd and
+tailscaled back automatically. Then relaunch tmux sessions:
+- `q2_tb`: `python3 -m tensorboard.main --logdir runs --bind_all --port 6006`
+  (plain `tensorboard` is not on tmux's PATH).
+- `q2_ppo`: trainer command — recover it from `/tmp/q2_train.log.ppo` or
+  the previous tmux session's `bash -c` line in `ps`.
+
+**TensorBoard renders blank (board up, no data):** TB 2.13 crashes on
+every request under protobuf ≥5.26 — `MessageToJson() got an unexpected
+keyword argument 'including_default_value_fields'` (the arg was renamed
+to `always_print_fields_with_no_presence`). The event files under
+`runs/` are fine; only the server is broken. Confirm with
+`grep -i traceback /tmp/tb.log`. Patched in place at three call sites
+(`.bak-protobuf7` copies beside each) — re-apply if a `pip install
+--upgrade tensorboard` reverts them:
+```
+cd ~/.local/lib/python3.10/site-packages/tensorboard
+sed -i 's/including_default_value_fields=True/always_print_fields_with_no_presence=True/g' \
+  plugins/hparams/hparams_plugin.py plugins/custom_scalar/custom_scalars_plugin.py
+find plugins/hparams plugins/custom_scalar -name '*.pyc' -delete   # clear stale bytecode
+```
+Then restart the `q2_tb` tmux session. Verify data loads:
+`curl -s localhost:6006/data/plugin/scalars/tags` should list the runs
+and their tags. Permanent fix (do it during a training gap, not live):
+bump TB to a protobuf-7-aware 2.16+ release. Note the trainer's protobuf
+is untouched by this patch — only TB plugin files change.
+
+**Local viewing from the Nobara workstation:** a `systemd --user`
+service `wsl-tunnel.service` holds an SSH local-forward
+(`-L 6006:localhost:6006 wsl-box`) with `Restart=always` + keepalives,
+so `http://127.0.0.1:6006` is always live (auto-reconnects after drops
+or while the WSL VM is down). `systemctl --user {status,restart}
+wsl-tunnel`; logs via `journalctl --user -u wsl-tunnel -f`.
+
+- `~/q2-ml-bot` + `~/merge_mod/lithium` — clones of the trees above; keep in
+  sync via git, do not rsync blindly.
+- Trainer runs in tmux session `q2_ppo`; log at `/tmp/q2_train.log.ppo`.
+- TensorBoard on port 6006 (`http://100.86.206.50:6006` direct, the
+  Windows portproxy at `http://100.104.16.95:6006`, or `http://127.0.0.1:6006`
+  via the wsl-tunnel service above); events in `~/q2-ml-bot/runs/`.
+- Headless `q2ded` servers on ports 27910+, configs `ml_server_*.cfg`.
+
+## Live Deployment Gotchas
+
+**Solo/few-bot deployments need a real timeout on `ML_RecvAction`'s bootstrap
+path** (2026-07-10, fixed in `ml_bridge.c`). The "self-arming lockstep"
+first-frame check originally used a non-blocking (`MSG_DONTWAIT`) recv to
+avoid delaying other bots' spawn during multi-bot cold start. That path can
+only ever succeed if the harness's reply is *already* sitting in the socket
+buffer at the exact instant it's checked — during 40+-bot batched training
+there's enough incidental inter-bot processing time within one frame for
+that race to resolve favorably; a solo live bot has none of that slack, so
+the check fails forever and the bot silently applies the zero-initialized
+fallback action every tick ("stuck at spawn" — looks like a lattice/map
+problem, isn't). Fixed with a bounded 50ms real timeout on the bootstrap
+check specifically (not the normal-path timeout, to avoid reintroducing the
+original multi-bot startup-delay problem). **If you ever see a live/solo
+deployment produce a perfectly healthy, non-timing-out obs/action loop
+where the bot simply never moves, check `action_debug`'s `accepted`/
+`echo_move` fields (in `harness/protocol.py`'s `Observation.action_debug`,
+exposed via a small `harness/env.py` info-dict patch) before assuming it's
+spatial-reward or map-generation related** — dump a few frames and look
+for the applied action actually being zero.
+
+## Build, Test, and Development Commands
+
+- Engine: `cd engine/lithium && make` (builds `lithium/gamex86_64.so`).
+  **Deploy**: copy the build to `q2_lithium_merge/lithium/game.so` — that is
+  the filename `q2ded` actually dlopens; `gamex86_64.so` in the runtime dir is
+  dead weight. Servers respawn per round, so a copied `game.so` goes live on
+  the next round without touching the trainer.
+- Train (on the WSL box): `python3 -m train.ppo --n_servers N --n_bots_per_server M --map_glob 'mltrain_*.bsp' --resume`.
+- Maps: `python3 maps/generator.py` then `maps/compile.sh` (q2tools/ericw).
+- Map sanity: `python3 tools/validate_maps.py` (4-player playability).
+- Protocol check: `python3 tools/verify_protocol.py`.
+
+## Conventions
+
+- Observation/action structs are versioned PODs (`ml_bridge.h` ↔
+  `harness/protocol.py`); any layout change requires a version bump on both
+  sides and a note in `docs/ML_FRAMEWORK.md`.
+- Reward weights are env-var overrides (`R_*`) today; record the full set in
+  the run log when launching. Do not tune rewards mid-run.
+- Checkpoints (`*.pt`, `*.onnx`) and `runs/` stay out of git.
+- Commit style: short imperative subject, body explains the why
+  (see `engine/lithium` history).

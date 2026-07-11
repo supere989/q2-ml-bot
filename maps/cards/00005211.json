@@ -1,0 +1,64 @@
+{
+  "map": "mltrain_00005211",
+  "seed": 5211,
+  "generator": "v2",
+  "features": {
+    "style": "open",
+    "rooms": 13,
+    "arenas": 5,
+    "towers": 1,
+    "lane_walls": 2,
+    "lava_pools": 0,
+    "platforms": 14,
+    "hook_required": 12,
+    "terrace_levels": 1,
+    "armor_total": 5
+  },
+  "judge_coherence": 0.75,
+  "runs": [
+    {
+      "run_tag": "B",
+      "t": "20260612",
+      "final_reward": -319.6,
+      "delta": -31.1,
+      "episodes": 548,
+      "kd_recent": 0.114,
+      "learnability": 0.378,
+      "parts": {
+        "improvement": 0.396,
+        "competence": 0.0,
+        "survival": 1.0
+      }
+    },
+    {
+      "run_tag": "C",
+      "t": "20260612",
+      "final_reward": -174.8,
+      "delta": 40.7,
+      "episodes": 1027,
+      "kd_recent": 0.04,
+      "learnability": 0.632,
+      "parts": {
+        "improvement": 0.636,
+        "competence": 0.417,
+        "survival": 1.0
+      }
+    },
+    {
+      "run_tag": "D",
+      "t": "20260612",
+      "final_reward": -97.7,
+      "delta": 28.8,
+      "episodes": 1536,
+      "kd_recent": 0.212,
+      "learnability": 0.704,
+      "parts": {
+        "improvement": 0.596,
+        "competence": 0.674,
+        "survival": 1.0
+      }
+    }
+  ],
+  "learnability_mean": 0.571,
+  "learnability_n": 3
+}

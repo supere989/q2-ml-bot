@@ -11,3 +11,9 @@ data/demos/
 *.pt
 *.log
 .env
+runs/
+*.log
+maps/generated/
+maps/ericw-tools-*/
+q2_plugin/
+maps/q2tools/bin/

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 monitor_stats.py — live dashboard for the ML bridge.
 
@@ -42,6 +43,10 @@ def main():
     p.add_argument("--slot", type=int, default=7)
     p.add_argument("--no-action", action="store_true",
                    help="don't send action replies (bot will stall)")
+    p.add_argument("--walk", action="store_true",
+                   help="send slow walking + occasional turn so bot leaves spawn")
+    p.add_argument("--random", action="store_true",
+                   help="send random movement + look + occasional fire")
     args = p.parse_args()
 
     port = ML_BASE_PORT + args.slot
@@ -100,10 +105,25 @@ def main():
             last_episode_reward = ep_reward_sum
             ep_reward_sum = 0.0
 
-        # send zero action so bot doesn't stall
+        # send action so bot doesn't stall.  --walk pushes forward + slow turn,
+        # --random scatters movement + fires occasionally, default is zeros.
         if not args.no_action:
+            if args.walk:
+                fwd, right = 0.6, 0.0
+                yaw_d = 3.0 if (n_pkts // 50) % 2 == 0 else -3.0
+                fire = jump = 0
+            elif args.random:
+                import random as _r
+                fwd   = _r.uniform(-0.5, 1.0)
+                right = _r.uniform(-0.5, 0.5)
+                yaw_d = _r.uniform(-15, 15)
+                fire  = 1 if _r.random() < 0.10 else 0
+                jump  = 1 if _r.random() < 0.05 else 0
+            else:
+                fwd = right = yaw_d = 0.0
+                fire = jump = 0
             act = struct.pack(ACT_FMT, ML_ACT_MAGIC, obs.tick,
-                              0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0)
+                              fwd, right, yaw_d, 0.0, jump, fire, 0, 0)
             s.sendto(act, addr)
 
         # render at 5Hz max

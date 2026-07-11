@@ -1,0 +1,230 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1700 1400" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrowRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1700" height="1400" fill="#f8fafc"/>
+
+  <!-- Title -->
+  <text x="850" y="42" text-anchor="middle" font-size="28" font-weight="700" fill="#0f172a">Q2 ML-Bot — Process &amp; Design Architecture</text>
+  <text x="850" y="66" text-anchor="middle" font-size="14" fill="#64748b">Reinforcement-learning Quake 2 bot: training harness, custom engine bridge, live human-vs-bot deployment</text>
+
+  <!-- ============ COLUMN HEADERS ============ -->
+  <rect x="30" y="90" width="770" height="36" rx="6" fill="#2563eb"/>
+  <text x="415" y="114" text-anchor="middle" font-size="17" font-weight="700" fill="#ffffff">TRAINING — RTX2080 / WSL box</text>
+
+  <rect x="900" y="90" width="770" height="36" rx="6" fill="#059669"/>
+  <text x="1285" y="114" text-anchor="middle" font-size="17" font-weight="700" fill="#ffffff">LIVE PRODUCTION — VPS 5.78.204.86</text>
+
+  <!-- ============================================================ -->
+  <!-- TRAINING COLUMN -->
+  <!-- ============================================================ -->
+
+  <!-- train/ppo.py orchestrator -->
+  <rect x="30" y="142" width="770" height="86" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="46" y="164" font-size="14" font-weight="700" fill="#1e3a8a" font-family="Consolas,Monaco,monospace">train/ppo.py</text>
+  <text x="180" y="164" font-size="12.5" fill="#334155">— orchestrator (PyTorch, GPU)</text>
+  <text x="46" y="184" font-size="12" fill="#334155">n_servers=12 × n_bots_per_server=8 (n_ml_bots=4/server → 48 concurrent ML bot slots)</text>
+  <text x="46" y="202" font-size="12" fill="#334155" font-family="Consolas,Monaco,monospace">train/curriculum.py</text>
+  <text x="198" y="202" font-size="12" fill="#334155">— CurriculumEvolver: retires mastered maps, seeds fresh mlcur_* replacements live</text>
+
+  <line x1="415" y1="228" x2="415" y2="248" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- harness/env.py Q2MultiEnv -->
+  <rect x="30" y="250" width="770" height="130" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="46" y="272" font-size="14" font-weight="700" fill="#1e3a8a" font-family="Consolas,Monaco,monospace">harness/env.py :: Q2MultiEnv</text>
+  <text x="380" y="272" font-size="12.5" fill="#334155">(×12 server instances)</text>
+  <text x="46" y="292" font-size="12" fill="#334155">spawns/owns one q2ded process per server; 1 UDP socket per ML bot slot</text>
+  <text x="46" y="312" font-size="12" fill="#334155" font-family="Consolas,Monaco,monospace">harness/protocol.py</text>
+  <text x="198" y="312" font-size="12" fill="#334155">— Observation/Action struct packing (matches C ml_bridge.h wire format)</text>
+  <rect x="46" y="322" width="738" height="48" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="1"/>
+  <text x="56" y="340" font-size="12" fill="#78350f" font-family="Consolas,Monaco,monospace" font-weight="700">harness/spatial.py :: VoxelSpatialReward</text>
+  <text x="380" y="340" font-size="11.5" fill="#78350f">— the "Voxel Lattice"</text>
+  <text x="56" y="358" font-size="11.5" fill="#78350f">per-256u-cell session memory (engagement/threat/opportunity/self-fire), keyed by exact map name;</text>
+  <text x="56" y="368" font-size="11.5" fill="#78350f" text-decoration="none">reward-shapes training AND feeds 21 of the policy's 24 "session memory" obs dims</text>
+
+  <line x1="415" y1="380" x2="415" y2="400" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="425" y="395" font-size="11" fill="#64748b">UDP loopback (127.0.0.1), 1 socket/bot slot</text>
+
+  <!-- ml_bridge boundary (training) -->
+  <line x1="30" y1="402" x2="800" y2="402" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="46" y="416" font-size="11" font-weight="700" fill="#64748b" letter-spacing="1">— ml_bridge PROTOCOL BOUNDARY (Python ⇄ C) —</text>
+
+  <!-- C engine/mod box -->
+  <rect x="30" y="426" width="770" height="176" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+  <text x="46" y="448" font-size="14" font-weight="700" fill="#78350f">[C]  merge_mod/lithium  (Lithium II Mod v1.32-beta2, compiled → game.so)</text>
+  <text x="46" y="468" font-size="12" fill="#334155" font-family="Consolas,Monaco,monospace">g_main.c</text>
+  <text x="140" y="468" font-size="12" fill="#334155">G_RunFrame — two-phase lockstep: sends every ML bot's obs first, then runs entities</text>
+  <text x="46" y="486" font-size="12" fill="#334155" font-family="Consolas,Monaco,monospace">func.c</text>
+  <text x="120" y="486" font-size="12" fill="#334155">Bot_Think — dispatches ML bridge / 3ZB2 legacy AI / dead-respawn per entity</text>
+  <text x="46" y="504" font-size="12" fill="#334155" font-family="Consolas,Monaco,monospace">ml_obs.c</text>
+  <text x="128" y="504" font-size="12" fill="#334155">ML_PackObs, ML_ApplyAction (act → ent-&gt;velocity), ML_UpdateStuckGuard (anti-stuck safety net)</text>
+  <text x="46" y="522" font-size="12" fill="#334155" font-family="Consolas,Monaco,monospace">ml_bridge.c</text>
+  <text x="145" y="522" font-size="12" fill="#334155">ML_SendObsOnly / ML_RecvAction — the UDP send/receive bridge itself</text>
+  <text x="46" y="540" font-size="12" fill="#334155" font-family="Consolas,Monaco,monospace">g_phys.c</text>
+  <text x="128" y="540" font-size="12" fill="#334155">SV_Physics_Step / SV_FlyMove — velocity → position integration, collision</text>
+  <text x="46" y="560" font-size="11.5" fill="#78350f">48 ML bot slots (across 12 servers) share this same source — batched multi-bot timing</text>
+  <text x="46" y="576" font-size="11.5" fill="#78350f">gives ML_RecvAction's bootstrap check enough incidental slack to succeed (see finding #1 below)</text>
+  <rect x="46" y="584" width="738" height="10" fill="none"/>
+
+  <line x1="415" y1="602" x2="415" y2="622" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- q2ded training -->
+  <rect x="30" y="624" width="770" height="60" rx="8" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
+  <text x="46" y="648" font-size="13" font-weight="700" fill="#1e293b" font-family="Consolas,Monaco,monospace">q2ded  ×12</text>
+  <text x="180" y="648" font-size="12" fill="#334155">custom yquake2 (bot-compat-patches: MAX_MSGLEN 1400→8192) + 3ZB2 AI opponents</text>
+  <text x="46" y="668" font-size="11.5" fill="#64748b">3zb2/ botlist configs required even for pure-ML training — silent empty-spawn otherwise</text>
+
+  <!-- maps generator -->
+  <rect x="30" y="700" width="380" height="120" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="46" y="722" font-size="13" font-weight="700" fill="#14532d" font-family="Consolas,Monaco,monospace">maps/generator.py</text>
+  <text x="46" y="740" font-size="11.5" fill="#334155">procedural map gen + q2tools/bin/q2tool (bsp/vis/rad)</text>
+  <text x="46" y="758" font-size="11.5" fill="#334155">writes per map: .bsp, hook-zones .json (read by</text>
+  <text x="46" y="774" font-size="11.5" fill="#334155">ML_LoadHookZones), .routes.json (item-timing graph)</text>
+  <rect x="46" y="784" width="348" height="26" rx="4" fill="#fee2e2" stroke="#dc2626" stroke-width="1"/>
+  <text x="56" y="801" font-size="11" fill="#7f1d1d" font-family="Consolas,Monaco,monospace">.lattice.json</text>
+  <text x="150" y="801" font-size="10.5" fill="#7f1d1d">written every map, NEVER read (finding #4)</text>
+
+  <!-- checkpoints -->
+  <rect x="430" y="700" width="370" height="120" rx="8" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="446" y="722" font-size="13" font-weight="700" fill="#4c1d95" font-family="Consolas,Monaco,monospace">checkpoints/{run_tag}/policy_*.pt</text>
+  <text x="446" y="742" font-size="11.5" fill="#334155">PyTorch LSTM policy — Q2BotPolicy</text>
+  <text x="446" y="760" font-size="11.5" fill="#334155">(models/policy.py), 256-dim hidden state,</text>
+  <text x="446" y="778" font-size="11.5" fill="#334155">continuous move/aim + discrete jump/fire/hook/weapon heads</text>
+  <text x="446" y="798" font-size="11.5" fill="#4c1d95" font-weight="700">models.policy.export_onnx() ──▶</text>
+
+  <line x1="800" y1="810" x2="895" y2="810" stroke="#7c3aed" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="805" y="828" font-size="11" fill="#4c1d95">checkpoint → .onnx</text>
+
+  <!-- ============================================================ -->
+  <!-- PRODUCTION COLUMN -->
+  <!-- ============================================================ -->
+
+  <!-- live_match_onnx.py -->
+  <rect x="900" y="142" width="770" height="140" rx="8" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+  <text x="916" y="164" font-size="14" font-weight="700" fill="#064e3b" font-family="Consolas,Monaco,monospace">tools/live_match_onnx.py</text>
+  <text x="916" y="184" font-size="12" fill="#334155" font-family="Consolas,Monaco,monospace">OnnxPolicy</text>
+  <text x="998" y="184" font-size="12" fill="#334155">— ONNX Runtime, CPU-only (~66MB RSS vs ~2.1GB for torch+CUDA)</text>
+  <text x="916" y="202" font-size="12" fill="#334155" font-family="Consolas,Monaco,monospace">AsyncMapGenerator</text>
+  <text x="1055" y="202" font-size="12" fill="#334155">— background bsp/vis/rad compile of a fresh map every round</text>
+  <text x="916" y="220" font-size="12" fill="#334155">sv_maplist rotation (EndDMLevel fallback, since use_mapqueue=0)</text>
+  <text x="916" y="238" font-size="12" fill="#334155">sv_downloadserver → HTTP map delivery (was: slow legacy UDP transfer)</text>
+  <text x="916" y="256" font-size="12" fill="#334155">deterministic decode: cont_mean directly, argmax for jump/fire/hook/weapon</text>
+  <text x="916" y="272" font-size="11" fill="#64748b">num_ml_bots=1 — solo bot, no 3ZB2 fill opponents by default</text>
+
+  <line x1="1285" y1="282" x2="1285" y2="302" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Q2MultiEnv x1 -->
+  <rect x="900" y="304" width="770" height="58" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="916" y="328" font-size="13" font-weight="700" fill="#1e3a8a" font-family="Consolas,Monaco,monospace">harness/env.py :: Q2MultiEnv</text>
+  <text x="1230" y="328" font-size="12" fill="#334155">(×1 instance)</text>
+  <text x="916" y="346" font-size="11.5" fill="#334155">identical class to training — same protocol.py, same spatial.py VoxelSpatialReward</text>
+
+  <line x1="1285" y1="362" x2="1285" y2="382" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="1295" y="377" font-size="11" fill="#64748b">UDP loopback, 1 socket</text>
+
+  <line x1="900" y1="384" x2="1670" y2="384" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="916" y="398" font-size="11" font-weight="700" fill="#64748b" letter-spacing="1">— ml_bridge PROTOCOL BOUNDARY (Python ⇄ C) —</text>
+
+  <!-- FIX CALLOUT -->
+  <rect x="900" y="406" width="770" height="46" rx="8" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+  <text x="916" y="425" font-size="12.5" font-weight="700" fill="#7f1d1d">★ FIXED 2026-07-10 — ml_bridge.c :: ML_RecvAction() bootstrap race</text>
+  <text x="916" y="442" font-size="11.5" fill="#7f1d1d">non-blocking MSG_DONTWAIT check never escaped for a solo bot → EVERY action applied as zero, forever ("stuck at spawn")</text>
+
+  <!-- C engine box (production, condensed) -->
+  <rect x="900" y="462" width="770" height="80" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+  <text x="916" y="484" font-size="13" font-weight="700" fill="#78350f">[C]  q2_lithium_merge/lithium/game.so</text>
+  <text x="1210" y="484" font-size="11.5" fill="#78350f">— identical source to training (md5-verified build)</text>
+  <text x="916" y="504" font-size="11.5" fill="#334155">same g_main.c / func.c / ml_obs.c / ml_bridge.c / g_phys.c — only ml_bridge.c's</text>
+  <text x="916" y="520" font-size="11.5" fill="#334155">bootstrap timeout differs from the pre-fix build (50ms real wait vs 0ms MSG_DONTWAIT)</text>
+  <text x="916" y="536" font-size="11" fill="#64748b">solo deployment has none of training's 48-bot incidental scheduling slack — this is why the bug only bit here</text>
+
+  <line x1="1285" y1="542" x2="1285" y2="562" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- q2ded production -->
+  <rect x="900" y="564" width="770" height="56" rx="8" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
+  <text x="916" y="588" font-size="13" font-weight="700" fill="#1e293b" font-family="Consolas,Monaco,monospace">q2ded  ×1</text>
+  <text x="1030" y="588" font-size="12" fill="#334155">same custom build, public UDP :28000, Q2_BIND_IP="" (bind-all workaround)</text>
+  <text x="916" y="606" font-size="11" fill="#64748b">admin.lst wildcard admin cred set; 3zb2/ present but unused (solo config)</text>
+
+  <line x1="1285" y1="620" x2="1285" y2="642" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="1300" y="636" font-size="11" fill="#64748b">game UDP :28000 (public internet)</text>
+
+  <!-- CLIENT box -->
+  <rect x="900" y="644" width="770" height="90" rx="8" fill="#faf5ff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="916" y="668" font-size="13" font-weight="700" fill="#4c1d95">CLIENT — human player's machine</text>
+  <text x="916" y="688" font-size="11.5" fill="#334155">custom yquake2 build (bot-compat-patches — MUST match server's MAX_MSGLEN=8192)</text>
+  <text x="916" y="706" font-size="11.5" fill="#334155" font-family="Consolas,Monaco,monospace">curl install.sh | bash</text>
+  <text x="1120" y="706" font-size="11.5" fill="#334155">→ ~/.local/share/q2mlbot + YamagiQ2 data dirs + Games-menu launcher</text>
+  <text x="916" y="724" font-size="11" fill="#64748b">connect-mlbot.sh: +set game lithium +connect 5.78.204.86:28000</text>
+
+  <!-- systemd services -->
+  <rect x="900" y="750" width="370" height="90" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="916" y="772" font-size="12.5" font-weight="700" fill="#14532d" font-family="Consolas,Monaco,monospace">systemd: q2mlbot.service</text>
+  <text x="916" y="792" font-size="11" fill="#334155">runs live_match_onnx.py, Restart=on-failure</text>
+  <text x="916" y="810" font-size="11" fill="#334155" font-family="Consolas,Monaco,monospace">q2mlbot-gamedata.service</text>
+  <text x="916" y="828" font-size="11" fill="#334155">python http.server :32494 — maps + client tarball + install.sh</text>
+
+  <!-- checkpoint onnx -->
+  <rect x="1300" y="750" width="370" height="90" rx="8" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="1316" y="772" font-size="12.5" font-weight="700" fill="#4c1d95" font-family="Consolas,Monaco,monospace">checkpoints/policy_39929600.onnx</text>
+  <text x="1316" y="792" font-size="11" fill="#334155">39.9M training steps — best available checkpoint</text>
+  <text x="1316" y="810" font-size="11" fill="#334155">verified bit-identical to PyTorch (max diff ~3e-7)</text>
+  <text x="1316" y="828" font-size="11" fill="#64748b">15:1 kill/death internal target NOT confirmed passed</text>
+
+  <!-- ============================================================ -->
+  <!-- KNOWN FINDINGS PANEL -->
+  <!-- ============================================================ -->
+  <rect x="30" y="870" width="1640" height="500" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="50" y="900" font-size="16" font-weight="700" fill="#0f172a">Known findings — 2026-07-10 investigation</text>
+
+  <!-- Finding 1 -->
+  <rect x="50" y="916" width="1600" height="86" rx="6" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="66" y="938" font-size="13" font-weight="700" fill="#14532d">✓ FIXED — "stuck at spawn": ml_bridge.c ML_RecvAction() bootstrap race condition</text>
+  <text x="66" y="958" font-size="11.5" fill="#334155">The bootstrap path (meant to handle only the very first frame, before Python starts listening) checked for a reply with a non-blocking, zero-wait recv.</text>
+  <text x="66" y="976" font-size="11.5" fill="#334155">Escaping it required Python's reply to already be buffered at the exact instant checked — training's 48-bot batched timing gave enough incidental slack for that</text>
+  <text x="66" y="994" font-size="11.5" fill="#334155">race to resolve; a solo live bot never had it, so every action applied as the zero-initialized fallback, forever. Fixed with a bounded 50ms real timeout; deployed to production.</text>
+
+  <!-- Finding 2 -->
+  <rect x="50" y="1012" width="1600" height="86" rx="6" fill="#fef2f2" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="66" y="1034" font-size="13" font-weight="700" fill="#7f1d1d">✗ OPEN — aim/yaw-tracking of visible targets is essentially non-functional</text>
+  <text x="66" y="1054" font-size="11.5" fill="#334155">Measured across 318 frames with a visible enemy (two live test runs, post-fix): mean facing error 97.5° (median 97.8°). Only 6% of frames were within the</text>
+  <text x="66" y="1072" font-size="11.5" fill="#334155">training reward's own 12° alignment threshold (Q2_AIM_YAW_DEG). Of 40 recorded fire events, zero happened while aligned within that threshold. Movement</text>
+  <text x="66" y="1090" font-size="11.5" fill="#334155">and target-detection clearly work (distance/contact modulate behavior) — specifically the yaw-to-target coupling does not, independent of the bootstrap fix.</text>
+
+  <!-- Finding 3 -->
+  <rect x="50" y="1108" width="1600" height="86" rx="6" fill="#fefce8" stroke="#ca8a04" stroke-width="1.5"/>
+  <text x="66" y="1130" font-size="13" font-weight="700" fill="#713f12">△ OPEN — lattice pull signals are weak, one is inverted from its intended meaning</text>
+  <text x="66" y="1150" font-size="11.5" fill="#334155">During pure exploration (no visible enemy, so the lattice is the only spatial signal): "opportunity" pull (steer.py's "value/target is here") correlates weakly</text>
+  <text x="66" y="1168" font-size="11.5" fill="#334155">positively with movement (cos-sim ≈ +0.11, n=75). "Engagement" pull ("expect combat here") correlates negatively (cos-sim ≈ −0.49, n=75) — the bot tends to</text>
+  <text x="66" y="1186" font-size="11.5" fill="#334155">move AWAY from cells with past-engagement history, opposite of the concept's intent. During active combat, movement vs. opportunity pull is also slightly negative (≈ −0.22).</text>
+
+  <!-- Finding 4 -->
+  <rect x="50" y="1204" width="1600" height="70" rx="6" fill="#fefce8" stroke="#ca8a04" stroke-width="1.5"/>
+  <text x="66" y="1226" font-size="13" font-weight="700" fill="#713f12">△ OPEN — maps/generator.py's .lattice.json sidecar has never been wired up</text>
+  <text x="66" y="1246" font-size="11.5" fill="#334155">Written for every generated map since commit 065a873 (objective sites as opportunity priors, lava pools as danger priors), explicitly "so the bot starts with</text>
+  <text x="66" y="1264" font-size="11.5" fill="#334155">the map sense the generator already has" — but nothing in spatial.py or env.py has ever read it back, across the entire commit history.</text>
+
+  <!-- Legend -->
+  <rect x="50" y="1290" width="1600" height="90" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="66" y="1310" font-size="12" font-weight="700" fill="#334155">Legend</text>
+  <rect x="66" y="1320" width="18" height="14" rx="3" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="92" y="1331" font-size="11" fill="#334155">Python harness</text>
+  <rect x="220" y="1320" width="18" height="14" rx="3" fill="#fffbeb" stroke="#d97706"/>
+  <text x="246" y="1331" font-size="11" fill="#334155">C engine / mod source</text>
+  <rect x="410" y="1320" width="18" height="14" rx="3" fill="#f1f5f9" stroke="#64748b"/>
+  <text x="436" y="1331" font-size="11" fill="#334155">compiled binary process</text>
+  <rect x="620" y="1320" width="18" height="14" rx="3" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text x="646" y="1331" font-size="11" fill="#334155">model / checkpoint artifact</text>
+  <rect x="850" y="1320" width="18" height="14" rx="3" fill="#f0fdf4" stroke="#16a34a"/>
+  <text x="876" y="1331" font-size="11" fill="#334155">tooling / infra</text>
+  <rect x="1010" y="1320" width="18" height="14" rx="3" fill="#fee2e2" stroke="#dc2626"/>
+  <text x="1036" y="1331" font-size="11" fill="#334155">bug / fix location</text>
+  <text x="66" y="1358" font-size="11" fill="#64748b">Sources: this investigation session (2026-07-09/11), q2-ml-bot + merge_mod/lithium repos (canonical: nobara-pc ~/Documents/Cascade_Projects/yquake, git-tracked).</text>
+  <text x="66" y="1372" font-size="11" fill="#64748b">Training box (WSL/RTX2080) runs a non-git snapshot of the same source, confirmed byte-identical on all files discussed above.</text>
+</svg>

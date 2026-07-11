@@ -54,7 +54,8 @@ act_params, val, hx2 = pol(obs, hx)
 print(f"Policy forward: value shape {val.shape} ✓")
 
 import numpy as np
-act_np, v, _ = pol.act(np.zeros(OBS_DIM, dtype=np.float32), hx)
+act_np, v, lp, _ = pol.act(np.zeros(OBS_DIM, dtype=np.float32), hx)
+print(f"Policy act log_prob: {lp:.4f} ✓")
 print(f"Policy act: action shape {act_np.shape} ✓")
 
 print("\nAll checks passed.")
