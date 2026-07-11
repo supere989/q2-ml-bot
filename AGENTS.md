@@ -105,14 +105,14 @@ backup/visibility only, not a compute migration.
   via the wsl-tunnel service above); events in `~/q2-ml-bot/runs/`.
 - Headless `q2ded` servers on ports 27910+, configs `ml_server_*.cfg`.
 
-**Active-runtime isolation (2026-07-11):** `q2_ppo` is still using
-`~/q2_lithium_merge/lithium/game.so`. Do not replace that file while the run
-is active: servers reload it on round/map restart, so a copy silently changes
-reward semantics mid-run. Build in `~/merge_mod/lithium`, then copy only to
-`~/q2_lithium_merge_eval/lithium/game.so` and launch experiments with
-`Q2_ROOT=~/q2_lithium_merge_eval` plus disjoint `Q2_SV_PORT_BASE` /
-`Q2_ML_PORT_BASE`. The reward-cap and terminal fixes are verified there but
-are intentionally not deployed to the active trainer or production yet.
+**Active-runtime isolation (updated 2026-07-11):** the old 209-dim trainer
+using `~/q2_lithium_merge/lithium/game.so` was stopped and archived. The active
+`q2_ppo` migration now uses `~/q2_lithium_merge_eval/lithium/game.so`,
+`Q2_EXT_OBS=1`, and disjoint port bases 33400/33500. Do not replace the eval
+`game.so` while this run is active: servers reload it on round/map restart, so
+a copy silently changes reward semantics mid-run. The original runtime binary
+remains unchanged and currently has no trainer attached. Production remains
+separate and was not touched.
 
 **Reproducible ablations (added 2026-07-11):** use all three controls together:
 `--seed N --game_seed N --deterministic 1`, and keep `Q2_ML_ASYNC=0`.

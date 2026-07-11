@@ -78,6 +78,21 @@ Q2_EXT_OBS=1 python tools/evaluate_lattice.py \
 and the fixed generated-map combat gate from `README.md`. Run a coefficient-0
 control with the same seeds before promoting anything.
 
+## Active migration
+
+The first controlled long run was launched later on 2026-07-11 as
+`lattice_aim_v1`. Four ML slots per deterministic server produced staggered
+cold-start ticks and a first-rollout lockstep stall, so that startup was
+archived. The stable topology uses 12 servers with one ML bot plus seven
+legacy opponents each; every slot armed at tick 101.
+
+The first two updates advanced from 39,940,354 to 39,941,890 at about 23
+steps/s. Initial TensorBoard lattice metrics were: priors loaded `1.0`, routes
+loaded `1.0`, route active `1.0`, about 114 dynamic cells per bot, direction
+cosine `+0.203`, and direction loss `0.797`. No timeout, traceback, or failed
+server output was present. The first paired policy/lattice checkpoint is due at
+the next 40M save boundary.
+
 ## Known prototype limit
 
 The engine observation does not expose visible item spawn IDs. Therefore the
