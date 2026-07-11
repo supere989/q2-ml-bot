@@ -105,14 +105,14 @@ backup/visibility only, not a compute migration.
   via the wsl-tunnel service above); events in `~/q2-ml-bot/runs/`.
 - Headless `q2ded` servers on ports 27910+, configs `ml_server_*.cfg`.
 
-**Active-runtime isolation (updated 2026-07-11):** the old 209-dim trainer
-using `~/q2_lithium_merge/lithium/game.so` was stopped and archived. The active
-`q2_ppo` migration now uses `~/q2_lithium_merge_eval/lithium/game.so`,
-`Q2_EXT_OBS=1`, and disjoint port bases 33400/33500. Do not replace the eval
-`game.so` while this run is active: servers reload it on round/map restart, so
-a copy silently changes reward semantics mid-run. The original runtime binary
-remains unchanged and currently has no trainer attached. Production remains
-separate and was not touched.
+**Active runtime (updated 2026-07-11):** the reward/terminal-fixed runtime was
+promoted to the canonical `~/q2_lithium_merge` path. The active `q2_ppo`
+migration uses that runtime, `Q2_EXT_OBS=1`, and disjoint port bases
+33400/33500. Do not replace its `lithium/game.so` while this run is active:
+servers reload it on round/map restart, so a copy silently changes reward
+semantics mid-run. The pre-fix runtime is retained only for forensic rollback
+at `~/q2_lithium_merge_DEPRECATED_pre_fixed_20260711`; never launch training
+or evaluation from it. Production remains separate and was not touched.
 
 **Reproducible ablations (added 2026-07-11):** use all three controls together:
 `--seed N --game_seed N --deterministic 1`, and keep `Q2_ML_ASYNC=0`.
@@ -163,7 +163,7 @@ for the applied action actually being zero.
   **Deploy**: copy the build to `q2_lithium_merge/lithium/game.so` — that is
   the filename `q2ded` actually dlopens; `gamex86_64.so` in the runtime dir is
   dead weight. Servers respawn per round, so a copied `game.so` goes live on
-  the next round; use the isolated runtime above while training is active.
+  the next round; create a separate scratch runtime while training is active.
 - Train (on the WSL box): `python3 -m train.ppo --n_servers N --n_bots_per_server M --map_glob 'mltrain_*.bsp' --resume`.
 - Maps: `python3 maps/generator.py` then `maps/compile.sh` (q2tools/ericw).
 - Map sanity: `python3 tools/validate_maps.py` (4-player playability).

@@ -93,6 +93,12 @@ cosine `+0.203`, and direction loss `0.797`. No timeout, traceback, or failed
 server output was present. The first paired policy/lattice checkpoint is due at
 the next 40M save boundary.
 
+The fixed runtime was subsequently promoted from the temporary evaluation path
+to canonical `~/q2_lithium_merge`. The former pre-fix runtime is deprecated and
+retained only at `~/q2_lithium_merge_DEPRECATED_pre_fixed_20260711`. The active
+run resumes against the canonical fixed runtime; the deprecated tree must never
+be used as a `Q2_ROOT`.
+
 ## Known prototype limit
 
 The engine observation does not expose visible item spawn IDs. Therefore the

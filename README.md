@@ -104,7 +104,7 @@ The project target is one ML bot versus three Lithium/3ZB2 opponents with a
 15:1 kill/death ratio. Evaluate the latest checkpoint with:
 
 ```bash
-Q2_ROOT=/home/raymond/q2_lithium_merge_eval Q2_EXT_OBS=1 \
+Q2_ROOT=/home/raymond/q2_lithium_merge Q2_EXT_OBS=1 \
 python tools/evaluate_kd.py \
   --checkpoint checkpoints/aim_ppo_canary_v2/policy_39940354.pt \
   --map_glob 'mltrain_*.bsp' --max_maps 1 --steps 5000 --n_bots 4 \
@@ -112,9 +112,9 @@ python tools/evaluate_kd.py \
 ```
 
 The command exits non-zero until `kd_ratio >= 15.0`, so it can be used as the
-promotion gate before treating a training run as successful. Use the
-reward/terminal-fixed isolated runtime for current aim artifacts; the active
-long-running trainer intentionally still has the older `game.so`.
+promotion gate before treating a training run as successful. The canonical
+WSL runtime now contains the reward/terminal fixes; use disjoint port bases for
+evaluation so it cannot collide with active training.
 
 ## Live Deployment
 
