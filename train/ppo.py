@@ -10,6 +10,7 @@ Usage:
 
 import os
 import json
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor
 import argparse
@@ -59,6 +60,9 @@ def _thermal_check(writer, step: int):
 # ── Hyperparameters ─────────────────────────────────────────────────
 
 DEFAULT = dict(
+    seed                = 0,
+    game_seed           = -1,        # >=0 enables deterministic game.so rand() per server
+    deterministic       = 0,         # opt-in deterministic Torch/CUDA kernels for A/B runs
     n_servers           = 2,         # parallel q2ded instances
     n_bots_per_server   = 4,         # total bots in server (ML + 3ZB2 opponents)
     n_ml_bots           = 1,         # ML-controlled slots per server (venvs each)
@@ -162,6 +166,64 @@ def _forward_sequence_with_done_masks(
     return act_params, torch.cat(values, dim=1)
 
 
+def _ppo_parameter_groups(policy: Q2BotPolicy):
+    """Return non-overlapping parameter groups used by PPO diagnostics."""
+    modules = {
+        "shared": (policy.encoder, policy.lstm),
+        "actor": (
+            policy.actor_cont,
+            policy.log_std_head,
+            policy.actor_jump,
+            policy.actor_hook,
+            policy.actor_weapon,
+            policy.weapon_embed,
+            policy.actor_fire,
+        ),
+        "critic": (policy.critic,),
+        "aux": (policy.predict_next,),
+    }
+    return {
+        name: tuple(param for module in group for param in module.parameters())
+        for name, group in modules.items()
+    }
+
+
+def _tensor_group_norm(tensors, device: torch.device) -> torch.Tensor:
+    """L2 norm across tensors, ignoring absent gradients."""
+    squared = [tensor.detach().float().pow(2).sum()
+               for tensor in tensors if tensor is not None]
+    if not squared:
+        return torch.zeros((), device=device)
+    return torch.stack(squared).sum().sqrt()
+
+
+def _gradient_cosine(grads_a, grads_b, device: torch.device) -> torch.Tensor:
+    """Cosine similarity across matching optional gradient tensors."""
+    pairs = [(a.detach().float(), b.detach().float())
+             for a, b in zip(grads_a, grads_b)
+             if a is not None and b is not None]
+    if not pairs:
+        return torch.zeros((), device=device)
+    dot = torch.stack([(a * b).sum() for a, b in pairs]).sum()
+    norm_a = torch.stack([a.pow(2).sum() for a, _ in pairs]).sum().sqrt()
+    norm_b = torch.stack([b.pow(2).sum() for _, b in pairs]).sum().sqrt()
+    denom = norm_a * norm_b
+    if float(denom.detach().cpu()) <= 1e-12:
+        return torch.zeros((), device=device)
+    return dot / denom
+
+
+def _explained_variance(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Population explained variance, returning zero for constant targets."""
+    prediction = prediction.detach().float().reshape(-1)
+    target = target.detach().float().reshape(-1)
+    target_var = target.var(unbiased=False)
+    if float(target_var.detach().cpu()) <= 1e-12:
+        return torch.zeros((), device=target.device)
+    residual_var = (target - prediction).var(unbiased=False)
+    return 1.0 - residual_var / target_var
+
+
 # ── Device selection ─────────────────────────────────────────────────
 
 def _pick_device() -> torch.device:
@@ -177,15 +239,36 @@ def _pick_device() -> torch.device:
 # ── Training loop ────────────────────────────────────────────────────
 
 def train(cfg: dict):
+    seed = int(cfg.get("seed", 0))
+    deterministic = bool(int(cfg.get("deterministic", 0)))
+    if deterministic:
+        # Must be set before the first CUDA context is created. This is
+        # required by deterministic cuBLAS matrix multiplies on CUDA 10.2+.
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.use_deterministic_algorithms(True)
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
     device = _pick_device()
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
     print(f"Training on: {device}")
+    print(f"Random seed: {seed}")
+    print(f"Deterministic kernels: {'ON' if deterministic else 'off'}")
     if device.type == "cuda":
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
 
     policy    = Q2BotPolicy().to(device)
     optimizer = optim.Adam(policy.parameters(), lr=cfg["lr"])
+    grad_diagnostics = os.environ.get("Q2_PPO_GRAD_DIAGNOSTICS", "0") == "1"
 
     print(f"Policy parameters: {policy.param_count():,}")
+    if grad_diagnostics:
+        print("PPO gradient diagnostics: ON")
 
     # Per-run tag isolates parallel runs: separate checkpoint dir + TB run
     # name so stacked ablation trainers never overwrite each other or the
@@ -232,6 +315,11 @@ def train(cfg: dict):
             map_name     = cfg["map_name"],
             map_pool     = map_pool,
             map_seed     = int(cfg["map_seed"]),
+            game_seed    = (
+                None if int(cfg.get("game_seed", -1)) < 0
+                else int(cfg["game_seed"]) + i * 1009
+            ),
+            spatial_seed = seed + i * 104729,
             map_change_episodes = int(cfg["map_change_episodes"]),
             n_bots       = n_bots,
             num_ml_bots  = n_ml,
@@ -280,13 +368,14 @@ def train(cfg: dict):
                 min_samples=float(os.environ.get("Q2_CURRICULUM_MIN_SAMPLES", "40")),
                 min_pool=int(os.environ.get("Q2_CURRICULUM_MIN_POOL", "8")))
             print(f"  curriculum evolution ON (prefix={_pref}, "
-                  f"churn≤{evolver.max_churn}/cycle, mastery_kd≥{evolver.mastery_kd})")
+                  f"churn<={evolver.max_churn}/cycle, mastery_kd>={evolver.mastery_kd})")
         except Exception as e:
             print(f"  ! curriculum init failed (continuing without): {e}")
 
     run_name = (f"ppo_{run_tag}_{int(time.time())}" if run_tag
                 else f"ppo_{_safe_tag(map_label)}_{int(time.time())}")
     writer   = SummaryWriter(log_dir=f"runs/{run_name}")
+    writer.add_scalar("config/seed", seed, resume_steps)
     print(f"TensorBoard log: runs/{run_name}")
     print(f"  view with:  tensorboard --logdir runs --bind_all")
     print(f"  virtual envs: {total_venvs}  ({n_servers} servers × 1 ML bot + {n_bots-1} AI opponents)")
@@ -483,7 +572,63 @@ def train(cfg: dict):
         chunks_per_batch = max(1, cfg["batch_size"] // chunk_len)
         aux_coef = float(cfg.get("aux_coef", 0.05) or 0.0)
 
-        total_loss = 0.0
+        diagnostic_metric_names = (
+            "component_grad_norm_policy_weighted",
+            "component_grad_norm_vf_weighted",
+            "component_grad_norm_aux_weighted",
+            "shared_grad_cos_policy_vf",
+            "grad_norm_shared_pre_clip",
+            "grad_norm_actor_pre_clip",
+            "grad_norm_critic_pre_clip",
+            "grad_norm_aux_pre_clip",
+            "grad_clip_scale",
+        )
+        diagnostic_totals = None
+        diagnostic_parameter_groups = None
+        diagnostic_parameter_snapshots = None
+        diagnostic_all_parameters = None
+        diagnostic_shared_indices = None
+        explained_variance_pre = None
+        if grad_diagnostics:
+            diagnostic_totals = torch.zeros(
+                len(diagnostic_metric_names), device=device, dtype=torch.float64
+            )
+            diagnostic_parameter_groups = _ppo_parameter_groups(policy)
+            diagnostic_all_parameters = tuple(policy.parameters())
+            parameter_indices = {
+                id(param): index
+                for index, param in enumerate(diagnostic_all_parameters)
+            }
+            diagnostic_shared_indices = tuple(
+                parameter_indices[id(param)]
+                for param in diagnostic_parameter_groups["shared"]
+            )
+            diagnostic_parameter_snapshots = {
+                name: tuple(param.detach().clone() for param in params)
+                for name, params in diagnostic_parameter_groups.items()
+            }
+            explained_variance_pre = _explained_variance(
+                buf.values, buf.returns
+            )
+
+        optimization_metric_names = (
+            "loss",
+            "pg_loss",
+            "vf_loss",
+            "entropy",
+            "entropy_loss",
+            "aux_loss",
+            "approx_kl",
+            "clip_fraction",
+            "grad_norm_pre_clip",
+        )
+        # Accumulate diagnostics on-device and synchronize once per PPO
+        # update. Calling .item() for every metric in every minibatch adds
+        # enough GPU barriers to measurably slow the main training loop.
+        optimization_totals = torch.zeros(
+            len(optimization_metric_names), device=device, dtype=torch.float64
+        )
+        optimization_minibatches = 0
         for epoch in range(cfg["n_epochs"]):
             idx = torch.randperm(total_chunks, device=device)
             for start_i in range(0, total_chunks, chunks_per_batch):
@@ -508,7 +653,16 @@ def train(cfg: dict):
                 entropy = entropy.reshape(-1)
 
                 old_log_probs = log_probs_chunked[b].reshape(-1)
-                ratio  = (log_prob - old_log_probs).exp()
+                log_ratio = log_prob - old_log_probs
+                ratio = log_ratio.exp()
+
+                # Diagnostics only: these tensors are detached from the
+                # optimization graph and do not change the PPO objective.
+                with torch.no_grad():
+                    approx_kl = ((ratio - 1.0) - log_ratio).mean()
+                    clip_fraction = (
+                        (ratio - 1.0).abs() > cfg["clip_eps"]
+                    ).float().mean()
                 
                 adv_flat_b = adv_chunked[b].reshape(-1)
                 pg_loss = -torch.min(
@@ -536,15 +690,212 @@ def train(cfg: dict):
                 loss = (pg_loss + cfg["vf_coef"] * vf_loss + cfg["ent_coef"] * ent_loss
                         + aux_coef * aux_loss)
 
+                diagnostic_component_values = None
+                if grad_diagnostics:
+                    policy_component = pg_loss + cfg["ent_coef"] * ent_loss
+                    vf_component = cfg["vf_coef"] * vf_loss
+                    aux_component = aux_coef * aux_loss
+                    policy_component_grads = torch.autograd.grad(
+                        policy_component,
+                        diagnostic_all_parameters,
+                        retain_graph=True,
+                        allow_unused=True,
+                    )
+                    vf_component_grads = torch.autograd.grad(
+                        vf_component,
+                        diagnostic_all_parameters,
+                        retain_graph=True,
+                        allow_unused=True,
+                    )
+                    if aux_component.requires_grad:
+                        aux_component_grads = torch.autograd.grad(
+                            aux_component,
+                            diagnostic_all_parameters,
+                            retain_graph=True,
+                            allow_unused=True,
+                        )
+                    else:
+                        aux_component_grads = (None,) * len(
+                            diagnostic_all_parameters
+                        )
+                    policy_shared_grads = tuple(
+                        policy_component_grads[index]
+                        for index in diagnostic_shared_indices
+                    )
+                    vf_shared_grads = tuple(
+                        vf_component_grads[index]
+                        for index in diagnostic_shared_indices
+                    )
+                    diagnostic_component_values = (
+                        _tensor_group_norm(policy_component_grads, device),
+                        _tensor_group_norm(vf_component_grads, device),
+                        _tensor_group_norm(aux_component_grads, device),
+                        _gradient_cosine(
+                            policy_shared_grads, vf_shared_grads, device
+                        ),
+                    )
+
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(policy.parameters(), cfg["max_grad_norm"])
+                diagnostic_group_norms = None
+                if grad_diagnostics:
+                    diagnostic_group_norms = tuple(
+                        _tensor_group_norm(
+                            (param.grad for param in
+                             diagnostic_parameter_groups[name]),
+                            device,
+                        )
+                        for name in ("shared", "actor", "critic", "aux")
+                    )
+                grad_norm_pre_clip = nn.utils.clip_grad_norm_(
+                    policy.parameters(), cfg["max_grad_norm"]
+                )
+                grad_norm_pre_clip_tensor = torch.as_tensor(
+                    grad_norm_pre_clip, device=device
+                ).detach()
+                grad_clip_scale = None
+                if grad_diagnostics:
+                    grad_clip_scale = torch.clamp(
+                        float(cfg["max_grad_norm"])
+                        / (grad_norm_pre_clip_tensor + 1e-6),
+                        max=1.0,
+                    )
                 optimizer.step()
-                total_loss += loss.item()
+                if grad_diagnostics:
+                    diagnostic_totals += torch.stack(
+                        diagnostic_component_values
+                        + diagnostic_group_norms
+                        + (grad_clip_scale,)
+                    ).to(dtype=diagnostic_totals.dtype)
+                with torch.no_grad():
+                    optimization_totals += torch.stack(
+                        (
+                            loss.detach(),
+                            pg_loss.detach(),
+                            vf_loss.detach(),
+                            entropy.mean().detach(),
+                            ent_loss.detach(),
+                            aux_loss.detach(),
+                            approx_kl.detach(),
+                            clip_fraction.detach(),
+                            grad_norm_pre_clip_tensor,
+                        )
+                    ).to(dtype=optimization_totals.dtype)
+                optimization_minibatches += 1
+
+        optimization_denom = float(max(1, optimization_minibatches))
+        optimization_values = (
+            optimization_totals / optimization_denom
+        ).detach().cpu().tolist()
+        optimization_means = dict(zip(optimization_metric_names, optimization_values))
+
+        diagnostic_values = {}
+        if grad_diagnostics:
+            post_kl_sum = torch.zeros((), device=device)
+            post_clip_count = torch.zeros((), device=device)
+            post_sample_count = 0
+            post_values = []
+            post_returns = []
+            was_training = policy.training
+            policy.eval()
+            with torch.no_grad():
+                for start_i in range(0, total_chunks, chunks_per_batch):
+                    end_i = min(start_i + chunks_per_batch, total_chunks)
+                    obs_post = obs_chunked[start_i:end_i]
+                    act_post = act_chunked[start_i:end_i]
+                    if stateful:
+                        h_post = h_chunk_starts[start_i:end_i]
+                        c_post = c_chunk_starts[start_i:end_i]
+                        params_post, values_post = _forward_sequence_with_done_masks(
+                            policy,
+                            obs_post,
+                            (h_post.unsqueeze(0), c_post.unsqueeze(0)),
+                            dones_chunked[start_i:end_i],
+                        )
+                    else:
+                        params_post, values_post, _ = policy(obs_post)
+                    log_prob_post, _entropy_post = policy.action_log_prob_entropy(
+                        params_post, act_post
+                    )
+                    log_ratio_post = (
+                        log_prob_post.reshape(-1)
+                        - log_probs_chunked[start_i:end_i].reshape(-1)
+                    )
+                    ratio_post = log_ratio_post.exp()
+                    post_kl_sum += (
+                        (ratio_post - 1.0) - log_ratio_post
+                    ).sum()
+                    post_clip_count += (
+                        (ratio_post - 1.0).abs() > cfg["clip_eps"]
+                    ).float().sum()
+                    post_sample_count += int(log_ratio_post.numel())
+                    post_values.append(values_post.squeeze(-1).reshape(-1))
+                    post_returns.append(
+                        ret_chunked[start_i:end_i].reshape(-1)
+                    )
+            if was_training:
+                policy.train()
+
+            post_denom = float(max(1, post_sample_count))
+            post_update_approx_kl = post_kl_sum / post_denom
+            post_update_clip_fraction = post_clip_count / post_denom
+            post_value_tensor = torch.cat(post_values)
+            post_return_tensor = torch.cat(post_returns)
+            explained_variance_post = _explained_variance(
+                post_value_tensor, post_return_tensor
+            )
+
+            parameter_delta_names = tuple(
+                f"param_delta_{name}"
+                for name in ("shared", "actor", "critic", "aux")
+            )
+            parameter_delta_values = tuple(
+                _tensor_group_norm(
+                    (
+                        param.detach() - before
+                        for param, before in zip(
+                            diagnostic_parameter_groups[name],
+                            diagnostic_parameter_snapshots[name],
+                        )
+                    ),
+                    device,
+                )
+                for name in ("shared", "actor", "critic", "aux")
+            )
+            diagnostic_single_names = (
+                "post_update_approx_kl",
+                "post_update_clip_fraction",
+                "explained_variance_pre",
+                "explained_variance_post",
+            ) + parameter_delta_names
+            diagnostic_single_values = (
+                post_update_approx_kl,
+                post_update_clip_fraction,
+                explained_variance_pre,
+                explained_variance_post,
+            ) + parameter_delta_values
+            diagnostic_all_names = (
+                diagnostic_metric_names + diagnostic_single_names
+            )
+            diagnostic_all_values = torch.cat(
+                (
+                    diagnostic_totals / optimization_denom,
+                    torch.stack(diagnostic_single_values).to(
+                        dtype=diagnostic_totals.dtype
+                    ),
+                )
+            ).detach().cpu().tolist()
+            diagnostic_values = dict(zip(
+                diagnostic_all_names, diagnostic_all_values
+            ))
 
         # logging
         elapsed = time.time() - start
-        sps     = total_env_steps / elapsed
+        # A resumed checkpoint can already carry tens of millions of steps;
+        # throughput is work completed by this process, not lifetime steps
+        # divided by this process's short wall clock.
+        run_env_steps = total_env_steps - resume_steps
+        sps = run_env_steps / elapsed
 
         # episode stats over completed episodes since last update
         if completed_ep_rewards:
@@ -584,11 +935,54 @@ def train(cfg: dict):
             n_ep      = 0
 
         # training metrics
-        writer.add_scalar("train/loss",       total_loss / cfg["n_epochs"], total_env_steps)
-        writer.add_scalar("train/aux_loss",   float(aux_loss.item()),       total_env_steps)
-        writer.add_scalar("train/sps",        sps,                          total_env_steps)
-        writer.add_scalar("train/value_mean", float(buf.values.mean()),     total_env_steps)
-        writer.add_scalar("train/return_mean",float(buf.returns.mean()),    total_env_steps)
+        writer.add_scalar("train/loss", optimization_means["loss"], total_env_steps)
+        writer.add_scalar("train/pg_loss", optimization_means["pg_loss"], total_env_steps)
+        writer.add_scalar("train/vf_loss", optimization_means["vf_loss"], total_env_steps)
+        writer.add_scalar("train/entropy", optimization_means["entropy"], total_env_steps)
+        writer.add_scalar(
+            "train/entropy_loss", optimization_means["entropy_loss"], total_env_steps
+        )
+        writer.add_scalar("train/aux_loss", optimization_means["aux_loss"], total_env_steps)
+        writer.add_scalar("train/approx_kl", optimization_means["approx_kl"], total_env_steps)
+        writer.add_scalar(
+            "train/clip_fraction", optimization_means["clip_fraction"], total_env_steps
+        )
+        writer.add_scalar(
+            "train/grad_norm_pre_clip",
+            optimization_means["grad_norm_pre_clip"],
+            total_env_steps,
+        )
+        if grad_diagnostics:
+            for name, value in diagnostic_values.items():
+                writer.add_scalar(
+                    f"diagnostics/{name}", value, total_env_steps
+                )
+        writer.add_scalar("train/sps", sps, total_env_steps)
+
+        rollout_tensors = {
+            "reward": buf.rewards,
+            "return": buf.returns,
+            "value": buf.values,
+        }
+        for name, values in rollout_tensors.items():
+            writer.add_scalar(
+                f"rollout/{name}_mean", float(values.mean().item()), total_env_steps
+            )
+            writer.add_scalar(
+                f"rollout/{name}_min", float(values.min().item()), total_env_steps
+            )
+            writer.add_scalar(
+                f"rollout/{name}_max", float(values.max().item()), total_env_steps
+            )
+            writer.add_scalar(
+                f"rollout/{name}_std",
+                float(values.std(unbiased=False).item()),
+                total_env_steps,
+            )
+
+        # Preserve the original mean tags for existing dashboards.
+        writer.add_scalar("train/value_mean", float(buf.values.mean()), total_env_steps)
+        writer.add_scalar("train/return_mean", float(buf.returns.mean()), total_env_steps)
         if rollout_behavior_samples > 0:
             denom = float(rollout_behavior_samples)
             writer.add_scalar(
@@ -781,7 +1175,7 @@ def train(cfg: dict):
         temp = _thermal_check(writer, total_env_steps)
         temp_str = f"  gpu={temp:.0f}°C" if temp else ""
         print(f"[{update_n:4d}] steps={total_env_steps:>8,}  sps={sps:>6.0f}  "
-              f"loss={total_loss:.4f}  ep_r={mean_ep_r:>+7.2f} "
+              f"loss={optimization_means['loss']:.4f}  ep_r={mean_ep_r:>+7.2f} "
               f"base={mean_base_r:>+7.2f} spatial={mean_spatial_r:>+6.2f} "
               f"kd={kd_ratio:>5.2f} ({total_kills:.0f}/{total_deaths:.0f}) "
               f"(n={n_ep})  "
@@ -836,7 +1230,8 @@ def train(cfg: dict):
                 from harness.spatial import export_observed_heat
                 n_maps = export_observed_heat(
                     [sr for srv in servers for sr in srv._spatial_rewards],
-                    "observed_heat", total_env_steps=total_env_steps)
+                    os.environ.get("Q2_OBSERVED_HEAT_DIR", "observed_heat"),
+                    total_env_steps=total_env_steps)
                 print(f"  → observed heat exported for {n_maps} maps")
             except Exception as e:
                 print(f"  ! observed-heat export failed (continuing): {e}")
@@ -857,10 +1252,14 @@ def train(cfg: dict):
     for srv in servers:
         srv.close()
 
+    final_ckpt = save_dir / f"policy_{total_env_steps:08d}.pt"
+    torch.save(policy.state_dict(), final_ckpt)
     try:
-        export_onnx(policy, "policy_final.onnx", device)
+        export_onnx(policy, str(save_dir / "policy_final.onnx"), device)
     except Exception as e:
         print(f"! final onnx export failed: {e}")
+    writer.close()
+    print(f"  → saved final {final_ckpt}")
     print("Training complete.")
 
 

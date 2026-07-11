@@ -178,9 +178,10 @@ class VoxelSpatialReward:
     episode_deaths: float = 0.0
     episode_contact_events: float = 0.0
     recent_threat_steps: int = 0
+    rng: random.Random = field(default_factory=random.Random, repr=False)
 
     @classmethod
-    def from_env(cls) -> "VoxelSpatialReward":
+    def from_env(cls, seed: Optional[int] = None) -> "VoxelSpatialReward":
         enabled = os.environ.get("Q2_SPATIAL_REWARD", "1").lower() not in {
             "0", "false", "off", "no"
         }
@@ -288,6 +289,7 @@ class VoxelSpatialReward:
             meaningful_contact_min=_env_float("Q2_MEANINGFUL_CONTACT_MIN", 8.0),
             low_health_threshold=_env_float("Q2_LOW_HEALTH", 35.0),
             recent_threat_window=_env_int("Q2_RECENT_THREAT_WINDOW", 90),
+            rng=random.Random(seed),
         )
 
     def reset(self, map_name: str, obs: Optional[Observation] = None) -> None:
@@ -948,8 +950,8 @@ class VoxelSpatialReward:
         # an even (chicken) standoff draw different leans, so one presses and
         # one swerves instead of mirroring into deadlock. Independent per venv,
         # which is exactly the diversity we want.
-        self.aggression = random.uniform(-self.exchange_aggression_mag,
-                                          self.exchange_aggression_mag)
+        self.aggression = self.rng.uniform(-self.exchange_aggression_mag,
+                                           self.exchange_aggression_mag)
         self._dps_self = 0.0
         self._dps_enemy = 0.0
         self._prev_rune_idx = -1
@@ -1049,8 +1051,8 @@ class VoxelSpatialReward:
         margin, _, _ = self._win_margin(obs)   # [-1,1]; >0 I win the projected race
         # aggression (per-life) + jitter (per-step) shift the even→press band:
         # a hawk (lean>0) commits on a slimmer projected margin.
-        lean = self.aggression + random.uniform(-self.exchange_jitter,
-                                                 self.exchange_jitter)
+        lean = self.aggression + self.rng.uniform(-self.exchange_jitter,
+                                                  self.exchange_jitter)
         hi, lo = 0.15 - 0.15 * lean, -0.15 - 0.15 * lean
         # opponent commitment (frame-free): am I under fire right now / recently?
         opp_press = (dmg_taken > 0.0

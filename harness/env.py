@@ -110,6 +110,41 @@ def _decode_action(raw: np.ndarray) -> Action:
     )
 
 
+def _is_duplicate_obs_tick(
+    tick: int,
+    previous_tick: Optional[int],
+    *,
+    is_terminal: bool = False,
+    previous_is_terminal: bool = False,
+) -> bool:
+    """Whether an observation repeats this slot's already-returned tick.
+
+    Tick ordering cannot be used here: ``level.framenum`` starts over when a
+    map reloads, so a smaller tick can be a valid fresh observation.  Exact
+    equality rejects a late duplicate death packet emitted by older lockstep
+    runtimes without hiding a map reset.
+
+    A same-tick terminal after an already-returned nonterminal is *not* a
+    duplicate: the lockstep pre-pass can report a live bot, Python can return
+    it, and a later Bot_Think in that engine frame can report the bot's death
+    plus new reward deltas. Only an ordinary replay (or a terminal after an
+    already-returned terminal) is stale.
+
+    Do not deduplicate packets first seen together in the current drain for
+    the same reason; their deltas are aggregated by ``step_all``.
+    """
+    same_tick = previous_tick is not None and int(tick) == int(previous_tick)
+    terminal_promotion = bool(is_terminal) and not bool(previous_is_terminal)
+    return same_tick and not terminal_promotion
+
+
+def _is_fresh_obs_transition(obs: Observation, previous: Optional[Observation]) -> bool:
+    """Accept a new frame or a late same-frame terminal promotion."""
+    if previous is None or int(obs.tick) != int(previous.tick):
+        return True
+    return bool(obs.is_terminal) and not bool(previous.is_terminal)
+
+
 class Q2MultiEnv:
     """
     One q2ded server providing training data for all N ML-enabled bot slots.
@@ -149,12 +184,20 @@ class Q2MultiEnv:
         console_pipe: bool = False,
         start_observer: bool = False,
         spectator_only: bool = False,
+        game_seed:    Optional[int] = None,
+        spatial_seed: Optional[int] = None,
     ):
         self.server_id    = server_id
         self.map_name     = map_name
         self.map_pool     = list(map_pool or [map_name])
         self.active_map   = self.map_pool[0]
         self._rng         = random.Random(map_seed + server_id * 1009)
+        self.game_seed    = (
+            None if game_seed is None or int(game_seed) < 0 else int(game_seed)
+        )
+        self.spatial_seed = (
+            int(spatial_seed) if spatial_seed is not None else self.game_seed
+        )
         self.map_change_episodes = max(0, int(map_change_episodes))
         self.n_bots       = n_bots        # total bots (1 ML + n_bots-1 AI)
         # Port bases are env-overridable so multiple trainers can run on one
@@ -221,7 +264,15 @@ class Q2MultiEnv:
         self._last_obs:   List[Optional[Observation]]   = [None] * self.n_ml
         self._ep_steps:   List[int]                     = [0] * self.n_ml
         self._episodes_done = 0
-        self._spatial_rewards = [VoxelSpatialReward.from_env() for _ in range(self.n_ml)]
+        self._spatial_rewards = [
+            VoxelSpatialReward.from_env(
+                seed=(
+                    None if self.spatial_seed is None
+                    else self.spatial_seed + slot_idx * 1009
+                )
+            )
+            for slot_idx in range(self.n_ml)
+        ]
 
     def _obs_vector(self, slot_idx: int, obs: Observation) -> np.ndarray:
         memory = self._spatial_rewards[slot_idx].memory_features(obs)
@@ -259,6 +310,7 @@ class Q2MultiEnv:
             "set autospawn 1",
             f"set botlist {botlist}",
             "set ml_enabled 1",
+            f"set ml_game_seed {self.game_seed if self.game_seed is not None else -1}",
             f"set ml_bot_slot {self._ml_slot}",
             f"set ml_port_base {self.ml_port_base}",
             f"set ml_spectators_only {1 if self.spectator_only else 0}",
@@ -303,22 +355,32 @@ class Q2MultiEnv:
         cmd = [
             str(Q2DED),
             "+set", "game",            "lithium",
-            "+set", "ip",              "127.0.0.1",
+            "+set", "ip",              os.environ.get("Q2_BIND_IP", "127.0.0.1"),
             "+set", "port",            str(self.sv_port),
             "+exec", cfg_path.name,
         ]
+        _dbg_log = os.environ.get("Q2_SERVER_STDOUT_LOG", "")
+        _stdout_target = open(_dbg_log, "a") if _dbg_log else subprocess.DEVNULL
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE if self.console_pipe else subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=_stdout_target,
+            stderr=(_stdout_target if _dbg_log else subprocess.DEVNULL),
             cwd=str(Q2_ROOT),
             preexec_fn=os.setsid,
         )
         # Map-load grace before reset_all() starts polling for obs. The old
         # fixed 8s dominated wall-clock at high timescale with frequent map
         # rotation (reset_all retries handle a server that needs longer).
-        time.sleep(float(os.environ.get("Q2_SERVER_BOOT_WAIT", "3")))
+        # With an explicit game seed, reset_all pre-binds the UDP sockets and
+        # must answer the first lockstep packet immediately. A fixed sleep can
+        # otherwise let a scheduling-dependent number of timed-out frames run
+        # before Python joins, defeating repeatable trajectories.
+        boot_wait = (
+            0.0 if self.game_seed is not None
+            else float(os.environ.get("Q2_SERVER_BOOT_WAIT", "3"))
+        )
+        time.sleep(boot_wait)
 
     def _stop_server(self):
         if self._proc:
@@ -464,10 +526,13 @@ class Q2MultiEnv:
         if _retries >= 5:
             raise RuntimeError(f"[Server {self.server_id}] failed after 5 restarts")
 
+        if self.game_seed is not None:
+            self._open_sockets()
         self._start_server()
         print(f"[Server {self.server_id}] map {self.active_map}  port {self.sv_port}  "
               f"slots {self.bot_slots}  UDP {self.ml_ports}  (attempt {_retries+1})")
-        self._open_sockets()
+        if self.game_seed is None:
+            self._open_sockets()
         self._game_addrs = [None] * self.n_ml
         self._last_obs   = [None] * self.n_ml
         self._ep_steps   = [0] * self.n_ml
@@ -567,6 +632,19 @@ class Q2MultiEnv:
                                 flush=True,
                             )
                             continue
+                        last = self._last_obs[i]
+                        previous_tick = None if last is None else int(last.tick)
+                        if _is_duplicate_obs_tick(
+                            int(obs.tick),
+                            previous_tick,
+                            is_terminal=bool(obs.is_terminal),
+                            previous_is_terminal=bool(last.is_terminal) if last else False,
+                        ):
+                            # Reject duplicates before they can replay reward
+                            # deltas or carry a terminal flag into the next
+                            # transition. Do not reject merely smaller ticks:
+                            # a map reload resets level.framenum.
+                            continue
                         self._game_addrs[i] = src_addr
                         for k in slot_agg[i]:
                             slot_agg[i][k] += float(getattr(obs, k))
@@ -590,8 +668,8 @@ class Q2MultiEnv:
                 if newest is None:
                     break
                 last = self._last_obs[i]
-                if last is not None and newest.tick == last.tick:
-                    break      # stale re-read of the frame we already have
+                if not _is_fresh_obs_transition(newest, last):
+                    break      # stale re-read of the transition already returned
                 ready[i] = newest
             else:
                 if ready:
@@ -645,6 +723,13 @@ class Q2MultiEnv:
                 "offense": float(obs.reward_offense),
                 "survival": float(obs.reward_survival),
                 "rune_held": float(obs.rune_flags.sum() > 0.0),
+                "self_debug_flags": int(obs.self_debug[3]),
+                "self_debug_control_source": int(obs.self_debug[2]),
+                "action_debug_tick": int(obs.action_debug[0]),
+                "action_debug_accepted": int(obs.action_debug[1]),
+                "action_debug_timeout_count": int(obs.action_debug[2]),
+                "action_debug_weapon": int(obs.action_debug[3]),
+                "action_debug_movement": [float(x) for x in obs.action_debug[4:8]],
                 **spatial_info,
             }
             results[i] = (self._obs_vector(i, obs), reward, terminated, truncated, info)

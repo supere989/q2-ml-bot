@@ -57,6 +57,10 @@ def main() -> int:
     p.add_argument("--steps", type=int, default=3000)
     p.add_argument("--fraglimit", type=int, default=20)
     p.add_argument("--timelimit", type=float, default=10)
+    p.add_argument(
+        "--game_seed", type=int, default=-1,
+        help="gameplay RNG seed; negative preserves normal game randomness",
+    )
     args = p.parse_args()
 
     policy_a = OnnxPolicy(Path(args.onnx))
@@ -78,6 +82,7 @@ def main() -> int:
         port_offset=args.port_offset,
         maxclients=4,
         ml_slot=2,
+        game_seed=None if args.game_seed < 0 else args.game_seed,
         max_ep_steps=10**9,
         timedemo=0,
         timescale=1.0,
@@ -127,4 +132,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

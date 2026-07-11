@@ -290,6 +290,10 @@ def evaluate_map(policy: Q2BotPolicy, device: torch.device, args, map_name: str,
         maxclients=args.maxclients,
         ml_slot=ml_slot,
         num_ml_bots=num_ml_bots,
+        game_seed=(
+            None if args.game_seed < 0
+            else args.game_seed + server_id * 1009
+        ),
         max_ep_steps=max(args.steps + 5, 100),
         timedemo=args.timedemo,
         timelimit=args.timelimit,
@@ -565,6 +569,10 @@ def main() -> int:
     parser.add_argument("--target_kd", type=float, default=15.0)
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument(
+        "--game_seed", type=int, default=-1,
+        help="gameplay RNG seed; negative preserves normal game randomness",
+    )
     parser.add_argument(
         "--shuffle_maps",
         action="store_true",
