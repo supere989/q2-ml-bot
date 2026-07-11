@@ -7,15 +7,19 @@ hook-zone annotations. Engine-side occupancy voxels can replace or extend this
 later without invalidating the current bridge.
 """
 
+import gzip
+import json
 import os
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from math import atan2, degrees, floor, hypot, log1p
-from typing import Dict, Optional, Set, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
 from .protocol import OBS_SESSION_MEMORY_DIM, Observation
+from .item_timing import ItemTimingTable
 
 HOOK_REQUIRED = 4
 BLASTER_ITEM_INDEX = 8
@@ -36,6 +40,12 @@ class SessionMemoryCell:
     hook_engagement: float = 0.0
     item_contested: float = 0.0
     successful_escape: float = 0.0
+    # Generator-known priors and live route/item timing overlays. Priors are
+    # persisted; the dynamic fields are rebuilt from the route clock each tick.
+    prior_opportunity: float = 0.0
+    prior_threat: float = 0.0
+    readiness: float = 0.0
+    route_bias: float = 0.0
     last_tick: int = 0
 
     @property
@@ -50,6 +60,8 @@ class SessionMemoryCell:
             + self.hook_engagement
             + self.item_contested
             + self.successful_escape
+            + abs(self.prior_opportunity)
+            + abs(self.prior_threat)
         )
 
 
@@ -113,6 +125,11 @@ class VoxelSpatialReward:
     session_memory_death_aversion: float = 0.010
     session_memory_self_fire_penalty: float = 0.012
     session_memory_camp_penalty: float = 0.004
+    lattice_preload_enabled: bool = True
+    lattice_routes_enabled: bool = True
+    lattice_prior_scale: float = 8.0
+    lattice_route_scale: float = 4.0
+    lattice_tick_rate: float = 10.0
     # Engine-supplied extended channels (both runs). prox = how-hard-hit
     # aversion; offense/survival = rune-conditioned payoffs.
     damage_prox_aversion: float = 0.004
@@ -163,6 +180,15 @@ class VoxelSpatialReward:
     session_memories: Dict[
         str, Dict[Tuple[int, int, int], SessionMemoryCell]
     ] = field(default_factory=dict, init=False)
+    route_graphs: Dict[str, dict] = field(default_factory=dict, init=False)
+    item_timings: Dict[str, ItemTimingTable] = field(default_factory=dict, init=False)
+    preloaded_maps: Set[str] = field(default_factory=set, init=False)
+    dynamic_cells: Dict[str, Set[Tuple[int, int, int]]] = field(
+        default_factory=dict, init=False
+    )
+    sidecar_sources: Dict[str, Dict[str, str]] = field(default_factory=dict, init=False)
+    selected_route: str = ""
+    _map_last_tick: Dict[str, int] = field(default_factory=dict, init=False)
     last_visible_count: int = 0
     last_damage_tick: int = -1000000
     last_damage_cell: Optional[Tuple[int, int, int]] = None
@@ -246,6 +272,15 @@ class VoxelSpatialReward:
             session_memory_camp_penalty=_env_float(
                 "R_SESSION_MEMORY_CAMP", 0.004
             ),
+            lattice_preload_enabled=os.environ.get(
+                "Q2_LATTICE_PRELOAD", "1"
+            ).lower() not in {"0", "false", "off", "no"},
+            lattice_routes_enabled=os.environ.get(
+                "Q2_LATTICE_ROUTES", "1"
+            ).lower() not in {"0", "false", "off", "no"},
+            lattice_prior_scale=_env_float("Q2_LATTICE_PRIOR_SCALE", 8.0),
+            lattice_route_scale=_env_float("Q2_LATTICE_ROUTE_SCALE", 4.0),
+            lattice_tick_rate=_env_float("Q2_LATTICE_TICK_RATE", 10.0),
             damage_prox_aversion=_env_float("R_DAMAGE_PROX_AVERSION", 0.004),
             offense_rune_reward=_env_float("R_OFFENSE_RUNE", 0.004),
             survival_rune_reward=_env_float("R_SURVIVAL_RUNE", 0.004),
@@ -295,6 +330,11 @@ class VoxelSpatialReward:
     def reset(self, map_name: str, obs: Optional[Observation] = None) -> None:
         self.map_name = map_name
         self._memory_for_map(map_name)
+        tick = int(getattr(obs, "tick", 0)) if obs is not None else 0
+        previous_tick = self._map_last_tick.get(map_name)
+        map_reloaded = previous_tick is not None and tick < previous_tick
+        self._ensure_map_lattice(map_name, tick, reset_clock=map_reloaded)
+        self._map_last_tick[map_name] = tick
         self.visited.clear()
         self.last_cell = None
         self.steps_in_cell = 0
@@ -308,6 +348,189 @@ class VoxelSpatialReward:
             self.visited.add(cell)
             self.last_cell = cell
             self.pos_history.append(tuple(obs.self_state[:3]))
+            self._refresh_route_heat(obs)
+
+    @staticmethod
+    def _sidecar_roots() -> List[Path]:
+        """Ordered roots for generated/installed lattice sidecars."""
+        roots: List[Path] = []
+        configured = os.environ.get("Q2_LATTICE_DIR", "")
+        for raw in configured.split(os.pathsep):
+            if raw.strip():
+                roots.append(Path(raw).expanduser())
+        maps_dir = os.environ.get("Q2_MAPS_DIR", "").strip()
+        if maps_dir:
+            roots.append(Path(maps_dir).expanduser())
+        q2_root = Path(os.environ.get("Q2_ROOT", "/home/raymond/q2_lithium_merge"))
+        roots.extend((q2_root / "baseq2" / "maps", q2_root / "lithium" / "maps"))
+        roots.append(Path(__file__).resolve().parent.parent / "maps" / "generated")
+        unique: List[Path] = []
+        seen = set()
+        for root in roots:
+            key = str(root.resolve()) if root.exists() else str(root)
+            if key not in seen:
+                unique.append(root)
+                seen.add(key)
+        return unique
+
+    def _find_sidecar(self, map_name: str, suffix: str) -> Optional[Path]:
+        filename = f"{map_name}.{suffix}.json"
+        for root in self._sidecar_roots():
+            candidate = root / filename
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _ensure_map_lattice(self, map_name: str, tick: int,
+                            reset_clock: bool = False) -> None:
+        """Load generator priors once and initialize the live item clock."""
+        if not map_name:
+            return
+        sources = self.sidecar_sources.setdefault(map_name, {})
+        if self.lattice_preload_enabled and map_name not in self.preloaded_maps:
+            lattice_path = self._find_sidecar(map_name, "lattice")
+            if lattice_path is not None:
+                try:
+                    payload = json.loads(lattice_path.read_text())
+                    self._preload_lattice_payload(map_name, payload)
+                    sources["lattice"] = str(lattice_path)
+                except (OSError, ValueError, TypeError, KeyError):
+                    sources["lattice_error"] = str(lattice_path)
+            self.preloaded_maps.add(map_name)
+
+        if not self.lattice_routes_enabled:
+            return
+        graph = self.route_graphs.get(map_name)
+        if graph is None:
+            route_path = self._find_sidecar(map_name, "routes")
+            if route_path is not None:
+                try:
+                    graph = json.loads(route_path.read_text())
+                    self.route_graphs[map_name] = graph
+                    sources["routes"] = str(route_path)
+                except (OSError, ValueError, TypeError):
+                    sources["routes_error"] = str(route_path)
+                    graph = None
+        if graph is not None and (map_name not in self.item_timings or reset_clock):
+            table = ItemTimingTable()
+            table.reset_from_routes(graph, self._game_time(tick))
+            self.item_timings[map_name] = table
+
+    def _preload_lattice_payload(self, map_name: str, payload: dict) -> None:
+        scale = max(0.1, float(self.lattice_prior_scale))
+        memory = self._memory_for_map(map_name)
+        for objective in payload.get("objectives", []):
+            pos = (objective["x"], objective["y"], objective["z"])
+            cell = self.cell_for_pos(pos)
+            entry = memory.setdefault(cell, SessionMemoryCell())
+            entry.prior_opportunity = max(
+                entry.prior_opportunity,
+                scale * max(0.0, float(objective.get("value", 1.0))),
+            )
+        for bounds in payload.get("danger", []):
+            if len(bounds) < 6:
+                continue
+            lo = self.cell_for_pos(bounds[:3])
+            hi = self.cell_for_pos(bounds[3:6])
+            for ix in range(min(lo[0], hi[0]), max(lo[0], hi[0]) + 1):
+                for iy in range(min(lo[1], hi[1]), max(lo[1], hi[1]) + 1):
+                    for iz in range(min(lo[2], hi[2]), max(lo[2], hi[2]) + 1):
+                        entry = memory.setdefault((ix, iy, iz), SessionMemoryCell())
+                        entry.prior_threat = max(entry.prior_threat, scale)
+
+    def _game_time(self, tick: int) -> float:
+        return float(tick) / max(0.1, float(self.lattice_tick_rate))
+
+    def _wanted_route_axis(self, obs: Observation) -> str:
+        health = float(obs.self_state[6]) if len(obs.self_state) > 6 else 100.0
+        if health <= self.rune_low_health:
+            return "survival"
+        if health >= self.rune_high_health:
+            return "offense"
+        return "value"
+
+    def _nearest_pickup_id(
+        self, table: ItemTimingTable, obs: Observation
+    ) -> Optional[int]:
+        if max(0.0, float(getattr(obs, "reward_item_pickup", 0.0))) <= 0.0:
+            return None
+        pos = tuple(float(v) for v in obs.self_state[:3])
+        candidates = [row for row in table.rows.values() if row.present]
+        if not candidates:
+            return None
+        nearest = min(candidates, key=lambda row: hypot(
+            row.pos[0] - pos[0], row.pos[1] - pos[1], row.pos[2] - pos[2]))
+        distance = hypot(nearest.pos[0] - pos[0], nearest.pos[1] - pos[1],
+                         nearest.pos[2] - pos[2])
+        return nearest.spawn_id if distance <= self.voxel_size * 1.5 else None
+
+    def _clear_dynamic_heat(self, map_name: str) -> None:
+        memory = self._memory_for_map(map_name)
+        for cell in self.dynamic_cells.get(map_name, set()):
+            entry = memory.get(cell)
+            if entry is not None:
+                entry.readiness = 0.0
+                entry.route_bias = 0.0
+        self.dynamic_cells[map_name] = set()
+
+    def _deposit_dynamic(self, map_name: str, deposit: dict,
+                         route_bias: float = 0.0) -> None:
+        amount = float(deposit.get("amount", 0.0))
+        radius = max(
+            self.voxel_size * 0.5,
+            float(deposit.get("radius", self.voxel_size)),
+        )
+        center = np.asarray(
+            (deposit["x"], deposit["y"], deposit["z"]), dtype=np.float32
+        )
+        base = self.cell_for_pos(center)
+        reach = max(0, int(np.ceil(radius / max(1.0, self.voxel_size))))
+        memory = self._memory_for_map(map_name)
+        touched = self.dynamic_cells.setdefault(map_name, set())
+        for ix in range(base[0] - reach, base[0] + reach + 1):
+            for iy in range(base[1] - reach, base[1] + reach + 1):
+                for iz in range(base[2] - reach, base[2] + reach + 1):
+                    cell = (ix, iy, iz)
+                    distance = float(np.linalg.norm(self._cell_center(cell) - center))
+                    weight = max(0.0, 1.0 - distance / radius)
+                    if weight <= 0.0:
+                        continue
+                    entry = memory.setdefault(cell, SessionMemoryCell())
+                    entry.readiness += amount * self.lattice_route_scale * weight
+                    entry.route_bias += route_bias * weight
+                    touched.add(cell)
+
+    def _refresh_route_heat(self, obs: Observation) -> None:
+        table = self.item_timings.get(self.map_name)
+        if table is None:
+            self.selected_route = ""
+            return
+        t = self._game_time(int(obs.tick))
+        pickup_id = self._nearest_pickup_id(table, obs)
+        table.observe(t, (), (), (() if pickup_id is None else (pickup_id,)))
+        self._clear_dynamic_heat(self.map_name)
+        wanted = self._wanted_route_axis(obs)
+        graph = self.route_graphs.get(self.map_name, {})
+        route_name = "balanced" if wanted == "value" else wanted
+        route = next((r for r in graph.get("routes", [])
+                      if r.get("archetype") == route_name), None)
+        route_nodes = set(route.get("node_ids", ())) if route else set()
+        self.selected_route = route_name if route else "readiness"
+        for deposit in table.readiness_deposits(t, want_axis=wanted):
+            sid = min(
+                table.rows,
+                key=lambda key: hypot(
+                    table.rows[key].pos[0] - float(deposit["x"]),
+                    table.rows[key].pos[1] - float(deposit["y"]),
+                    table.rows[key].pos[2] - float(deposit["z"]),
+                ),
+            ) if table.rows else -1
+            bias = (
+                0.25 * self.lattice_route_scale
+                if sid in route_nodes and float(deposit.get("amount", 0.0)) > 0
+                else 0.0
+            )
+            self._deposit_dynamic(self.map_name, deposit, route_bias=bias)
 
     def cell_for(self, obs: Observation) -> Tuple[int, int, int]:
         return self.cell_for_pos(obs.self_state[:3])
@@ -324,6 +547,8 @@ class VoxelSpatialReward:
         info: Dict[str, float] = {}
 
         cell = self.cell_for(obs)
+        self._map_last_tick[self.map_name] = int(obs.tick)
+        self._refresh_route_heat(obs)
         is_new = cell not in self.visited
         if is_new:
             self.visited.add(cell)
@@ -596,6 +821,16 @@ class VoxelSpatialReward:
             "session_nearest_engagement": float(nearest_engagement),
             "session_nearest_threat": float(nearest_threat),
             "session_nearest_opportunity": float(nearest_opportunity),
+            "lattice_prior_loaded": float(
+                "lattice" in self.sidecar_sources.get(self.map_name, {})
+            ),
+            "lattice_routes_loaded": float(
+                "routes" in self.sidecar_sources.get(self.map_name, {})
+            ),
+            "lattice_dynamic_cells": float(
+                len(self.dynamic_cells.get(self.map_name, ()))
+            ),
+            "lattice_route_active": float(bool(self.selected_route)),
         })
         return float(bonus), info
 
@@ -927,6 +1162,8 @@ class VoxelSpatialReward:
             + 3.0 * entry.deaths
             + 0.15 * entry.enemy_seen
             + 0.20 * entry.enemy_lost
+            + entry.prior_threat
+            + max(0.0, -entry.readiness)
         )
 
     def _opportunity_score(self, entry: SessionMemoryCell) -> float:
@@ -936,6 +1173,9 @@ class VoxelSpatialReward:
             + 0.45 * entry.hook_engagement
             + 0.45 * entry.item_contested
             + 0.20 * entry.successful_escape
+            + entry.prior_opportunity
+            + max(0.0, entry.readiness)
+            + max(0.0, entry.route_bias)
         )
 
     def _norm_memory_score(self, value: float) -> float:
@@ -943,7 +1183,14 @@ class VoxelSpatialReward:
         return float(np.tanh(max(0.0, float(value)) / scale))
 
     def _memory_confidence(self, entry: SessionMemoryCell) -> float:
-        return float(min(1.0, log1p(max(0.0, entry.samples)) / log1p(24.0)))
+        learned = min(1.0, log1p(max(0.0, entry.samples)) / log1p(24.0))
+        known_map_signal = (
+            abs(entry.prior_opportunity) > 0.0
+            or abs(entry.prior_threat) > 0.0
+            or abs(entry.readiness) > 0.0
+            or abs(entry.route_bias) > 0.0
+        )
+        return float(max(learned, 1.0 if known_map_signal else 0.0))
 
     def _reset_episode_state(self) -> None:
         # Per-life aggression temperament — the symmetry-breaker. Two clones in
@@ -1412,6 +1659,78 @@ class VoxelSpatialReward:
         age = float(obs.audio[3])
         alert = float(obs.audio[4])
         return age <= self.audio_fire_max_age and alert >= self.audio_fire_alert_min
+
+
+# ── Lattice checkpoint persistence ──────────────────────────────────────────
+
+_DYNAMIC_CELL_FIELDS = {"readiness", "route_bias"}
+
+
+def save_lattice_state(instances, path, total_env_steps: int = 0) -> Path:
+    """Atomically checkpoint each bot's learned per-map lattice as JSON/gzip."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cell_fields = [f.name for f in fields(SessionMemoryCell)
+                   if f.name not in _DYNAMIC_CELL_FIELDS]
+    payload = {
+        "version": 1,
+        "env_steps": int(total_env_steps),
+        "instances": [],
+    }
+    for inst in instances:
+        maps = {}
+        for map_name, memory in inst.session_memories.items():
+            cells = []
+            for cell, entry in memory.items():
+                values = {name: getattr(entry, name) for name in cell_fields}
+                if not any(float(value) != 0.0 for value in values.values()):
+                    continue
+                cells.append({"cell": list(cell), **values})
+            if cells:
+                maps[map_name] = cells
+        payload["instances"].append({"maps": maps})
+    encoded = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
+    temporary = target.with_name(target.name + ".tmp")
+    if target.suffix == ".gz":
+        with gzip.open(temporary, "wb") as handle:
+            handle.write(encoded)
+    else:
+        temporary.write_bytes(encoded)
+    os.replace(temporary, target)
+    return target
+
+
+def load_lattice_state(instances, path) -> dict:
+    """Restore a matching set of per-bot lattices; tolerate added cell fields."""
+    source = Path(path)
+    if source.suffix == ".gz":
+        with gzip.open(source, "rt") as handle:
+            payload = json.load(handle)
+    else:
+        payload = json.loads(source.read_text())
+    if int(payload.get("version", 0)) != 1:
+        raise ValueError(f"unsupported lattice state version in {source}")
+    valid_fields = {f.name for f in fields(SessionMemoryCell)} - _DYNAMIC_CELL_FIELDS
+    restored_cells = 0
+    saved_instances = payload.get("instances", [])
+    for index, inst in enumerate(instances):
+        if index >= len(saved_instances):
+            break
+        for map_name, cells in saved_instances[index].get("maps", {}).items():
+            memory = inst._memory_for_map(map_name)
+            for raw in cells:
+                cell = tuple(int(v) for v in raw.get("cell", ()))
+                if len(cell) != 3:
+                    continue
+                kwargs = {name: raw[name] for name in valid_fields if name in raw}
+                memory[cell] = SessionMemoryCell(**kwargs)
+                restored_cells += 1
+            inst.preloaded_maps.add(map_name)
+    return {
+        "env_steps": int(payload.get("env_steps", 0)),
+        "instances": min(len(instances), len(saved_instances)),
+        "cells": restored_cells,
+    }
 
 
 # ── Observed-heat telemetry export ───────────────────────────────────────────

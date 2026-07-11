@@ -106,11 +106,60 @@ DEFAULT = dict(
     aim_anchor_fire_weight = 1.0,
     aim_anchor_yaw_deg  = 12.0,
     aim_anchor_pitch_deg = 14.0,
+    lattice_direction_coef = 0.02,
 )
 
 
 def _safe_tag(value: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in value).strip("_") or "unknown"
+
+
+def _lattice_direction_loss(act_params: dict, obs: torch.Tensor) -> dict:
+    """Teach local movement to follow the existing world-space lattice pulls.
+
+    The 24-d memory block is always the tail of the observation, independent
+    of Q2_EXT_OBS. Engagement/opportunity attract; threat repels. Supervision
+    is withheld during visible combat so aim/dodge policy remains in charge.
+    """
+    memory = obs[..., -24:]
+    engagement = memory[..., 5:8] * memory[..., 8:9] * 0.5
+    threat = memory[..., 9:12] * memory[..., 12:13]
+    opportunity = memory[..., 13:16] * memory[..., 16:17]
+    desired_world = engagement + opportunity - threat
+    desired_xy = desired_world[..., :2]
+    strength = torch.linalg.vector_norm(desired_xy, dim=-1)
+
+    # Quake yaw: forward=(cos,sin), right=(sin,-cos). The lateral sign is the
+    # engine's actual AngleVectors convention, not the usual 2-D basis.
+    yaw = obs[..., 183] * torch.pi
+    cos_yaw = torch.cos(yaw)
+    sin_yaw = torch.sin(yaw)
+    target = torch.stack((
+        desired_xy[..., 0] * cos_yaw + desired_xy[..., 1] * sin_yaw,
+        desired_xy[..., 0] * sin_yaw - desired_xy[..., 1] * cos_yaw,
+    ), dim=-1)
+    target = target / torch.linalg.vector_norm(target, dim=-1, keepdim=True).clamp_min(1e-6)
+
+    visibility = torch.stack(
+        [obs[..., ENT_OFF + index * ENT_DIM + 8] for index in range(ENT_CNT)],
+        dim=-1,
+    ).amax(dim=-1)
+    alive = obs[..., 6] > 0.0
+    mask = (strength > 0.03) & (visibility < 0.5) & alive
+    predicted = act_params["cont_mean"][..., :2]
+    predicted = predicted / torch.linalg.vector_norm(
+        predicted, dim=-1, keepdim=True
+    ).clamp_min(0.25)
+    cosine = (predicted * target).sum(dim=-1).clamp(-1.0, 1.0)
+    weights = strength.clamp(max=1.0) * mask.float()
+    denominator = weights.sum()
+    loss = ((1.0 - cosine) * weights).sum() / denominator.clamp_min(1.0)
+    mean_cosine = (cosine * weights).sum() / denominator.clamp_min(1.0)
+    return {
+        "loss": loss,
+        "cosine": mean_cosine,
+        "samples": mask.float().sum(),
+    }
 
 
 # ── Rollout buffer ───────────────────────────────────────────────────
@@ -463,6 +512,7 @@ def train(cfg: dict):
     aim_anchor_fire_weight = float(cfg.get("aim_anchor_fire_weight", 1.0))
     aim_anchor_yaw_deg = float(cfg.get("aim_anchor_yaw_deg", 12.0))
     aim_anchor_pitch_deg = float(cfg.get("aim_anchor_pitch_deg", 14.0))
+    lattice_direction_coef = float(cfg.get("lattice_direction_coef", 0.02) or 0.0)
     for name, value in (
         ("aim_anchor_coef", aim_anchor_coef),
         ("aim_anchor_look_weight", aim_anchor_look_weight),
@@ -474,6 +524,10 @@ def train(cfg: dict):
             raise ValueError(f"{name} must be nonnegative, got {value}")
     if aim_anchor_coef > 0 and not stateful:
         raise ValueError("aim_anchor_coef > 0 requires Q2_POLICY_STATEFUL=1")
+    if lattice_direction_coef < 0:
+        raise ValueError(
+            f"lattice_direction_coef must be nonnegative, got {lattice_direction_coef}"
+        )
 
     print(f"Policy parameters: {policy.param_count():,}")
     if grad_diagnostics:
@@ -484,6 +538,8 @@ def train(cfg: dict):
             f"coef={aim_anchor_coef:g} "
             f"look={aim_anchor_look_weight:g} fire={aim_anchor_fire_weight:g}"
         )
+    if lattice_direction_coef > 0:
+        print(f"Lattice direction objective: ON coef={lattice_direction_coef:g}")
 
     # Per-run tag isolates parallel runs: separate checkpoint dir + TB run
     # name so stacked ablation trainers never overwrite each other or the
@@ -495,6 +551,7 @@ def train(cfg: dict):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     resume_steps = 0
+    resume_dir = None
     if cfg.get("resume"):
         resume_dir = Path(os.environ.get("Q2_RESUME_DIR", str(ckpt_dir)))
         candidates = sorted(resume_dir.glob("policy_[0-9]*.pt"))
@@ -547,6 +604,24 @@ def train(cfg: dict):
         )
         for i in range(n_servers)
     ]
+    lattice_instances = [
+        sr for server in servers for sr in server._spatial_rewards
+    ]
+    if resume_dir is not None:
+        from harness.spatial import load_lattice_state
+        lattice_candidates = (
+            resume_dir / f"lattice_{resume_steps:08d}.json.gz",
+            resume_dir / "lattice_latest.json.gz",
+        )
+        lattice_path = next((path for path in lattice_candidates if path.is_file()), None)
+        if lattice_path is not None:
+            stats = load_lattice_state(lattice_instances, lattice_path)
+            print(
+                f"Resumed lattice from {lattice_path} "
+                f"({stats['cells']:,} cells / {stats['instances']} instances)"
+            )
+        else:
+            print("No lattice checkpoint found; maps will start from sidecar priors")
 
     def _close_all_servers() -> None:
         for server in servers:
@@ -635,6 +710,10 @@ def train(cfg: dict):
         "session_nearest_engagement",
         "session_nearest_threat",
         "session_nearest_opportunity",
+        "lattice_prior_loaded",
+        "lattice_routes_loaded",
+        "lattice_dynamic_cells",
+        "lattice_route_active",
         "threat_bonus",
         "threat_in_range",
         "threat_active",
@@ -875,6 +954,10 @@ def train(cfg: dict):
             "entropy",
             "entropy_loss",
             "aux_loss",
+            "lattice_direction_loss",
+            "lattice_direction_weighted_loss",
+            "lattice_direction_cosine",
+            "lattice_direction_samples",
             "aim_anchor_inner_loss",
             "aim_anchor_weighted_loss",
             "aim_anchor_look_loss",
@@ -977,9 +1060,14 @@ def train(cfg: dict):
                         fire_weight=aim_anchor_fire_weight,
                     )
                 aim_anchor_component = aim_anchor_coef * aim_anchor_metrics["inner"]
+                lattice_direction_metrics = _lattice_direction_loss(act_params, obs_b)
+                lattice_direction_component = (
+                    lattice_direction_coef * lattice_direction_metrics["loss"]
+                )
 
                 loss = (pg_loss + cfg["vf_coef"] * vf_loss + cfg["ent_coef"] * ent_loss
-                        + aux_coef * aux_loss + aim_anchor_component)
+                        + aux_coef * aux_loss + aim_anchor_component
+                        + lattice_direction_component)
 
                 diagnostic_component_values = None
                 if grad_diagnostics:
@@ -1088,6 +1176,10 @@ def train(cfg: dict):
                             entropy.mean().detach(),
                             ent_loss.detach(),
                             aux_loss.detach(),
+                            lattice_direction_metrics["loss"].detach(),
+                            lattice_direction_component.detach(),
+                            lattice_direction_metrics["cosine"].detach(),
+                            lattice_direction_metrics["samples"].detach(),
                             aim_anchor_metrics["inner"].detach(),
                             aim_anchor_component.detach(),
                             aim_anchor_metrics["look"].detach(),
@@ -1271,6 +1363,17 @@ def train(cfg: dict):
             "train/entropy_loss", optimization_means["entropy_loss"], total_env_steps
         )
         writer.add_scalar("train/aux_loss", optimization_means["aux_loss"], total_env_steps)
+        for metric_name in (
+            "lattice_direction_loss",
+            "lattice_direction_weighted_loss",
+            "lattice_direction_cosine",
+            "lattice_direction_samples",
+        ):
+            writer.add_scalar(
+                f"lattice/{metric_name.removeprefix('lattice_direction_')}",
+                optimization_means[metric_name],
+                total_env_steps,
+            )
         if aim_anchor_coef > 0:
             for metric_name in (
                 "aim_anchor_inner_loss",
@@ -1410,6 +1513,13 @@ def train(cfg: dict):
                 rollout_behavior["session_nearest_opportunity"] / denom,
                 total_env_steps,
             )
+            for key, tag in (
+                ("lattice_prior_loaded", "lattice/prior_loaded_rate"),
+                ("lattice_routes_loaded", "lattice/routes_loaded_rate"),
+                ("lattice_dynamic_cells", "lattice/dynamic_cells_mean"),
+                ("lattice_route_active", "lattice/route_active_rate"),
+            ):
+                writer.add_scalar(tag, rollout_behavior[key] / denom, total_env_steps)
             writer.add_scalar(
                 "threat/bonus_mean",
                 rollout_behavior["threat_bonus"] / denom,
@@ -1573,6 +1683,21 @@ def train(cfg: dict):
             ckpt = save_dir / f"policy_{total_env_steps:08d}.pt"
             torch.save(policy.state_dict(), ckpt)
             try:
+                from harness.spatial import save_lattice_state
+                lattice_ckpt = save_lattice_state(
+                    lattice_instances,
+                    save_dir / f"lattice_{total_env_steps:08d}.json.gz",
+                    total_env_steps=total_env_steps,
+                )
+                save_lattice_state(
+                    lattice_instances,
+                    save_dir / "lattice_latest.json.gz",
+                    total_env_steps=total_env_steps,
+                )
+                print(f"  → saved {lattice_ckpt}")
+            except Exception as e:
+                print(f"  ! lattice checkpoint failed (continuing): {e}")
+            try:
                 export_onnx(policy, str(save_dir / "policy_latest.onnx"), device)
             except Exception as e:
                 print(f"  ! onnx export failed (continuing): {e}")
@@ -1604,6 +1729,20 @@ def train(cfg: dict):
 
     final_ckpt = save_dir / f"policy_{total_env_steps:08d}.pt"
     torch.save(policy.state_dict(), final_ckpt)
+    try:
+        from harness.spatial import save_lattice_state
+        save_lattice_state(
+            lattice_instances,
+            save_dir / f"lattice_{total_env_steps:08d}.json.gz",
+            total_env_steps=total_env_steps,
+        )
+        save_lattice_state(
+            lattice_instances,
+            save_dir / "lattice_latest.json.gz",
+            total_env_steps=total_env_steps,
+        )
+    except Exception as e:
+        print(f"! final lattice checkpoint failed: {e}")
     try:
         export_onnx(policy, str(save_dir / "policy_final.onnx"), device)
     except Exception as e:

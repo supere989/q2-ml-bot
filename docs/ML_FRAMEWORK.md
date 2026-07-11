@@ -140,10 +140,13 @@ summarized here for framework-level prioritization:
    next real milestone, ahead of further target-sensing extraction work
    *or* motivating it directly, depending on root cause (sensing vs. reward
    shaping vs. undertrained checkpoint).
-3. **Lattice pull fidelity** — "opportunity" pull present but weak,
-   "engagement" pull inverted from intent. Needs its own investigation,
-   likely independent of (2).
-4. **`.lattice.json` preload** — generator writes it, nothing consumes it.
-   Small, well-scoped fix (`VoxelSpatialReward.reset()` + a JSON read);
-   candidate for the same effort pass as (3) since both touch
-   `harness/spatial.py`.
+3. **Lattice pull fidelity — prototype implemented, training proof pending.**
+   The old checkpoint's "opportunity" pull is weak and "engagement" is
+   inverted. PPO now has a yaw-aware direction objective over the existing
+   24-d memory tail, masked during visible combat. A new checkpoint must pass
+   `tools/evaluate_lattice.py` plus the fixed combat gate before this is closed.
+4. ~~**`.lattice.json` preload**~~ — **implemented 2026-07-11.** Generator
+   priors and route graphs are installed, preloaded, converted into live
+   opportunity/threat readiness heat, and persisted beside policy checkpoints.
+   Own pickups re-phase item clocks; enemy item visibility still needs an
+   engine observation field for full contention inference.

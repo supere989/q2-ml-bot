@@ -40,6 +40,13 @@ _compile_one() {
         cp "$BASE.json" "$INSTALL_DIR/$NAME.json"
         echo "  hook zones → $INSTALL_DIR/$NAME.json"
     fi
+
+    for SIDECAR in lattice routes; do
+        if [ -f "$BASE.$SIDECAR.json" ]; then
+            cp "$BASE.$SIDECAR.json" "$INSTALL_DIR/$NAME.$SIDECAR.json"
+            echo "  $SIDECAR lattice → $INSTALL_DIR/$NAME.$SIDECAR.json"
+        fi
+    done
 }
 
 case "${1:-}" in

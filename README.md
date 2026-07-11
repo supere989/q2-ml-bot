@@ -86,8 +86,9 @@ bash tools/train_service.sh start
 ## Generated-Map Curriculum
 
 `maps/generator.py` creates Lithium/3ZB2 deathmatch maps with spawns, weapons,
-items, platforms, and hook affordances. `maps/compile.sh` installs compiled BSPs
-and hook-zone sidecars into `q2_lithium_merge/baseq2/maps/`.
+items, platforms, and hook affordances. `maps/compile.sh` installs compiled BSPs,
+hook zones, lattice priors, and route/item-timing sidecars into
+`q2_lithium_merge/baseq2/maps/`.
 
 Use `--map_glob 'mltrain_*.bsp'` to train from the installed generated maps. Use
 `--map_change_episodes 1` to restart each server onto a new sampled map after
@@ -219,7 +220,8 @@ fixed checkpoint). Ordered by what's blocking what.
    before any longer PPO run. Leave expensive gradient diagnostics disabled
    for ordinary training.
 
-3. **[OPEN]** Lattice pull signals are weak, one is inverted from intent.
+3. **[PROTOTYPE 2026-07-11]** Lattice pull signals in the old checkpoint are
+   weak, and one is inverted from intent.
    During pure exploration (no visible enemy — the lattice is the only
    spatial signal): "opportunity" pull (`tools/steer.py`'s "value/target is
    here") correlates weakly *positively* with movement (cos-sim ≈ +0.11,
@@ -227,15 +229,20 @@ fixed checkpoint). Ordered by what's blocking what.
    (cos-sim ≈ −0.49, n=75) — the bot tends to move away from cells with
    past-engagement history, opposite of the concept's intent. During active
    combat, movement vs. opportunity pull is also mildly negative (≈ −0.22).
+   PPO now includes a yaw-aware lattice-direction objective (default coefficient
+   `0.02`) that attracts toward engagement/opportunity, repels from threat, and
+   masks itself during visible combat. This is implemented and unit-gated but
+   still needs a newly-trained checkpoint to prove the measured inversion fixed.
 
-4. **[OPEN]** `maps/generator.py`'s `.lattice.json` sidecar (objective sites
-   as opportunity priors, lava pools as danger priors) has been written for
-   every generated map since the map-gen commit that added it, explicitly
-   "so the bot starts with the map sense the generator already has" — but
-   nothing in `harness/spatial.py` or `harness/env.py` has ever read it
-   back. Wiring this preload in would give freshly-generated maps (and
-   `--live_maps` rounds especially) a populated lattice from spawn instead
-   of building purely from in-episode contact.
+4. **[FIXED/PROTOTYPE 2026-07-11]** `maps/generator.py`'s `.lattice.json`
+   objective/lava priors are now installed and preloaded by
+   `VoxelSpatialReward.reset()`. `.routes.json` now seeds a per-bot item timing
+   clock whose readiness and selected offense/survival/balanced route appear
+   through the existing opportunity/threat vectors. Learned lattice cells are
+   saved beside policy checkpoints as `lattice_*.json.gz` and restored on
+   `--resume`. Engine item-visibility IDs are still absent, so the prototype
+   re-phases timers from the bot's own nearest pickup plus predicted respawns;
+   enemy pickup inference remains future wire work.
 
 5. **[FIXED 2026-07-11]** `tools/behavior_clone_aim.py`'s `train_bc()` crashed
    immediately on `KeyError: 'fire_logits'` — it predates `models/policy.py`'s
@@ -349,7 +356,26 @@ conservatively modify actions.
 `harness/spatial.py` adds a training-side voxel reward without changing the C
 wire protocol or checkpoint shape. It rewards entering new position voxels,
 visible tactical engagement ranges, and proximity to required hook zones, while
-lightly penalizing stagnation.
+lightly penalizing stagnation. Generated-map objective/danger priors and live
+route/item readiness feed the existing 24-dimensional memory tail. The trainer
+checkpoints learned cells alongside the policy and explicitly supervises
+movement along the pull vectors outside visible combat.
+The implementation contract and isolated real-engine smoke results are in
+`docs/LATTICE-PROTOTYPE-2026-07-11.md`.
+
+Prototype smoke test and checkpoint regression gate:
+
+```bash
+python tools/evaluate_lattice.py --map mltrain_00005200
+Q2_EXT_OBS=1 python tools/evaluate_lattice.py \
+  --checkpoint checkpoints/<run>/policy_<steps>.pt \
+  --require_mean_cosine 0.25
+```
+
+The map check exits non-zero if lattice/routes sidecars or their live deposits
+are missing. The checkpoint gate probes opportunity, engagement, and threat
+across cardinal directions and four yaw angles. Use it with the fixed combat
+gate; vector alignment alone is not a promotion criterion.
 
 Useful knobs:
 
@@ -357,6 +383,10 @@ Useful knobs:
 - `Q2_VOXEL_SIZE=256` sets world units per voxel.
 - `R_VOXEL_NEW_CELL=0.02` controls exploration reward.
 - `R_TACTICAL_ENGAGEMENT=0.01` controls visible-enemy engagement reward.
+- `Q2_LATTICE_PRELOAD=0` disables generated prior loading.
+- `Q2_LATTICE_ROUTES=0` disables live route/item readiness deposits.
+- `--lattice_direction_coef 0.02` controls direct pull-vector supervision
+  (`0` disables it for an A/B control).
 - `R_KILL=5.0` and `R_DEATH=3.0` emphasize the KD objective during training.
 
 ## Related repos
