@@ -130,6 +130,7 @@ class VoxelSpatialReward:
     lattice_prior_scale: float = 8.0
     lattice_route_scale: float = 4.0
     lattice_tick_rate: float = 10.0
+    lattice_route_refresh_ticks: int = 5
     # Engine-supplied extended channels (both runs). prox = how-hard-hit
     # aversion; offense/survival = rune-conditioned payoffs.
     damage_prox_aversion: float = 0.004
@@ -189,6 +190,11 @@ class VoxelSpatialReward:
     sidecar_sources: Dict[str, Dict[str, str]] = field(default_factory=dict, init=False)
     selected_route: str = ""
     _map_last_tick: Dict[str, int] = field(default_factory=dict, init=False)
+    _route_heat_last_tick: Dict[str, int] = field(default_factory=dict, init=False)
+    _route_heat_last_axis: Dict[str, str] = field(default_factory=dict, init=False)
+    _feature_cache_key: Optional[Tuple[str, int]] = field(default=None, init=False)
+    _feature_cache: Optional[np.ndarray] = field(default=None, init=False, repr=False)
+    _feature_nearest_deaths: float = field(default=0.0, init=False)
     last_visible_count: int = 0
     last_damage_tick: int = -1000000
     last_damage_cell: Optional[Tuple[int, int, int]] = None
@@ -281,6 +287,9 @@ class VoxelSpatialReward:
             lattice_prior_scale=_env_float("Q2_LATTICE_PRIOR_SCALE", 8.0),
             lattice_route_scale=_env_float("Q2_LATTICE_ROUTE_SCALE", 4.0),
             lattice_tick_rate=_env_float("Q2_LATTICE_TICK_RATE", 10.0),
+            lattice_route_refresh_ticks=_env_int(
+                "Q2_LATTICE_ROUTE_REFRESH_TICKS", 5
+            ),
             damage_prox_aversion=_env_float("R_DAMAGE_PROX_AVERSION", 0.004),
             offense_rune_reward=_env_float("R_OFFENSE_RUNE", 0.004),
             survival_rune_reward=_env_float("R_SURVIVAL_RUNE", 0.004),
@@ -328,6 +337,7 @@ class VoxelSpatialReward:
         )
 
     def reset(self, map_name: str, obs: Optional[Observation] = None) -> None:
+        self._invalidate_feature_cache()
         self.map_name = map_name
         self._memory_for_map(map_name)
         tick = int(getattr(obs, "tick", 0)) if obs is not None else 0
@@ -348,7 +358,7 @@ class VoxelSpatialReward:
             self.visited.add(cell)
             self.last_cell = cell
             self.pos_history.append(tuple(obs.self_state[:3]))
-            self._refresh_route_heat(obs)
+            self._refresh_route_heat(obs, force=True)
 
     @staticmethod
     def _sidecar_roots() -> List[Path]:
@@ -441,6 +451,11 @@ class VoxelSpatialReward:
     def _game_time(self, tick: int) -> float:
         return float(tick) / max(0.1, float(self.lattice_tick_rate))
 
+    def _invalidate_feature_cache(self) -> None:
+        self._feature_cache_key = None
+        self._feature_cache = None
+        self._feature_nearest_deaths = 0.0
+
     def _wanted_route_axis(self, obs: Observation) -> str:
         health = float(obs.self_state[6]) if len(obs.self_state) > 6 else 100.0
         if health <= self.rune_low_health:
@@ -500,16 +515,29 @@ class VoxelSpatialReward:
                     entry.route_bias += route_bias * weight
                     touched.add(cell)
 
-    def _refresh_route_heat(self, obs: Observation) -> None:
+    def _refresh_route_heat(self, obs: Observation, force: bool = False) -> bool:
         table = self.item_timings.get(self.map_name)
         if table is None:
             self.selected_route = ""
-            return
-        t = self._game_time(int(obs.tick))
+            return False
+        tick = int(obs.tick)
         pickup_id = self._nearest_pickup_id(table, obs)
+        wanted = self._wanted_route_axis(obs)
+        last_tick = self._route_heat_last_tick.get(self.map_name, -10**9)
+        last_axis = self._route_heat_last_axis.get(self.map_name, "")
+        refresh_ticks = max(1, int(self.lattice_route_refresh_ticks))
+        if (
+            not force
+            and pickup_id is None
+            and wanted == last_axis
+            and tick >= last_tick
+            and tick - last_tick < refresh_ticks
+        ):
+            return False
+
+        t = self._game_time(tick)
         table.observe(t, (), (), (() if pickup_id is None else (pickup_id,)))
         self._clear_dynamic_heat(self.map_name)
-        wanted = self._wanted_route_axis(obs)
         graph = self.route_graphs.get(self.map_name, {})
         route_name = "balanced" if wanted == "value" else wanted
         route = next((r for r in graph.get("routes", [])
@@ -531,6 +559,10 @@ class VoxelSpatialReward:
                 else 0.0
             )
             self._deposit_dynamic(self.map_name, deposit, route_bias=bias)
+        self._route_heat_last_tick[self.map_name] = tick
+        self._route_heat_last_axis[self.map_name] = wanted
+        self._invalidate_feature_cache()
+        return True
 
     def cell_for(self, obs: Observation) -> Tuple[int, int, int]:
         return self.cell_for_pos(obs.self_state[:3])
@@ -679,6 +711,9 @@ class VoxelSpatialReward:
             fire_audio_contact=fire_audio_contact,
             audio_contact=audio_contact,
         )
+        # Session marks, DPS state, and possibly route heat changed this tick.
+        # Compute once below; env._obs_vector() reuses the exact cached vector.
+        self._invalidate_feature_cache()
         memory_features = self.memory_features(obs)
         memory_delta = 0.0
         current_engagement = float(memory_features[0])
@@ -706,7 +741,7 @@ class VoxelSpatialReward:
         # bot's gravity toward it, unconditionally (not just at low health).
         # Each repeat deepens the repulsion until the tanh saturates, directly
         # counteracting the engagement/opportunity pull at lethal locations.
-        _, _, _, nearest_deaths = self._nearest_memory_signal(obs, "deaths")
+        nearest_deaths = self._feature_nearest_deaths
         entry_here = self._memory_for_map(self.map_name).get(cell)
         current_deaths = 0.0
         if entry_here is not None and entry_here.deaths > 0.0:
@@ -902,26 +937,37 @@ class VoxelSpatialReward:
     def memory_features(self, obs: Observation) -> np.ndarray:
         """Compact non-decaying session memory features for the policy input.
         Last 3 slots are the survivability projection (always set)."""
+        cache_key = (self.map_name or "unknown", int(obs.tick))
+        if self._feature_cache_key == cache_key and self._feature_cache is not None:
+            return self._feature_cache
+
         features = np.zeros(OBS_SESSION_MEMORY_DIM, dtype=np.float32)
+        nearest = {
+            kind: (0.0, 0.0, 0.0, 0.0)
+            for kind in ("engagement", "threat", "opportunity", "self_fire", "deaths")
+        }
+        if self.session_memory_enabled:
+            nearest = self._nearest_memory_signals(obs, tuple(nearest))
+        self._feature_nearest_deaths = float(nearest["deaths"][3])
 
         # Survivability projection (slots 21-23) — always computed so the bot
         # perceives "will I win this race" every step, not just when memory
         # exists. map_help = nearby recovery opportunity (extends survival).
-        try:
-            map_help = (self._nearest_memory_signal(obs, "opportunity")[3]
-                        if self.session_memory_enabled else 0.0)
-        except Exception:
-            map_help = 0.0
+        map_help = float(nearest["opportunity"][3])
         wm, ehp_n, dps_sh = self._win_margin(obs, map_help)
         features[21] = wm
         features[22] = ehp_n
         features[23] = dps_sh
 
         if not self.session_memory_enabled:
+            self._feature_cache_key = cache_key
+            self._feature_cache = features
             return features
 
         memory = self._memory_for_map(self.map_name)
         if not memory:
+            self._feature_cache_key = cache_key
+            self._feature_cache = features
             return features
 
         cell = self.cell_for(obs)
@@ -939,9 +985,11 @@ class VoxelSpatialReward:
             (13, "opportunity"),
             (17, "self_fire"),
         ):
-            dx, dy, dz, score = self._nearest_memory_signal(obs, kind)
+            dx, dy, dz, score = nearest[kind]
             features[offset:offset + 4] = (dx, dy, dz, score)
 
+        self._feature_cache_key = cache_key
+        self._feature_cache = features
         return features
 
     def _memory_for_map(
@@ -1085,47 +1133,66 @@ class VoxelSpatialReward:
             entry.damage_taken += amt * 33.0
         else:
             return False
+        if target == self.map_name:
+            self._invalidate_feature_cache()
         return True
 
     def _nearest_memory_signal(
         self, obs: Observation, kind: str
     ) -> Tuple[float, float, float, float]:
+        return self._nearest_memory_signals(obs, (kind,))[kind]
+
+    def _nearest_memory_signals(
+        self, obs: Observation, kinds: Tuple[str, ...]
+    ) -> Dict[str, Tuple[float, float, float, float]]:
+        """Find every requested channel in one traversal of the voxel map."""
+        zero = (0.0, 0.0, 0.0, 0.0)
+        results = {kind: zero for kind in kinds}
         memory = self._memory_for_map(self.map_name)
         if not memory:
-            return 0.0, 0.0, 0.0, 0.0
+            return results
 
         pos = obs.self_state[:3]
+        px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
         radius = max(self.session_memory_search_radius, self.voxel_size)
-        best_cell = None
-        best_score = 0.0
-        best_dist = float("inf")
+        voxel_size = max(self.voxel_size, 1.0)
+        best = {
+            kind: {"rank": -1.0, "score": 0.0, "center": None}
+            for kind in kinds
+        }
         for cell, entry in memory.items():
-            raw_score = self._memory_score(entry, kind)
-            if raw_score <= 0.0:
-                continue
-            center = self._cell_center(cell)
-            dist = float(hypot(center[0] - pos[0], center[1] - pos[1], center[2] - pos[2]))
+            cx = (float(cell[0]) + 0.5) * voxel_size
+            cy = (float(cell[1]) + 0.5) * voxel_size
+            cz = (float(cell[2]) + 0.5) * voxel_size
+            dist = float(hypot(cx - px, cy - py, cz - pz))
             if dist > radius:
                 continue
-            score = self._norm_memory_score(raw_score) * self._memory_confidence(entry)
-            rank = score / max(1.0, dist / self.voxel_size)
-            best_rank = best_score / max(1.0, best_dist / self.voxel_size)
-            if best_cell is None or rank > best_rank:
-                best_cell = cell
-                best_score = score
-                best_dist = dist
+            confidence = self._memory_confidence(entry)
+            distance_scale = max(1.0, dist / voxel_size)
+            for kind in kinds:
+                raw_score = self._memory_score(entry, kind)
+                if raw_score <= 0.0:
+                    continue
+                score = self._norm_memory_score(raw_score) * confidence
+                rank = score / distance_scale
+                if rank > best[kind]["rank"]:
+                    best[kind] = {
+                        "rank": rank,
+                        "score": score,
+                        "center": (cx, cy, cz),
+                    }
 
-        if best_cell is None:
-            return 0.0, 0.0, 0.0, 0.0
-
-        center = self._cell_center(best_cell)
-        direction = np.clip((center - pos) / radius, -1.0, 1.0)
-        return (
-            float(direction[0]),
-            float(direction[1]),
-            float(direction[2]),
-            float(best_score),
-        )
+        for kind, candidate in best.items():
+            center = candidate["center"]
+            if center is None:
+                continue
+            results[kind] = (
+                float(np.clip((center[0] - px) / radius, -1.0, 1.0)),
+                float(np.clip((center[1] - py) / radius, -1.0, 1.0)),
+                float(np.clip((center[2] - pz) / radius, -1.0, 1.0)),
+                float(candidate["score"]),
+            )
+        return results
 
     def _cell_center(self, cell: Tuple[int, int, int]) -> np.ndarray:
         size = max(self.voxel_size, 1.0)
@@ -1726,6 +1793,7 @@ def load_lattice_state(instances, path) -> dict:
                 memory[cell] = SessionMemoryCell(**kwargs)
                 restored_cells += 1
             inst.preloaded_maps.add(map_name)
+        inst._invalidate_feature_cache()
     return {
         "env_steps": int(payload.get("env_steps", 0)),
         "instances": min(len(instances), len(saved_instances)),

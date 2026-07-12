@@ -95,6 +95,72 @@ def test_own_pickup_rephases_item_readiness(tmp_path, monkeypatch):
     assert row.predicted_available_t == pytest.approx(62.0)
 
 
+def test_route_heat_refresh_is_throttled_but_pickups_force_it(
+    tmp_path, monkeypatch
+):
+    _write_sidecars(tmp_path)
+    monkeypatch.setenv("Q2_LATTICE_DIR", str(tmp_path))
+    reward = VoxelSpatialReward.from_env(seed=7)
+    reward.reset("prototype", _obs(pos=(128, 128, 128), tick=10))
+
+    assert not reward._refresh_route_heat(
+        _obs(pos=(128, 128, 128), tick=11)
+    )
+    assert reward._route_heat_last_tick["prototype"] == 10
+    assert reward._refresh_route_heat(
+        _obs(pos=(128, 128, 128), tick=15)
+    )
+    assert reward._route_heat_last_tick["prototype"] == 15
+    assert reward._refresh_route_heat(
+        _obs(pos=(384, 128, 128), tick=16, pickup=1.0)
+    )
+    assert reward._route_heat_last_tick["prototype"] == 16
+
+
+def test_memory_features_cache_one_nearest_pass_per_tick(monkeypatch):
+    reward = VoxelSpatialReward.from_env(seed=3)
+    reward.map_name = "prototype"
+    reward.session_memories["prototype"] = {
+        (1, 0, 0): SessionMemoryCell(kills=2.0, enemy_seen=1.0),
+        (-1, 0, 0): SessionMemoryCell(deaths=2.0, damage_taken=30.0),
+    }
+    obs = _obs(pos=(0, 0, 0), tick=20)
+    original = reward._nearest_memory_signals
+    calls = 0
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(reward, "_nearest_memory_signals", counting)
+    first = reward.memory_features(obs)
+    second = reward.memory_features(obs)
+    assert calls == 1
+    assert first is second
+
+    reward._invalidate_feature_cache()
+    reward.memory_features(obs)
+    assert calls == 2
+
+
+def test_batched_nearest_signals_match_single_channel_queries():
+    reward = VoxelSpatialReward.from_env(seed=4)
+    reward.map_name = "prototype"
+    reward.session_memories["prototype"] = {
+        (2, 0, 0): SessionMemoryCell(kills=2.0, enemy_seen=2.0),
+        (-2, 0, 0): SessionMemoryCell(deaths=2.0, damage_taken=50.0),
+        (0, 2, 0): SessionMemoryCell(self_fire=3.0),
+    }
+    obs = _obs(pos=(0, 0, 0), tick=30)
+    kinds = ("engagement", "threat", "opportunity", "self_fire", "deaths")
+
+    together = reward._nearest_memory_signals(obs, kinds)
+
+    for kind in kinds:
+        assert together[kind] == reward._nearest_memory_signal(obs, kind)
+
+
 def test_lattice_checkpoint_round_trip_excludes_dynamic_heat(tmp_path):
     original = VoxelSpatialReward.from_env(seed=1)
     original.map_name = "prototype"

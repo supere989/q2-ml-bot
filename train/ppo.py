@@ -677,7 +677,10 @@ def train(cfg: dict):
     writer.add_scalar("config/seed", seed, resume_steps)
     print(f"TensorBoard log: runs/{run_name}")
     print(f"  view with:  tensorboard --logdir runs --bind_all")
-    print(f"  virtual envs: {total_venvs}  ({n_servers} servers × 1 ML bot + {n_bots-1} AI opponents)")
+    print(
+        f"  virtual envs: {total_venvs}  "
+        f"({n_servers} servers × {n_ml} ML bot(s) + {n_bots - n_ml} AI opponents each)"
+    )
 
     ep_rewards           = np.zeros(total_venvs, dtype=np.float64)
     ep_base_rewards      = np.zeros(total_venvs, dtype=np.float64)
