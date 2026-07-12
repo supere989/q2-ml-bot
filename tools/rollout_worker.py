@@ -8,6 +8,7 @@ import os
 import random
 import socket
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -22,53 +23,73 @@ from harness.rollout_protocol import (
 )
 
 
-def collect_q2_batch(artifact, args):
+def collect_q2_batch(artifact, args, runtime=None):
     import numpy as np
     import torch
 
-    if args.deterministic:
-        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-        torch.use_deterministic_algorithms(True)
-        if hasattr(torch.backends, "cudnn"):
-            torch.backends.cudnn.benchmark = False
-            torch.backends.cudnn.deterministic = True
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    device = torch.device(
-        "cuda" if args.device == "auto" and torch.cuda.is_available() else
-        "cpu" if args.device == "auto" else args.device
-    )
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(args.seed)
+    from models.policy import ACTION_DIM, HIDDEN_DIM, OBS_DIM
 
-    from harness.env import Q2MultiEnv
-    from models.policy import ACTION_DIM, HIDDEN_DIM, OBS_DIM, Q2BotPolicy
+    owns_runtime = runtime is None
+    runtime = {} if runtime is None else runtime
+    if not runtime:
+        if args.deterministic:
+            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+            torch.use_deterministic_algorithms(True)
+            if hasattr(torch.backends, "cudnn"):
+                torch.backends.cudnn.benchmark = False
+                torch.backends.cudnn.deterministic = True
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        device = torch.device(
+            "cuda" if args.device == "auto" and torch.cuda.is_available() else
+            "cpu" if args.device == "auto" else args.device
+        )
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(args.seed)
+        from harness.env import Q2MultiEnv
+        from models.policy import Q2BotPolicy
 
-    policy = Q2BotPolicy().to(device)
+        policy = Q2BotPolicy().to(device)
+        os.environ["Q2_SV_PORT_BASE"] = str(args.sv_port_base)
+        os.environ["Q2_ML_PORT_BASE"] = str(args.ml_port_base)
+        env = Q2MultiEnv(
+            server_id=0,
+            map_name=args.map_name,
+            map_pool=[args.map_name],
+            map_seed=args.seed,
+            game_seed=args.game_seed,
+            spatial_seed=args.seed,
+            n_bots=args.n_bots,
+            num_ml_bots=args.n_ml,
+            maxclients=max(8, args.n_bots, args.n_ml),
+            max_ep_steps=args.max_ep_steps,
+            timedemo=1,
+            timescale=args.timescale,
+            console_pipe=True,
+        )
+        n_envs = env.n_ml
+        obs = np.zeros((n_envs, OBS_DIM), dtype=np.float32)
+        hidden = [policy.init_hidden(1, device) for _ in range(n_envs)]
+        runtime.update({
+            "device": device,
+            "policy": policy,
+            "env": env,
+            "n_envs": n_envs,
+            "obs": obs,
+            "hidden": hidden,
+            "started": False,
+        })
+    else:
+        device = runtime["device"]
+        policy = runtime["policy"]
+        env = runtime["env"]
+        n_envs = runtime["n_envs"]
+        obs = runtime["obs"]
+        hidden = runtime["hidden"]
     state = torch.load(io.BytesIO(artifact.payload), map_location=device)
     policy.load_state_dict(state)
     policy.eval()
-    os.environ["Q2_SV_PORT_BASE"] = str(args.sv_port_base)
-    os.environ["Q2_ML_PORT_BASE"] = str(args.ml_port_base)
-    env = Q2MultiEnv(
-        server_id=0,
-        map_name=args.map_name,
-        map_pool=[args.map_name],
-        map_seed=args.seed,
-        game_seed=args.game_seed,
-        spatial_seed=args.seed,
-        n_bots=args.n_bots,
-        num_ml_bots=args.n_ml,
-        maxclients=max(8, args.n_bots, args.n_ml),
-        max_ep_steps=args.max_ep_steps,
-        timedemo=1,
-        timescale=args.timescale,
-        console_pipe=True,
-    )
-    n_envs = env.n_ml
-    obs = np.zeros((n_envs, OBS_DIM), dtype=np.float32)
-    hidden = [policy.init_hidden(1, device) for _ in range(n_envs)]
     arrays = {
         "obs": np.empty((args.steps, n_envs, OBS_DIM), np.float32),
         "actions": np.empty((args.steps, n_envs, ACTION_DIM), np.float32),
@@ -80,8 +101,18 @@ def collect_q2_batch(artifact, args):
         "c_states": np.empty((args.steps, n_envs, HIDDEN_DIM), np.float32),
     }
     try:
-        for index, value in enumerate(env.reset_all()):
-            obs[index] = value
+        if not runtime["started"]:
+            for index, value in enumerate(env.reset_all()):
+                obs[index] = value
+            runtime["started"] = True
+            if args.lattice_dir:
+                latest = args.lattice_dir / "lattice_latest.json.gz"
+                if latest.is_file():
+                    from harness.spatial import load_lattice_state
+
+                    load_lattice_state(env._spatial_rewards, latest)
+                    for index, raw_obs in enumerate(env._last_obs):
+                        obs[index] = env._obs_vector(index, raw_obs)
         with torch.no_grad():
             for step in range(args.steps):
                 arrays["obs"][step] = obs
@@ -112,8 +143,11 @@ def collect_q2_batch(artifact, args):
         arrays["last_c"] = torch.cat(
             [state[1] for state in hidden], dim=1
         ).squeeze(0).cpu().numpy()
+        runtime["obs"] = obs
+        runtime["hidden"] = hidden
     finally:
-        env.close()
+        if owns_runtime:
+            env.close()
 
     determinism_key = (
         f"q2:v{artifact.version}:{artifact.sha256}:cfg={artifact.config_hash}:"
@@ -135,7 +169,9 @@ def collect_q2_batch(artifact, args):
         "n_envs": n_envs,
         "device": str(device),
         "deterministic_actions": bool(args.deterministic_actions),
-        "lattice_mode": "fresh_worker_session",
+        "lattice_mode": (
+            "fresh_worker_session" if owns_runtime else "persistent"
+        ),
     }, arrays)
 
 
@@ -164,15 +200,23 @@ def main():
     parser.add_argument("--deterministic-actions", action="store_true")
     parser.add_argument("--policy-out", type=Path)
     parser.add_argument("--verify-determinism", action="store_true")
+    parser.add_argument("--continuous", action="store_true")
+    parser.add_argument("--max-generations", type=int, default=0)
+    parser.add_argument("--poll-seconds", type=float, default=1.0)
+    parser.add_argument("--lattice-dir", type=Path)
     args = parser.parse_args()
+
+    if args.continuous and args.verify_determinism:
+        parser.error("--continuous and --verify-determinism are separate modes")
 
     client = CoordinatorClient(args.coordinator, token=args.token)
     artifact = client.fetch_policy()
     if args.policy_out:
         args.policy_out.parent.mkdir(parents=True, exist_ok=True)
         args.policy_out.write_bytes(artifact.payload)
+    runtime = {} if args.continuous and args.mode == "q2" else None
     if args.mode == "q2":
-        batch = collect_q2_batch(artifact, args)
+        batch = collect_q2_batch(artifact, args, runtime=runtime)
     else:
         batch = deterministic_synthetic_batch(
             artifact,
@@ -217,13 +261,63 @@ def main():
                 "local deterministic rollout validation failed: "
                 + json.dumps(differences, sort_keys=True)
             )
-    decision = client.submit(batch)
-    print(json.dumps({
-        "event": "batch_submission",
-        "rollout_hash": batch.rollout_hash(),
-        **decision.as_dict(),
-    }, sort_keys=True), flush=True)
-    return 0 if decision.accepted or decision.status == "duplicate" else 2
+    generations = 0
+    try:
+        while True:
+            decision = client.submit(batch)
+            print(json.dumps({
+                "event": "batch_submission",
+                "rollout_hash": batch.rollout_hash(),
+                **decision.as_dict(),
+            }, sort_keys=True), flush=True)
+            if not (decision.accepted or decision.status == "duplicate"):
+                return 2
+            generations += 1
+            if args.lattice_dir and runtime:
+                from harness.spatial import save_lattice_state
+
+                args.lattice_dir.mkdir(parents=True, exist_ok=True)
+                instances = runtime["env"]._spatial_rewards
+                save_lattice_state(
+                    instances,
+                    args.lattice_dir / f"lattice_{artifact.version:08d}.json.gz",
+                    total_env_steps=(args.rollout_index + 1) * args.steps * runtime["n_envs"],
+                )
+                save_lattice_state(
+                    instances,
+                    args.lattice_dir / "lattice_latest.json.gz",
+                    total_env_steps=(args.rollout_index + 1) * args.steps * runtime["n_envs"],
+                )
+            if not args.continuous or (
+                args.max_generations and generations >= args.max_generations
+            ):
+                return 0
+            while True:
+                status = client.status()
+                if int(status["policy_version"]) > artifact.version:
+                    break
+                time.sleep(max(0.1, args.poll_seconds))
+            artifact = client.fetch_policy()
+            args.sequence += 1
+            args.rollout_index += 1
+            batch = (
+                collect_q2_batch(artifact, args, runtime=runtime)
+                if args.mode == "q2"
+                else deterministic_synthetic_batch(
+                    artifact,
+                    args.worker_id,
+                    args.sequence,
+                    args.seed,
+                    args.game_seed,
+                    args.rollout_index,
+                    steps=args.steps,
+                    obs_dim=args.obs_dim,
+                    action_dim=args.action_dim,
+                )
+            )
+    finally:
+        if runtime and runtime.get("env") is not None:
+            runtime["env"].close()
 
 
 if __name__ == "__main__":

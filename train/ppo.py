@@ -9,6 +9,8 @@ Usage:
 """
 
 import atexit
+import hashlib
+import io
 import os
 import json
 import random
@@ -581,7 +583,59 @@ def train(cfg: dict):
     print(f"Map pool ({len(map_pool)}): {', '.join(map_pool[:8])}"
           f"{' ...' if len(map_pool) > 8 else ''}")
 
-    servers = [
+    distributed = os.environ.get("Q2_DISTRIBUTED_LEARNER", "0") == "1"
+    rollout_coordinator = None
+    rollout_server = None
+    publish_distributed_policy = None
+    if distributed:
+        from harness.rollout_protocol import (
+            CoordinatorServer,
+            PolicyArtifact,
+            RolloutCoordinator,
+        )
+
+        quorum = max(1, int(os.environ.get("Q2_ROLLOUT_QUORUM", "1")))
+        remote_envs = max(1, int(os.environ.get("Q2_ROLLOUT_ENVS_PER_WORKER", "1")))
+        total_venvs = quorum * remote_envs
+        config_payload = json.dumps({
+            "ppo": cfg,
+            "obs_dim": OBS_DIM,
+            "action_dim": ACTION_DIM,
+            "hidden_dim": HIDDEN_DIM,
+            "ext_obs": os.environ.get("Q2_EXT_OBS", "0"),
+            "rust_lattice": os.environ.get("Q2_RUST_LATTICE", "0"),
+            "worker_envs": remote_envs,
+        }, sort_keys=True, separators=(",", ":")).encode()
+        distributed_config_hash = hashlib.sha256(config_payload).hexdigest()
+        rollout_coordinator = RolloutCoordinator(quorum=quorum, schema="ppo")
+        rollout_server = CoordinatorServer(
+            rollout_coordinator,
+            os.environ.get("Q2_ROLLOUT_BIND", "0.0.0.0"),
+            int(os.environ.get("Q2_ROLLOUT_PORT", "38888")),
+            token=os.environ.get("Q2_ROLLOUT_TOKEN", ""),
+        ).start()
+
+        def _publish_distributed_policy(version: int) -> None:
+            buffer = io.BytesIO()
+            cpu_state = {
+                name: tensor.detach().cpu()
+                for name, tensor in policy.state_dict().items()
+            }
+            torch.save(cpu_state, buffer)
+            rollout_coordinator.publish(PolicyArtifact.create(
+                int(version), buffer.getvalue(), distributed_config_hash
+            ))
+
+        publish_distributed_policy = _publish_distributed_policy
+        publish_distributed_policy(resume_steps)
+        print(
+            "Distributed learner: "
+            f"{rollout_server.address[0]}:{rollout_server.address[1]} "
+            f"quorum={quorum} envs/worker={remote_envs} "
+            f"policy_version={resume_steps} config={distributed_config_hash[:12]}"
+        )
+
+    servers = [] if distributed else [
         Q2MultiEnv(
             server_id    = i,
             map_name     = cfg["map_name"],
@@ -626,6 +680,8 @@ def train(cfg: dict):
     def _close_all_servers() -> None:
         for server in servers:
             server.close()
+        if rollout_server is not None:
+            rollout_server.close()
 
     # An optimizer/assertion failure used to orphan q2ded children and leave
     # their UDP ports occupied for the next experiment. Normal completion
@@ -639,11 +695,12 @@ def train(cfg: dict):
 
     # reset all servers in parallel and populate initial obs (sequential boot
     # cost ~50s/server; each env owns its own ports, sockets, and process)
-    with ThreadPoolExecutor(max_workers=n_servers) as ex:
-        all_initial = list(ex.map(lambda srv: srv.reset_all(), servers))
-    for si, obs_list in enumerate(all_initial):
-        for bi, o in enumerate(obs_list):
-            obs_np[si * n_ml + bi] = o
+    if not distributed:
+        with ThreadPoolExecutor(max_workers=n_servers) as ex:
+            all_initial = list(ex.map(lambda srv: srv.reset_all(), servers))
+        for si, obs_list in enumerate(all_initial):
+            for bi, o in enumerate(obs_list):
+                obs_np[si * n_ml + bi] = o
 
     total_env_steps    = resume_steps
     _directive_seqs    = {}
@@ -655,7 +712,7 @@ def train(cfg: dict):
     # isolated by map prefix so it never touches maps other runs glob. See
     # train/curriculum.py for the absorb-for-entropy-not-convergence rationale.
     evolver = None
-    if os.environ.get("Q2_CURRICULUM_EVOLVE") == "1":
+    if not distributed and os.environ.get("Q2_CURRICULUM_EVOLVE") == "1":
         try:
             from train.curriculum import CurriculumEvolver
             _pref = os.environ.get("Q2_CURRICULUM_PREFIX") or (
@@ -677,10 +734,14 @@ def train(cfg: dict):
     writer.add_scalar("config/seed", seed, resume_steps)
     print(f"TensorBoard log: runs/{run_name}")
     print(f"  view with:  tensorboard --logdir runs --bind_all")
-    print(
-        f"  virtual envs: {total_venvs}  "
-        f"({n_servers} servers × {n_ml} ML bot(s) + {n_bots - n_ml} AI opponents each)"
-    )
+    if distributed:
+        print(f"  virtual envs: {total_venvs} from distributed rollout quorum")
+    else:
+        print(
+            f"  virtual envs: {total_venvs}  "
+            f"({n_servers} servers × {n_ml} ML bot(s) + "
+            f"{n_bots - n_ml} AI opponents each)"
+        )
 
     ep_rewards           = np.zeros(total_venvs, dtype=np.float64)
     ep_base_rewards      = np.zeros(total_venvs, dtype=np.float64)
@@ -752,7 +813,7 @@ def train(cfg: dict):
         rollout_behavior = {key: 0.0 for key in behavior_metric_keys}
         rollout_behavior_samples = 0
 
-        for step in range(cfg["n_steps"]):
+        for step in range(0 if distributed else cfg["n_steps"]):
             # Store the current observation which produced the actions!
             current_obs = obs_np.copy()
 
@@ -832,20 +893,66 @@ def train(cfg: dict):
                 c_step,
             )
 
-        total_env_steps += cfg["n_steps"] * total_venvs
+        if distributed:
+            from harness.rollout_protocol import merge_ppo_batches
 
-        # compute bootstrap value
-        with torch.no_grad():
-            # Batched bootstrap computation to run in a single GPU pass
-            if os.environ.get("Q2_POLICY_STATEFUL", "1").lower() in {"1", "true", "yes", "on"}:
-                h_stack = torch.cat([hx[0] for hx in hx_list], dim=1)
-                c_stack = torch.cat([hx[1] for hx in hx_list], dim=1)
-            else:
-                h_stack, c_stack = policy.init_hidden(total_venvs, device)
-            
-            obs_t = torch.from_numpy(obs_np).to(device, dtype=torch.float32).unsqueeze(1) # (N, 1, OBS_DIM)
-            _, values_t, _ = policy(obs_t, (h_stack, c_stack))
-            last_vals = values_t.squeeze(-1).squeeze(-1) # (total_venvs,)
+            policy_version = rollout_coordinator.policy().version
+            batches = rollout_coordinator.wait_for_quorum(
+                policy_version,
+                float(os.environ.get("Q2_ROLLOUT_TIMEOUT", "600")),
+            )
+            if not batches:
+                raise TimeoutError(
+                    f"distributed rollout quorum timed out for policy {policy_version}"
+                )
+            merged = merge_ppo_batches(batches)
+            expected_obs = (cfg["n_steps"], total_venvs, OBS_DIM)
+            if merged["obs"].shape != expected_obs:
+                raise ValueError(
+                    f"distributed rollout shape {merged['obs'].shape} != {expected_obs}"
+                )
+            for target, name in (
+                (buf.obs, "obs"),
+                (buf.actions, "actions"),
+                (buf.rewards, "rewards"),
+                (buf.dones, "dones"),
+                (buf.values, "values"),
+                (buf.log_probs, "log_probs"),
+                (buf.h_states, "h_states"),
+                (buf.c_states, "c_states"),
+            ):
+                target.copy_(torch.from_numpy(merged[name]).to(
+                    device, dtype=target.dtype
+                ))
+            total_env_steps += cfg["n_steps"] * total_venvs
+            with torch.no_grad():
+                obs_t = torch.from_numpy(merged["last_obs"]).to(
+                    device, dtype=torch.float32
+                ).unsqueeze(1)
+                h_stack = torch.from_numpy(merged["last_h"]).to(
+                    device, dtype=torch.float32
+                ).unsqueeze(0)
+                c_stack = torch.from_numpy(merged["last_c"]).to(
+                    device, dtype=torch.float32
+                ).unsqueeze(0)
+                _, values_t, _ = policy(obs_t, (h_stack, c_stack))
+                last_vals = values_t.squeeze(-1).squeeze(-1)
+        else:
+            total_env_steps += cfg["n_steps"] * total_venvs
+
+            # compute bootstrap value
+            with torch.no_grad():
+                # Batched bootstrap computation to run in a single GPU pass
+                if os.environ.get("Q2_POLICY_STATEFUL", "1").lower() in {"1", "true", "yes", "on"}:
+                    h_stack = torch.cat([hx[0] for hx in hx_list], dim=1)
+                    c_stack = torch.cat([hx[1] for hx in hx_list], dim=1)
+                else:
+                    h_stack, c_stack = policy.init_hidden(total_venvs, device)
+                obs_t = torch.from_numpy(obs_np).to(
+                    device, dtype=torch.float32
+                ).unsqueeze(1)
+                _, values_t, _ = policy(obs_t, (h_stack, c_stack))
+                last_vals = values_t.squeeze(-1).squeeze(-1)
 
         buf.compute_returns(last_vals, cfg["gamma"], cfg["gae_lambda"])
 
@@ -1311,6 +1418,9 @@ def train(cfg: dict):
             diagnostic_values = dict(zip(
                 diagnostic_all_names, diagnostic_all_values
             ))
+
+        if distributed:
+            publish_distributed_policy(total_env_steps)
 
         # logging
         elapsed = time.time() - start

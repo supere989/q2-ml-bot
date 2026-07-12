@@ -105,3 +105,35 @@ trust the learner. Rollout batches themselves remain non-executable.
 The coordinator CLI intentionally stops after `--once` in the demonstrated
 flow. Continuous learning should embed `RolloutCoordinator`, call
 `wait_for_quorum(N)`, merge/update, and only then call `publish(N + 1)`.
+
+## Embedded learner and persistent worker
+
+`train/ppo.py` now has an opt-in embedded coordinator. It does not construct
+local q2ded servers; instead it validates a quorum, copies the merged arrays
+into the existing `RolloutBuffer`, computes final values on the learner, runs
+the unchanged PPO update, and publishes the new total-step version.
+
+```bash
+Q2_DISTRIBUTED_LEARNER=1 \
+Q2_ROLLOUT_BIND=0.0.0.0 Q2_ROLLOUT_PORT=38888 \
+Q2_ROLLOUT_TOKEN="$Q2_ROLLOUT_TOKEN" \
+Q2_ROLLOUT_QUORUM=2 Q2_ROLLOUT_ENVS_PER_WORKER=4 \
+python -m train.ppo --n_steps 256 --total_steps 20000000
+```
+
+Workers use `--continuous` to keep q2ded, recurrent state, and the Rust lattice
+alive while policy versions change. `--lattice-dir` writes a versioned Python
+checkpoint after every accepted generation and restores `lattice_latest` when
+the worker restarts.
+
+```bash
+python tools/rollout_worker.py --mode q2 --continuous \
+  --coordinator http://LEARNER:38888 --token "$Q2_ROLLOUT_TOKEN" \
+  --worker-id nobara-0 --steps 256 --n-ml 4 \
+  --lattice-dir worker-state/nobara-0
+```
+
+An isolated two-generation CUDA rehearsal completed versions 0 and 16 with a
+single persistent q2ded launch, performed two learner PPO updates, published
+both policy generations, saved worker lattice snapshots for both, and produced
+learner checkpoint version 32.
