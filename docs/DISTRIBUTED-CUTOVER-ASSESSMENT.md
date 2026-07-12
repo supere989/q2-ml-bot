@@ -15,6 +15,9 @@ active run.
   deterministic hashes.
 - WSL completed a real CUDA/q2ded recurrent upload accepted by the strict PPO
   schema.
+- Nobara was provisioned from WSL with checksum-identical q2ded/game.so/Rust
+  binaries and all maps, then completed a real four-ML RTX 3070 rollout that
+  passed the strict PPO schema.
 - The embedded learner consumed remote arrays with the existing PPO optimizer,
   published version 16, consumed a second batch from the same persistent q2ded
   and lattice, then saved policy version 32.
@@ -25,21 +28,20 @@ active run.
 
 | Priority | Blocker | Evidence / consequence |
 |---|---|---|
-| P0 | Remote rollout hosts are not provisioned | Nobara has CUDA PyTorch but no q2ded/runtime checkout. Procreator has neither PyTorch nor q2ded. Only WSL can produce real batches today, so cutover adds protocol complexity without adding compute. |
+| Closed | First spare CUDA host provisioning | Nobara now has the isolated runtime, feature branch, Rust extension, state/log scaffold, and a disabled user service. A real four-ML batch was accepted. See `docs/ROLLOUT-HOST-PROVISIONING.md`. |
 | P0 | Remote telemetry is incomplete | The two-generation learner logged episode/base/spatial/KD fields as `nan` because batches do not carry episode summaries or behavior/outcome metrics. Aim, reward, curriculum, and regression drift would be substantially less visible than in the primary trainer. |
 | P0 | Worker recovery is not learner-owned | Persistent workers checkpoint their lattice locally, but the learner does not publish/retain a lattice artifact or lease its version. Replacing a failed host can mix fresh and persistent spatial memory or lose learning state. |
 | P0 | No worker lease/heartbeat/retry policy | A missing quorum currently times out and aborts training. Workers do not reconnect with bounded backoff, and the learner cannot replace a dead assignment while preserving seed/rollout identity. |
 | P1 | Four-ML replay is nondeterministic | Two fresh four-slot runs diverged in observations, rewards, actions, and recurrent state even with seeded game/Python/Torch and deterministic actions. Normal training can use unique rollout keys, but strict reproducibility and duplicate-work verification are unavailable for the high-throughput topology. |
-| P1 | Multi-host performance is unmeasured | Cross-host transport was proven synthetically; real q2 collection ran only on WSL. The two-generation smoke included startup and reported ~1 SPS, so it is a correctness result, not evidence that distributed training beats the current ~18–20 SPS run. |
+| P1 | Concurrent multi-host performance is unmeasured | Real q2 collection now works independently on WSL and Nobara, but they have not supplied the same live learner concurrently. The two-generation smoke included startup and reported ~1 SPS, so it is a correctness result, not evidence that distributed training beats the current ~18–20 SPS run. |
 | P1 | Runtime attestation is weak | Workers echo the learner config hash but do not independently prove game.so, map, reward environment variables, Rust extension, or observation layout checksums. A mismatched host can submit shape-valid but semantically incompatible data. |
 | P1 | No soak or policy-quality gate | Only two optimizer generations have run. There is no 12–24 hour shadow comparison for KL, clip rate, reward composition, aim preservation, KD, failure/retry behavior, or memory growth. |
 | P2 | Transport security assumes a trusted fabric | Bearer authentication exists, but HTTP is unencrypted. This is acceptable only behind Tailscale/LAN ACLs; public exposure requires mTLS or a secure proxy. |
 
 ## Required path to primary
 
-1. Provision Nobara with checksum-identical q2 runtime, maps, Python tree,
-   policy dependencies, and the Rust extension. Run a real batch and compare
-   its semantic manifest to WSL.
+1. **Completed:** provision Nobara with checksum-identical q2 runtime, maps,
+   policy dependencies, and the Rust extension; accept a real four-ML batch.
 2. Add a signed runtime manifest covering game.so, protocol/observation shape,
    maps, reward variables, policy architecture, and lattice build.
 3. Carry episode summaries and the current behavior/outcome telemetry in each

@@ -137,3 +137,9 @@ An isolated two-generation CUDA rehearsal completed versions 0 and 16 with a
 single persistent q2ded launch, performed two learner PPO updates, published
 both policy generations, saved worker lattice snapshots for both, and produced
 learner checkpoint version 32.
+
+Nobara's operational scaffold lives under `~/q2-rollout`; repo templates are
+in `ops/q2-rollout-worker.{service,env.example}`. The installed user service is
+deliberately disabled until a shadow learner token is assigned. Provisioning
+paths, immutable hashes, and the accepted real RTX 3070 rollout are recorded in
+`docs/ROLLOUT-HOST-PROVISIONING.md`.
