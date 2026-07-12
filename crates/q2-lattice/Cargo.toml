@@ -1,0 +1,18 @@
+[package]
+name = "q2-lattice"
+version = "0.1.0"
+edition = "2024"
+description = "Batched nearest-signal kernel for q2-ml-bot's Vector Lattice"
+license = "MIT"
+
+[lib]
+name = "q2_lattice_rs"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+python = ["dep:numpy", "dep:pyo3"]
+
+[dependencies]
+numpy = { version = "0.27", optional = true }
+pyo3 = { version = "0.27", features = ["abi3-py310", "extension-module"], optional = true }
