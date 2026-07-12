@@ -34,9 +34,8 @@ active run.
 |---|---|---|
 | Closed | First spare CUDA host provisioning | Nobara now has the isolated runtime, feature branch, Rust extension, state/log scaffold, and a disabled user service. A real four-ML batch was accepted. See `docs/ROLLOUT-HOST-PROVISIONING.md`. |
 | Closed | Remote telemetry parity | Strict batches now carry episode summaries plus 45 behavior/outcome aggregates under `ppo-telemetry-v1`; the learner restores the corresponding console and TensorBoard series. |
-| Closed in code | Learner-owned worker recovery | The embedded learner now creates deterministic lane assignments, serves TTL leases/heartbeats and versioned lattice artifacts, fences stale submissions, and adopts each checksum-chained lattice before acknowledging the batch. `--continuous --leased` workers reconnect with bounded backoff and recover the exact learner reference. |
-| P0 | Recovery has no live fault-injection proof | Lease/assignment state is process-local and the leased path has only focused/loopback tests. Kill/restart the learner during collection and replace a worker on real q2; prove stale work is fenced, the learner-owned lattice chain resumes exactly, and no optimizer generation is duplicated before relying on it. |
-| P0 | Multi-map attestation/recovery mismatch | Assignments can select a map pool, but the worker currently rebuilds attestation for only its assigned map. An approved multi-map manifest therefore cannot match. Shadow recovery must stay on one fixed map until the worker attests the full approved map set and rejects out-of-set assignments. |
+| Closed | Learner-owned durable recovery | Real-q2 fault injection proved lease expiry/replacement with the identical assignment ID. A learner was then killed with one accepted lane: the restarted coordinator restored that batch, receipt, completed lease, determinism identity, and lattice artifact from its fsynced journal; only the missing Nobara lane ran, quorum updated exactly once, and policy advanced `40,410,882 → 40,412,930`. Distributed policy and Adam state are now atomically checkpointed before publishing a new generation. |
+| Closed in code | Multi-map attestation/recovery | Workers rebuild the complete operator-approved manifest map pool, not only the assigned map, and reject assignments outside that pool. A multi-map live curriculum soak remains a promotion gate rather than a protocol mismatch. |
 | Closed | Four-ML deterministic boundary | Eight fixed-action four-slot q2/Rust trajectories were bit-exact, and full CPU-policy replay matched exactly. CUDA inference remains unsuitable for a byte-exact audit, so production CUDA workers use unique rollout keys and a CPU audit lane verifies replay. |
 | Closed | Concurrent multi-host capacity | WSL and Nobara supplied the same live generation concurrently: 335.50 and 536.60 SPS respectively, 671.01 conservative aggregate SPS, zero timeouts. See `docs/RUNTIME-ATTESTATION-THROUGHPUT-2026-07-12.md`. |
 | Closed | Signed runtime attestation | The learner pins the manifest digest in every policy, workers independently rebuild and verify the signed semantic manifest before q2 startup, and the coordinator rejects mismatches as `wrong_runtime`. Signed shadow lanes must configure the HMAC-key variable on learner/coordinator/workers; updated ops templates fail closed when it is missing. |
@@ -49,10 +48,10 @@ active run.
    policy dependencies, and the Rust extension; accept a real four-ML batch.
 2. **Completed:** signed runtime manifest and per-generation digest enforcement.
 3. **Completed:** remote episode and behavior telemetry parity.
-4. Run a real isolated learner-kill/worker-replacement rehearsal and close the
-   durable restart/fencing gate; do not infer this from loopback tests.
-5. Make map-pool attestation compatible with leased curriculum assignments and
-   validate it with at least two maps. Until then use one fixed shadow map.
+4. **Completed:** real worker replacement and mid-quorum learner-kill/restart;
+   durable journal restored one accepted lane and produced one optimizer update.
+5. **Completed in code:** full approved map-pool attestation and out-of-pool
+   rejection. Include at least two maps in the shadow soak before promotion.
 6. **Bounded:** use a CPU four-ML lane for exact replay audits; CUDA collection
    uses unique rollout keys and statistical policy-quality gates.
 7. Run distributed collection in shadow mode for at least 12–24 hours while
@@ -61,5 +60,5 @@ active run.
 8. Canary one learner update stream with automatic rollback to local
    collection, then promote only if throughput and policy-quality gates pass.
 
-The active master trainer should remain primary until P0 items are closed and
-the shadow run demonstrates a real capacity gain.
+The active master trainer should remain primary until the shadow soak and
+policy-quality gate demonstrate that the proven capacity gain is sustainable.

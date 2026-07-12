@@ -213,16 +213,22 @@ python tools/rollout_worker.py --mode q2 --continuous --leased \
   --lattice-dir worker-state/nobara-0
 ```
 
-The current attestation rebuild hashes only the assigned map, so recovery mode
-is limited to a **single fixed map** even though the assignment API can select
-from a pool. Do not launch a multi-map curriculum until the worker verifies the
-entire approved manifest map set and rejects only assignments outside it.
+Worker attestation hashes the complete map pool in the operator-approved
+manifest and rejects assignments outside it. This keeps one semantic runtime
+identity while leased curriculum assignments rotate among approved maps.
 
 An earlier isolated two-generation CUDA rehearsal completed versions 0 and 16
 with a single persistent q2ded launch, performed two learner PPO updates,
 published both policy generations, saved worker lattice snapshots for both,
 and produced learner checkpoint version 32. That predates leased recovery and
-is not a learner-restart/fencing proof.
+was followed by a real fault-injection proof on 2026-07-12. A dead worker's
+lane was reissued with the identical assignment ID and a newer lease epoch. In
+a separate run the learner was killed after accepting one of two lanes; after
+restart its fsynced generation journal restored that batch, receipt, completed
+lease, determinism identity, and lattice artifact. Only the missing lane ran,
+quorum updated once, and policy advanced `40,410,882 → 40,412,930` at 63 SPS.
+Distributed policy and optimizer checkpoints are atomically written before a
+new policy generation is published.
 
 Nobara's operational scaffold lives under `~/q2-rollout`; repo templates are
 in `ops/q2-rollout-worker.{service,env.example}`. The installed user service is

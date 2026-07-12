@@ -159,13 +159,24 @@ def _attest_worker_runtime(artifact, args, effective_device):
     if expected_verification.digest != artifact.runtime_manifest_sha256:
         raise RuntimeError("policy runtime digest does not match expected manifest")
     semantic = expected["semantic"]
+    approved_maps = tuple(
+        str(item.get("name", ""))
+        for item in semantic.get("maps", ())
+        if isinstance(item, dict) and item.get("name")
+    )
+    if not approved_maps:
+        raise RuntimeError("runtime manifest has no approved map pool")
+    if args.map_name not in approved_maps:
+        raise RuntimeError(
+            f"assigned map {args.map_name!r} is outside the approved manifest pool"
+        )
     runtime_config = _worker_runtime_config(
         semantic.get("runtime_config"), args, effective_device
     )
     current = build_runtime_manifest(
         q2_root=Path(os.environ["Q2_ROOT"]),
         source_root=ROOT,
-        map_names=[args.map_name],
+        map_names=approved_maps,
         source_revision=(
             os.environ.get("Q2_SOURCE_REVISION", "").strip() or None
         ),

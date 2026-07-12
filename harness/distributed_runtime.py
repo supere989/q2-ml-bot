@@ -617,6 +617,30 @@ class AssignmentLeaseBook:
                 "completed_lease_id": record.completed_lease_id,
             }
 
+    def restore_completed(
+        self,
+        assignment_id: str,
+        *,
+        attempts: int,
+        completed_lease_id: str,
+    ) -> None:
+        """Restore a durably accepted assignment without reviving its lease."""
+        attempts = _require_int("attempts", attempts, 1, self.max_attempts)
+        completed_lease_id = _require_identity(
+            "completed_lease_id", completed_lease_id
+        )
+        with self._lock:
+            record = self._records.get(assignment_id)
+            if record is None:
+                raise AssignmentUnavailableError("unknown assignment")
+            if record.state not in {"pending", "completed"}:
+                raise StaleLeaseError("cannot restore over an active assignment")
+            record.attempts = max(record.attempts, attempts)
+            record.active = None
+            record.state = "completed"
+            record.completed_lease_id = completed_lease_id
+            record.last_failure = ""
+
 
 def validate_batch_lease(
     metadata: Mapping[str, object],

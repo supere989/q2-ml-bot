@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
 import threading
 import time
@@ -18,6 +19,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Dict, Iterable, Optional, Sequence
 
 import numpy as np
@@ -420,6 +422,7 @@ class CoordinatorRecoveryConfig:
     max_attempts: int = 3
     lattice_store: Optional[LearnerLatticeStore] = None
     require_lattice_snapshot: bool = True
+    journal_root: Optional[Path] = None
 
     def __post_init__(self):
         if not isinstance(self.learner_id, str) or not self.learner_id.strip():
@@ -433,6 +436,119 @@ class CoordinatorRecoveryConfig:
         if self.require_lattice_snapshot and self.lattice_store is None:
             raise ValueError("required lattice snapshots need a learner lattice store")
         object.__setattr__(self, "maps", tuple(self.maps))
+        journal_root = self.journal_root
+        if journal_root is None and self.lattice_store is not None:
+            journal_root = self.lattice_store.root / "generation-journal"
+        if journal_root is not None:
+            object.__setattr__(self, "journal_root", Path(journal_root))
+
+
+class _GenerationJournal:
+    """Atomic write-ahead journal for accepted leased rollout batches."""
+
+    SCHEMA = 1
+
+    def __init__(self, root: Path, learner_id: str, config_hash: str):
+        self.root = Path(root)
+        self.learner_id = learner_id
+        self.config_hash = config_hash
+
+    def _path(self, assignment: RolloutAssignment) -> Path:
+        return (
+            self.root / f"generation_{assignment.policy_version:020d}" /
+            f"lane_{assignment.lane_index:04d}_{assignment.assignment_id}.q2gj"
+        )
+
+    @staticmethod
+    def _atomic_write(path: Path, payload: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(
+            f".{path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
+        )
+        try:
+            with temporary.open("wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    def record(
+        self,
+        assignment: RolloutAssignment,
+        encoded_batch: bytes,
+        *,
+        lease_epoch: int,
+        lease_id: str,
+    ) -> Path:
+        manifest = {
+            "schema": self.SCHEMA,
+            "learner_id": self.learner_id,
+            "config_hash": self.config_hash,
+            "assignment": assignment.as_dict(),
+            "lease_epoch": int(lease_epoch),
+            "lease_id": str(lease_id),
+            "batch_sha256": _sha256(encoded_batch),
+            "batch_bytes": len(encoded_batch),
+        }
+        header = _canonical_json(manifest)
+        payload = struct.pack("<Q", len(header)) + header + encoded_batch
+        path = self._path(assignment)
+        if path.exists():
+            existing = path.read_bytes()
+            if existing != payload:
+                raise ValueError("conflicting durable batch journal entry")
+            return path
+        self._atomic_write(path, payload)
+        return path
+
+    def remove(self, assignment: RolloutAssignment) -> None:
+        try:
+            self._path(assignment).unlink()
+        except FileNotFoundError:
+            pass
+
+    def load(self, policy_version: int):
+        directory = self.root / f"generation_{int(policy_version):020d}"
+        result = []
+        if not directory.is_dir():
+            return result
+        for path in sorted(directory.glob("lane_*.q2gj")):
+            payload = path.read_bytes()
+            if len(payload) < 8:
+                raise ValueError("truncated generation journal entry")
+            header_bytes = struct.unpack("<Q", payload[:8])[0]
+            if header_bytes > len(payload) - 8:
+                raise ValueError("invalid generation journal header length")
+            manifest = json.loads(payload[8:8 + header_bytes])
+            encoded = payload[8 + header_bytes:]
+            if (
+                manifest.get("schema") != self.SCHEMA
+                or manifest.get("learner_id") != self.learner_id
+                or manifest.get("config_hash") != self.config_hash
+                or manifest.get("batch_bytes") != len(encoded)
+                or manifest.get("batch_sha256") != _sha256(encoded)
+            ):
+                raise ValueError("generation journal identity/checksum mismatch")
+            assignment = RolloutAssignment.from_dict(manifest["assignment"])
+            if assignment.policy_version != int(policy_version):
+                raise ValueError("generation journal policy version mismatch")
+            result.append((
+                assignment,
+                encoded,
+                int(manifest["lease_epoch"]),
+                str(manifest["lease_id"]),
+            ))
+        return result
 
 
 class RolloutCoordinator:
@@ -466,6 +582,17 @@ class RolloutCoordinator:
         if recovery is not None and recovery.n_envs < 1:
             raise ValueError("recovery n_envs must be positive")
         self.recovery = recovery
+        self._journal = (
+            _GenerationJournal(
+                recovery.journal_root,
+                recovery.learner_id,
+                recovery.lattice_store.config_hash,
+            )
+            if recovery is not None
+            and recovery.journal_root is not None
+            and recovery.lattice_store is not None
+            else None
+        )
         self._lease_book = (
             AssignmentLeaseBook(recovery.lease_ttl, recovery.max_attempts)
             if recovery is not None else None
@@ -494,12 +621,38 @@ class RolloutCoordinator:
             self._policy = artifact
             self._batches.pop(artifact.version, None)
             if self.recovery is not None:
+                restored_entries = (
+                    self._journal.load(artifact.version)
+                    if self._journal is not None else []
+                )
+                restored_by_lane = {}
+                for saved_assignment, encoded, lease_epoch, lease_id in restored_entries:
+                    if (
+                        saved_assignment.config_hash != artifact.config_hash
+                        or saved_assignment.policy_sha256 != artifact.sha256
+                    ):
+                        raise ValueError(
+                            "generation journal does not match published policy"
+                        )
+                    if saved_assignment.lane_index in restored_by_lane:
+                        raise ValueError("generation journal repeats a lane")
+                    restored_by_lane[saved_assignment.lane_index] = (
+                        saved_assignment, encoded, lease_epoch, lease_id
+                    )
                 lattice_refs = {}
                 if self.recovery.lattice_store is not None:
                     for lane_index in range(self.quorum):
                         latest = self.recovery.lattice_store.latest(lane_index)
-                        if latest is not None and latest.policy_version <= artifact.version:
+                        if latest is not None and latest.policy_version < artifact.version:
                             lattice_refs[lane_index] = latest.artifact_sha256
+                        elif (
+                            latest is not None
+                            and latest.policy_version == artifact.version
+                            and lane_index not in restored_by_lane
+                        ):
+                            raise ValueError(
+                                "current-generation lattice has no durable batch journal"
+                            )
                 assignments = build_generation_assignments(
                     learner_id=self.recovery.learner_id,
                     config_hash=artifact.config_hash,
@@ -514,12 +667,58 @@ class RolloutCoordinator:
                     base_game_seed=self.recovery.base_game_seed,
                     lattice_artifacts=lattice_refs,
                 )
+                assignments = tuple(
+                    restored_by_lane.get(assignment.lane_index, (assignment,))[0]
+                    for assignment in assignments
+                )
                 self._assignments[artifact.version] = {
                     assignment.lane_index: assignment
                     for assignment in assignments
                 }
                 assert self._lease_book is not None
                 self._lease_book.add(assignments)
+                generation = self._batches.setdefault(artifact.version, {})
+                for assignment, encoded, lease_epoch, lease_id in restored_entries:
+                    batch = RolloutBatch.decode(encoded)
+                    if any(
+                        batch.metadata.get(name) != value
+                        for name, value in assignment.batch_contract().items()
+                    ):
+                        raise ValueError("journaled batch violates assignment contract")
+                    batch.validate_ppo_schema()
+                    lattice_array = batch.arrays.get("lattice_payload")
+                    if lattice_array is None and self.recovery.require_lattice_snapshot:
+                        raise ValueError("journaled batch has no lattice payload")
+                    lattice_digest = ""
+                    if lattice_array is not None:
+                        lattice_artifact = LatticeArtifact.from_assignment(
+                            assignment, lattice_array.tobytes()
+                        )
+                        assert self.recovery.lattice_store is not None
+                        self.recovery.lattice_store.publish(
+                            lattice_artifact, assignment
+                        )
+                        lattice_digest = lattice_artifact.artifact_sha256
+                    batch_id = _sha256(encoded)
+                    rollout_hash = batch.rollout_hash()
+                    key = str(batch.metadata["determinism_key"])
+                    previous = self._determinism.get(key)
+                    if previous is not None and previous != rollout_hash:
+                        raise ValueError("journaled batch determinism conflict")
+                    self._determinism[key] = rollout_hash
+                    generation[assignment.assignment_id] = batch
+                    self._batch_ids.add(batch_id)
+                    decision = BatchDecision(
+                        "accepted", True, "batch restored from journal",
+                        artifact.version, len(generation),
+                        assignment.assignment_id, lattice_digest,
+                    )
+                    self._receipts[batch_id] = decision
+                    self._lease_book.restore_completed(
+                        assignment.assignment_id,
+                        attempts=lease_epoch,
+                        completed_lease_id=lease_id,
+                    )
             self._condition.notify_all()
 
     def policy(self) -> Optional[PolicyArtifact]:
@@ -729,12 +928,24 @@ class RolloutCoordinator:
                     lattice_artifact_sha256 = lattice_artifact.artifact_sha256
 
             if lease is not None:
+                journal_recorded = False
                 try:
                     before_complete = None
-                    if lattice_artifact is not None:
-                        before_complete = lambda: self.recovery.lattice_store.publish(
-                            lattice_artifact, assignment
-                        )
+                    def _commit_durable_acceptance():
+                        nonlocal journal_recorded
+                        if self._journal is not None:
+                            self._journal.record(
+                                assignment,
+                                encoded,
+                                lease_epoch=lease.epoch,
+                                lease_id=lease.lease_id,
+                            )
+                            journal_recorded = True
+                        if lattice_artifact is not None:
+                            self.recovery.lattice_store.publish(
+                                lattice_artifact, assignment
+                            )
+                    before_complete = _commit_durable_acceptance
                     self._lease_book.complete(
                         lease.lease_id,
                         lease.worker_id,
@@ -746,6 +957,8 @@ class RolloutCoordinator:
                         len(generation), assignment.assignment_id,
                     )
                 except (OSError, TypeError, ValueError) as error:
+                    if journal_recorded and self._journal is not None:
+                        self._journal.remove(assignment)
                     return BatchDecision(
                         "invalid_lattice", False, str(error), current.version,
                         len(generation), assignment.assignment_id,

@@ -192,7 +192,10 @@ def test_worker_attestation_uses_actual_config_and_source_revision(monkeypatch):
         "deterministic_actions": False,
         "device": "cuda",
     }
-    expected = {"semantic": {"runtime_config": expected_config}}
+    expected = {"semantic": {
+        "runtime_config": expected_config,
+        "maps": [{"name": "mltrain_test"}, {"name": "map-b"}],
+    }}
     captured = {}
     monkeypatch.setattr(attestation, "load_runtime_manifest", lambda _path: expected)
 
@@ -230,8 +233,14 @@ def test_worker_attestation_uses_actual_config_and_source_revision(monkeypatch):
     ) == digest
     assert captured["runtime_config"] == expected_config
     assert captured["source_revision"] == "actual-revision"
+    assert captured["map_names"] == ("mltrain_test", "map-b")
 
     with pytest.raises(RuntimeError, match="runtime attestation failed"):
         _attest_worker_runtime(
             artifact, _attestation_args(n_ml=3), "cuda"
+        )
+
+    with pytest.raises(RuntimeError, match="outside the approved"):
+        _attest_worker_runtime(
+            artifact, _attestation_args(map_name="unapproved"), "cuda"
         )

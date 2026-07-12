@@ -570,6 +570,12 @@ def train(cfg: dict):
             resume_steps = int(latest.stem.split("_")[-1])
         except ValueError:
             resume_steps = 0
+        optimizer_checkpoint = resume_dir / f"optimizer_{resume_steps:08d}.pt"
+        if optimizer_checkpoint.is_file():
+            optimizer.load_state_dict(torch.load(
+                optimizer_checkpoint, map_location=device
+            ))
+            print(f"Restored optimizer from {optimizer_checkpoint}")
         print(f"Resumed from {latest} (env_steps={resume_steps:,})")
 
     from harness.env import Q2MultiEnv, discover_map_pool
@@ -1489,6 +1495,26 @@ def train(cfg: dict):
             ))
 
         if distributed:
+            # The next policy must be durable before workers can observe it.
+            # Together with the accepted-batch journal this prevents a crash
+            # from replaying an optimizer update or losing Adam state.
+            policy_checkpoint = ckpt_dir / f"policy_{total_env_steps:08d}.pt"
+            optimizer_checkpoint = ckpt_dir / f"optimizer_{total_env_steps:08d}.pt"
+            for target, value in (
+                (policy_checkpoint, policy.state_dict()),
+                (optimizer_checkpoint, optimizer.state_dict()),
+            ):
+                temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+                with temporary.open("wb") as handle:
+                    torch.save(value, handle)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, target)
+            checkpoint_directory = os.open(ckpt_dir, os.O_RDONLY)
+            try:
+                os.fsync(checkpoint_directory)
+            finally:
+                os.close(checkpoint_directory)
             publish_distributed_policy(total_env_steps)
 
         # logging

@@ -5,7 +5,7 @@ import time
 import numpy as np
 import pytest
 
-from harness.distributed_runtime import LearnerLatticeStore
+from harness.distributed_runtime import LearnerLatticeStore, StaleLeaseError
 from harness.rollout_protocol import (
     CoordinatorClient,
     CoordinatorRecoveryConfig,
@@ -166,3 +166,68 @@ def test_expired_assignment_is_reissued_with_same_identity_and_new_fence(tmp_pat
         assert stale.value.status == 409
     finally:
         server.close()
+
+
+def test_restart_restores_accepted_batch_receipt_and_quorum(tmp_path):
+    store = LearnerLatticeStore(
+        tmp_path / "learner-lattices", "learner-a", CONFIG_HASH
+    )
+    recovery = CoordinatorRecoveryConfig(
+        learner_id="learner-a",
+        steps=4,
+        n_envs=2,
+        maps=("map-a",),
+        base_seed=10,
+        base_game_seed=20,
+        lease_ttl=1.0,
+        max_attempts=3,
+        lattice_store=store,
+    )
+    policy = PolicyArtifact.create(
+        7, b"restart-policy", CONFIG_HASH, RUNTIME_DIGEST
+    )
+    first = RolloutCoordinator(
+        2,
+        schema="ppo",
+        expected_runtime_manifest_sha256=RUNTIME_DIGEST,
+        recovery=recovery,
+    )
+    first.publish(policy)
+    lease = first.claim_assignment("worker-before-crash", preferred_lane=0)
+    encoded = _leased_batch(policy, lease, _lattice_payload(28)).encode()
+    accepted = first.submit(encoded)
+    assert accepted.accepted
+    assert first.status()["accepted_for_current"] == 1
+
+    # A fresh coordinator incarnation reconstructs the accepted slot and its
+    # receipt from disk, while every pre-crash lease token remains fenced.
+    restarted = RolloutCoordinator(
+        2,
+        schema="ppo",
+        expected_runtime_manifest_sha256=RUNTIME_DIGEST,
+        recovery=recovery,
+    )
+    restarted.publish(policy)
+    assert restarted.status()["accepted_for_current"] == 1
+    assert restarted.status()["assignments_completed"] == 1
+    duplicate = restarted.submit(encoded)
+    assert duplicate.status == "duplicate"
+    assert duplicate.assignment_id == accepted.assignment_id
+    with pytest.raises(StaleLeaseError):
+        restarted.heartbeat_assignment(lease.lease_id, lease.worker_id)
+
+    replacement = restarted.claim_assignment(
+        "worker-after-crash", preferred_lane=1
+    )
+    second = restarted.submit(
+        _leased_batch(policy, replacement, _lattice_payload(29)).encode()
+    )
+    assert second.accepted
+    batches = restarted.wait_for_quorum(policy.version, 0.2)
+    assert len(batches) == 2
+    assert {
+        batch.metadata["assignment_id"] for batch in batches
+    } == {
+        lease.assignment.assignment_id,
+        replacement.assignment.assignment_id,
+    }
