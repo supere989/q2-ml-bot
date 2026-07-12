@@ -12,7 +12,13 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from harness.rust_lattice import CHANNELS, available, nearest_signals, pack_cells
+from harness.rust_lattice import (
+    CHANNELS,
+    StatefulLatticeIndex,
+    available,
+    nearest_signals,
+    pack_cells,
+)
 from harness.spatial import SessionMemoryCell, VoxelSpatialReward
 
 
@@ -54,7 +60,12 @@ def main():
     state = np.zeros(10, dtype=np.float32)
     state[6] = 100.0
     state[9] = 10.0
-    obs = SimpleNamespace(self_state=state)
+    obs = SimpleNamespace(
+        self_state=state,
+        rune_flags=np.zeros(5, dtype=np.float32),
+        entities=np.zeros((0, 10), dtype=np.float32),
+        entity_count=0,
+    )
 
     timed(
         "python single pass",
@@ -84,6 +95,24 @@ def main():
         "rust with Python repack",
         max(100, args.iterations // 5),
         lambda: nearest_signals(reward, obs),
+    )
+
+    stateful = StatefulLatticeIndex(reward)
+    timed(
+        "rust stateful policy tail",
+        args.iterations,
+        lambda: stateful.features(reward, obs),
+    )
+    dirty_cell = next(iter(memory))
+
+    def apply_one_changed_cell():
+        memory[dirty_cell].engagement_count += 0.001
+        stateful.apply_cells(reward, (dirty_cell,))
+
+    timed(
+        "rust incremental one-cell",
+        args.iterations,
+        apply_one_changed_cell,
     )
 
 

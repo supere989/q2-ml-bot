@@ -39,7 +39,17 @@ On the procreator host with 287 populated cells:
 | Rust plus Python dict→array repack | ~425 µs |
 
 The kernel is about 65× faster than optimized Python, but a naive per-tick
-binding is slower because packing dominates. Therefore this extension is not
-connected to the live path yet. The next Rust milestone is a stateful index
-that owns cells and accepts incremental deposits/updates, allowing queries to
-cross the Python boundary without rebuilding the map.
+binding is slower because packing dominates.
+
+## Stateful prototype
+
+`q2_lattice_rs.LatticeIndex` now owns a deterministic sparse cell map. It
+supports incremental upsert/remove operations, GIL-free nearest-signal and
+24-float feature queries, and a versioned deterministic binary snapshot. The
+Python harness enables it only with `Q2_RUST_LATTICE=1` and automatically
+falls back when the extension is unavailable.
+
+With 400 populated cells, a complete stateful policy-tail query is ~7.4 µs
+and a one-cell incremental update is ~2.3 µs. An isolated four-slot q2ded A/B
+measured ~608 transitions/sec for optimized Python and ~1,797 for stateful
+Rust, with maximum feature error `5.96e-08` over 600 live comparisons.

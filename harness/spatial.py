@@ -125,6 +125,7 @@ class VoxelSpatialReward:
     session_memory_death_aversion: float = 0.010
     session_memory_self_fire_penalty: float = 0.012
     session_memory_camp_penalty: float = 0.004
+    rust_lattice_enabled: bool = False
     lattice_preload_enabled: bool = True
     lattice_routes_enabled: bool = True
     lattice_prior_scale: float = 8.0
@@ -195,6 +196,14 @@ class VoxelSpatialReward:
     _feature_cache_key: Optional[Tuple[str, int]] = field(default=None, init=False)
     _feature_cache: Optional[np.ndarray] = field(default=None, init=False, repr=False)
     _feature_nearest_deaths: float = field(default=0.0, init=False)
+    _rust_indices: Dict[str, object] = field(default_factory=dict, init=False, repr=False)
+    _rust_dirty_cells: Dict[str, Set[Tuple[int, int, int]]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _rust_removed_cells: Dict[str, Set[Tuple[int, int, int]]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _rust_fallback_reason: str = field(default="", init=False)
     last_visible_count: int = 0
     last_damage_tick: int = -1000000
     last_damage_cell: Optional[Tuple[int, int, int]] = None
@@ -278,6 +287,7 @@ class VoxelSpatialReward:
             session_memory_camp_penalty=_env_float(
                 "R_SESSION_MEMORY_CAMP", 0.004
             ),
+            rust_lattice_enabled=bool(_env_int("Q2_RUST_LATTICE", 0)),
             lattice_preload_enabled=os.environ.get(
                 "Q2_LATTICE_PRELOAD", "1"
             ).lower() not in {"0", "false", "off", "no"},
@@ -456,6 +466,60 @@ class VoxelSpatialReward:
         self._feature_cache = None
         self._feature_nearest_deaths = 0.0
 
+    def _mark_rust_dirty(
+        self, cell: Tuple[int, int, int], map_name: Optional[str] = None
+    ) -> None:
+        if not self.rust_lattice_enabled:
+            return
+        key = map_name or self.map_name or "unknown"
+        normalized = tuple(int(value) for value in cell)
+        self._rust_dirty_cells.setdefault(key, set()).add(normalized)
+        self._rust_removed_cells.setdefault(key, set()).discard(normalized)
+
+    def _mark_rust_removed(
+        self, cell: Tuple[int, int, int], map_name: Optional[str] = None
+    ) -> None:
+        if not self.rust_lattice_enabled:
+            return
+        key = map_name or self.map_name or "unknown"
+        normalized = tuple(int(value) for value in cell)
+        self._rust_removed_cells.setdefault(key, set()).add(normalized)
+        self._rust_dirty_cells.setdefault(key, set()).discard(normalized)
+
+    def _rust_index(self):
+        """Return the current map's index, or permanently fall back to Python."""
+        if not self.rust_lattice_enabled:
+            return None
+        key = self.map_name or "unknown"
+        existing = self._rust_indices.get(key)
+        if existing is not None:
+            return existing
+        try:
+            from .rust_lattice import StatefulLatticeIndex
+
+            index = StatefulLatticeIndex(self, sync=True)
+        except (ImportError, RuntimeError, AttributeError, ValueError) as error:
+            self._rust_fallback_reason = str(error)
+            self.rust_lattice_enabled = False
+            return None
+        self._rust_indices[key] = index
+        self._rust_dirty_cells.pop(key, None)
+        self._rust_removed_cells.pop(key, None)
+        return index
+
+    def _flush_rust_index(self):
+        index = self._rust_index()
+        if index is None:
+            return None
+        key = self.map_name or "unknown"
+        removed = self._rust_removed_cells.pop(key, set())
+        dirty = self._rust_dirty_cells.pop(key, set())
+        if removed:
+            index.remove_cells(removed)
+        if dirty:
+            index.apply_cells(self, dirty)
+        return index
+
     def _wanted_route_axis(self, obs: Observation) -> str:
         health = float(obs.self_state[6]) if len(obs.self_state) > 6 else 100.0
         if health <= self.rune_low_health:
@@ -486,6 +550,7 @@ class VoxelSpatialReward:
             if entry is not None:
                 entry.readiness = 0.0
                 entry.route_bias = 0.0
+                self._mark_rust_dirty(cell, map_name)
         self.dynamic_cells[map_name] = set()
 
     def _deposit_dynamic(self, map_name: str, deposit: dict,
@@ -514,6 +579,7 @@ class VoxelSpatialReward:
                     entry.readiness += amount * self.lattice_route_scale * weight
                     entry.route_bias += route_bias * weight
                     touched.add(cell)
+                    self._mark_rust_dirty(cell, map_name)
 
     def _refresh_route_heat(self, obs: Observation, force: bool = False) -> bool:
         table = self.item_timings.get(self.map_name)
@@ -941,6 +1007,21 @@ class VoxelSpatialReward:
         if self._feature_cache_key == cache_key and self._feature_cache is not None:
             return self._feature_cache
 
+        if self.session_memory_enabled and self.rust_lattice_enabled:
+            try:
+                rust_index = self._flush_rust_index()
+                if rust_index is not None:
+                    features, nearest_deaths = rust_index.features_with_deaths(
+                        self, obs
+                    )
+                    self._feature_nearest_deaths = float(nearest_deaths)
+                    self._feature_cache_key = cache_key
+                    self._feature_cache = features
+                    return features
+            except (RuntimeError, ValueError, AttributeError) as error:
+                self._rust_fallback_reason = str(error)
+                self.rust_lattice_enabled = False
+
         features = np.zeros(OBS_SESSION_MEMORY_DIM, dtype=np.float32)
         nearest = {
             kind: (0.0, 0.0, 0.0, 0.0)
@@ -1007,6 +1088,7 @@ class VoxelSpatialReward:
             entry = SessionMemoryCell()
             memory[cell] = entry
         entry.last_tick = int(tick)
+        self._mark_rust_dirty(cell)
         self._prune_memory(memory)
         return entry
 
@@ -1023,6 +1105,7 @@ class VoxelSpatialReward:
         )[:overflow]
         for cell, _entry in victims:
             memory.pop(cell, None)
+            self._mark_rust_removed(cell)
 
     def _update_session_memory(
         self,
@@ -1135,6 +1218,7 @@ class VoxelSpatialReward:
             return False
         if target == self.map_name:
             self._invalidate_feature_cache()
+        self._mark_rust_dirty(cell, target)
         return True
 
     def _nearest_memory_signal(
@@ -1793,6 +1877,9 @@ def load_lattice_state(instances, path) -> dict:
                 memory[cell] = SessionMemoryCell(**kwargs)
                 restored_cells += 1
             inst.preloaded_maps.add(map_name)
+            inst._rust_indices.pop(map_name, None)
+            inst._rust_dirty_cells.pop(map_name, None)
+            inst._rust_removed_cells.pop(map_name, None)
         inst._invalidate_feature_cache()
     return {
         "env_steps": int(payload.get("env_steps", 0)),
