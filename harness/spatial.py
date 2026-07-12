@@ -203,7 +203,11 @@ class VoxelSpatialReward:
     _rust_removed_cells: Dict[str, Set[Tuple[int, int, int]]] = field(
         default_factory=dict, init=False, repr=False
     )
+    _rust_score_events: Dict[
+        str, Dict[Tuple[int, int, int], np.ndarray]
+    ] = field(default_factory=dict, init=False, repr=False)
     _rust_fallback_reason: str = field(default="", init=False)
+    _rust_event_rows_applied: int = field(default=0, init=False)
     last_visible_count: int = 0
     last_damage_tick: int = -1000000
     last_damage_cell: Optional[Tuple[int, int, int]] = None
@@ -486,6 +490,42 @@ class VoxelSpatialReward:
         self._rust_removed_cells.setdefault(key, set()).add(normalized)
         self._rust_dirty_cells.setdefault(key, set()).discard(normalized)
 
+    def _mark_rust_score_event(
+        self,
+        cell: Tuple[int, int, int],
+        engagement: float = 0.0,
+        threat: float = 0.0,
+        opportunity: float = 0.0,
+        self_fire: float = 0.0,
+        deaths: float = 0.0,
+        samples: float = 0.0,
+        force_confident: bool = False,
+        confidence_override: Optional[float] = None,
+        map_name: Optional[str] = None,
+    ) -> None:
+        if not self.rust_lattice_enabled:
+            return
+        key = map_name or self.map_name or "unknown"
+        normalized = tuple(int(value) for value in cell)
+        events = self._rust_score_events.setdefault(key, {})
+        delta = events.get(normalized)
+        if delta is None:
+            delta = np.zeros(8, dtype=np.float32)
+            delta[7] = np.nan
+            events[normalized] = delta
+        delta[:6] += (
+            engagement,
+            threat,
+            opportunity,
+            self_fire,
+            deaths,
+            samples,
+        )
+        if force_confident:
+            delta[6] = 1.0
+        if confidence_override is not None:
+            delta[7] = float(confidence_override)
+
     def _rust_index(self):
         """Return the current map's index, or permanently fall back to Python."""
         if not self.rust_lattice_enabled:
@@ -505,6 +545,7 @@ class VoxelSpatialReward:
         self._rust_indices[key] = index
         self._rust_dirty_cells.pop(key, None)
         self._rust_removed_cells.pop(key, None)
+        self._rust_score_events.pop(key, None)
         return index
 
     def _flush_rust_index(self):
@@ -514,8 +555,14 @@ class VoxelSpatialReward:
         key = self.map_name or "unknown"
         removed = self._rust_removed_cells.pop(key, set())
         dirty = self._rust_dirty_cells.pop(key, set())
+        events = self._rust_score_events.pop(key, {})
         if removed:
             index.remove_cells(removed)
+        for cell in removed | dirty:
+            events.pop(cell, None)
+        if events:
+            index.apply_score_events(events)
+            self._rust_event_rows_applied += len(events)
         if dirty:
             index.apply_cells(self, dirty)
         return index
@@ -548,9 +595,19 @@ class VoxelSpatialReward:
         for cell in self.dynamic_cells.get(map_name, set()):
             entry = memory.get(cell)
             if entry is not None:
+                old_threat = max(0.0, -entry.readiness)
+                old_opportunity = (
+                    max(0.0, entry.readiness) + max(0.0, entry.route_bias)
+                )
                 entry.readiness = 0.0
                 entry.route_bias = 0.0
-                self._mark_rust_dirty(cell, map_name)
+                self._mark_rust_score_event(
+                    cell,
+                    threat=-old_threat,
+                    opportunity=-old_opportunity,
+                    confidence_override=self._memory_confidence(entry),
+                    map_name=map_name,
+                )
         self.dynamic_cells[map_name] = set()
 
     def _deposit_dynamic(self, map_name: str, deposit: dict,
@@ -576,10 +633,24 @@ class VoxelSpatialReward:
                     if weight <= 0.0:
                         continue
                     entry = memory.setdefault(cell, SessionMemoryCell())
+                    old_threat = max(0.0, -entry.readiness)
+                    old_opportunity = (
+                        max(0.0, entry.readiness) + max(0.0, entry.route_bias)
+                    )
                     entry.readiness += amount * self.lattice_route_scale * weight
                     entry.route_bias += route_bias * weight
                     touched.add(cell)
-                    self._mark_rust_dirty(cell, map_name)
+                    new_threat = max(0.0, -entry.readiness)
+                    new_opportunity = (
+                        max(0.0, entry.readiness) + max(0.0, entry.route_bias)
+                    )
+                    self._mark_rust_score_event(
+                        cell,
+                        threat=new_threat - old_threat,
+                        opportunity=new_opportunity - old_opportunity,
+                        confidence_override=self._memory_confidence(entry),
+                        map_name=map_name,
+                    )
 
     def _refresh_route_heat(self, obs: Observation, force: bool = False) -> bool:
         table = self.item_timings.get(self.map_name)
@@ -1088,7 +1159,6 @@ class VoxelSpatialReward:
             entry = SessionMemoryCell()
             memory[cell] = entry
         entry.last_tick = int(tick)
-        self._mark_rust_dirty(cell)
         self._prune_memory(memory)
         return entry
 
@@ -1152,6 +1222,33 @@ class VoxelSpatialReward:
             here.damage_taken += damage_taken
             here.kills += kills
             here.deaths += deaths
+            self._mark_rust_score_event(
+                cell,
+                engagement=(
+                    (1.0 if contact else 0.0)
+                    + 0.35 * visible_count
+                    + (0.50 if hook_enemy else 0.0)
+                    + (0.35 * items if contact else 0.0)
+                ),
+                threat=0.15 * visible_count + 0.03 * damage_taken + 3.0 * deaths,
+                opportunity=(
+                    (0.45 if hook_enemy else 0.0)
+                    + (0.45 * items if contact else 0.0)
+                    + 0.03 * damage_dealt
+                    + 3.0 * kills
+                ),
+                self_fire=(1.0 if fired else 0.0),
+                deaths=3.0 * deaths,
+                samples=(
+                    (1.0 if contact else 0.0)
+                    + visible_count
+                    + (1.0 if fired else 0.0)
+                    + (1.0 if hook_enemy else 0.0)
+                    + (items if contact else 0.0)
+                    + kills
+                    + deaths
+                ),
+            )
 
         if visible_contact:
             for enemy_cell in self._visible_enemy_cells(obs):
@@ -1162,9 +1259,26 @@ class VoxelSpatialReward:
                 seen.kills += kills / max(1, visible_count)
                 if fire_audio_contact:
                     seen.self_fire += 0.25
+                dealt_share = damage_dealt / max(1, visible_count)
+                kill_share = kills / max(1, visible_count)
+                self._mark_rust_score_event(
+                    enemy_cell,
+                    engagement=1.35,
+                    threat=0.15,
+                    opportunity=0.03 * dealt_share + 3.0 * kill_share,
+                    self_fire=(0.25 if fire_audio_contact else 0.0),
+                    samples=(
+                        2.0
+                        + kill_share
+                        + (0.25 if fire_audio_contact else 0.0)
+                    ),
+                )
 
         if self.last_visible_count > 0 and visible_count == 0:
             self._memory_cell(cell, tick).enemy_lost += 1.0
+            self._mark_rust_score_event(
+                cell, engagement=0.25, threat=0.20, samples=1.0
+            )
 
         if damage_taken > 0.0:
             self.last_damage_tick = tick
@@ -1176,6 +1290,7 @@ class VoxelSpatialReward:
             cell != self.last_damage_cell
         ):
             self._memory_cell(cell, tick).successful_escape += 1.0
+            self._mark_rust_score_event(cell, opportunity=0.20, samples=1.0)
             self.last_damage_cell = None
 
         self.last_visible_count = visible_count
@@ -1880,6 +1995,7 @@ def load_lattice_state(instances, path) -> dict:
             inst._rust_indices.pop(map_name, None)
             inst._rust_dirty_cells.pop(map_name, None)
             inst._rust_removed_cells.pop(map_name, None)
+            inst._rust_score_events.pop(map_name, None)
         inst._invalidate_feature_cache()
     return {
         "env_steps": int(payload.get("env_steps", 0)),

@@ -49,7 +49,12 @@ supports incremental upsert/remove operations, GIL-free nearest-signal and
 Python harness enables it only with `Q2_RUST_LATTICE=1` and automatically
 falls back when the extension is unavailable.
 
-With 400 populated cells, a complete stateful policy-tail query is ~7.4 µs
-and a one-cell incremental update is ~2.3 µs. An isolated four-slot q2ded A/B
-measured ~608 transitions/sec for optimized Python and ~1,797 for stateful
-Rust, with maximum feature error `5.96e-08` over 600 live comparisons.
+Combat and readiness updates are coalesced per voxel and applied as additive
+score/sample events. This keeps Python's checkpoint cells as the compatibility
+oracle while Rust owns live accumulation and confidence evolution.
+
+With 400 populated cells, a complete stateful policy-tail query is ~7.4 µs,
+a full one-cell replacement is ~2.4 µs, and an event-native update is ~0.9 µs.
+An isolated four-slot q2ded A/B measured ~607 transitions/sec for optimized
+Python and ~1,878 for event-native Rust. A live run applied 300 event rows with
+maximum feature error `1.79e-07` over 600 comparisons.

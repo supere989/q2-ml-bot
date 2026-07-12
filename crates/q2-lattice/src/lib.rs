@@ -14,6 +14,7 @@ const FEATURES: usize = 24;
 const FEATURE_BUNDLE: usize = FEATURES + 1;
 const STATE_MAGIC: &[u8; 8] = b"Q2LAT001";
 pub const PACKED_CELL_WIDTH: usize = 9;
+pub const SCORE_EVENT_WIDTH: usize = 11;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PackedCell {
@@ -32,6 +33,48 @@ impl PackedCell {
             raw_scores: [row[3], row[4], row[5], row[6], row[7]],
             confidence: row[8],
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IndexedCell {
+    packed: PackedCell,
+    sample_mass: f32,
+}
+
+impl IndexedCell {
+    fn from_packed(packed: PackedCell) -> Self {
+        let confidence = packed.confidence.clamp(0.0, 1.0);
+        let sample_mass = if confidence >= 1.0 {
+            24.0
+        } else {
+            (confidence * 24.0_f32.ln_1p()).exp_m1()
+        };
+        Self {
+            packed,
+            sample_mass,
+        }
+    }
+
+    fn apply_score_event(
+        &mut self,
+        score_deltas: [f32; CHANNELS],
+        sample_delta: f32,
+        force_confident: bool,
+        confidence_override: Option<f32>,
+    ) {
+        for (score, delta) in self.packed.raw_scores.iter_mut().zip(score_deltas) {
+            *score += delta;
+        }
+        self.sample_mass = (self.sample_mass + sample_delta).max(0.0);
+        let learned = self.sample_mass.ln_1p() / 24.0_f32.ln_1p();
+        self.packed.confidence = if let Some(confidence) = confidence_override {
+            confidence.clamp(0.0, 1.0)
+        } else if force_confident {
+            1.0
+        } else {
+            self.packed.confidence.max(learned.min(1.0))
+        };
     }
 }
 
@@ -141,7 +184,7 @@ fn nearest_signals_iter<'a>(
 /// queries never rebuild or copy the complete lattice across the FFI boundary.
 #[derive(Clone, Debug)]
 pub struct LatticeIndex {
-    cells: BTreeMap<[i32; 3], PackedCell>,
+    cells: BTreeMap<[i32; 3], IndexedCell>,
     search_radius: f32,
     voxel_size: f32,
     score_scale: f32,
@@ -170,7 +213,31 @@ impl LatticeIndex {
     }
 
     pub fn upsert(&mut self, cell: PackedCell) {
-        self.cells.insert(cell.voxel, cell);
+        self.cells
+            .insert(cell.voxel, IndexedCell::from_packed(cell));
+    }
+
+    pub fn apply_score_event(
+        &mut self,
+        voxel: [i32; 3],
+        score_deltas: [f32; CHANNELS],
+        sample_delta: f32,
+        force_confident: bool,
+        confidence_override: Option<f32>,
+    ) {
+        let cell = self.cells.entry(voxel).or_insert_with(|| {
+            IndexedCell::from_packed(PackedCell {
+                voxel,
+                raw_scores: [0.0; CHANNELS],
+                confidence: 0.0,
+            })
+        });
+        cell.apply_score_event(
+            score_deltas,
+            sample_delta,
+            force_confident,
+            confidence_override,
+        );
     }
 
     pub fn remove(&mut self, voxel: [i32; 3]) -> bool {
@@ -179,7 +246,7 @@ impl LatticeIndex {
 
     pub fn nearest_signals(&self, position: [f32; 3]) -> [[f32; OUTPUTS]; CHANNELS] {
         nearest_signals_iter(
-            self.cells.values(),
+            self.cells.values().map(|cell| &cell.packed),
             position,
             self.search_radius,
             self.voxel_size,
@@ -208,7 +275,7 @@ impl LatticeIndex {
         survivability: [f32; 3],
     ) -> [f32; FEATURE_BUNDLE] {
         let mut output = [0.0; FEATURE_BUNDLE];
-        if let Some(current) = self.cells.get(&current_voxel) {
+        if let Some(current) = self.cells.get(&current_voxel).map(|cell| &cell.packed) {
             for (index, raw) in current.raw_scores[..4].iter().enumerate() {
                 output[index] = (raw.max(0.0) / self.score_scale).tanh();
             }
@@ -230,7 +297,7 @@ impl LatticeIndex {
         let mut bytes = Vec::with_capacity(24 + self.cells.len() * 36);
         bytes.extend_from_slice(STATE_MAGIC);
         bytes.extend_from_slice(&(self.cells.len() as u64).to_le_bytes());
-        for cell in self.cells.values() {
+        for cell in self.cells.values().map(|cell| &cell.packed) {
             for value in cell.voxel {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
@@ -292,7 +359,7 @@ impl LatticeIndex {
 
 #[cfg(feature = "python")]
 mod python {
-    use super::{LatticeIndex, PACKED_CELL_WIDTH, PackedCell, nearest_signals};
+    use super::{LatticeIndex, PACKED_CELL_WIDTH, PackedCell, SCORE_EVENT_WIDTH, nearest_signals};
     use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
     use pyo3::exceptions::PyValueError;
     use pyo3::prelude::*;
@@ -368,6 +435,32 @@ mod python {
             let count = packed.len();
             for cell in packed {
                 self.inner.upsert(cell);
+            }
+            Ok(count)
+        }
+
+        /// Rows are voxel xyz, five raw-score deltas, sample delta, and a
+        /// force-confidence flag. Multiple Python events are coalesced first.
+        fn apply_score_events(&mut self, events: PyReadonlyArray2<'_, f32>) -> PyResult<usize> {
+            let view = events.as_array();
+            if view.shape().len() != 2 || view.shape()[1] != SCORE_EVENT_WIDTH {
+                return Err(PyValueError::new_err(format!(
+                    "events must have shape (N, {SCORE_EVENT_WIDTH})"
+                )));
+            }
+            let values = events.as_slice().map_err(|_| {
+                PyValueError::new_err("events must be a C-contiguous float32 array")
+            })?;
+            let mut count = 0;
+            for row in values.chunks_exact(SCORE_EVENT_WIDTH) {
+                self.inner.apply_score_event(
+                    [row[0] as i32, row[1] as i32, row[2] as i32],
+                    [row[3], row[4], row[5], row[6], row[7]],
+                    row[8],
+                    row[9] > 0.5,
+                    row[10].is_finite().then_some(row[10]),
+                );
+                count += 1;
             }
             Ok(count)
         }
@@ -522,6 +615,11 @@ mod tests {
         assert_eq!(index.features([0.0; 3], [0, 0, 0], [0.0; 3])[4], 0.25);
         assert!(index.remove([2, 0, 0]));
         assert_eq!(index.len(), 1);
+
+        index.apply_score_event([4, 0, 0], [1.0, 2.0, 3.0, 4.0, 5.0], 1.0, false, None);
+        let event_features = index.features([0.0; 3], [4, 0, 0], [0.0; 3]);
+        assert!((event_features[0] - 0.125_f32.tanh()).abs() < 1e-6);
+        assert!((event_features[4] - 2.0_f32.ln() / 25.0_f32.ln()).abs() < 1e-6);
     }
 
     #[test]

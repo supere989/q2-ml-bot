@@ -110,9 +110,20 @@ def main():
         stateful.apply_cells(reward, (dirty_cell,))
 
     timed(
-        "rust incremental one-cell",
+        "rust full one-cell replace",
         args.iterations,
         apply_one_changed_cell,
+    )
+    score_event = {
+        dirty_cell: np.asarray(
+            (0.001, 0.0, 0.0, 0.0, 0.0, 0.001, 0.0, np.nan),
+            dtype=np.float32,
+        )
+    }
+    timed(
+        "rust event-native one-cell",
+        args.iterations,
+        lambda: stateful.apply_score_events(score_event),
     )
 
 

@@ -158,6 +158,7 @@ def test_opt_in_spatial_path_flushes_only_dirty_cells():
     reward.rust_lattice_enabled = True
     changed = reward._memory_cell((0, 0, 0), obs.tick)
     changed.damage_taken += 100.0
+    reward._mark_rust_score_event((0, 0, 0), threat=3.0)
     reward._invalidate_feature_cache()
     rust_changed = reward.memory_features(obs).copy()
     reward.rust_lattice_enabled = False
@@ -209,4 +210,65 @@ def test_python_checkpoint_remains_authoritative_for_rust_index(tmp_path):
     restored._invalidate_feature_cache()
     assert rust_features == pytest.approx(
         restored.memory_features(obs), rel=2e-5, abs=2e-5
+    )
+
+
+def test_event_native_accumulation_matches_python_cell_scores():
+    reward = VoxelSpatialReward.from_env(seed=49)
+    reward.map_name = "events"
+    cell = (0, 0, 0)
+    reward._memory_for_map(reward.map_name)[cell] = SessionMemoryCell(
+        engagement_count=1.0, enemy_seen=1.0
+    )
+    stateful = StatefulLatticeIndex(reward, sync=False)
+    assert stateful.apply_score_events({
+        cell: np.asarray(
+            (1.35, 0.15, 0.0, 0.0, 0.0, 2.0, 0.0, np.nan),
+            np.float32,
+        )
+    }) == 1
+
+    obs = _obs((64.0, 64.0, 64.0))
+    obs.tick = 50
+    obs.rune_flags = np.zeros(5, dtype=np.float32)
+    obs.entities = np.zeros((0, 10), dtype=np.float32)
+    obs.entity_count = 0
+    assert stateful.features(reward, obs) == pytest.approx(
+        reward.memory_features(obs), rel=2e-5, abs=2e-5
+    )
+
+
+def test_readiness_overlay_events_match_python_and_can_lower_confidence():
+    reward = VoxelSpatialReward.from_env(seed=50)
+    reward.map_name = "readiness"
+    reward.rust_lattice_enabled = True
+    obs = _obs((128.0, 128.0, 128.0))
+    obs.tick = 60
+    obs.rune_flags = np.zeros(5, dtype=np.float32)
+    obs.entities = np.zeros((0, 10), dtype=np.float32)
+    obs.entity_count = 0
+    reward.memory_features(obs)  # create the initially empty Rust index
+
+    reward._deposit_dynamic(
+        reward.map_name,
+        {"x": 128.0, "y": 128.0, "z": 128.0, "amount": 1.0, "radius": 256.0},
+        route_bias=0.5,
+    )
+    reward._invalidate_feature_cache()
+    rust_hot = reward.memory_features(obs).copy()
+    assert reward._rust_event_rows_applied > 0
+    reward.rust_lattice_enabled = False
+    reward._invalidate_feature_cache()
+    assert rust_hot == pytest.approx(
+        reward.memory_features(obs), rel=2e-5, abs=2e-5
+    )
+
+    reward.rust_lattice_enabled = True
+    reward._clear_dynamic_heat(reward.map_name)
+    reward._invalidate_feature_cache()
+    rust_cleared = reward.memory_features(obs).copy()
+    reward.rust_lattice_enabled = False
+    reward._invalidate_feature_cache()
+    assert rust_cleared == pytest.approx(
+        reward.memory_features(obs), rel=2e-5, abs=2e-5
     )

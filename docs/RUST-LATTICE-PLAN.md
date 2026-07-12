@@ -54,6 +54,7 @@ The branch now includes a per-environment sparse index:
 
 ```text
 LatticeIndex.upsert/remove/apply_packed(changed_cells)
+LatticeIndex.apply_score_events(coalesced_combat_and_readiness_deltas)
 LatticeIndex.features(position, current_cell, survivability) -> [f32; 24]
 LatticeIndex.dumps/loads()
 ```
@@ -70,21 +71,30 @@ At 400 populated cells, the measured boundary costs are:
 - optimized Python five-channel traversal: approximately 572 µs;
 - Rust query with a full Python repack: approximately 574 µs (rejected design);
 - stateful Rust 24-float policy tail: approximately 7.4 µs;
-- incremental one-cell update: approximately 2.3 µs.
+- full one-cell replacement: approximately 2.4 µs;
+- event-native one-cell accumulation: approximately 0.9 µs.
 
 An isolated one-server/four-ML q2ded A/B with 400 cells per bot sustained
-approximately 608 transitions/sec on Python and 1,797 transitions/sec on the
-stateful Rust path (about 3×). Across 600 live per-frame comparisons, maximum
-absolute feature error was `5.96e-08`; no slot fell back.
+approximately 607 transitions/sec on Python and 1,878 transitions/sec on the
+event-native Rust path (about 3.1×). A separate live parity run applied 300
+coalesced event rows across four slots; maximum absolute feature error over
+600 frame comparisons was `1.79e-07`, and no slot fell back.
 
 A CUDA PPO smoke run then completed one 64-transition update with four ML
 slots, saved its PyTorch checkpoint and ONNX export, and exited cleanly. A
 subsequent live map rotation retained separate Rust indices for both maps and
 re-aligned all four slots at tick 134 without falling back or restarting.
 
-Remaining ownership work is event-native score accumulation and readiness
-refresh inside Rust. The present bridge still derives changed-cell scores in
-Python, but its cost scales with changed cells rather than total lattice size.
+Combat statistics now cross as additive score/sample events, and route
+readiness changes cross as additive threat/opportunity overlays with an exact
+confidence override. Rust owns accumulation, confidence evolution, and feature
+derivation. Python deliberately remains the checkpoint oracle and still owns
+item-clock/route selection; moving those higher-level schedules would add risk
+without removing a measured hot-path cost.
+
+The next milestone is the synchronous LAN rollout-worker protocol described
+below, plus deterministic rollout/version rejection gates before using remote
+workers for learner updates.
 
 ## Multi-host rollout design
 

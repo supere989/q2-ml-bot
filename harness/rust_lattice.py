@@ -22,6 +22,7 @@ except ImportError:
 
 CHANNELS = ("engagement", "threat", "opportunity", "self_fire", "deaths")
 PACKED_CELL_WIDTH = 9
+SCORE_EVENT_WIDTH = 11
 
 
 def available() -> bool:
@@ -109,6 +110,17 @@ class StatefulLatticeIndex:
         if not len(packed):
             return 0
         return int(self._index.apply_packed(packed))
+
+    def apply_score_events(self, events) -> int:
+        """Apply coalesced score/sample/confidence events for changed cells."""
+        rows = list(events.items())
+        if not rows:
+            return 0
+        packed = np.empty((len(rows), SCORE_EVENT_WIDTH), dtype=np.float32)
+        for index, (cell, delta) in enumerate(rows):
+            packed[index, :3] = cell
+            packed[index, 3:] = delta
+        return int(self._index.apply_score_events(packed))
 
     def remove_cells(self, cells) -> int:
         return sum(
