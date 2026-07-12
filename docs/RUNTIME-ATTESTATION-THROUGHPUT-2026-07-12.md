@@ -6,7 +6,7 @@ The standalone attestation and capacity gate are implemented and a concurrent
 real-q2 WSL + Nobara probe passed. This closes the narrow questions “can the
 two hosts prove semantic runtime identity?” and “can they collect from the
 same live policy generation concurrently faster than the current trainer's
-18–20 SPS?” It does **not** by itself authorize primary-trainer cutover; soak,
+18–20 SPS?” It does **not** by itself authorize primary-trainer cutover; seasonal quality,
 recovery, and learner telemetry gates remain separate.
 
 ## Tools
@@ -85,7 +85,7 @@ This is a collection-capacity result, not end-to-end learner throughput. It
 excludes cold setup, upload, quorum wait after the final collection, PPO update,
 checkpointing, and long-run failure/retry costs. The fixed four-slot map also
 has much less orchestration overhead than the active 12-server trainer. Use the
-result to justify a shadow soak, not to predict 671 training SPS.
+result to justify shadow seasons, not to predict 671 training SPS.
 
 The standalone contract was subsequently integrated into the distributed
 rollout protocol:
