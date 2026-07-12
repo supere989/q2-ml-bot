@@ -96,14 +96,14 @@ The next milestone is the synchronous LAN rollout-worker protocol described
 below, plus deterministic rollout/version rejection gates before using remote
 workers for learner updates.
 
-## Multi-host rollout design
+## Multi-host rollout prototype
 
 Rust runs locally on each rollout host beside q2ded. Never make per-frame LAN
 calls to a centralized lattice service. The RTX/WSL machine remains the PPO
 learner; procreator and nobara can run versioned rollout workers and upload
 complete trajectory batches.
 
-The first distributed implementation should be synchronous PPO:
+The first distributed implementation is synchronous PPO:
 
 1. Learner publishes policy version N.
 2. Workers load N and collect fixed-size recurrent rollouts.
@@ -111,10 +111,11 @@ The first distributed implementation should be synchronous PPO:
 4. Learner accepts a quorum, rejects stale versions, and performs one update.
 5. Version N+1 is broadcast.
 
-Batch transport can use ZeroMQ or gRPC over the LAN. Policy inference and Rust
-lattice state stay local to each worker. Fully asynchronous rollout requires
-V-trace/APPO-style corrections and is explicitly out of scope for the first
-prototype.
+The dependency-free HTTP/framed-array prototype, commands, completed two-host
+LAN proof, exact rejection behavior, and current four-ML determinism limitation
+are documented in `docs/DISTRIBUTED-ROLLOUTS.md`. Policy inference, q2ded, and
+Rust lattice state remain local to each worker. Fully asynchronous rollout
+requires V-trace/APPO-style corrections and remains explicitly out of scope.
 
 ## Merge gates
 
