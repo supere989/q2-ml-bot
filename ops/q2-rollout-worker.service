@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=%h/q2-rollout/worker.env
 WorkingDirectory=%h/q2-rollout/q2-ml-bot
-ExecStart=/usr/bin/python3 tools/rollout_worker.py \
+ExecStart=/usr/bin/env ${PYTHON_BIN} tools/rollout_worker.py \
   --mode q2 --continuous --leased \
   --coordinator ${Q2_ROLLOUT_COORDINATOR} \
   --token ${Q2_ROLLOUT_TOKEN} \
