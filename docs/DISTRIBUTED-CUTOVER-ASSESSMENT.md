@@ -21,20 +21,25 @@ active run.
 - The embedded learner consumed remote arrays with the existing PPO optimizer,
   published version 16, consumed a second batch from the same persistent q2ded
   and lattice, then saved policy version 32.
-- A restarted one-ML deterministic audit reproduces exactly. Four-ML fresh
-  launch replay does not, and is rejected.
+- The q2/Rust four-slot path reproduces bit-exactly with fixed actions. Full
+  four-slot policy replay also reproduces on CPU; fresh CUDA policy inference
+  is the isolated source of strict replay variance.
+- WSL and Nobara concurrently sustained a conservative 671.01 rollout SPS
+  against the current 18--20 SPS baseline, with zero timeouts and a matching
+  signed semantic runtime manifest.
 
 ## Cutover blockers
 
 | Priority | Blocker | Evidence / consequence |
 |---|---|---|
 | Closed | First spare CUDA host provisioning | Nobara now has the isolated runtime, feature branch, Rust extension, state/log scaffold, and a disabled user service. A real four-ML batch was accepted. See `docs/ROLLOUT-HOST-PROVISIONING.md`. |
-| P0 | Remote telemetry is incomplete | The two-generation learner logged episode/base/spatial/KD fields as `nan` because batches do not carry episode summaries or behavior/outcome metrics. Aim, reward, curriculum, and regression drift would be substantially less visible than in the primary trainer. |
-| P0 | Worker recovery is not learner-owned | Persistent workers checkpoint their lattice locally, but the learner does not publish/retain a lattice artifact or lease its version. Replacing a failed host can mix fresh and persistent spatial memory or lose learning state. |
-| P0 | No worker lease/heartbeat/retry policy | A missing quorum currently times out and aborts training. Workers do not reconnect with bounded backoff, and the learner cannot replace a dead assignment while preserving seed/rollout identity. |
-| P1 | Four-ML replay is nondeterministic | Two fresh four-slot runs diverged in observations, rewards, actions, and recurrent state even with seeded game/Python/Torch and deterministic actions. Normal training can use unique rollout keys, but strict reproducibility and duplicate-work verification are unavailable for the high-throughput topology. |
-| P1 | Concurrent multi-host performance is unmeasured | Real q2 collection now works independently on WSL and Nobara, but they have not supplied the same live learner concurrently. The two-generation smoke included startup and reported ~1 SPS, so it is a correctness result, not evidence that distributed training beats the current ~18–20 SPS run. |
-| P1 | Runtime attestation is weak | Workers echo the learner config hash but do not independently prove game.so, map, reward environment variables, Rust extension, or observation layout checksums. A mismatched host can submit shape-valid but semantically incompatible data. |
+| Closed | Remote telemetry parity | Strict batches now carry episode summaries plus 45 behavior/outcome aggregates under `ppo-telemetry-v1`; the learner restores the corresponding console and TensorBoard series. |
+| Closed in code | Learner-owned worker recovery | The embedded learner now creates deterministic lane assignments, serves TTL leases/heartbeats and versioned lattice artifacts, fences stale submissions, and adopts each checksum-chained lattice before acknowledging the batch. `--continuous --leased` workers reconnect with bounded backoff and recover the exact learner reference. |
+| P0 | Recovery has no live fault-injection proof | Lease/assignment state is process-local and the leased path has only focused/loopback tests. Kill/restart the learner during collection and replace a worker on real q2; prove stale work is fenced, the learner-owned lattice chain resumes exactly, and no optimizer generation is duplicated before relying on it. |
+| P0 | Multi-map attestation/recovery mismatch | Assignments can select a map pool, but the worker currently rebuilds attestation for only its assigned map. An approved multi-map manifest therefore cannot match. Shadow recovery must stay on one fixed map until the worker attests the full approved map set and rejects out-of-set assignments. |
+| Closed | Four-ML deterministic boundary | Eight fixed-action four-slot q2/Rust trajectories were bit-exact, and full CPU-policy replay matched exactly. CUDA inference remains unsuitable for a byte-exact audit, so production CUDA workers use unique rollout keys and a CPU audit lane verifies replay. |
+| Closed | Concurrent multi-host capacity | WSL and Nobara supplied the same live generation concurrently: 335.50 and 536.60 SPS respectively, 671.01 conservative aggregate SPS, zero timeouts. See `docs/RUNTIME-ATTESTATION-THROUGHPUT-2026-07-12.md`. |
+| Closed | Signed runtime attestation | The learner pins the manifest digest in every policy, workers independently rebuild and verify the signed semantic manifest before q2 startup, and the coordinator rejects mismatches as `wrong_runtime`. Signed shadow lanes must configure the HMAC-key variable on learner/coordinator/workers; updated ops templates fail closed when it is missing. |
 | P1 | No soak or policy-quality gate | Only two optimizer generations have run. There is no 12–24 hour shadow comparison for KL, clip rate, reward composition, aim preservation, KD, failure/retry behavior, or memory growth. |
 | P2 | Transport security assumes a trusted fabric | Bearer authentication exists, but HTTP is unencrypted. This is acceptable only behind Tailscale/LAN ACLs; public exposure requires mTLS or a secure proxy. |
 
@@ -42,19 +47,18 @@ active run.
 
 1. **Completed:** provision Nobara with checksum-identical q2 runtime, maps,
    policy dependencies, and the Rust extension; accept a real four-ML batch.
-2. Add a signed runtime manifest covering game.so, protocol/observation shape,
-   maps, reward variables, policy architecture, and lattice build.
-3. Carry episode summaries and the current behavior/outcome telemetry in each
-   batch; restore TensorBoard parity before evaluating policy quality.
-4. Add worker leases, heartbeats, reconnect/backoff, deterministic assignment
-   IDs, and learner-owned versioned lattice snapshots/recovery.
-5. Diagnose or explicitly bound four-ML nondeterminism. Deterministic audit
-   workers may remain one-ML, but high-throughput workers need repeated-run
-   statistical equivalence gates.
-6. Run distributed collection in shadow mode for at least 12–24 hours while
+2. **Completed:** signed runtime manifest and per-generation digest enforcement.
+3. **Completed:** remote episode and behavior telemetry parity.
+4. Run a real isolated learner-kill/worker-replacement rehearsal and close the
+   durable restart/fencing gate; do not infer this from loopback tests.
+5. Make map-pool attestation compatible with leased curriculum assignments and
+   validate it with at least two maps. Until then use one fixed shadow map.
+6. **Bounded:** use a CPU four-ML lane for exact replay audits; CUDA collection
+   uses unique rollout keys and statistical policy-quality gates.
+7. Run distributed collection in shadow mode for at least 12–24 hours while
    the current primary trainer continues. Compare usable SPS, stale/rejected
    work, GPU utilization, PPO diagnostics, aim, KD, and reward composition.
-7. Canary one learner update stream with automatic rollback to local
+8. Canary one learner update stream with automatic rollback to local
    collection, then promote only if throughput and policy-quality gates pass.
 
 The active master trainer should remain primary until P0 items are closed and

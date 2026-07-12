@@ -268,7 +268,7 @@ fixed checkpoint). Ordered by what's blocking what.
    against each other, zero 3ZB2 by default if `n_bots=num_ml_bots`, but see
    this gotcha before using a small `n_bots`).
 
-7. **[FIXED IN SOURCE 2026-07-11; not deployed to the active trainer or
+7. **[FIXED AND PROMOTED TO THE ACTIVE TRAINER 2026-07-11; not deployed to
    production]** ML reward accounting used raw Quake damage. Kill planes,
    telefrags, crushers, and the out-of-bounds fallback deliberately pass
    `100000`, which entered PPO returns unchanged; corpse hits could also add
@@ -282,7 +282,7 @@ fixed checkpoint). Ordered by what's blocking what.
    17 of 18 apparent kills were corpse credits and the critic spikes were
    sentinel returns, not useful learning.
 
-8. **[FIXED IN SOURCE 2026-07-11; isolated runtime verified]** Terminal
+8. **[FIXED, VERIFIED, AND PROMOTED TO THE ACTIVE TRAINER 2026-07-11]** Terminal
    delivery had two independent bugs: lockstep sent the same death terminal
    from both the frame pre-pass and dead `Bot_Think`, while every intermission
    frame was terminal. The latter produced runs with 2,769 episode endings in

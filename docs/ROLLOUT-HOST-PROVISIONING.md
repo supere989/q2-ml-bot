@@ -9,15 +9,24 @@ Provisioned 2026-07-11 from the working WSL runtime template.
   runtime/              # exact WSL q2_lithium_merge copy (548 MiB)
   python/               # ABI3 q2_lattice_rs.so
   q2-ml-bot/            # feature/rust-lattice checkout
-  state/                # versioned per-worker lattice checkpoints
+  state/                # local lattice transfer mirror; learner store is authoritative
   logs/                 # worker service output
+  runtime-manifest.json # operator-approved signed semantic runtime
   worker.env            # mode 0600; token intentionally UNSET
 ```
 
 The user service is installed at
 `~/.config/systemd/user/q2-rollout-worker.service`, daemon-reloaded, disabled,
 and inactive. It must not be enabled until `worker.env` contains the real
-learner address/token and a shadow run is authorized.
+learner address/token, manifest path, and attestation-key variable, the signed
+manifest has been verified locally, and a shadow run is authorized. Keep the
+bearer token and HMAC attestation key distinct.
+Set `Q2_SOURCE_REVISION` to the approved full commit hash on operational trees
+without `.git`; workers use it as measured provenance and still hash the exact
+runtime source tree to catch overlays or drift.
+The installed service uses `--continuous --leased`; its learner must enable
+`Q2_ROLLOUT_RECOVERY=1` and a durable learner-owned lattice directory. Do not
+point it at a legacy coordinator that cannot issue assignments.
 
 ## Verified template identity
 
@@ -57,4 +66,8 @@ version 40000258 with rollout hash
 3. Rsync WSL `~/q2_lithium_merge/` to `runtime/` while no worker q2ded exists.
 4. Copy/build `q2_lattice_rs.so` and verify the three hashes above.
 5. Preserve `state/`, `logs/`, and the mode-600 `worker.env`.
-6. Run one isolated strict-schema batch before re-enabling the service.
+6. Rebuild/sign `runtime-manifest.json` with the exact runtime, source, map
+   pool, environment, and worker configuration; copy the same approved
+   manifest and HMAC key to the learner and every worker.
+7. Run `tools/runtime_attestation.py verify` with `--hmac-key-env`, then one
+   isolated strict-schema batch before re-enabling the service.

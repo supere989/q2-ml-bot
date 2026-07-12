@@ -8,9 +8,11 @@ Type=simple
 EnvironmentFile=%h/q2-rollout/worker.env
 WorkingDirectory=%h/q2-rollout/q2-ml-bot
 ExecStart=/usr/bin/python3 tools/rollout_worker.py \
-  --mode q2 --continuous \
+  --mode q2 --continuous --leased \
   --coordinator ${Q2_ROLLOUT_COORDINATOR} \
   --token ${Q2_ROLLOUT_TOKEN} \
+  --runtime-manifest ${Q2_ROLLOUT_RUNTIME_MANIFEST} \
+  --attestation-key-env ${Q2_ROLLOUT_ATTESTATION_KEY_ENV} \
   --worker-id ${Q2_ROLLOUT_WORKER_ID} \
   --sequence 1 --rollout-index 0 \
   --seed ${Q2_ROLLOUT_SEED} --game-seed ${Q2_ROLLOUT_GAME_SEED} \

@@ -4,6 +4,9 @@ import pytest
 from harness.rollout_protocol import (
     CoordinatorClient,
     CoordinatorServer,
+    PPO_BEHAVIOR_METRIC_KEYS,
+    PPO_EPISODE_SUMMARY_COLUMNS,
+    PPO_TELEMETRY_SCHEMA,
     PolicyArtifact,
     RolloutBatch,
     RolloutCoordinator,
@@ -12,8 +15,13 @@ from harness.rollout_protocol import (
 )
 
 
-def _policy(version=1, payload=b"policy-one"):
-    return PolicyArtifact.create(version, payload, config_hash="cfg-test")
+def _policy(version=1, payload=b"policy-one", runtime_digest=""):
+    return PolicyArtifact.create(
+        version,
+        payload,
+        config_hash="cfg-test",
+        runtime_manifest_sha256=runtime_digest,
+    )
 
 
 def test_policy_and_batch_round_trip_are_deterministic_and_pickle_free():
@@ -83,9 +91,37 @@ def test_loopback_http_fetch_submit_status_and_authentication():
         server.close()
 
 
+def test_ppo_runtime_digest_is_required_and_bound_to_policy_and_status():
+    runtime_digest = "a" * 64
+    policy = _policy(runtime_digest=runtime_digest)
+    assert PolicyArtifact.decode(policy.encode()) == policy
+
+    with pytest.raises(ValueError, match="expected runtime"):
+        RolloutCoordinator(quorum=1, schema="ppo")
+    coordinator = RolloutCoordinator(
+        quorum=1,
+        schema="ppo",
+        expected_runtime_manifest_sha256=runtime_digest,
+    )
+    with pytest.raises(ValueError, match="policy runtime manifest"):
+        coordinator.publish(_policy())
+    with pytest.raises(ValueError, match="policy runtime manifest"):
+        coordinator.publish(_policy(runtime_digest="b" * 64))
+    coordinator.publish(policy)
+    status = coordinator.status()
+    assert status["runtime_manifest_sha256"] == runtime_digest
+    assert status["policy_sha256"] == policy.sha256
+    assert status["config_hash"] == policy.config_hash
+
+
 def test_ppo_schema_rejects_incomplete_batches_and_accepts_exact_shapes():
-    policy = _policy()
-    coordinator = RolloutCoordinator(quorum=1, schema="ppo")
+    runtime_digest = "a" * 64
+    policy = _policy(runtime_digest=runtime_digest)
+    coordinator = RolloutCoordinator(
+        quorum=1,
+        schema="ppo",
+        expected_runtime_manifest_sha256=runtime_digest,
+    )
     coordinator.publish(policy)
     incomplete = deterministic_synthetic_batch(policy, "worker-a", 1, 1, 2, 0)
     assert coordinator.submit(incomplete.encode()).status == "invalid_schema"
@@ -94,9 +130,12 @@ def test_ppo_schema_rejects_incomplete_batches_and_accepts_exact_shapes():
     metadata = dict(
         incomplete.metadata,
         producer="q2",
+        map_name="map-a",
         n_envs=envs,
         lattice_mode="fresh_worker_session",
         deterministic_actions=False,
+        runtime_manifest_sha256=runtime_digest,
+        telemetry_schema=PPO_TELEMETRY_SCHEMA,
     )
     zeros = np.zeros
     batch = RolloutBatch(metadata, {
@@ -111,11 +150,81 @@ def test_ppo_schema_rejects_incomplete_batches_and_accepts_exact_shapes():
         "last_obs": zeros((envs, obs_dim), np.float32),
         "last_h": zeros((envs, 256), np.float32),
         "last_c": zeros((envs, 256), np.float32),
+        "episode_summaries": np.array(
+            [[10.0, 7.0, 3.0, 2.0, 1.0, 40.0]], dtype=np.float64
+        ),
+        "behavior_sums": np.arange(
+            len(PPO_BEHAVIOR_METRIC_KEYS), dtype=np.float64
+        ),
+        "behavior_samples": np.array([steps * envs], dtype=np.int64),
     })
+    batch.arrays["dones"][-1, 0] = 1
     assert coordinator.submit(batch.encode()).accepted
-    second = RolloutBatch(dict(metadata, worker_id="worker-b"), {
+    runtime_guard = RolloutCoordinator(
+        quorum=1,
+        schema="ppo",
+        expected_runtime_manifest_sha256=runtime_digest,
+    )
+    runtime_guard.publish(policy)
+    wrong_runtime = RolloutBatch(dict(
+        metadata,
+        worker_id="worker-wrong-runtime",
+        runtime_manifest_sha256="b" * 64,
+    ), {name: array.copy() for name, array in batch.arrays.items()})
+    decision = runtime_guard.submit(wrong_runtime.encode())
+    assert decision.status == "wrong_runtime"
+    assert decision.quorum_count == 0
+    second = RolloutBatch(dict(
+        metadata, worker_id="worker-b", map_name="map-b"
+    ), {
         name: array.copy() for name, array in batch.arrays.items()
     })
+    second.arrays["episode_summaries"][0] = np.array(
+        [20.0, 12.0, 8.0, 1.0, 0.0, 24.0], dtype=np.float64
+    )
+    second.arrays["behavior_sums"] *= 2.0
     merged = merge_ppo_batches([batch, second])
     assert merged["obs"].shape == (steps, envs * 2, obs_dim)
     assert merged["last_h"].shape == (envs * 2, 256)
+    assert merged["episode_summaries"].shape == (
+        2, len(PPO_EPISODE_SUMMARY_COLUMNS)
+    )
+    assert merged["episode_summaries"][:, 0].tolist() == [10.0, 20.0]
+    assert merged["episode_map_names"] == ("map-a", "map-b")
+    assert np.array_equal(
+        merged["behavior_sums"],
+        np.arange(len(PPO_BEHAVIOR_METRIC_KEYS), dtype=np.float64) * 3.0,
+    )
+    assert merged["behavior_samples"].tolist() == [steps * envs * 2]
+
+    mismatched_runtime = RolloutBatch(dict(
+        second.metadata,
+        worker_id="worker-runtime-b",
+        runtime_manifest_sha256="b" * 64,
+    ), {name: array.copy() for name, array in second.arrays.items()})
+    with pytest.raises(ValueError, match="different policies"):
+        merge_ppo_batches([batch, mismatched_runtime])
+
+    malformed = RolloutBatch(dict(metadata, worker_id="worker-c"), {
+        name: array.copy() for name, array in batch.arrays.items()
+    })
+    malformed.arrays["behavior_sums"] = np.zeros(1, dtype=np.float64)
+    with pytest.raises(ValueError, match="behavior_sums"):
+        malformed.validate_ppo_schema()
+
+    missing_episode = RolloutBatch(dict(metadata, worker_id="worker-d"), {
+        name: array.copy() for name, array in batch.arrays.items()
+    })
+    missing_episode.arrays["episode_summaries"] = np.empty(
+        (0, len(PPO_EPISODE_SUMMARY_COLUMNS)), dtype=np.float64
+    )
+    with pytest.raises(ValueError, match="completed episodes"):
+        missing_episode.validate_ppo_schema()
+
+    restored = RolloutBatch.decode(batch.encode())
+    assert np.array_equal(
+        restored.arrays["episode_summaries"], batch.arrays["episode_summaries"]
+    )
+    assert np.array_equal(
+        restored.arrays["behavior_sums"], batch.arrays["behavior_sums"]
+    )

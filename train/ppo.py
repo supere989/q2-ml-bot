@@ -25,6 +25,10 @@ import torch.optim as optim
 from pathlib import Path
 from typing import Dict, List, Optional
 from torch.utils.tensorboard import SummaryWriter
+from harness.rollout_protocol import (
+    PPO_BEHAVIOR_METRIC_KEYS,
+    PPO_EPISODE_SUMMARY_COLUMNS,
+)
 from models.policy import (
     ACTION_DIM,
     ENT_CNT,
@@ -590,6 +594,7 @@ def train(cfg: dict):
     if distributed:
         from harness.rollout_protocol import (
             CoordinatorServer,
+            CoordinatorRecoveryConfig,
             PolicyArtifact,
             RolloutCoordinator,
         )
@@ -597,6 +602,39 @@ def train(cfg: dict):
         quorum = max(1, int(os.environ.get("Q2_ROLLOUT_QUORUM", "1")))
         remote_envs = max(1, int(os.environ.get("Q2_ROLLOUT_ENVS_PER_WORKER", "1")))
         total_venvs = quorum * remote_envs
+        from harness.runtime_attestation import (
+            load_runtime_manifest,
+            verify_runtime_manifest,
+        )
+
+        runtime_manifest_path = os.environ.get(
+            "Q2_ROLLOUT_RUNTIME_MANIFEST", ""
+        ).strip()
+        if not runtime_manifest_path:
+            raise ValueError(
+                "Q2_DISTRIBUTED_LEARNER=1 requires "
+                "Q2_ROLLOUT_RUNTIME_MANIFEST"
+            )
+        runtime_manifest = load_runtime_manifest(Path(runtime_manifest_path))
+        attestation_key_name = os.environ.get(
+            "Q2_ROLLOUT_ATTESTATION_KEY_ENV", ""
+        ).strip()
+        attestation_key = (
+            os.environ[attestation_key_name].encode()
+            if attestation_key_name else None
+        )
+        runtime_verification = verify_runtime_manifest(
+            runtime_manifest,
+            hmac_key=attestation_key,
+            require_signature=bool(attestation_key_name),
+        )
+        if not runtime_verification.valid:
+            raise ValueError(
+                "invalid rollout runtime manifest: "
+                + "; ".join(runtime_verification.errors)
+            )
+        runtime_manifest_sha256 = runtime_verification.digest
+        recovery_enabled = os.environ.get("Q2_ROLLOUT_RECOVERY", "0") == "1"
         config_payload = json.dumps({
             "ppo": cfg,
             "obs_dim": OBS_DIM,
@@ -605,9 +643,49 @@ def train(cfg: dict):
             "ext_obs": os.environ.get("Q2_EXT_OBS", "0"),
             "rust_lattice": os.environ.get("Q2_RUST_LATTICE", "0"),
             "worker_envs": remote_envs,
+            "runtime_manifest_sha256": runtime_manifest_sha256,
+            "recovery_enabled": recovery_enabled,
         }, sort_keys=True, separators=(",", ":")).encode()
         distributed_config_hash = hashlib.sha256(config_payload).hexdigest()
-        rollout_coordinator = RolloutCoordinator(quorum=quorum, schema="ppo")
+        recovery_config = None
+        if recovery_enabled:
+            from harness.distributed_runtime import LearnerLatticeStore
+
+            learner_id = os.environ.get(
+                "Q2_ROLLOUT_LEARNER_ID", "q2-ppo-shadow"
+            )
+            lattice_root = Path(os.environ.get(
+                "Q2_ROLLOUT_LATTICE_DIR",
+                str(ckpt_dir / "distributed_lattice"),
+            ))
+            lattice_store = LearnerLatticeStore(
+                lattice_root, learner_id, distributed_config_hash
+            )
+            configured_game_seed = int(cfg.get("game_seed", -1))
+            recovery_config = CoordinatorRecoveryConfig(
+                learner_id=learner_id,
+                steps=int(cfg["n_steps"]),
+                n_envs=remote_envs,
+                maps=tuple(map_pool),
+                base_seed=seed,
+                base_game_seed=(
+                    configured_game_seed
+                    if configured_game_seed >= 0 else seed
+                ),
+                lease_ttl=float(os.environ.get(
+                    "Q2_ROLLOUT_LEASE_TTL", "45"
+                )),
+                max_attempts=int(os.environ.get(
+                    "Q2_ROLLOUT_MAX_ATTEMPTS", "3"
+                )),
+                lattice_store=lattice_store,
+            )
+        rollout_coordinator = RolloutCoordinator(
+            quorum=quorum,
+            schema="ppo",
+            expected_runtime_manifest_sha256=runtime_manifest_sha256,
+            recovery=recovery_config,
+        )
         rollout_server = CoordinatorServer(
             rollout_coordinator,
             os.environ.get("Q2_ROLLOUT_BIND", "0.0.0.0"),
@@ -623,7 +701,8 @@ def train(cfg: dict):
             }
             torch.save(cpu_state, buffer)
             rollout_coordinator.publish(PolicyArtifact.create(
-                int(version), buffer.getvalue(), distributed_config_hash
+                int(version), buffer.getvalue(), distributed_config_hash,
+                runtime_manifest_sha256,
             ))
 
         publish_distributed_policy = _publish_distributed_policy
@@ -632,7 +711,8 @@ def train(cfg: dict):
             "Distributed learner: "
             f"{rollout_server.address[0]}:{rollout_server.address[1]} "
             f"quorum={quorum} envs/worker={remote_envs} "
-            f"policy_version={resume_steps} config={distributed_config_hash[:12]}"
+            f"policy_version={resume_steps} config={distributed_config_hash[:12]} "
+            f"recovery={'on' if recovery_enabled else 'off'}"
         )
 
     servers = [] if distributed else [
@@ -758,54 +838,7 @@ def train(cfg: dict):
     completed_map_rewards: Dict[str, List[float]] = {}
 
     start = time.time()
-    behavior_metric_keys = (
-        "ammo_depleted",
-        "requested_ammo_weapon_unavailable",
-        "fire_no_ammo",
-        "hook_action",
-        "hook_enemy",
-        "hook_no_ammo_melee",
-        "session_memory_bonus",
-        "session_memory_cells",
-        "session_current_engagement",
-        "session_current_threat",
-        "session_current_opportunity",
-        "session_current_self_fire",
-        "session_nearest_engagement",
-        "session_nearest_threat",
-        "session_nearest_opportunity",
-        "lattice_prior_loaded",
-        "lattice_routes_loaded",
-        "lattice_dynamic_cells",
-        "lattice_route_active",
-        "threat_bonus",
-        "threat_in_range",
-        "threat_active",
-        "threat_ignored",
-        "survival_low_health",
-        "survival_contact",
-        "damage_margin_step",
-        "outcome_sample",
-        "outcome_bonus",
-        "outcome_win",
-        "outcome_survival",
-        "outcome_loss",
-        "outcome_idle",
-        "episode_damage_margin",
-        "episode_frag_margin",
-        "episode_contact_events",
-        # ext channels + exchange/chicken + rune observability
-        "offense",
-        "survival",
-        "damage_prox",
-        "exchange_ratio",
-        "exchange_dominating",
-        "exchange_even",
-        "exchange_losing",
-        "rune_held",
-        "rune_switch",
-        "win_margin",
-    )
+    behavior_metric_keys = PPO_BEHAVIOR_METRIC_KEYS
 
     while total_env_steps < cfg["total_steps"]:
         # ── collect rollout ──────────────────────────────────────────
@@ -924,6 +957,42 @@ def train(cfg: dict):
                 target.copy_(torch.from_numpy(merged[name]).to(
                     device, dtype=target.dtype
                 ))
+            episode_columns = {
+                name: index
+                for index, name in enumerate(PPO_EPISODE_SUMMARY_COLUMNS)
+            }
+            episode_summaries = merged["episode_summaries"]
+            completed_ep_rewards.extend(
+                episode_summaries[:, episode_columns["reward"]].tolist()
+            )
+            completed_ep_base_rewards.extend(
+                episode_summaries[:, episode_columns["base_reward"]].tolist()
+            )
+            completed_ep_spatial_rewards.extend(
+                episode_summaries[:, episode_columns["spatial_reward"]].tolist()
+            )
+            completed_ep_kills.extend(
+                episode_summaries[:, episode_columns["kills"]].tolist()
+            )
+            completed_ep_deaths.extend(
+                episode_summaries[:, episode_columns["deaths"]].tolist()
+            )
+            completed_ep_lengths.extend(
+                int(value)
+                for value in episode_summaries[:, episode_columns["length"]]
+            )
+            for map_name, reward in zip(
+                merged["episode_map_names"],
+                episode_summaries[:, episode_columns["reward"]],
+            ):
+                completed_map_rewards.setdefault(str(map_name), []).append(
+                    float(reward)
+                )
+            rollout_behavior.update(zip(
+                behavior_metric_keys,
+                merged["behavior_sums"].tolist(),
+            ))
+            rollout_behavior_samples = int(merged["behavior_samples"][0])
             total_env_steps += cfg["n_steps"] * total_venvs
             with torch.no_grad():
                 obs_t = torch.from_numpy(merged["last_obs"]).to(

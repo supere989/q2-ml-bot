@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 import signal
 import sys
 import time
@@ -25,6 +26,9 @@ def main():
     parser.add_argument("--port", type=int, default=38888)
     parser.add_argument("--quorum", type=int, default=1)
     parser.add_argument("--schema", choices=("ppo", "any"), default="ppo")
+    parser.add_argument("--runtime-manifest", type=Path)
+    parser.add_argument("--attestation-key-env", default="")
+    parser.add_argument("--require-attestation-signature", action="store_true")
     parser.add_argument("--token", default="")
     parser.add_argument("--spool", type=Path, default=Path("distributed_batches"))
     parser.add_argument("--timeout", type=float, default=3600.0)
@@ -34,8 +38,36 @@ def main():
     config_hash = args.config_hash
     if args.config:
         config_hash = hashlib.sha256(args.config.read_bytes()).hexdigest()
-    artifact = PolicyArtifact.create(args.version, args.policy.read_bytes(), config_hash)
-    coordinator = RolloutCoordinator(args.quorum, schema=args.schema)
+    runtime_digest = ""
+    if args.runtime_manifest:
+        from harness.runtime_attestation import (
+            load_runtime_manifest,
+            verify_runtime_manifest,
+        )
+
+        manifest = load_runtime_manifest(args.runtime_manifest)
+        key = (
+            os.environ[args.attestation_key_env].encode()
+            if args.attestation_key_env else None
+        )
+        verification = verify_runtime_manifest(
+            manifest,
+            hmac_key=key,
+            require_signature=args.require_attestation_signature,
+        )
+        if not verification.valid:
+            parser.error("invalid runtime manifest: " + "; ".join(verification.errors))
+        runtime_digest = verification.digest
+    elif args.schema == "ppo":
+        parser.error("--runtime-manifest is required for schema=ppo")
+    artifact = PolicyArtifact.create(
+        args.version, args.policy.read_bytes(), config_hash, runtime_digest
+    )
+    coordinator = RolloutCoordinator(
+        args.quorum,
+        schema=args.schema,
+        expected_runtime_manifest_sha256=runtime_digest,
+    )
     coordinator.publish(artifact)
     server = CoordinatorServer(
         coordinator, args.bind, args.port, token=args.token
