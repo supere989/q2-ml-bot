@@ -7,6 +7,7 @@ Provisioned 2026-07-11 from the working WSL runtime template.
 ```text
 /home/raymond/q2-rollout/
   runtime/              # exact WSL q2_lithium_merge copy (548 MiB)
+  python/               # ABI3 q2_lattice_rs.so
   q2-ml-bot/            # feature/rust-lattice checkout
   state/                # versioned per-worker lattice checkpoints
   logs/                 # worker service output
