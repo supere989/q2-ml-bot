@@ -101,6 +101,9 @@ class VoxelSpatialReward:
     hook_enemy_reward: float = 0.01
     hook_no_ammo_reward: float = 0.035
     hook_blind_penalty: float = 0.008
+    hook_noop_penalty: float = 0.012
+    hook_release_overspeed_reward: float = 0.008
+    hook_release_idle_penalty: float = 0.002
     hook_melee_distance: float = 768.0
     hook_yaw_deg: float = 18.0
     hook_pitch_deg: float = 22.0
@@ -261,6 +264,11 @@ class VoxelSpatialReward:
             hook_enemy_reward=_env_float("R_HOOK_ENEMY_REWARD", 0.01),
             hook_no_ammo_reward=_env_float("R_HOOK_NO_AMMO_REWARD", 0.035),
             hook_blind_penalty=_env_float("R_HOOK_BLIND_PENALTY", 0.008),
+            hook_noop_penalty=_env_float("R_HOOK_NOOP", 0.012),
+            hook_release_overspeed_reward=_env_float(
+                "R_HOOK_RELEASE_OVERSPEED", 0.008
+            ),
+            hook_release_idle_penalty=_env_float("R_HOOK_RELEASE_IDLE", 0.002),
             hook_melee_distance=_env_float("Q2_HOOK_MELEE_DISTANCE", 768.0),
             hook_yaw_deg=_env_float("Q2_HOOK_YAW_DEG", 18.0),
             hook_pitch_deg=_env_float("Q2_HOOK_PITCH_DEG", 22.0),
@@ -807,6 +815,10 @@ class VoxelSpatialReward:
         hook_blind = False
         hook_traversal = False
         hook_overspeed = False
+        hook_fired = hook_action == 1
+        hook_noop = hook_action == 2  # reserved by C; intentionally does nothing
+        hook_released = hook_action == 3
+        hook_release_overspeed = False
 
         movement = self.movement_context(obs)
         movement_delta = float(movement["movement_discipline"])
@@ -819,9 +831,9 @@ class VoxelSpatialReward:
         jump_action = bool(movement["jump_action"])
         jump_slow = bool(movement["jump_slow"])
         bonus += movement_delta
-        if hook_action > 0:
+        if hook_fired:
             hook_delta -= self.hook_cost
-            if hook_required_near:
+            if hook_required_near and not overspeed:
                 hook_traversal = True
                 hook_delta += self.hook_required_reward
             if bool(hook_context["hook_enemy_viable"]):
@@ -830,14 +842,23 @@ class VoxelSpatialReward:
                 if bool(hook_context["ammo_low"]):
                     hook_no_ammo_melee = True
                     hook_delta += self.hook_no_ammo_reward
-            elif hook_action == 1 and not hook_required_near:
+            elif not hook_required_near:
                 hook_blind = True
                 hook_delta -= self.hook_blind_penalty
-            if (overspeed and not hook_required_near and
-                    not bool(hook_context["hook_enemy_viable"])):
+            if overspeed:
                 hook_overspeed = True
                 hook_delta -= self.hook_overspeed_penalty
-            bonus += hook_delta
+        elif hook_noop:
+            # Protocol class 2 has no C-side effect. Rewarding it as generic
+            # hook use caused the first movement-reset policy to spam it.
+            hook_delta -= self.hook_noop_penalty
+        elif hook_released:
+            if overspeed:
+                hook_release_overspeed = True
+                hook_delta += self.hook_release_overspeed_reward
+            else:
+                hook_delta -= self.hook_release_idle_penalty
+        bonus += hook_delta
 
         fired = self._action_fired(obs)
         fire_delta = 0.0
@@ -1019,6 +1040,10 @@ class VoxelSpatialReward:
             "hook_blind": float(hook_blind),
             "hook_traversal": float(hook_traversal),
             "hook_overspeed": float(hook_overspeed),
+            "hook_fire_action": float(hook_fired),
+            "hook_noop_action": float(hook_noop),
+            "hook_release_action": float(hook_released),
+            "hook_release_overspeed": float(hook_release_overspeed),
             "movement_speed": float(horizontal_speed),
             "movement_intent": float(movement_intent),
             "forward_intent": float(forward_intent),

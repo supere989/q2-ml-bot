@@ -147,16 +147,20 @@ at `~/q2_lithium_merge_DEPRECATED_pre_fixed_20260711`; never launch training
 or evaluation from it. Production remains separate and was not touched.
 
 **Fresh movement run (started 2026-07-13):** WSL tmux `q2_ppo` runs
-`movement_reset_v1` from newly initialized weights (no `--resume`) against the
+`movement_reset_v2` from newly initialized weights (no `--resume`) against the
 16-map `mlmove_*.bsp` pool. Those maps have eight validated DM spawns. The run
 uses the Rust lattice extension, deterministic seed/game-seed `7132026`, 12
-servers × 8 bots, and writes only to `checkpoints/movement_reset_v1`,
-`observed_heat/movement_reset_v1`, and `runs/ppo_movement_reset_v1_*`. The
+servers × 8 bots, and writes only to `checkpoints/movement_reset_v2`,
+`observed_heat/movement_reset_v2`, and `runs/ppo_movement_reset_v2_*`. The
 pre-reset checkpoint/event/heat trees and trainer log were moved intact to
 `~/q2-ml-bot/archive/20260713-pre-movement-reset/`. Its locomotion contract is
 220–360 units/s with explicit slow-jump and hook-overspeed penalties; watch the
 new `movement/*`, `behavior/jump_*`, and `behavior/hook_overspeed_rate` tags.
 Do not resume or merge an archived policy into this run.
+The short `movement_reset_v1` false start was archived after telemetry exposed
+that generic `hook_action > 0` reward was paying protocol class 2, which is a
+C-side no-op. V2 rewards only class-1 hook fire, penalizes class 2, and rewards
+class-3 release specifically while overspeed.
 
 **Reproducible ablations (added 2026-07-11):** use all three controls together:
 `--seed N --game_seed N --deterministic 1`, and keep `Q2_ML_ASYNC=0`.

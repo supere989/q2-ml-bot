@@ -67,3 +67,4 @@ def test_fresh_policy_starts_grounded_and_hook_idle():
     hook_probs = policy.actor_hook.bias.softmax(dim=0)
     assert float(jump_probs[0]) > 0.95
     assert float(hook_probs[0]) > 0.85
+    assert float(hook_probs[2]) < 0.01  # protocol class 2 is a C-side no-op

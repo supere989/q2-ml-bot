@@ -380,6 +380,12 @@ the result under `movement/*`, `behavior/jump_*`, and
 384-unit-separated deathmatch starts, leaving spare starts for six-player live
 matches instead of forcing spawn reuse.
 
+Hook telemetry distinguishes fire, release, and the reserved class-2 no-op.
+Only hook fire can earn contextual traversal/combat reward; the no-op is
+penalized, and releasing an active hook while overspeed is rewarded. This
+prevents a categorical policy from collecting “hook” reward without issuing a
+C-side hook command.
+
 Prototype smoke test and checkpoint regression gate:
 
 ```bash

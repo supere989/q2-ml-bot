@@ -168,7 +168,7 @@ class Q2BotPolicy(nn.Module):
         # loads replace these values, so existing policies are unchanged.
         with torch.no_grad():
             self.actor_jump.bias.copy_(torch.tensor([2.0, -2.0]))
-            self.actor_hook.bias.copy_(torch.tensor([2.0, -1.0, -1.0, -1.0]))
+            self.actor_hook.bias.copy_(torch.tensor([2.0, -1.0, -3.0, -1.0]))
 
     def forward(
         self,

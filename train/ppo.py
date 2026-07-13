@@ -1717,6 +1717,10 @@ def train(cfg: dict):
                 ("jump_action", "behavior/jump_action_rate"),
                 ("jump_slow", "behavior/jump_slow_rate"),
                 ("hook_overspeed", "behavior/hook_overspeed_rate"),
+                ("hook_fire_action", "behavior/hook_fire_rate"),
+                ("hook_noop_action", "behavior/hook_noop_rate"),
+                ("hook_release_action", "behavior/hook_release_rate"),
+                ("hook_release_overspeed", "behavior/hook_release_overspeed_rate"),
             ):
                 writer.add_scalar(tag, rollout_behavior[key] / denom, total_env_steps)
             writer.add_scalar(

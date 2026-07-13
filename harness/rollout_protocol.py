@@ -53,7 +53,7 @@ def _valid_sha256(value: str) -> bool:
 # Telemetry carried beside every real PPO rollout.  The order is part of the
 # PPO telemetry schema so workers and learners cannot silently disagree about
 # vector positions.
-PPO_TELEMETRY_SCHEMA = "ppo-telemetry-v2"
+PPO_TELEMETRY_SCHEMA = "ppo-telemetry-v3"
 PPO_EPISODE_SUMMARY_COLUMNS = (
     "reward",
     "base_reward",
@@ -70,6 +70,10 @@ PPO_BEHAVIOR_METRIC_KEYS = (
     "hook_enemy",
     "hook_no_ammo_melee",
     "hook_overspeed",
+    "hook_fire_action",
+    "hook_noop_action",
+    "hook_release_action",
+    "hook_release_overspeed",
     "movement_speed",
     "movement_intent",
     "forward_intent",
