@@ -91,6 +91,7 @@ class VoxelSpatialReward:
     engagement_reward: float = 0.01
     engagement_min: float = 192.0
     engagement_max: float = 1400.0
+    combat_navigation_suppression: float = 0.85
     aim_alignment_reward: float = 0.02
     aim_yaw_deg: float = 12.0
     aim_pitch_deg: float = 14.0
@@ -239,6 +240,9 @@ class VoxelSpatialReward:
             engagement_reward=_env_float("R_TACTICAL_ENGAGEMENT", 0.01),
             engagement_min=_env_float("Q2_ENGAGEMENT_MIN", 192.0),
             engagement_max=_env_float("Q2_ENGAGEMENT_MAX", 1400.0),
+            combat_navigation_suppression=_env_float(
+                "Q2_COMBAT_NAV_SUPPRESSION", 0.85
+            ),
             aim_alignment_reward=_env_float("R_AIM_ALIGNMENT", 0.02),
             aim_yaw_deg=_env_float("Q2_AIM_YAW_DEG", 12.0),
             aim_pitch_deg=_env_float("Q2_AIM_PITCH_DEG", 14.0),
@@ -748,6 +752,10 @@ class VoxelSpatialReward:
         if stagnated:
             bonus -= self.stagnation_penalty
 
+        # Exploration/navigation reward is useful for reaching combat, but it
+        # must not remain a competing objective after contact begins.
+        navigation_bonus = max(0.0, float(bonus))
+
         fire_context = self.fire_context(obs)
         visible_count = int(fire_context["enemy_visible_count"])
         nearest_visible = float(fire_context["enemy_visible_nearest"])
@@ -923,6 +931,14 @@ class VoxelSpatialReward:
                       + self.survival_rune_reward * survival)
         bonus += ext_delta
 
+        navigation_suppressed = 0.0
+        if tactical_engagement and navigation_bonus > 0.0:
+            navigation_suppressed = (
+                navigation_bonus
+                * max(0.0, min(1.0, self.combat_navigation_suppression))
+            )
+            bonus -= navigation_suppressed
+
         # Contextual rune switching: reward acquiring (or swapping to) the rune
         # that fits the current health need, scaled by the fit GAIN over the
         # rune dropped. Low health → survival runes pay; healthy → offense; a
@@ -952,6 +968,7 @@ class VoxelSpatialReward:
             "voxel_cell_y": float(cell[1]),
             "voxel_cell_z": float(cell[2]),
             "visible_enemy": float(tactical_engagement),
+            "combat_navigation_suppressed": float(navigation_suppressed),
             "enemy_visible_any": float(visible_count > 0),
             "enemy_visible_count": float(visible_count),
             "enemy_visible_nearest": float(nearest_visible if visible_count > 0 else 0.0),

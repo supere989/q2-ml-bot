@@ -121,11 +121,13 @@ def _safe_tag(value: str) -> str:
 
 
 def _lattice_direction_loss(act_params: dict, obs: torch.Tensor) -> dict:
-    """Teach local movement to follow the existing world-space lattice pulls.
+    """Teach movement to follow lattice pulls and convert contact to pursuit.
 
     The 24-d memory block is always the tail of the observation, independent
-    of Q2_EXT_OBS. Engagement/opportunity attract; threat repels. Supervision
-    is withheld during visible combat so aim/dodge policy remains in charge.
+    of Q2_EXT_OBS. Away from contact, engagement/opportunity attract and threat
+    repels. During live contact a combat-ready bot follows the nearest visible
+    enemy in its already bot-local frame instead of dropping lattice guidance
+    at precisely the point where actionability is required.
     """
     memory = obs[..., -24:]
     engagement = memory[..., 5:8] * memory[..., 8:9] * 0.5
@@ -140,24 +142,52 @@ def _lattice_direction_loss(act_params: dict, obs: torch.Tensor) -> dict:
     yaw = obs[..., 183] * torch.pi
     cos_yaw = torch.cos(yaw)
     sin_yaw = torch.sin(yaw)
-    target = torch.stack((
+    memory_target = torch.stack((
         desired_xy[..., 0] * cos_yaw + desired_xy[..., 1] * sin_yaw,
         desired_xy[..., 0] * sin_yaw - desired_xy[..., 1] * cos_yaw,
     ), dim=-1)
-    target = target / torch.linalg.vector_norm(target, dim=-1, keepdim=True).clamp_min(1e-6)
+    memory_target = memory_target / torch.linalg.vector_norm(
+        memory_target, dim=-1, keepdim=True
+    ).clamp_min(1e-6)
 
-    visibility = torch.stack(
-        [obs[..., ENT_OFF + index * ENT_DIM + 8] for index in range(ENT_CNT)],
-        dim=-1,
-    ).amax(dim=-1)
+    entities = obs[..., ENT_OFF:ENT_OFF + ENT_CNT * ENT_DIM].reshape(
+        *obs.shape[:-1], ENT_CNT, ENT_DIM
+    )
+    candidates = (
+        (entities[..., 6] > 0.0)
+        & (entities[..., 7] > 0.5)
+        & (entities[..., 8] > 0.5)
+    )
+    visible = candidates.any(dim=-1)
+    distance_sq = entities[..., :3].square().sum(dim=-1).masked_fill(
+        ~candidates, torch.inf
+    )
+    nearest_index = distance_sq.argmin(dim=-1)
+    gather_index = nearest_index.unsqueeze(-1).unsqueeze(-1).expand(
+        *nearest_index.shape, 1, 2
+    )
+    pursuit_target = entities[..., :2].gather(-2, gather_index).squeeze(-2)
+    pursuit_target = pursuit_target / torch.linalg.vector_norm(
+        pursuit_target, dim=-1, keepdim=True
+    ).clamp_min(1e-6)
     alive = obs[..., 6] > 0.0
-    mask = (strength > 0.03) & (visibility < 0.5) & alive
+    combat_ready = alive & (obs[..., 6] > 0.175) & (obs[..., 9] > 0.0)
+    committed = visible & combat_ready
+    target = torch.where(committed.unsqueeze(-1), pursuit_target, memory_target)
+    mask = alive & (committed | ((strength > 0.03) & ~visible))
     predicted = act_params["cont_mean"][..., :2]
     predicted = predicted / torch.linalg.vector_norm(
         predicted, dim=-1, keepdim=True
     ).clamp_min(0.25)
     cosine = (predicted * target).sum(dim=-1).clamp(-1.0, 1.0)
-    weights = strength.clamp(max=1.0) * mask.float()
+    memory_weight = strength.clamp(max=1.0)
+    # Engagement/opportunity history raises commitment; threat only repels when
+    # no live, winnable target is present.
+    combat_weight = (
+        0.5 + 0.25 * memory[..., 0] + 0.15 * memory[..., 2]
+        + 0.10 * memory[..., 21].clamp(min=0.0)
+    ).clamp(max=1.0)
+    weights = torch.where(committed, combat_weight, memory_weight) * mask.float()
     denominator = weights.sum()
     loss = ((1.0 - cosine) * weights).sum() / denominator.clamp_min(1.0)
     mean_cosine = (cosine * weights).sum() / denominator.clamp_min(1.0)

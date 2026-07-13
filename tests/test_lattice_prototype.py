@@ -208,18 +208,23 @@ def test_direction_objective_rewards_correct_local_movement():
 
 
 @pytest.mark.skipif(torch is None, reason="direction objective requires PyTorch")
-def test_direction_objective_defers_during_visible_combat():
+def test_direction_objective_converts_visible_combat_to_pursuit():
     obs = torch.zeros((1, 1, 219), dtype=torch.float32)
     obs[..., 6] = 0.5
     obs[..., -24 + 13] = 1.0
     obs[..., -24 + 16] = 1.0
-    obs[..., 10 + 8] = 1.0  # first entity visible flag
-    params = {"cont_mean": torch.tensor([[[-1.0, 0.0, 0.0, 0.0]]])}
+    obs[..., 9] = 0.5  # ammo
+    obs[..., 10:13] = torch.tensor([0.25, 0.0, 0.0])
+    obs[..., 10 + 6] = 0.5  # enemy health
+    obs[..., 10 + 7] = 1.0  # is_enemy
+    obs[..., 10 + 8] = 1.0  # visible
+    params = {"cont_mean": torch.tensor([[[1.0, 0.0, 0.0, 0.0]]])}
 
     result = _lattice_direction_loss(params, obs)
 
-    assert result["samples"].item() == 0.0
-    assert result["loss"].item() == 0.0
+    assert result["samples"].item() == 1.0
+    assert result["cosine"].item() == pytest.approx(0.5)
+    assert result["loss"].item() == pytest.approx(0.0)
 
 
 @pytest.mark.skipif(torch is None, reason="direction objective requires PyTorch")
