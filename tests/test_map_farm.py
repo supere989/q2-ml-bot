@@ -101,6 +101,15 @@ def test_worker_health_reports_queued_generator_styles(tmp_path):
     status = farm.status()
 
     assert status["ready_styles"] == {"mllive_12345678": "arena_lanes"}
+    assert status["arena_target"] == 1
+
+
+def test_worker_arena_target_scales_with_queue_depth(tmp_path):
+    live = MapFarm(tmp_path / "live", tmp_path / "runtime", depth=2)
+    teacher = MapFarm(tmp_path / "teacher", tmp_path / "runtime", depth=4)
+
+    assert live.arena_target == 1
+    assert teacher.arena_target == 2
 
 
 def test_teacher_queue_cannot_consume_live_maps(tmp_path):

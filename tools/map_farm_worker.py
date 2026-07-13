@@ -21,6 +21,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LIVE_MAP_PREFIX = "mllive"
+ARENA_STYLES = ("arena_open", "arena_vertical", "arena_lanes")
+LEGACY_STYLES = ("open", "towers", "canyon", "pits")
 SEED_RANGES = {
     "mllive": (10_000_000, 49_999_999),
     "mlteacher": (50_000_000, 99_999_999),
@@ -29,7 +31,7 @@ SEED_RANGES = {
 
 class MapFarm:
     def __init__(self, queue_dir: Path, q2_root: Path, depth: int, threads: int = 8,
-                 prefix: str = LIVE_MAP_PREFIX):
+                 prefix: str = LIVE_MAP_PREFIX, arena_fraction: float = 0.5):
         if not re.fullmatch(r"[a-z][a-z0-9_]{1,31}", prefix):
             raise ValueError(f"invalid map prefix {prefix!r}")
         self.queue_dir = queue_dir
@@ -37,6 +39,10 @@ class MapFarm:
         self.depth = max(1, depth)
         self.threads = max(1, threads)
         self.prefix = prefix
+        self.arena_target = min(
+            self.depth,
+            max(0, int(round(self.depth * max(0.0, min(1.0, arena_fraction))))),
+        )
         self.queue_dir.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.wake = threading.Event()
@@ -66,6 +72,7 @@ class MapFarm:
                 "ready_styles": ready_styles,
                 "ready_count": len(ready),
                 "target_depth": self.depth,
+                "arena_target": self.arena_target,
                 "prefix": self.prefix,
                 "building": self.building,
                 "last_error": self.last_error,
@@ -89,13 +96,17 @@ class MapFarm:
         json_path = generated / f"{name}.json"
         meta_path = generated / f"{name}.meta.json"
         q2tool = ROOT / "maps" / "q2tools" / "bin" / "q2tool"
+        ready_styles = self.status()["ready_styles"]
+        arena_ready = sum(style in ARENA_STYLES for style in ready_styles.values())
+        style_pool = ARENA_STYLES if arena_ready < self.arena_target else LEGACY_STYLES
+        style = random.SystemRandom().choice(style_pool)
         with self.lock:
             self.building = name
             self.last_error = ""
         try:
             subprocess.run(
                 [sys.executable, str(ROOT / "maps" / "generator.py"),
-                 "--seed", str(seed), "--name", name],
+                 "--seed", str(seed), "--name", name, "--style", style],
                 cwd=ROOT, check=True, timeout=30,
             )
             subprocess.run(
@@ -211,12 +222,13 @@ def main() -> int:
     parser.add_argument("--queue_depth", type=int, default=2)
     parser.add_argument("--prefix", default=LIVE_MAP_PREFIX)
     parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument("--arena_fraction", type=float, default=0.5)
     parser.add_argument("--queue_dir", default=str(ROOT / "maps" / "farm_queue"))
     parser.add_argument("--q2_root", default=os.environ.get("Q2_ROOT", str(ROOT.parent / "runtime")))
     args = parser.parse_args()
 
     farm = MapFarm(Path(args.queue_dir), Path(args.q2_root), args.queue_depth,
-                   args.threads, args.prefix)
+                   args.threads, args.prefix, args.arena_fraction)
     builder = threading.Thread(target=farm.build_loop, name="map-builder", daemon=True)
     builder.start()
     server = ThreadingHTTPServer((args.bind, args.port), handler_for(farm))

@@ -389,6 +389,9 @@ bands, and one or more enterable 384–448-unit buildings with opposed doors,
 interior ceilings, and playable roofs. Their counts are recorded in each
 map's metadata as `hallways`, `corner_pockets`, `corners`, `large_buildings`, and
 `ceiling_bands`. `mixed` includes these presets alongside the original four.
+The live and teacher map farms additionally maintain a 50% arena-style quota
+in each ready queue (one of two public bundles and two of four teacher
+bundles), while the remaining capacity preserves the original style family.
 
 Hook telemetry distinguishes fire, release, and the reserved class-2 no-op.
 Only hook fire can earn contextual traversal/combat reward; the no-op is
