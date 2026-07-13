@@ -10,7 +10,12 @@ except ModuleNotFoundError:
     torch = None
 
 from harness.spatial import VoxelSpatialReward
-from maps.generator import DM_SPAWN_COUNT, MIN_SPAWN_SEPARATION, MapGenerator
+from maps.generator import (
+    ARENA_STYLES,
+    DM_SPAWN_COUNT,
+    MIN_SPAWN_SEPARATION,
+    MapGenerator,
+)
 if torch is not None:
     from models.policy import Q2BotPolicy
 
@@ -30,6 +35,29 @@ def test_generated_maps_have_spare_clear_spawns_for_six_players():
         generator = MapGenerator(seed=seed)
         generator.generate()
         assert len(generator.spawn_points) == DM_SPAWN_COUNT
+        nearest = min(
+            math.dist(first[:2], second[:2])
+            for index, first in enumerate(generator.spawn_points)
+            for second in generator.spawn_points[index + 1:]
+        )
+        assert nearest >= MIN_SPAWN_SEPARATION
+
+
+@pytest.mark.parametrize("style", ARENA_STYLES)
+def test_arena_styles_keep_eight_clear_spawns(style):
+    for seed in range(3):
+        generator = MapGenerator(seed=seed, style=style)
+        generator.generate()
+        assert generator.style == style
+        assert len(generator.spawn_points) == DM_SPAWN_COUNT
+        assert sum(room.kind == "arena" for room in generator.rooms) >= 3
+        stats = generator.stats()
+        assert stats["hallways"] >= 2
+        assert stats["corner_pockets"] >= 2
+        assert stats["corners"] >= 6
+        assert stats["large_buildings"] >= 1
+        assert all(stats["ceiling_bands"][band] >= 1
+                   for band in ("low", "mid", "high"))
         nearest = min(
             math.dist(first[:2], second[:2])
             for index, first in enumerate(generator.spawn_points)

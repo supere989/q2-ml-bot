@@ -98,7 +98,8 @@ LANE_GAP     = 192         # central gap in lane walls
 LAVA_DEPTH   = 8
 LAVA_MIN, LAVA_MAX = 224, 384   # pool edge length
 
-STYLES = ("open", "towers", "canyon", "pits", "mixed")
+ARENA_STYLES = ("arena_open", "arena_vertical", "arena_lanes")
+STYLES = ("open", "towers", "canyon", "pits", *ARENA_STYLES, "mixed")
 
 # ── Data structures ───────────────────────────────────────────────────────────
 
@@ -414,20 +415,68 @@ class MapGenerator:
         self.stair_count = 0
         self.lane_wall_count = 0
         self.cover_count = 0
+        self.hallway_count = 0
+        self.corner_count = 0
+        self.large_building_count = 0
 
         # Resolve style → feature knobs (mixed rolls per map)
         r = self.rng
         if style == "mixed":
-            style = r.choice(("open", "towers", "canyon", "pits"))
+            style = r.choice(STYLES[:-1])
         self.style = style
         self.palette_name = r.choice(list(PALETTES.keys()))
         self.pal = PALETTES[self.palette_name]
-        self.terrace_levels = {"open": 1, "towers": 2, "canyon": 1, "pits": 3}[style]
-        self.tower_prob     = {"open": 0.15, "towers": 0.9, "canyon": 0.2, "pits": 0.3}[style]
+        self.terrace_levels = {
+            "open": 1, "towers": 2, "canyon": 1, "pits": 3,
+            "arena_open": 1, "arena_vertical": 3, "arena_lanes": 1,
+        }[style]
+        self.tower_prob = {
+            "open": 0.15, "towers": 0.9, "canyon": 0.2, "pits": 0.3,
+            "arena_open": 0.05, "arena_vertical": 0.75, "arena_lanes": 0.15,
+        }[style]
         # Judge: zero lane walls leaves verticality carrying all the flow —
         # every style keeps some chance of engineered chokepoints.
-        self.lane_prob      = {"open": 0.35, "towers": 0.35, "canyon": 0.9, "pits": 0.3}[style]
-        self.lava_prob      = {"open": 0.1, "towers": 0.15, "canyon": 0.15, "pits": 0.6}[style]
+        self.lane_prob = {
+            "open": 0.35, "towers": 0.35, "canyon": 0.9, "pits": 0.3,
+            "arena_open": 0.15, "arena_vertical": 0.30, "arena_lanes": 1.0,
+        }[style]
+        self.lava_prob = {
+            "open": 0.1, "towers": 0.15, "canyon": 0.15, "pits": 0.6,
+            "arena_open": 0.05, "arena_vertical": 0.10, "arena_lanes": 0.05,
+        }[style]
+        # Arena presets bias the graph toward repeated combat bowls while
+        # retaining ordinary rooms for circulation, pickups, and respawns.
+        self.occupied_density = 0.55
+        self.extra_arena_prob = 0.0
+        self.corridor_prob = 0.35
+        self.arena_cover_range = (2, 4)
+        self.hallway_ratio = 0.0
+        self.corner_range = (1, 1)
+        self.large_building_ratio = 0.0
+        if style == "arena_open":
+            self.occupied_density = 0.48
+            self.extra_arena_prob = 0.45
+            self.corridor_prob = 0.18
+            self.arena_cover_range = (4, 7)
+            self.hallway_ratio = 0.18
+            self.corner_range = (2, 3)
+            self.large_building_ratio = 0.25
+        elif style == "arena_vertical":
+            self.occupied_density = 0.52
+            self.extra_arena_prob = 0.40
+            self.corridor_prob = 0.20
+            self.arena_cover_range = (3, 5)
+            self.hallway_ratio = 0.18
+            self.corner_range = (1, 2)
+            self.large_building_ratio = 0.25
+        elif style == "arena_lanes":
+            self.occupied_density = 0.52
+            self.extra_arena_prob = 0.50
+            self.corridor_prob = 0.18
+            self.arena_cover_range = (3, 6)
+            self.hallway_ratio = 0.18
+            self.corner_range = (2, 3)
+            self.large_building_ratio = 0.30
 
     # ----- grid layout -----
 
@@ -442,10 +491,13 @@ class MapGenerator:
             d = r.randint(1, 2) * GRID_SIZE
             h = r.randint(256, 384)
         else:  # corridor
-            # corridors are 1 cell wide, 1-2 long — orientation handled in placement
-            w = GRID_SIZE
-            d = GRID_SIZE
-            h = r.randint(128, 192)
+            # True through-hallways: one cell wide, two cells long, with a
+            # deliberately lower ceiling than rooms and arenas.
+            if r.random() < 0.5:
+                w, d = 2 * GRID_SIZE, GRID_SIZE
+            else:
+                w, d = GRID_SIZE, 2 * GRID_SIZE
+            h = r.randint(160, 224)
         return w, d, h
 
     def build_layout(self, grid_n: int = 5):
@@ -462,7 +514,8 @@ class MapGenerator:
         frontier = [start]
         occupied.add(start)
         cell_level[start] = 0
-        while frontier and len(occupied) < int(N*N * 0.55):
+        target_rooms = max(8, int(N * N * self.occupied_density))
+        while frontier and len(occupied) < target_rooms:
             c = rng.choice(frontier)
             nx = c[0] + rng.choice([-1, 0, 1])
             ny = c[1] + rng.choice([-1, 0, 0, 1])
@@ -478,9 +531,11 @@ class MapGenerator:
         grid_rooms: dict = {}  # (gx,gy) -> Room index
         for (gx, gy) in occupied:
             dist_centre = abs(gx - N//2) + abs(gy - N//2)
-            if dist_centre <= 1 and len(occupied) > 5:
+            if (dist_centre <= 1 and len(occupied) > 5) or (
+                rng.random() < self.extra_arena_prob
+            ):
                 kind = 'arena'
-            elif rng.random() < 0.35:
+            elif rng.random() < self.corridor_prob:
                 kind = 'corridor'
             else:
                 kind = 'room'
@@ -493,6 +548,33 @@ class MapGenerator:
                         kind=kind)
             grid_rooms[(gx, gy)] = len(self.rooms)
             self.rooms.append(room)
+
+        if self.style in ARENA_STYLES:
+            # Enforce the composition instead of trusting independent random
+            # rolls: at least two low-ceiling hallways and one mid-ceiling
+            # ordinary room balance the repeated high-ceiling arenas.
+            target_hallways = max(2, int(round(len(self.rooms) * self.hallway_ratio)))
+            corridors = [room for room in self.rooms if room.kind == 'corridor']
+            candidates = sorted(
+                (room for room in self.rooms if room.kind != 'corridor'),
+                key=lambda room: abs(room.gx - N // 2) + abs(room.gy - N // 2),
+                reverse=True,
+            )
+            for room in candidates[:max(0, target_hallways - len(corridors))]:
+                room.kind = 'corridor'
+                room.w, room.d, height = self._room_params('corridor')
+                room.ceil_z = room.floor_z + height
+            if not any(room.kind == 'room' for room in self.rooms):
+                candidates = sorted(
+                    (room for room in self.rooms if room.kind == 'arena'),
+                    key=lambda room: abs(room.gx - N // 2) + abs(room.gy - N // 2),
+                    reverse=True,
+                )
+                if candidates:
+                    room = candidates[0]
+                    room.kind = 'room'
+                    room.w, room.d, height = self._room_params('room')
+                    room.ceil_z = room.floor_z + height
 
         # 3. Connect adjacent rooms
         dirs = [(1,0),(0,1),(-1,0),(0,-1)]
@@ -642,6 +724,175 @@ class MapGenerator:
                         tf=self.pal['metal'], tc=self.pal['metal'], tw=self.pal['trim'])
             self.spawn_blockers.append(SolidBox(x0, y0, fz, x1, y1, fz + cover_h))
 
+    @staticmethod
+    def _boxes_overlap(a: SolidBox, b: SolidBox) -> bool:
+        return not (
+            a.x1 <= b.x0 or a.x0 >= b.x1 or
+            a.y1 <= b.y0 or a.y0 >= b.y1 or
+            a.z1 <= b.z0 or a.z0 >= b.z1
+        )
+
+    def _structure_is_clear(self, box: SolidBox) -> bool:
+        return not any(self._boxes_overlap(box, blocker)
+                       for blocker in self.spawn_blockers)
+
+    def _emit_hallways(self):
+        """Turn corridor rooms into recognizable low-ceiling through-halls.
+
+        Parallel full-height side walls define a 256u clear passage while
+        both ends remain open. The room's existing ceiling supplies the low
+        overhead band, so hallways are useful circulation rather than traps.
+        """
+        for room in self.rooms:
+            if room.kind != 'corridor':
+                continue
+            fz = room.floor_z
+            top = room.ceil_z
+            thickness = 24
+            passage_half = 128
+            walls: List[SolidBox] = []
+            if room.w >= room.d:  # passage runs east/west
+                cy = room.wy + room.d // 2
+                walls = [
+                    SolidBox(room.wx + 32, cy - passage_half - thickness, fz,
+                             room.wx + room.w - 32, cy - passage_half, top),
+                    SolidBox(room.wx + 32, cy + passage_half, fz,
+                             room.wx + room.w - 32, cy + passage_half + thickness, top),
+                ]
+            else:                 # passage runs north/south
+                cx = room.wx + room.w // 2
+                walls = [
+                    SolidBox(cx - passage_half - thickness, room.wy + 32, fz,
+                             cx - passage_half, room.wy + room.d - 32, top),
+                    SolidBox(cx + passage_half, room.wy + 32, fz,
+                             cx + passage_half + thickness, room.wy + room.d - 32, top),
+                ]
+            for box in walls:
+                self.writer.add_brush(
+                    box.x0, box.y0, box.z0, box.x1, box.y1, box.z1,
+                    tf=self.pal['wall'], tc=self.pal['ceil'], tw=self.pal['wall'],
+                )
+                self.spawn_blockers.append(box)
+            self.hallway_count += 1
+
+    def _emit_corner_pockets(self):
+        """Place L-shaped cover pockets at arena edges for real corner play."""
+        rng = self.rng
+        for room in self.rooms:
+            if room.kind != 'arena':
+                continue
+            corners = [
+                (room.wx + 192, room.wy + 192, 1, 1),
+                (room.wx + room.w - 192, room.wy + 192, -1, 1),
+                (room.wx + 192, room.wy + room.d - 192, 1, -1),
+                (room.wx + room.w - 192, room.wy + room.d - 192, -1, -1),
+            ]
+            rng.shuffle(corners)
+            target = rng.randint(*self.corner_range)
+            for x, y, sx, sy in corners[:target]:
+                length, thick, height = 144, 24, 112
+                horizontal = SolidBox(
+                    min(x, x + sx * length), y - thick // 2, room.floor_z,
+                    max(x, x + sx * length), y + thick // 2,
+                    room.floor_z + height,
+                )
+                vertical = SolidBox(
+                    x - thick // 2, min(y, y + sy * length), room.floor_z,
+                    x + thick // 2, max(y, y + sy * length),
+                    room.floor_z + height,
+                )
+                if not (self._structure_is_clear(horizontal) and
+                        self._structure_is_clear(vertical)):
+                    continue
+                for box in (horizontal, vertical):
+                    self.writer.add_brush(
+                        box.x0, box.y0, box.z0, box.x1, box.y1, box.z1,
+                        tf=self.pal['trim'], tc=self.pal['trim'], tw=self.pal['wall'],
+                    )
+                    self.spawn_blockers.append(box)
+                self.corner_count += 1
+
+    def _emit_large_buildings(self):
+        """Add enterable roofed buildings to arena presets.
+
+        Each structure is hollow, has 144u doors on opposite faces, and adds
+        both an interior low ceiling and an optional roof control point.
+        """
+        if self.large_building_ratio <= 0.0:
+            return
+        rng = self.rng
+        arenas = [room for room in self.rooms if room.kind == 'arena']
+        if self.style == "arena_vertical":
+            # Highest terraces cannot be buried by another room's floor plate.
+            arenas.sort(key=lambda room: (room.floor_z, room.w * room.d), reverse=True)
+        else:
+            rng.shuffle(arenas)
+        target = max(1, int(round(len(arenas) * self.large_building_ratio)))
+        for room in arenas:
+            if self.large_building_count >= target:
+                break
+            size = rng.choice((384, 448))
+            # Vertical layouts stack room volumes. A deliberately lower
+            # building roof keeps the structure below neighbouring ceiling
+            # plates while still creating a distinct indoor ceiling band.
+            height = (rng.randint(144, 160) if self.style == "arena_vertical"
+                      else rng.randint(176, 224))
+            inset = 96
+            candidates = [
+                (room.wx + inset, room.wy + inset),
+                (room.wx + room.w - size - inset, room.wy + inset),
+                (room.wx + inset, room.wy + room.d - size - inset),
+                (room.wx + room.w - size - inset,
+                 room.wy + room.d - size - inset),
+                (room.wx + (room.w - size) // 2, room.wy + inset),
+                (room.wx + (room.w - size) // 2,
+                 room.wy + room.d - size - inset),
+                (room.wx + inset, room.wy + (room.d - size) // 2),
+                (room.wx + room.w - size - inset,
+                 room.wy + (room.d - size) // 2),
+            ]
+            rng.shuffle(candidates)
+            for x0, y0 in candidates:
+                fz = room.floor_z
+                shell = SolidBox(x0, y0, fz, x0 + size, y0 + size, fz + height + 24)
+                if not self._structure_is_clear(shell):
+                    continue
+                thick, door = 24, 144
+                door0 = x0 + (size - door) // 2
+                door1 = door0 + door
+                walls = [
+                    SolidBox(x0, y0, fz, x0 + thick, y0 + size, fz + height),
+                    SolidBox(x0 + size - thick, y0, fz,
+                             x0 + size, y0 + size, fz + height),
+                    SolidBox(x0, y0, fz, door0, y0 + thick, fz + height),
+                    SolidBox(door1, y0, fz, x0 + size, y0 + thick, fz + height),
+                    SolidBox(x0, y0 + size - thick, fz,
+                             door0, y0 + size, fz + height),
+                    SolidBox(door1, y0 + size - thick, fz,
+                             x0 + size, y0 + size, fz + height),
+                ]
+                roof = SolidBox(x0, y0, fz + height,
+                                x0 + size, y0 + size, fz + height + 24)
+                for box in (*walls, roof):
+                    self.writer.add_brush(
+                        box.x0, box.y0, box.z0, box.x1, box.y1, box.z1,
+                        tf=self.pal['metal'], tc=self.pal['ceil'], tw=self.pal['wall'],
+                    )
+                    self.spawn_blockers.append(box)
+                cx, cy = x0 + size // 2, y0 + size // 2
+                self._loot_sites.append(("platform", cx, cy, fz + 24))
+                self._loot_sites.append(("tower", cx, cy, fz + height + 48))
+                if HOOK_MIN <= height <= HOOK_MAX:
+                    self.hook_zones.append(HookZone(
+                        anchor=(float(cx), float(cy), float(fz + height)),
+                        landing=(float(cx), float(cy),
+                                 float(fz + height + PLAYER_H + 4)),
+                        distance=float(height),
+                        flags=HOOK_WALL,
+                    ))
+                self.large_building_count += 1
+                break
+
     # ----- v2 structures: stairs, towers, lane walls, lava -----
 
     def _emit_stairs(self):
@@ -713,16 +964,27 @@ class MapGenerator:
                         key=lambda r: r.w * r.d, reverse=True)
         if not arenas:
             return
-        room = arenas[0]
-        th = rng.randint(TOWER_H_MIN + 32, TOWER_H_MAX)
-        tx = room.wx + rng.randint(192, max(193, room.w - TOWER_BASE - 192))
-        ty = room.wy + rng.randint(192, max(193, room.d - TOWER_BASE - 192))
-        fz = room.floor_z
-        top = min(fz + th, room.ceil_z - PLAYER_H - 24)
+        chosen = None
+        for room in arenas:
+            for _ in range(24):
+                th = rng.randint(TOWER_H_MIN + 32, TOWER_H_MAX)
+                tx = room.wx + rng.randint(192, max(193, room.w - TOWER_BASE - 192))
+                ty = room.wy + rng.randint(192, max(193, room.d - TOWER_BASE - 192))
+                fz = room.floor_z
+                top = min(fz + th, room.ceil_z - PLAYER_H - 24)
+                box = SolidBox(tx, ty, fz,
+                               tx + TOWER_BASE, ty + TOWER_BASE, top)
+                if self._structure_is_clear(box):
+                    chosen = (room, tx, ty, fz, top, box)
+                    break
+            if chosen is not None:
+                break
+        if chosen is None:
+            return
+        room, tx, ty, fz, top, box = chosen
         w.add_brush(tx, ty, fz, tx + TOWER_BASE, ty + TOWER_BASE, top,
                     tf=self.pal['light'], tc=self.pal['metal'], tw=self.pal['metal'])
-        self.spawn_blockers.append(SolidBox(tx, ty, fz,
-                                            tx + TOWER_BASE, ty + TOWER_BASE, top))
+        self.spawn_blockers.append(box)
         cx_t = tx + TOWER_BASE // 2
         cy_t = ty + TOWER_BASE // 2
         w.add_entity("item_quad", {"origin": f"{cx_t} {cy_t} {top + 24}"})
@@ -756,10 +1018,13 @@ class MapGenerator:
                 if top > room.ceil_z - PLAYER_H - 24:
                     top = room.ceil_z - PLAYER_H - 24
                     th = top - fz
+                box = SolidBox(tx, ty, fz,
+                               tx + TOWER_BASE, ty + TOWER_BASE, top)
+                if not self._structure_is_clear(box):
+                    continue
                 w.add_brush(tx, ty, fz, tx + TOWER_BASE, ty + TOWER_BASE, top,
                             tf=self.pal['metal'], tc=self.pal['metal'], tw=self.pal['wall'])
-                self.spawn_blockers.append(SolidBox(tx, ty, fz,
-                                                    tx + TOWER_BASE, ty + TOWER_BASE, top))
+                self.spawn_blockers.append(box)
                 cx_t = tx + TOWER_BASE // 2
                 cy_t = ty + TOWER_BASE // 2
                 # Tower-top loot site: the heat pass decides WHAT goes here —
@@ -994,7 +1259,7 @@ class MapGenerator:
                 continue
             fz = room.floor_z
             fz_check = fz + 32   # probe above the floor brush, like spawns/items
-            target = rng.randint(2, 4)
+            target = rng.randint(*self.arena_cover_range)
             placed = 0
             for _ in range(target * 6):
                 if placed >= target:
@@ -1532,6 +1797,10 @@ class MapGenerator:
         for conn in self.connections:
             self._emit_connection(conn)
 
+        self._emit_hallways()
+        self._emit_large_buildings()
+        self._emit_corner_pockets()
+
         self._place_objectives()
         self._emit_stairs()
         self._emit_towers()
@@ -1546,6 +1815,12 @@ class MapGenerator:
 
     def stats(self) -> dict:
         levels = sorted({r.floor_z for r in self.rooms})
+        ceiling_bands = {
+            "low": sum(1 for r in self.rooms if r.ceil_z - r.floor_z < 256),
+            "mid": sum(1 for r in self.rooms
+                       if 256 <= r.ceil_z - r.floor_z < 384),
+            "high": sum(1 for r in self.rooms if r.ceil_z - r.floor_z >= 384),
+        }
         return {
             "style": self.style,
             "palette": self.palette_name,
@@ -1562,6 +1837,11 @@ class MapGenerator:
             "towers": self.tower_count,
             "lane_walls": self.lane_wall_count,
             "cover": self.cover_count,
+            "hallways": self.hallway_count,
+            "corner_pockets": self.corner_count,
+            "corners": self.corner_count + 4 * self.large_building_count,
+            "large_buildings": self.large_building_count,
+            "ceiling_bands": ceiling_bands,
             "lava_pools": len(self.lava_pools),
             "lava_area": sum((b.x1 - b.x0) * (b.y1 - b.y0) for b in self.lava_pools),
             "spawns": len(self.spawn_points),
@@ -1649,6 +1929,8 @@ def generate_map(name: str, seed: Optional[int], out_dir: Path, grid_n: int = 5,
           f"{s['stairs']} stairs, {s['towers']} towers, "
           f"{s['lane_walls']} lane walls, {s['lava_pools']} lava pools, "
           f"{s['platforms']} platforms, "
+          f"{s['hallways']} halls, {s['corners']} corners, "
+          f"{s['large_buildings']} buildings, "
           f"{s['hook_zones']} hook zones ({s['hook_required']} required)")
     return map_path, json_path
 

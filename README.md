@@ -380,6 +380,16 @@ the result under `movement/*`, `behavior/jump_*`, and
 384-unit-separated deathmatch starts, leaving spare starts for six-player live
 matches instead of forcing spawn reuse.
 
+Three arena-focused presets provide deliberate spatial composition:
+`arena_open` is flat and cover-rich, `arena_vertical` combines arena bowls
+with terraces/stairs/platforms, and `arena_lanes` emphasizes ground-level
+lanes and chokepoints. Arena presets enforce at least two 256-unit-wide
+through-hallways, repeated L-shaped corner pockets, low/mid/high ceiling
+bands, and one or more enterable 384–448-unit buildings with opposed doors,
+interior ceilings, and playable roofs. Their counts are recorded in each
+map's metadata as `hallways`, `corner_pockets`, `corners`, `large_buildings`, and
+`ceiling_bands`. `mixed` includes these presets alongside the original four.
+
 Hook telemetry distinguishes fire, release, and the reserved class-2 no-op.
 Only hook fire can earn contextual traversal/combat reward; the no-op is
 penalized, and releasing an active hook while overspeed is rewarded. This
