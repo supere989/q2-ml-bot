@@ -127,11 +127,15 @@ instead of cycling a fixed pool.
 
 ```bash
 python tools/live_match_onnx.py --onnx checkpoints/policy_43507714.onnx \
-  --live_maps --dlserver http://<host>:<port>
+  --live_maps --map_farm_url http://100.86.206.50:32510 \
+  --dlserver http://<host>:<port>
 ```
 
-Key flags: `--live_maps` (background `bsp -vis -fast -rad` compile per round,
-armed via `sv_maplist`/`EndDMLevel` fallback since `use_mapqueue=0`);
+Key flags: `--live_maps` (fresh-map rotation armed through
+`sv_maplist`/`EndDMLevel` since `use_mapqueue=0`; standalone mode compiles
+locally);
+`--map_farm_url` (consume checksum-attested maps from the private WSL worker
+instead of compiling on the live VPS; production keeps a two-map reserve);
 `--dlserver` (HTTP `sv_downloadserver` instead of the legacy in-game UDP map
 transfer — required once maps are never pre-bundled); `Q2_BIND_IP=""` (empty
 string — some builds hit a `getaddrinfo` error on a literal `+set ip`, empty

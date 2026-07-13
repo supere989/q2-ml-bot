@@ -15,8 +15,9 @@ dims, argmax for jump/fire/hook/weapon. fire_logits from the export are
 already conditioned on the argmax-selected weapon (autoregressive head).
 
 Live map generation (--live_maps): instead of playing a fixed map or a
-static pre-baked pool, generate a FRESH procedural map (same generator +
-q2tool the training curriculum uses) for every round. Mechanism: with
+static pre-baked pool, use a FRESH procedural map every round. Production
+combines this with --map_farm_url so generation and radiosity run on the WSL
+compute host; local compilation remains available for standalone use. With
 use_mapqueue=0 (our config), EndDMLevel() falls through to the vanilla
 sv_maplist cvar -- a cycling list where, if the current map is present,
 the server advances to the next entry. So we keep a rolling 2-entry list
@@ -30,19 +31,26 @@ pass -- the bot doesn't render pixels, so unlit/fullbright geometry is fine
 and much faster to iterate on. For a human-facing live match that looks
 badly overbright/fullbright, so this script runs its own compile with -rad
 included. A full rad pass takes ~50-100s (vs <1s for bsp+vis alone) --
-far too slow to block a round transition, so generation always runs in the
-BACKGROUND (started right after the current round begins) and has the
-whole round's duration to finish before it's needed.
+far too slow to share the live VPS without pacing impact. The WSL map farm
+keeps a ready queue of fully compiled bundles; the VPS only downloads,
+checksum-verifies, and atomically installs them.
 """
 
 import argparse
+import hashlib
+import io
+import json
 import os
 import random
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
+import urllib.error
+import urllib.request
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -161,18 +169,98 @@ class AsyncMapGenerator:
         return self._proc is not None
 
 
-def generate_fresh_map_blocking(rng: random.Random) -> str:
+class FarmMapGenerator:
+    """Downloads checksum-attested maps already compiled by a remote farm."""
+
+    def __init__(self, base_url: str):
+        self.url = f"{base_url.rstrip('/')}/next.zip"
+        self.q2_root = Path(os.environ.get("Q2_ROOT", str(ROOT.parent / "q2_lithium_merge")))
+        self._thread = None
+        self._result = None
+        self._error = ""
+        self._last_attempt = 0.0
+
+    @staticmethod
+    def _valid_name(name: str) -> bool:
+        return (
+            name.startswith(f"{LIVE_MAP_PREFIX}_")
+            and len(name) == len(LIVE_MAP_PREFIX) + 9
+            and name[len(LIVE_MAP_PREFIX) + 1:].isdigit()
+        )
+
+    def _fetch(self):
+        try:
+            with urllib.request.urlopen(self.url, timeout=15) as response:
+                if response.status == 204:
+                    raise RuntimeError("remote map queue is empty")
+                bundle_data = response.read()
+            with zipfile.ZipFile(io.BytesIO(bundle_data)) as bundle:
+                manifest = json.loads(bundle.read("manifest.json"))
+                name = str(manifest["name"])
+                if not self._valid_name(name):
+                    raise ValueError(f"invalid farm map name {name!r}")
+                expected = {
+                    f"{name}.bsp": manifest["files"][f"{name}.bsp"],
+                    f"{name}.json": manifest["files"][f"{name}.json"],
+                }
+                payloads = {filename: bundle.read(filename) for filename in expected}
+                for filename, digest in expected.items():
+                    actual = hashlib.sha256(payloads[filename]).hexdigest()
+                    if actual != digest:
+                        raise ValueError(f"checksum mismatch for {filename}")
+            install_dir = self.q2_root / "baseq2" / "maps"
+            install_dir.mkdir(parents=True, exist_ok=True)
+            for filename, payload in payloads.items():
+                temporary = install_dir / f".{filename}.{os.getpid()}.tmp"
+                temporary.write_bytes(payload)
+                os.replace(temporary, install_dir / filename)
+            self._result = name
+        except Exception as error:
+            self._error = str(error)
+
+    def start(self):
+        if self._thread is not None:
+            return
+        now = time.monotonic()
+        if now - self._last_attempt < 5.0:
+            return
+        self._last_attempt = now
+        self._result = None
+        self._error = ""
+        self._thread = threading.Thread(target=self._fetch, name="map-farm-fetch", daemon=True)
+        self._thread.start()
+
+    def poll(self) -> str:
+        if self._thread is None or self._thread.is_alive():
+            return None
+        self._thread.join()
+        self._thread = None
+        result, error = self._result, self._error
+        self._result = None
+        self._error = ""
+        if result:
+            print(f"[mapfarm] installed remote map: {result}", flush=True)
+            return result
+        if error:
+            print(f"[mapfarm] fetch deferred: {error}", flush=True)
+        return None
+
+    @property
+    def busy(self) -> bool:
+        return self._thread is not None
+
+
+def generate_fresh_map_blocking(mapgen) -> str:
     """Synchronous variant -- only used once, for the very first map at
     startup (no round is in progress yet to be blocked)."""
-    gen = AsyncMapGenerator(rng)
-    gen.start()
-    if not gen.busy:
+    mapgen.start()
+    if not mapgen.busy:
         return None
-    while gen.busy:
-        name = gen.poll()
+    while mapgen.busy:
+        name = mapgen.poll()
         if name:
             return name
-        time.sleep(1.0)
+        time.sleep(0.1)
     return None
 
 
@@ -208,6 +296,8 @@ def main() -> int:
     parser.add_argument("--timelimit", type=float, default=15)
     parser.add_argument("--live_maps", action="store_true",
                          help="generate a fresh procedural map every round instead of a fixed/pooled map")
+    parser.add_argument("--map_farm_url", default="",
+                         help="private map-farm base URL; consume compiled maps instead of compiling locally")
     parser.add_argument("--dlserver", default="",
                          help="HTTP URL serving the game data root (sv_downloadserver) -- "
                               "fast client downloads instead of the legacy in-game transfer")
@@ -215,10 +305,14 @@ def main() -> int:
 
     policy = OnnxPolicy(Path(args.onnx))
     rng = random.Random()
-    mapgen = AsyncMapGenerator(rng) if args.live_maps else None
+    mapgen = (
+        FarmMapGenerator(args.map_farm_url)
+        if args.live_maps and args.map_farm_url
+        else AsyncMapGenerator(rng) if args.live_maps else None
+    )
 
     if args.live_maps:
-        start_map = generate_fresh_map_blocking(rng)
+        start_map = generate_fresh_map_blocking(mapgen)
         if not start_map:
             print("[mapgen] initial generation failed, falling back to --map_name", flush=True)
             start_map = args.map_name
@@ -293,6 +387,8 @@ def main() -> int:
                         next_map = finished
                         env.set_cvar("sv_maplist", f"{current_map} {next_map}")
                         print(f"[mapgen] armed sv_maplist: {current_map} -> {next_map}", flush=True)
+                elif next_map is None:
+                    mapgen.start()
 
                 # 2. did the round actually transition? (poll infrequently --
                 #    it's just a UDP status query, but no need to hammer it)

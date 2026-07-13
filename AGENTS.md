@@ -22,6 +22,16 @@ Runtime, human-joinable) has run on a separate Hetzner VPS since 2026-07 —
 see `q2-ml-bot/README.md` § Live Deployment / § Known Issues for topology
 and current findings.
 
+**Live map farm (added 2026-07-12):** radiosity must not run on the production
+VPS because it disturbs 10 Hz frame pacing. WSL runs the enabled user service
+`q2-map-farm.service`, bound only to its Tailscale address at
+`http://100.86.206.50:32510`, and maintains two checksum-attested compiled
+map bundles. Production uses `--map_farm_url` to pull and atomically install
+them. `/health` reports queue depth/build state. If WSL is unavailable, the
+live server keeps its current/armed map and retries; never restore local VPS
+compilation as an automatic fallback. The worker's ignored `q2tool` asset is
+copied into `~/q2-rollout/q2-ml-bot/maps/q2tools/` from the canonical WSL tree.
+
 ## Training Topology
 
 Training runs on the Windows RTX 2080 box (DESKTOP-KDLBAE7), inside WSL.
