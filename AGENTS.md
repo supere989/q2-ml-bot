@@ -51,8 +51,8 @@ the active player count is six. WSL's `q2-teacher-receiver.service` writes atomi
 `~/q2-rollout/live-3zb2/teacher_batches`. The dedicated receiver and map-farm
 services are enabled user units on WSL.
 
-The public `q2mlbot.service` uses `maxclients=6`: one ML bot occupies the final
-slot and five slots remain available to human players.
+The public `q2mlbot.service` uses `maxclients=6` and four ML bots in slots 2-5,
+leaving slots 0-1 for two human players.
 
 ## Training Topology
 

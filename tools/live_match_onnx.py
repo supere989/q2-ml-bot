@@ -269,8 +269,8 @@ def main() -> int:
     next_map = None  # map currently armed in sv_maplist
     staged_generated = None
     try:
-        obs = env.reset_all()[0]
-        hx = policy.init_hidden()
+        observations = env.reset_all()
+        hidden_states = [policy.init_hidden() for _ in observations]
 
         if args.dlserver:
             env.set_cvar("sv_downloadserver", args.dlserver)
@@ -279,17 +279,25 @@ def main() -> int:
         if args.live_maps:
             mapgen.start()  # begin generating the NEXT map in the background now
 
-        print("ML bot is live. Waiting for a human to join...", flush=True)
+        print(f"{len(observations)} ML bots are live. Waiting for humans to join...", flush=True)
         last_report = time.monotonic()
         last_map_check = time.monotonic()
         while not _STOP:
-            action, _value, hx = policy.act(obs, hx)
-            obs, _reward, term, trunc, info = env.step_all([action])[0]
-            kills += int(info.get("kills", 0.0) > 0)
-            deaths += int(info.get("deaths", 0.0) > 0)
-            if term or trunc:
-                obs = env.reset_slot(0)
-                hx = policy.init_hidden()
+            actions = []
+            for slot_idx, (obs, hx) in enumerate(zip(observations, hidden_states)):
+                action, _value, next_hx = policy.act(obs, hx)
+                actions.append(action)
+                hidden_states[slot_idx] = next_hx
+            results = env.step_all(actions)
+            infos = []
+            for slot_idx, (obs, _reward, term, trunc, info) in enumerate(results):
+                observations[slot_idx] = obs
+                infos.append(info)
+                kills += int(info.get("kills", 0.0) > 0)
+                deaths += int(info.get("deaths", 0.0) > 0)
+                if term or trunc:
+                    observations[slot_idx] = env.reset_slot(slot_idx)
+                    hidden_states[slot_idx] = policy.init_hidden()
 
             now = time.monotonic()
 
@@ -331,7 +339,8 @@ def main() -> int:
                               f"generating the next one now", flush=True)
 
             if now - last_report >= 30.0:
-                print(f"[live] bot kills={kills} deaths={deaths} map={info.get('map')}", flush=True)
+                live_map = infos[0].get("map") if infos else current_map
+                print(f"[live] bot kills={kills} deaths={deaths} map={live_map}", flush=True)
                 last_report = now
     finally:
         print(f"shutting down. final: kills={kills} deaths={deaths}")
