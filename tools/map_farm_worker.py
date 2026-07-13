@@ -49,9 +49,21 @@ class MapFarm:
 
     def status(self) -> dict:
         with self.lock:
-            ready = [path.stem for path in self.ready()]
+            paths = self.ready()
+            ready = [path.stem for path in paths]
+            ready_styles = {}
+            for path in paths:
+                try:
+                    with zipfile.ZipFile(path) as bundle:
+                        manifest = json.loads(bundle.read("manifest.json"))
+                    ready_styles[path.stem] = str(
+                        manifest.get("generator", {}).get("style", "unknown")
+                    )
+                except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+                    ready_styles[path.stem] = "unknown"
             return {
                 "ready": ready,
+                "ready_styles": ready_styles,
                 "ready_count": len(ready),
                 "target_depth": self.depth,
                 "prefix": self.prefix,
@@ -75,6 +87,7 @@ class MapFarm:
         map_path = generated / f"{name}.map"
         bsp_path = generated / f"{name}.bsp"
         json_path = generated / f"{name}.json"
+        meta_path = generated / f"{name}.meta.json"
         q2tool = ROOT / "maps" / "q2tools" / "bin" / "q2tool"
         with self.lock:
             self.building = name
@@ -91,10 +104,12 @@ class MapFarm:
                  "-moddir", str(self.q2_root / "baseq2"), str(map_path)],
                 cwd=ROOT, check=True,
             )
-            if not bsp_path.is_file() or not json_path.is_file():
-                raise RuntimeError(f"compiler did not produce both artifacts for {name}")
+            if not bsp_path.is_file() or not json_path.is_file() or not meta_path.is_file():
+                raise RuntimeError(f"compiler did not produce map artifacts for {name}")
+            generator_meta = json.loads(meta_path.read_text())
             manifest = {
                 "name": name,
+                "generator": generator_meta,
                 "files": {
                     bsp_path.name: self._sha256(bsp_path),
                     json_path.name: self._sha256(json_path),
@@ -113,7 +128,10 @@ class MapFarm:
             print(f"[farm] build failed for {name}: {error}", flush=True)
             time.sleep(5)
         finally:
-            for suffix in (".map", ".prt", ".bsp", ".json"):
+            for suffix in (
+                ".map", ".prt", ".bsp", ".json", ".meta.json",
+                ".lattice.json", ".routes.json",
+            ):
                 try:
                     (generated / f"{name}{suffix}").unlink()
                 except FileNotFoundError:

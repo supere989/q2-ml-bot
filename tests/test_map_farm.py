@@ -30,7 +30,7 @@ class _Response:
         return self.payload
 
 
-def _bundle(name="mllive_12345678", corrupt=False):
+def _bundle(name="mllive_12345678", corrupt=False, style=None):
     payloads = {
         f"{name}.bsp": b"compiled-bsp",
         f"{name}.json": b'{"spawn": []}',
@@ -39,6 +39,8 @@ def _bundle(name="mllive_12345678", corrupt=False):
         "name": name,
         "files": {key: hashlib.sha256(value).hexdigest() for key, value in payloads.items()},
     }
+    if style:
+        manifest["generator"] = {"style": style}
     if corrupt:
         manifest["files"][f"{name}.bsp"] = "0" * 64
     stream = io.BytesIO()
@@ -89,6 +91,16 @@ def test_worker_claim_is_atomic_and_wakes_replenishment(tmp_path):
     assert farm.claim() is None
     farm.restore(name, claimed)
     assert ready.exists()
+
+
+def test_worker_health_reports_queued_generator_styles(tmp_path):
+    farm = MapFarm(tmp_path / "queue", tmp_path / "runtime", depth=2)
+    ready = farm.queue_dir / "mllive_12345678.zip"
+    ready.write_bytes(_bundle(style="arena_lanes"))
+
+    status = farm.status()
+
+    assert status["ready_styles"] == {"mllive_12345678": "arena_lanes"}
 
 
 def test_teacher_queue_cannot_consume_live_maps(tmp_path):
