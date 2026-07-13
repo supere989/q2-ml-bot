@@ -1,0 +1,22 @@
+[Unit]
+Description=Q2 live 3ZB2 teacher receiver (WSL)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/q2-rollout/q2-ml-bot
+Environment=Q2_EXT_OBS=1
+Environment=Q2_RUST_LATTICE=1
+Environment=PYTHONPATH=%h/q2-rollout/python
+ExecStart=/usr/bin/python3 -u tools/teacher_receiver.py \
+  --bind 100.86.206.50 \
+  --port 32511 \
+  --source 100.101.57.114 \
+  --output_dir %h/q2-rollout/live-3zb2/teacher_batches \
+  --batch_size 2048 \
+  --flush_seconds 120
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

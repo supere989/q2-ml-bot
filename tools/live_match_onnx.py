@@ -15,7 +15,9 @@ dims, argmax for jump/fire/hook/weapon. fire_logits from the export are
 already conditioned on the argmax-selected weapon (autoregressive head).
 
 Live map generation (--live_maps): instead of playing a fixed map or a
-static pre-baked pool, use a FRESH procedural map every round. Production
+static pre-baked pool, consume fresh procedural maps. With --stock_maps,
+production alternates stock and generated maps, leaving an entire stock-map
+round for the remote farm to replenish its generated-map queue. Production
 combines this with --map_farm_url so generation and radiosity run on the WSL
 compute host; local compilation remains available for standalone use. With
 use_mapqueue=0 (our config), EndDMLevel() falls through to the vanilla
@@ -37,20 +39,12 @@ checksum-verifies, and atomically installs them.
 """
 
 import argparse
-import hashlib
-import io
-import json
 import os
 import random
 import signal
-import socket
 import subprocess
 import sys
-import threading
 import time
-import urllib.error
-import urllib.request
-import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -60,6 +54,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from harness.env import Q2MultiEnv, discover_map_pool
+from tools.map_farm_client import (
+    FarmMapGenerator,
+    ShuffledStockRotation,
+    query_live_mapname,
+)
 
 HIDDEN_DIM = 256  # must match models.policy.HIDDEN_DIM
 LIVE_MAP_PREFIX = "mllive"
@@ -169,87 +168,6 @@ class AsyncMapGenerator:
         return self._proc is not None
 
 
-class FarmMapGenerator:
-    """Downloads checksum-attested maps already compiled by a remote farm."""
-
-    def __init__(self, base_url: str):
-        self.url = f"{base_url.rstrip('/')}/next.zip"
-        self.q2_root = Path(os.environ.get("Q2_ROOT", str(ROOT.parent / "q2_lithium_merge")))
-        self._thread = None
-        self._result = None
-        self._error = ""
-        self._last_attempt = 0.0
-
-    @staticmethod
-    def _valid_name(name: str) -> bool:
-        return (
-            name.startswith(f"{LIVE_MAP_PREFIX}_")
-            and len(name) == len(LIVE_MAP_PREFIX) + 9
-            and name[len(LIVE_MAP_PREFIX) + 1:].isdigit()
-        )
-
-    def _fetch(self):
-        try:
-            with urllib.request.urlopen(self.url, timeout=15) as response:
-                if response.status == 204:
-                    raise RuntimeError("remote map queue is empty")
-                bundle_data = response.read()
-            with zipfile.ZipFile(io.BytesIO(bundle_data)) as bundle:
-                manifest = json.loads(bundle.read("manifest.json"))
-                name = str(manifest["name"])
-                if not self._valid_name(name):
-                    raise ValueError(f"invalid farm map name {name!r}")
-                expected = {
-                    f"{name}.bsp": manifest["files"][f"{name}.bsp"],
-                    f"{name}.json": manifest["files"][f"{name}.json"],
-                }
-                payloads = {filename: bundle.read(filename) for filename in expected}
-                for filename, digest in expected.items():
-                    actual = hashlib.sha256(payloads[filename]).hexdigest()
-                    if actual != digest:
-                        raise ValueError(f"checksum mismatch for {filename}")
-            install_dir = self.q2_root / "baseq2" / "maps"
-            install_dir.mkdir(parents=True, exist_ok=True)
-            for filename, payload in payloads.items():
-                temporary = install_dir / f".{filename}.{os.getpid()}.tmp"
-                temporary.write_bytes(payload)
-                os.replace(temporary, install_dir / filename)
-            self._result = name
-        except Exception as error:
-            self._error = str(error)
-
-    def start(self):
-        if self._thread is not None:
-            return
-        now = time.monotonic()
-        if now - self._last_attempt < 5.0:
-            return
-        self._last_attempt = now
-        self._result = None
-        self._error = ""
-        self._thread = threading.Thread(target=self._fetch, name="map-farm-fetch", daemon=True)
-        self._thread.start()
-
-    def poll(self) -> str:
-        if self._thread is None or self._thread.is_alive():
-            return None
-        self._thread.join()
-        self._thread = None
-        result, error = self._result, self._error
-        self._result = None
-        self._error = ""
-        if result:
-            print(f"[mapfarm] installed remote map: {result}", flush=True)
-            return result
-        if error:
-            print(f"[mapfarm] fetch deferred: {error}", flush=True)
-        return None
-
-    @property
-    def busy(self) -> bool:
-        return self._thread is not None
-
-
 def generate_fresh_map_blocking(mapgen) -> str:
     """Synchronous variant -- only used once, for the very first map at
     startup (no round is in progress yet to be blocked)."""
@@ -262,24 +180,6 @@ def generate_fresh_map_blocking(mapgen) -> str:
             return name
         time.sleep(0.1)
     return None
-
-
-def query_live_mapname(port: int) -> str:
-    """Out-of-band status query -- reads the REAL server state, independent
-    of the harness's own (engine-driven transitions bypass it) bookkeeping."""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(2.0)
-        s.sendto(b"\xff\xff\xff\xffstatus\n", ("127.0.0.1", port))
-        data, _ = s.recvfrom(4096)
-        text = data.decode(errors="replace")
-        for line in text.split("\n"):
-            if "\\mapname\\" in line:
-                parts = line.split("\\")
-                return parts[parts.index("mapname") + 1]
-    except (OSError, ValueError, IndexError):
-        pass
-    return ""
 
 
 def main() -> int:
@@ -298,6 +198,10 @@ def main() -> int:
                          help="generate a fresh procedural map every round instead of a fixed/pooled map")
     parser.add_argument("--map_farm_url", default="",
                          help="private map-farm base URL; consume compiled maps instead of compiling locally")
+    parser.add_argument("--stock_maps", default="",
+                         help="comma/space separated stock maps to alternate with generated maps")
+    parser.add_argument("--rotation_seed", type=int, default=20260712,
+                         help="independent shuffle stream for the stock rotation")
     parser.add_argument("--dlserver", default="",
                          help="HTTP URL serving the game data root (sv_downloadserver) -- "
                               "fast client downloads instead of the legacy in-game transfer")
@@ -310,12 +214,21 @@ def main() -> int:
         if args.live_maps and args.map_farm_url
         else AsyncMapGenerator(rng) if args.live_maps else None
     )
+    stock_names = args.stock_maps.replace(",", " ").split()
+    stock_rotation = (
+        ShuffledStockRotation(stock_names, args.rotation_seed) if stock_names else None
+    )
 
     if args.live_maps:
-        start_map = generate_fresh_map_blocking(mapgen)
-        if not start_map:
-            print("[mapgen] initial generation failed, falling back to --map_name", flush=True)
-            start_map = args.map_name
+        # Interlaced mode deliberately starts on stock while the first fresh
+        # map is fetched. It never substitutes --map_name into that rotation.
+        if stock_rotation:
+            start_map = stock_rotation.next()
+        else:
+            start_map = generate_fresh_map_blocking(mapgen)
+            if not start_map:
+                print("[mapgen] initial generation failed, falling back to --map_name", flush=True)
+                start_map = args.map_name
         maps = [start_map]
     else:
         maps = discover_map_pool(
@@ -353,7 +266,8 @@ def main() -> int:
 
     kills = deaths = 0
     current_map = maps[0]
-    next_map = None  # name once a background compile finishes and is armed
+    next_map = None  # map currently armed in sv_maplist
+    staged_generated = None
     try:
         obs = env.reset_all()[0]
         hx = policy.init_hidden()
@@ -380,15 +294,24 @@ def main() -> int:
             now = time.monotonic()
 
             if args.live_maps:
-                # 1. did the background compile finish? arm it once ready.
+                # 1. Stage a finished farm map. In interlaced mode it is only
+                # armed after a stock round; generated rounds arm stock next.
                 if mapgen.busy:
                     finished = mapgen.poll()
                     if finished:
-                        next_map = finished
+                        staged_generated = finished
+                elif staged_generated is None:
+                    mapgen.start()
+
+                if next_map is None:
+                    if stock_rotation and current_map.startswith(f"{LIVE_MAP_PREFIX}_"):
+                        next_map = stock_rotation.next()
+                    elif staged_generated is not None:
+                        next_map = staged_generated
+                        staged_generated = None
+                    if next_map:
                         env.set_cvar("sv_maplist", f"{current_map} {next_map}")
                         print(f"[mapgen] armed sv_maplist: {current_map} -> {next_map}", flush=True)
-                elif next_map is None:
-                    mapgen.start()
 
                 # 2. did the round actually transition? (poll infrequently --
                 #    it's just a UDP status query, but no need to hammer it)
@@ -402,7 +325,7 @@ def main() -> int:
                         # start generating the one after)
                         current_map = live_map
                         next_map = None
-                        if not mapgen.busy:
+                        if staged_generated is None and not mapgen.busy:
                             mapgen.start()
                         print(f"[mapgen] round advanced to {current_map}; "
                               f"generating the next one now", flush=True)

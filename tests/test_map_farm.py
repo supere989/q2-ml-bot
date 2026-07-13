@@ -10,7 +10,7 @@ try:
 except ModuleNotFoundError:
     sys.modules["onnxruntime"] = types.ModuleType("onnxruntime")
 
-from tools.live_match_onnx import FarmMapGenerator
+from tools.map_farm_client import FarmMapGenerator, ShuffledStockRotation
 from tools.map_farm_worker import MapFarm
 
 
@@ -89,3 +89,43 @@ def test_worker_claim_is_atomic_and_wakes_replenishment(tmp_path):
     assert farm.claim() is None
     farm.restore(name, claimed)
     assert ready.exists()
+
+
+def test_teacher_queue_cannot_consume_live_maps(tmp_path):
+    farm = MapFarm(
+        tmp_path / "queue", tmp_path / "runtime", depth=4, prefix="mlteacher",
+    )
+    live = farm.queue_dir / "mllive_12345678.zip"
+    teacher = farm.queue_dir / "mlteacher_56781234.zip"
+    live.write_bytes(_bundle("mllive_12345678"))
+    teacher.write_bytes(_bundle("mlteacher_56781234"))
+
+    name, _claimed = farm.claim()
+
+    assert name == "mlteacher_56781234"
+    assert live.exists()
+
+
+def test_teacher_consumer_rejects_live_namespace(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q2_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda *_args, **_kwargs: _Response(_bundle()),
+    )
+    generator = FarmMapGenerator("http://map-farm.test:32513", prefix="mlteacher")
+
+    generator._fetch()
+
+    assert generator._result is None
+    assert "invalid farm map name" in generator._error
+
+
+def test_stock_rotation_shuffles_without_repeats_in_a_cycle():
+    rotation = ShuffledStockRotation(["q2dm2", "q2dm4", "q2dm6", "q2dm8"], seed=2204)
+
+    first = [rotation.next() for _ in range(4)]
+    second = [rotation.next() for _ in range(4)]
+
+    assert set(first) == {"q2dm2", "q2dm4", "q2dm6", "q2dm8"}
+    assert set(second) == set(first)
+    assert first[-1] != second[0]
+    assert "q2dm1" not in first + second

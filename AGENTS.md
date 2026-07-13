@@ -32,6 +32,25 @@ live server keeps its current/armed map and retries; never restore local VPS
 compilation as an automatic fallback. The worker's ignored `q2tool` asset is
 copied into `~/q2-rollout/q2-ml-bot/maps/q2tools/` from the canonical WSL tree.
 
+**Interlaced live/teacher rotations (added 2026-07-12):** both lanes alternate
+one stock map with one remotely compiled map so the WSL farm has a complete
+stock-map round to replenish its queue. The public lane uses the shuffled stock
+pool `q2dm1,q2dm3,q2dm5,q2dm7` plus `mllive_*` from port 32510. The isolated
+3ZB2 teacher lane uses `q2dm2,q2dm4,q2dm6,q2dm8` plus `mlteacher_*` from a
+separate queue on port 32513. The farms use disjoint seed ranges, independent
+shuffle seeds, randomized queue claims, and strict consumer-side prefix checks.
+Do not merge these queues or add `q2dm1` to the teacher pool.
+
+The teacher q2ded is a separate VPS system service `q2-teacher-server.service`
+on loopback port 28001, using `/home/q2mlbot/q2_teacher_runtime`; it must never
+replace the public runtime on port 28000. Six legacy 3ZB2 bots use the dedicated
+`ml6sk1` section (installed idempotently by the teacher controller) and send
+pre-action observations plus their genuine actions over Tailscale UDP to WSL
+port 32511. Keep `maxclients=8`: 3ZB2 needs two spare engine slots even though
+the active player count is six. WSL's `q2-teacher-receiver.service` writes atomic batches beneath
+`~/q2-rollout/live-3zb2/teacher_batches`. The dedicated receiver and map-farm
+services are enabled user units on WSL.
+
 ## Training Topology
 
 Training runs on the Windows RTX 2080 box (DESKTOP-KDLBAE7), inside WSL.

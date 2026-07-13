@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -20,14 +21,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LIVE_MAP_PREFIX = "mllive"
+SEED_RANGES = {
+    "mllive": (10_000_000, 49_999_999),
+    "mlteacher": (50_000_000, 99_999_999),
+}
 
 
 class MapFarm:
-    def __init__(self, queue_dir: Path, q2_root: Path, depth: int, threads: int = 8):
+    def __init__(self, queue_dir: Path, q2_root: Path, depth: int, threads: int = 8,
+                 prefix: str = LIVE_MAP_PREFIX):
+        if not re.fullmatch(r"[a-z][a-z0-9_]{1,31}", prefix):
+            raise ValueError(f"invalid map prefix {prefix!r}")
         self.queue_dir = queue_dir
         self.q2_root = q2_root
         self.depth = max(1, depth)
         self.threads = max(1, threads)
+        self.prefix = prefix
         self.queue_dir.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.wake = threading.Event()
@@ -36,7 +45,7 @@ class MapFarm:
         self.last_error = ""
 
     def ready(self) -> list[Path]:
-        return sorted(self.queue_dir.glob(f"{LIVE_MAP_PREFIX}_*.zip"))
+        return sorted(self.queue_dir.glob(f"{self.prefix}_*.zip"))
 
     def status(self) -> dict:
         with self.lock:
@@ -45,6 +54,7 @@ class MapFarm:
                 "ready": ready,
                 "ready_count": len(ready),
                 "target_depth": self.depth,
+                "prefix": self.prefix,
                 "building": self.building,
                 "last_error": self.last_error,
             }
@@ -58,8 +68,9 @@ class MapFarm:
         return digest.hexdigest()
 
     def _build_one(self) -> None:
-        seed = random.SystemRandom().randint(10_000_000, 99_999_999)
-        name = f"{LIVE_MAP_PREFIX}_{seed:08d}"
+        low, high = SEED_RANGES.get(self.prefix, (10_000_000, 99_999_999))
+        seed = random.SystemRandom().randint(low, high)
+        name = f"{self.prefix}_{seed:08d}"
         generated = ROOT / "maps" / "generated"
         map_path = generated / f"{name}.map"
         bsp_path = generated / f"{name}.bsp"
@@ -123,7 +134,8 @@ class MapFarm:
             ready = self.ready()
             if not ready:
                 return None
-            source = ready[0]
+            # Do not make queue filename order become the map rotation.
+            source = random.SystemRandom().choice(ready)
             claimed = source.with_name(f".{source.stem}.{uuid.uuid4().hex}.claimed")
             os.replace(source, claimed)
             return source.stem, claimed
@@ -179,16 +191,19 @@ def main() -> int:
     parser.add_argument("--bind", default="100.86.206.50")
     parser.add_argument("--port", type=int, default=32510)
     parser.add_argument("--queue_depth", type=int, default=2)
+    parser.add_argument("--prefix", default=LIVE_MAP_PREFIX)
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--queue_dir", default=str(ROOT / "maps" / "farm_queue"))
     parser.add_argument("--q2_root", default=os.environ.get("Q2_ROOT", str(ROOT.parent / "runtime")))
     args = parser.parse_args()
 
-    farm = MapFarm(Path(args.queue_dir), Path(args.q2_root), args.queue_depth, args.threads)
+    farm = MapFarm(Path(args.queue_dir), Path(args.q2_root), args.queue_depth,
+                   args.threads, args.prefix)
     builder = threading.Thread(target=farm.build_loop, name="map-builder", daemon=True)
     builder.start()
     server = ThreadingHTTPServer((args.bind, args.port), handler_for(farm))
-    print(f"[farm] listening on http://{args.bind}:{args.port} depth={farm.depth}", flush=True)
+    print(f"[farm] listening on http://{args.bind}:{args.port} "
+          f"prefix={farm.prefix} depth={farm.depth}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
