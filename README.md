@@ -384,7 +384,8 @@ Hook telemetry distinguishes fire, release, and the reserved class-2 no-op.
 Only hook fire can earn contextual traversal/combat reward; the no-op is
 penalized, and releasing an active hook while overspeed is rewarded. This
 prevents a categorical policy from collecting “hook” reward without issuing a
-C-side hook command.
+C-side hook command. `behavior/hook_action_rate` is the boolean aggregate;
+the split rates are the authoritative action breakdown.
 
 Prototype smoke test and checkpoint regression gate:
 
