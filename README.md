@@ -2,13 +2,12 @@
 
 ML-based bot engine for Quake 2 (Lithium II + 3ZB2 base).
 
-**Status:** Live-deployed. `checkpoints/policy_39929600.onnx` (39.9M training
-steps) runs a public 1v1 human-vs-bot server via `tools/live_match_onnx.py`
-(see **Live Deployment**). Movement/control is solid as of 2026-07-10. Aim
-never converged through pure RL; the first telemetry used to quantify that was
-later found geometrically invalid, but corrected BC/evaluation now provides a
-strong warm start and a reward/terminal-fixed PPO canary retained it. Combat is
-still far below the promotion target — see **Known Issues / Roadmap** item 2.
+**Status:** Live-deployed. The Season 3 lattice prototype,
+`checkpoints/policy_43507714.onnx` (43.5M training steps), runs a public 1v1
+human-vs-bot server via `tools/live_match_onnx.py` with the Rust lattice index
+enabled (see **Live Deployment**). Movement/control is solid; aim and combat
+conversion remain below the promotion target — see **Known Issues / Roadmap**
+item 2.
 **See `docs/HANDOFF-2026-07-11.md` for the current artifacts, evidence, and
 next controlled experiment if picking this up fresh.**
 
@@ -44,7 +43,7 @@ and current known issues) lives at `docs/architecture-map.svg`.
 | session_memory | 24 | per-voxel-cell lattice: engagement/threat/opportunity/self-fire scores + nearest-signal pull vectors + survivability projection (win_margin, effective-HP, DPS-share) — see `harness/spatial.py` |
 
 `OBS_DIM = 185 + 24 + (10 if Q2_EXT_OBS else 0)`. The deployed live checkpoint
-(`policy_39929600.onnx`) was trained with `Q2_EXT_OBS=1` → 219 dims; running it
+(`policy_43507714.onnx`) was trained with `Q2_EXT_OBS=1` → 219 dims; running it
 with the env var unset is a silent shape mismatch, not a training bug — see
 `harness/protocol.py` and the `Q2_EXT_OBS` gotcha noted in project memory.
 
@@ -127,7 +126,7 @@ procedurally-generated, fully-lit map compiled in the background every round
 instead of cycling a fixed pool.
 
 ```bash
-python tools/live_match_onnx.py --onnx checkpoints/policy_39929600.onnx \
+python tools/live_match_onnx.py --onnx checkpoints/policy_43507714.onnx \
   --live_maps --dlserver http://<host>:<port>
 ```
 
@@ -139,7 +138,8 @@ string — some builds hit a `getaddrinfo` error on a literal `+set ip`, empty
 string takes the working bind-all path instead).
 
 A production instance (Hetzner VPS, `q2mlbot.service` + `q2mlbot-gamedata.service`
-systemd units) has been running since 2026-07 with real external players.
+systemd units) has been running since 2026-07 with real external players. The
+versioned live unit is [`ops/q2mlbot-live.service`](ops/q2mlbot-live.service).
 
 ## Known Issues / Roadmap
 
@@ -268,8 +268,8 @@ fixed checkpoint). Ordered by what's blocking what.
    against each other, zero 3ZB2 by default if `n_bots=num_ml_bots`, but see
    this gotcha before using a small `n_bots`).
 
-7. **[FIXED AND PROMOTED TO THE ACTIVE TRAINER 2026-07-11; not deployed to
-   production]** ML reward accounting used raw Quake damage. Kill planes,
+7. **[FIXED AND DEPLOYED TO TRAINING AND PRODUCTION]** ML reward accounting
+   used raw Quake damage. Kill planes,
    telefrags, crushers, and the out-of-bounds fallback deliberately pass
    `100000`, which entered PPO returns unchanged; corpse hits could also add
    damage and repeat ML kill credit. The impossible totals were exact
@@ -282,7 +282,7 @@ fixed checkpoint). Ordered by what's blocking what.
    17 of 18 apparent kills were corpse credits and the critic spikes were
    sentinel returns, not useful learning.
 
-8. **[FIXED, VERIFIED, AND PROMOTED TO THE ACTIVE TRAINER 2026-07-11]** Terminal
+8. **[FIXED, VERIFIED, AND DEPLOYED TO TRAINING AND PRODUCTION]** Terminal
    delivery had two independent bugs: lockstep sent the same death terminal
    from both the frame pre-pass and dead `Bot_Think`, while every intermission
    frame was terminal. The latter produced runs with 2,769 episode endings in
