@@ -135,7 +135,10 @@ armed via `sv_maplist`/`EndDMLevel` fallback since `use_mapqueue=0`);
 `--dlserver` (HTTP `sv_downloadserver` instead of the legacy in-game UDP map
 transfer — required once maps are never pre-bundled); `Q2_BIND_IP=""` (empty
 string — some builds hit a `getaddrinfo` error on a literal `+set ip`, empty
-string takes the working bind-all path instead).
+string takes the working bind-all path instead). Production also sets
+`Q2_ML_STEP_TIMEOUT_MS=75`: normal ONNX replies take 1–14 ms, so an inference
+failure falls back within the current 100 ms frame instead of stalling the
+server for the training-oriented one-second default.
 
 A production instance (Hetzner VPS, `q2mlbot.service` + `q2mlbot-gamedata.service`
 systemd units) has been running since 2026-07 with real external players. The

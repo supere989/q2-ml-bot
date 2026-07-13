@@ -10,6 +10,7 @@ WorkingDirectory=/home/q2mlbot/q2-ml-bot
 Environment=Q2_BIND_IP=
 Environment=Q2_EXT_OBS=1
 Environment=Q2_RUST_LATTICE=1
+Environment=Q2_ML_STEP_TIMEOUT_MS=75
 Environment=Q2_ROOT=/home/q2mlbot/q2_lithium_merge
 ExecStart=/home/q2mlbot/venv/bin/python3 -u tools/live_match_onnx.py --onnx checkpoints/policy_43507714.onnx --port_offset 90 --server_id 90 --live_maps --dlserver http://5.78.204.86:32494
 Restart=on-failure
