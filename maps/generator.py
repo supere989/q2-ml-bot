@@ -9,7 +9,7 @@ Layout algorithm:
   - 2D room graph on a NxN grid
   - Connected open training floor inside a skybox
   - Arenas get cover blocks and platforms for evasion/hook practice
-  - Spawns are separated enough for 4+ player deathmatch starts
+  - Eight separated starts support six-player deathmatch without forced reuse
 
 Usage:
     python generator.py                   # one random map
@@ -38,6 +38,7 @@ PLAYER_MAXS_Z = 32         # origin-relative standing bbox top
 JUMP_H      = 50           # max jump height (units)
 HOOK_MIN    = 150          # minimum useful hook distance
 HOOK_MAX    = 580          # maximum hook range
+DM_SPAWN_COUNT = 8         # headroom for six-player live matches
 MIN_SPAWN_SEPARATION = 384 # minimum 2D spacing for generated DM spawns
 SPAWN_EDGE_MARGIN = 96     # keep starts away from room edges/sky walls
 SPAWN_SOLID_MARGIN = 48    # extra XY clearance from cover and low blockers
@@ -939,7 +940,7 @@ class MapGenerator:
         return self._choose_spawn(room)
 
     def _try_combat_spawns_in(self, room: Room) -> Optional[List[Tuple[int, int, int, int]]]:
-        """Try to place four separated spawns in one room. Returns
+        """Try to place the full separated spawn set in one room. Returns
         [(x, y, z, yaw)] or None, leaving self.spawn_points untouched on failure."""
         cx = room.wx + room.w // 2
         cy = room.wy + room.d // 2
@@ -950,7 +951,10 @@ class MapGenerator:
 
         placed: List[Tuple[int, int, int, int]] = []
         saved = list(self.spawn_points)
-        for base_angle in (180, 0, -90, 90):
+        # Even ring spacing avoids the old four-point cardinal cluster and
+        # leaves two spare starts in a six-player match.
+        for index in range(DM_SPAWN_COUNT):
+            base_angle = 180.0 + index * (360.0 / DM_SPAWN_COUNT)
             candidate = self._combat_spawn_candidate(room, base_angle, radius)
             if candidate is None:
                 self.spawn_points = saved
@@ -1010,7 +1014,7 @@ class MapGenerator:
                 placed += 1
 
     def _place_combat_spawns(self):
-        """Place exactly four separated starts.
+        """Place a validated, well-separated set of deathmatch starts.
 
         Preferred: a wide ring in a big arena (clean opening sightlines).
         With terracing, that arena may be partly buried under higher
@@ -1034,24 +1038,40 @@ class MapGenerator:
         placed = []
         map_cx = sum(r.wx + r.w // 2 for r in self.rooms) // max(1, len(self.rooms))
         map_cy = sum(r.wy + r.d // 2 for r in self.rooms) // max(1, len(self.rooms))
-        remaining = sorted(self.rooms, key=lambda r: r.w * r.d, reverse=True)
-        while remaining and len(placed) < 4:
-            if placed:
-                room = max(remaining, key=lambda r: min(
-                    math.hypot(r.wx + r.w // 2 - px, r.wy + r.d // 2 - py)
-                    for px, py, _, _ in placed))
-            else:
-                room = remaining[0]
-            remaining.remove(room)
-            cand = self._choose_spawn(room)
-            if cand is None:
-                continue
-            x, y, fz = cand
-            yaw = int(round((math.degrees(math.atan2(map_cy - y, map_cx - x)) + 360.0) % 360.0))
-            self.spawn_points.append((x, y, fz))
-            placed.append((x, y, fz, yaw))
-        if len(placed) < 4:
-            raise RuntimeError("could not place four clear deathmatch spawns in any room")
+        # Revisit rooms after the first pass: larger layouts can safely hold
+        # more than one start per room, while _spawn_is_clear still enforces
+        # both geometry clearance and global separation.
+        for _ in range(DM_SPAWN_COUNT * 2):
+            if len(placed) >= DM_SPAWN_COUNT:
+                break
+            ranked = sorted(
+                self.rooms,
+                key=lambda r: (
+                    min(
+                        math.hypot(r.wx + r.w // 2 - px, r.wy + r.d // 2 - py)
+                        for px, py, _, _ in placed
+                    ) if placed else float(r.w * r.d)
+                ),
+                reverse=True,
+            )
+            progress = False
+            for room in ranked:
+                cand = self._choose_spawn(room)
+                if cand is None:
+                    continue
+                x, y, fz = cand
+                yaw = int(round((math.degrees(math.atan2(map_cy - y, map_cx - x)) + 360.0) % 360.0))
+                self.spawn_points.append((x, y, fz))
+                placed.append((x, y, fz, yaw))
+                progress = True
+                if len(placed) >= DM_SPAWN_COUNT:
+                    break
+            if not progress:
+                break
+        if len(placed) < DM_SPAWN_COUNT:
+            raise RuntimeError(
+                f"could not place {DM_SPAWN_COUNT} clear deathmatch spawns"
+            )
         self._emit_spawn_entities(placed)
 
     def _item_spot(self, rng, xc: int, yc: int, fz: int, spread: int):

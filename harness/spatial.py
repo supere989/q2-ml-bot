@@ -97,7 +97,7 @@ class VoxelSpatialReward:
     aim_pitch_deg: float = 14.0
     hook_required_reward: float = 0.005
     hook_required_distance: float = 512.0
-    hook_cost: float = 0.001
+    hook_cost: float = 0.004
     hook_enemy_reward: float = 0.01
     hook_no_ammo_reward: float = 0.035
     hook_blind_penalty: float = 0.008
@@ -105,6 +105,15 @@ class VoxelSpatialReward:
     hook_yaw_deg: float = 18.0
     hook_pitch_deg: float = 22.0
     hook_ammo_threshold: float = 0.5
+    nominal_speed_min: float = 220.0
+    nominal_speed_max: float = 360.0
+    movement_intent_min: float = 0.55
+    nominal_speed_reward: float = 0.008
+    slow_movement_penalty: float = 0.012
+    overspeed_penalty: float = 0.008
+    jump_cost: float = 0.006
+    slow_jump_penalty: float = 0.014
+    hook_overspeed_penalty: float = 0.012
     fire_cost: float = 0.002
     fire_unseen_penalty: float = 0.025
     fire_unaligned_penalty: float = 0.018
@@ -248,7 +257,7 @@ class VoxelSpatialReward:
             aim_pitch_deg=_env_float("Q2_AIM_PITCH_DEG", 14.0),
             hook_required_reward=_env_float("R_HOOK_REQUIRED_PROXIMITY", 0.005),
             hook_required_distance=_env_float("Q2_HOOK_REQUIRED_DISTANCE", 512.0),
-            hook_cost=_env_float("R_HOOK_COST", 0.001),
+            hook_cost=_env_float("R_HOOK_COST", 0.004),
             hook_enemy_reward=_env_float("R_HOOK_ENEMY_REWARD", 0.01),
             hook_no_ammo_reward=_env_float("R_HOOK_NO_AMMO_REWARD", 0.035),
             hook_blind_penalty=_env_float("R_HOOK_BLIND_PENALTY", 0.008),
@@ -256,6 +265,15 @@ class VoxelSpatialReward:
             hook_yaw_deg=_env_float("Q2_HOOK_YAW_DEG", 18.0),
             hook_pitch_deg=_env_float("Q2_HOOK_PITCH_DEG", 22.0),
             hook_ammo_threshold=_env_float("Q2_HOOK_AMMO_THRESHOLD", 0.5),
+            nominal_speed_min=_env_float("Q2_NOMINAL_SPEED_MIN", 220.0),
+            nominal_speed_max=_env_float("Q2_NOMINAL_SPEED_MAX", 360.0),
+            movement_intent_min=_env_float("Q2_MOVEMENT_INTENT_MIN", 0.55),
+            nominal_speed_reward=_env_float("R_MOVE_NOMINAL", 0.008),
+            slow_movement_penalty=_env_float("R_MOVE_SLOW", 0.012),
+            overspeed_penalty=_env_float("R_MOVE_OVERSPEED", 0.008),
+            jump_cost=_env_float("R_JUMP_COST", 0.006),
+            slow_jump_penalty=_env_float("R_JUMP_SLOW", 0.014),
+            hook_overspeed_penalty=_env_float("R_HOOK_OVERSPEED", 0.012),
             fire_cost=_env_float("R_FIRE_COST", 0.002),
             fire_unseen_penalty=_env_float("R_FIRE_UNSEEN_PENALTY", 0.025),
             fire_unaligned_penalty=_env_float("R_FIRE_UNALIGNED_PENALTY", 0.018),
@@ -788,6 +806,19 @@ class VoxelSpatialReward:
         hook_no_ammo_melee = False
         hook_blind = False
         hook_traversal = False
+        hook_overspeed = False
+
+        movement = self.movement_context(obs)
+        movement_delta = float(movement["movement_discipline"])
+        horizontal_speed = float(movement["movement_speed"])
+        movement_intent = float(movement["movement_intent"])
+        forward_intent = float(movement["forward_intent"])
+        nominal_speed = bool(movement["movement_nominal"])
+        slow_movement = bool(movement["movement_slow"])
+        overspeed = bool(movement["movement_overspeed"])
+        jump_action = bool(movement["jump_action"])
+        jump_slow = bool(movement["jump_slow"])
+        bonus += movement_delta
         if hook_action > 0:
             hook_delta -= self.hook_cost
             if hook_required_near:
@@ -802,6 +833,10 @@ class VoxelSpatialReward:
             elif hook_action == 1 and not hook_required_near:
                 hook_blind = True
                 hook_delta -= self.hook_blind_penalty
+            if (overspeed and not hook_required_near and
+                    not bool(hook_context["hook_enemy_viable"])):
+                hook_overspeed = True
+                hook_delta -= self.hook_overspeed_penalty
             bonus += hook_delta
 
         fired = self._action_fired(obs)
@@ -983,6 +1018,16 @@ class VoxelSpatialReward:
             "hook_no_ammo_melee": float(hook_no_ammo_melee),
             "hook_blind": float(hook_blind),
             "hook_traversal": float(hook_traversal),
+            "hook_overspeed": float(hook_overspeed),
+            "movement_speed": float(horizontal_speed),
+            "movement_intent": float(movement_intent),
+            "forward_intent": float(forward_intent),
+            "movement_nominal": float(nominal_speed),
+            "movement_slow": float(slow_movement),
+            "movement_overspeed": float(overspeed),
+            "movement_discipline": float(movement_delta),
+            "jump_action": float(jump_action),
+            "jump_slow": float(jump_slow),
             "weapon_id": float(hook_context["weapon_id"]),
             "requested_weapon": float(hook_context["requested_weapon"]),
             "ammo": float(hook_context["ammo"]),
@@ -1914,6 +1959,51 @@ class VoxelSpatialReward:
         if action_debug is None or len(action_debug) <= 9:
             return False
         return bool(int(action_debug[9]))
+
+    def movement_context(self, obs: Observation) -> Dict[str, float]:
+        """Grade grounded map traversal using the engine-applied action echo."""
+        action_debug = getattr(obs, "action_debug", ())
+        move_forward = float(action_debug[4]) if len(action_debug) > 4 else 0.0
+        move_right = float(action_debug[5]) if len(action_debug) > 5 else 0.0
+        jump_action = bool(int(action_debug[8])) if len(action_debug) > 8 else False
+        movement_intent = min(1.0, hypot(move_forward, move_right))
+        forward_intent = min(1.0, abs(move_forward))
+        horizontal_speed = hypot(float(obs.self_state[3]), float(obs.self_state[4]))
+        wants_movement = movement_intent >= self.movement_intent_min
+        nominal_speed = wants_movement and (
+            self.nominal_speed_min <= horizontal_speed <= self.nominal_speed_max
+        )
+        slow_movement = wants_movement and horizontal_speed < self.nominal_speed_min
+        overspeed = horizontal_speed > self.nominal_speed_max
+        delta = 0.0
+        if nominal_speed:
+            # Scale by forward intent so circling/knockback cannot farm the
+            # speed reward without actually traversing the map.
+            delta += self.nominal_speed_reward * forward_intent
+        elif slow_movement:
+            deficit = 1.0 - horizontal_speed / max(1.0, self.nominal_speed_min)
+            delta -= self.slow_movement_penalty * deficit
+        elif overspeed and wants_movement:
+            excess = min(1.0, (horizontal_speed - self.nominal_speed_max) /
+                         max(1.0, self.nominal_speed_max))
+            delta -= self.overspeed_penalty * excess
+
+        jump_slow = jump_action and (slow_movement or not wants_movement)
+        if jump_action:
+            delta -= self.jump_cost
+            if jump_slow:
+                delta -= self.slow_jump_penalty
+        return {
+            "movement_speed": float(horizontal_speed),
+            "movement_intent": float(movement_intent),
+            "forward_intent": float(forward_intent),
+            "movement_nominal": float(nominal_speed),
+            "movement_slow": float(slow_movement),
+            "movement_overspeed": float(overspeed),
+            "movement_discipline": float(delta),
+            "jump_action": float(jump_action),
+            "jump_slow": float(jump_slow),
+        }
 
     def _action_hook(self, obs: Observation) -> int:
         action_debug = getattr(obs, "action_debug", None)

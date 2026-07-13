@@ -370,6 +370,16 @@ movement along the pull vectors outside visible combat.
 The implementation contract and isolated real-engine smoke results are in
 `docs/LATTICE-PROTOTYPE-2026-07-11.md`.
 
+Fresh policies also use a grounded-locomotion curriculum. Their categorical
+heads start jump-off/hook-idle instead of the old uniform 50% jump / 75% hook
+distribution. The spatial reward targets 220–360 units/s when meaningful
+movement is requested, rewards forward traversal inside that window, and
+penalizes slow jumping plus unnecessary hook overspeed. TensorBoard exposes
+the result under `movement/*`, `behavior/jump_*`, and
+`behavior/hook_overspeed_rate`. Generated maps now carry eight geometry-checked,
+384-unit-separated deathmatch starts, leaving spare starts for six-player live
+matches instead of forcing spawn reuse.
+
 Prototype smoke test and checkpoint regression gate:
 
 ```bash
@@ -394,6 +404,9 @@ Useful knobs:
 - `Q2_LATTICE_ROUTES=0` disables live route/item readiness deposits.
 - `--lattice_direction_coef 0.02` controls direct pull-vector supervision
   (`0` disables it for an A/B control).
+- `Q2_NOMINAL_SPEED_MIN=220` / `Q2_NOMINAL_SPEED_MAX=360` define the ordinary
+  traversal window; `R_MOVE_*`, `R_JUMP_*`, and `R_HOOK_OVERSPEED` tune its
+  reward terms.
 - `R_KILL=5.0` and `R_DEATH=3.0` emphasize the KD objective during training.
 
 ## Related repos

@@ -1706,6 +1706,19 @@ def train(cfg: dict):
                 rollout_behavior["hook_no_ammo_melee"] / denom,
                 total_env_steps,
             )
+            for key, tag in (
+                ("movement_speed", "movement/speed_mean"),
+                ("movement_intent", "movement/intent_mean"),
+                ("forward_intent", "movement/forward_intent_mean"),
+                ("movement_nominal", "movement/nominal_rate"),
+                ("movement_slow", "movement/slow_rate"),
+                ("movement_overspeed", "movement/overspeed_rate"),
+                ("movement_discipline", "movement/reward_mean"),
+                ("jump_action", "behavior/jump_action_rate"),
+                ("jump_slow", "behavior/jump_slow_rate"),
+                ("hook_overspeed", "behavior/hook_overspeed_rate"),
+            ):
+                writer.add_scalar(tag, rollout_behavior[key] / denom, total_env_steps)
             writer.add_scalar(
                 "memory/bonus_mean",
                 rollout_behavior["session_memory_bonus"] / denom,

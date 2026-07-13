@@ -162,6 +162,13 @@ class Q2BotPolicy(nn.Module):
         # matching the old constant-parameter behaviour at init
         nn.init.zeros_(self.log_std_head.weight)
         nn.init.zeros_(self.log_std_head.bias)
+        # A fresh categorical policy used to begin at 50% jump and 75% hook,
+        # which makes its earliest rollouts airborne and hook-dominated. Keep
+        # exploration, but start from ordinary grounded locomotion. Checkpoint
+        # loads replace these values, so existing policies are unchanged.
+        with torch.no_grad():
+            self.actor_jump.bias.copy_(torch.tensor([2.0, -2.0]))
+            self.actor_hook.bias.copy_(torch.tensor([2.0, -1.0, -1.0, -1.0]))
 
     def forward(
         self,
