@@ -1195,8 +1195,7 @@ def train(cfg: dict):
                 # backwards moonwalk behind a healthy-looking value.
                 effective_forward = np.clip(actions_np[:, 0], -1.0, 1.0)
                 effective_look_pitch = np.clip(actions_np[:, 3], -30.0, 30.0)
-                pitch_obs_index = ENT_OFF + ENT_LEN + 16 * 4 + 4 * 8 + 5 + 1
-                view_pitch = current_obs[:, pitch_obs_index] * 90.0
+                view_pitch = current_obs[:, _AIM_PITCH_OBS_INDEX] * 90.0
                 rollout_posture_samples += int(effective_forward.size)
                 rollout_signed_forward += float(effective_forward.sum())
                 rollout_forward_commands += int((effective_forward > 0.15).sum())
