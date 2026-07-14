@@ -8,16 +8,39 @@ reachability generation, and Atlas serialization.
 
 The caller must provide explicit reachable chunk keys and may provide one
 additional boundary chunk. The module sorts those keys by `(z,y,x)`, removes
-duplicates, and queries only those chunks plus a bounded 24-unit witness halo
-around each. It never accepts a map AABB and never infers a dense scan range.
-Consequently, sealed or exterior geometry outside the authorized halos cannot
-enter the result.
+duplicates, never accepts a map AABB, and never infers a dense scan range.
 
 Before creating any collision request, admission prospectively reserves the
 occupancy bitplane and all four possible surface-material bitplanes for every
 authorized chunk through `L0BudgetState`. A cumulative chunk/byte rejection is
 an Exact rejected result with zero oracle calls and zero materialization.
 Successful execution accounts only chunks and planes actually retained.
+
+### Candidate-scoped path
+
+`discover_scoped_surface_bands` is the performance path. It accepts global L0
+cell coordinates in `SurfaceCandidateGroup` values. Every cell must belong to
+its group chunk (`cell_axis // 16 == chunk_axis`), and every group chunk must be
+in the caller-authorized reachable/boundary set. All groups and cells are
+validated and canonicalized before the first oracle call. Duplicate group
+records and overlapping cells are deduplicated.
+
+For each group, discovery first probes only its candidate cells and the minimal
+six-face, one-cell exposure halo. Verified surface seeds then drive targeted
+occupancy expansion through occupied cells in authorized chunks, one layer at
+a time, through depth five. It never issues an exhaustive 16-cubed chunk or
+28-cubed chunk-plus-halo scan. The occupancy cache is discarded after each
+candidate group; the only cross-group structure contains cells that will be
+materialized. This prevents a map-wide multi-million-cell occupancy set.
+
+`SurfaceBandResult.request_counts` records the exact occupancy and surface
+trace request counts. These counts include exact surface traces that return no
+hit but never include requests suppressed by candidate or expansion overlap.
+
+`discover_surface_bands` remains the exhaustive compatibility path. It probes
+an authorized chunk plus its bounded 24-unit witness halo and should not be
+selected for large cold-map builds when deterministic candidates are already
+available.
 
 ## Collision evidence
 
@@ -57,4 +80,6 @@ collision witnesses only.
 
 Malformed, missing, rejected, or mismatched oracle evidence makes the entire
 operation Unknown. A successfully evidenced result, including an empty result,
-is Exact. Output chunks and cells are canonical `(z,y,x)` order.
+is Exact. Candidate-scoped Exact means exact collision evidence within the
+provided scope; it is not a claim that the caller supplied every map surface.
+Output chunks and cells are canonical `(z,y,x)` order.

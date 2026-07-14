@@ -132,6 +132,24 @@ class SurfaceBandChunk:
 
 
 @dataclass(frozen=True)
+class SurfaceCandidateGroup:
+    """Caller-scoped possible surface cells owned by one authorized chunk."""
+
+    chunk: ChunkKey
+    cells: tuple[CellKey, ...]
+
+
+@dataclass(frozen=True)
+class SurfaceBandRequestCounts:
+    occupancy: int = 0
+    surface: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.occupancy + self.surface
+
+
+@dataclass(frozen=True)
 class SurfaceBandPlan:
     accepted: bool
     reachable_chunks: tuple[ChunkKey, ...]
@@ -148,12 +166,23 @@ class SurfaceBandPlan:
 
 
 @dataclass(frozen=True)
+class ScopedSurfaceBandPlan:
+    """An admitted candidate-scoped discovery with canonical per-chunk cells."""
+
+    base_plan: SurfaceBandPlan
+    candidate_groups: tuple[SurfaceCandidateGroup, ...]
+    accepted: bool
+    rejection: str = ""
+
+
+@dataclass(frozen=True)
 class SurfaceBandResult:
     accepted: bool
     chunks: tuple[SurfaceBandChunk, ...]
     budget_state: L0BudgetState
     queried_chunks: int
     rejection: str = ""
+    request_counts: SurfaceBandRequestCounts = SurfaceBandRequestCounts()
 
 
 class _OracleEvidenceError(RuntimeError):
@@ -183,6 +212,14 @@ def _valid_chunk(key: object) -> bool:
         and len(key) == 3
         and all(not isinstance(value, bool) and isinstance(value, int) for value in key)
     )
+
+
+def _valid_cell(key: object) -> bool:
+    return _valid_chunk(key)
+
+
+def _cell_chunk(cell: CellKey) -> ChunkKey:
+    return tuple(component // L0_CHUNK_CELLS for component in cell)  # type: ignore[return-value]
 
 
 def _validate_pose(pose: CollisionPose) -> str:
@@ -284,6 +321,68 @@ def plan_surface_band_discovery(
         rejection=rejection,
     )
     return AuthorityResult.exact(plan)
+
+
+def plan_scoped_surface_band_discovery(
+    *,
+    candidate_groups: Sequence[SurfaceCandidateGroup],
+    reachable_chunks: Sequence[ChunkKey],
+    boundary_chunk: ChunkKey | None,
+    atlas_origin: Vec3,
+    collision_mask: int,
+    pose: CollisionPose,
+    budget_state: L0BudgetState,
+    batch_size: int = DEFAULT_ORACLE_BATCH_SIZE,
+) -> AuthorityResult[ScopedSurfaceBandPlan]:
+    """Admit and canonicalize an exact caller-scoped candidate discovery.
+
+    Scope errors are deterministic rejected plans.  Malformed values and
+    non-surface poses remain Unknown under the base surface-band laws.
+    Validation of every group and cell finishes before execution can issue a
+    collision request.
+    """
+
+    base_result = plan_surface_band_discovery(
+        reachable_chunks=reachable_chunks,
+        boundary_chunk=boundary_chunk,
+        atlas_origin=atlas_origin,
+        collision_mask=collision_mask,
+        pose=pose,
+        budget_state=budget_state,
+        batch_size=batch_size,
+    )
+    if not base_result.is_exact or base_result.value is None:
+        return AuthorityResult.unknown(None, base_result.reason)
+    base = base_result.value
+    if not base.accepted:
+        return AuthorityResult.exact(ScopedSurfaceBandPlan(base, (), False, base.rejection))
+
+    authorized = set(base.authorized_chunks)
+    by_chunk: dict[ChunkKey, set[CellKey]] = {}
+    for group in candidate_groups:
+        if not isinstance(group, SurfaceCandidateGroup):
+            return AuthorityResult.unknown(None, "candidate groups must be SurfaceCandidateGroup values")
+        if not _valid_chunk(group.chunk):
+            return AuthorityResult.unknown(None, "candidate group chunks must be integer (x,y,z) tuples")
+        if group.chunk not in authorized:
+            rejection = f"candidate group chunk {group.chunk} is outside the authorized chunks"
+            return AuthorityResult.exact(ScopedSurfaceBandPlan(base, (), False, rejection))
+        if not isinstance(group.cells, (tuple, list)):
+            return AuthorityResult.unknown(None, "candidate group cells must be a finite sequence")
+        selected = by_chunk.setdefault(group.chunk, set())
+        for cell in group.cells:
+            if not _valid_cell(cell):
+                return AuthorityResult.unknown(None, "candidate cells must be integer (x,y,z) tuples")
+            if _cell_chunk(cell) != group.chunk:
+                rejection = f"candidate cell {cell} is outside its authorized owner chunk {group.chunk}"
+                return AuthorityResult.exact(ScopedSurfaceBandPlan(base, (), False, rejection))
+            selected.add(cell)
+
+    canonical = tuple(
+        SurfaceCandidateGroup(chunk, tuple(sorted(cells, key=_zyx)))
+        for chunk, cells in sorted(by_chunk.items(), key=lambda item: _zyx(item[0]))
+    )
+    return AuthorityResult.exact(ScopedSurfaceBandPlan(base, canonical, True))
 
 
 def _cell_center(plan: SurfaceBandPlan, cell: CellKey) -> Vec3:
@@ -455,11 +554,160 @@ def _surface_witness(
     )
 
 
+def _canonical_witnesses(raw_witnesses: Sequence[SurfaceWitness]) -> tuple[SurfaceWitness, ...]:
+    unique = {
+        (
+            witness.surface_cell,
+            witness.clear_neighbor,
+            witness.normal,
+            witness.classification,
+            witness.surface_flags,
+            witness.surface_name,
+            witness.surface_value,
+        ): witness
+        for witness in raw_witnesses
+    }
+    return tuple(
+        sorted(
+            unique.values(),
+            key=lambda item: (
+                _zyx(item.surface_cell),
+                _zyx(item.clear_neighbor),
+                item.normal,
+                item.surface_flags,
+                item.surface_name,
+                item.surface_value,
+            ),
+        )
+    )
+
+
+def _materialize_band_cells(
+    best: Mapping[CellKey, tuple[int, list[SurfaceWitness]]]
+) -> tuple[SurfaceBandCell, ...]:
+    cells: list[SurfaceBandCell] = []
+    for cell in sorted(best, key=_zyx):
+        depth, raw_witnesses = best[cell]
+        witnesses = _canonical_witnesses(raw_witnesses)
+        classifications = tuple(
+            sorted({witness.classification for witness in witnesses}, key=lambda item: item.value)
+        )
+        surface_flags = 0
+        for witness in witnesses:
+            surface_flags |= witness.surface_flags
+        cells.append(
+            SurfaceBandCell(
+                index=cell,
+                depth_cells=depth,
+                classifications=classifications,
+                surface_flags=surface_flags,
+                witnesses=witnesses,
+            )
+        )
+    return tuple(cells)
+
+
+def _probe_occupancy_cells(
+    plan: SurfaceBandPlan,
+    owner_chunk: ChunkKey,
+    cells: Sequence[CellKey],
+    oracle: BatchCollisionOracle,
+    occupancy: dict[CellKey, bool],
+) -> int:
+    pending = tuple(sorted((cell for cell in set(cells) if cell not in occupancy), key=_zyx))
+    for offset in range(0, len(pending), plan.batch_size):
+        batch_cells = pending[offset : offset + plan.batch_size]
+        requests = tuple(_occupancy_request(plan, owner_chunk, cell) for cell in batch_cells)
+        responses = _oracle_batch(oracle, requests)
+        for cell, response in zip(batch_cells, responses):
+            occupancy[cell] = _occupied_from_response(response)
+    return len(pending)
+
+
+def _discover_scoped_group(
+    plan: SurfaceBandPlan,
+    group: SurfaceCandidateGroup,
+    authorized_chunks: set[ChunkKey],
+    oracle: BatchCollisionOracle,
+) -> tuple[dict[CellKey, tuple[int, list[SurfaceWitness]]], SurfaceBandRequestCounts]:
+    """Discover one group with a local, input-proportional occupancy cache."""
+
+    candidates = set(group.cells)
+    if not candidates:
+        return {}, SurfaceBandRequestCounts()
+
+    exposure_cells = set(candidates)
+    for cell in candidates:
+        for direction in _FACE_DIRECTIONS:
+            exposure_cells.add(
+                tuple(cell[axis] + direction[axis] for axis in range(3))  # type: ignore[arg-type]
+            )
+    occupancy: dict[CellKey, bool] = {}
+    occupancy_requests = _probe_occupancy_cells(
+        plan, group.chunk, tuple(exposure_cells), oracle, occupancy
+    )
+
+    trace_candidates: list[tuple[CellKey, CellKey, OracleRequest]] = []
+    for cell in sorted(candidates, key=_zyx):
+        if not occupancy[cell]:
+            continue
+        for direction in _FACE_DIRECTIONS:
+            neighbor = tuple(cell[axis] + direction[axis] for axis in range(3))
+            if not occupancy[neighbor]:  # type: ignore[index]
+                trace_candidates.append(
+                    (cell, neighbor, _surface_request(plan, group.chunk, neighbor, cell))  # type: ignore[arg-type]
+                )
+
+    witnesses_by_seed: dict[CellKey, list[SurfaceWitness]] = {}
+    for offset in range(0, len(trace_candidates), plan.batch_size):
+        batch_candidates = trace_candidates[offset : offset + plan.batch_size]
+        requests = tuple(candidate[2] for candidate in batch_candidates)
+        responses = _oracle_batch(oracle, requests)
+        for (solid_cell, clear_cell, _request), response in zip(batch_candidates, responses):
+            witness = _surface_witness(response, solid_cell, clear_cell)
+            if witness is not None:
+                witnesses_by_seed.setdefault(solid_cell, []).append(witness)
+
+    best: dict[CellKey, tuple[int, list[SurfaceWitness]]] = {
+        seed: (0, list(witnesses)) for seed, witnesses in witnesses_by_seed.items()
+    }
+    frontier = set(witnesses_by_seed)
+    for depth in range(SURFACE_BAND_CELLS - 1):
+        proposed_parents: dict[CellKey, list[CellKey]] = {}
+        for cell in sorted(frontier, key=_zyx):
+            for direction in _FACE_DIRECTIONS:
+                neighbor = tuple(cell[axis] + direction[axis] for axis in range(3))
+                if neighbor in best or _cell_chunk(neighbor) not in authorized_chunks:  # type: ignore[arg-type]
+                    continue
+                proposed_parents.setdefault(neighbor, []).append(cell)  # type: ignore[arg-type]
+        if not proposed_parents:
+            break
+        occupancy_requests += _probe_occupancy_cells(
+            plan, group.chunk, tuple(proposed_parents), oracle, occupancy
+        )
+        next_frontier: set[CellKey] = set()
+        for cell in sorted(proposed_parents, key=_zyx):
+            if not occupancy[cell]:
+                continue
+            inherited: list[SurfaceWitness] = []
+            for parent in sorted(set(proposed_parents[cell]), key=_zyx):
+                inherited.extend(best[parent][1])
+            best[cell] = (depth + 1, list(_canonical_witnesses(inherited)))
+            next_frontier.add(cell)
+        frontier = next_frontier
+        if not frontier:
+            break
+
+    return best, SurfaceBandRequestCounts(occupancy_requests, len(trace_candidates))
+
+
 def _discover_chunk(
     plan: SurfaceBandPlan, chunk: ChunkKey, oracle: BatchCollisionOracle
-) -> tuple[SurfaceBandCell, ...]:
+) -> tuple[tuple[SurfaceBandCell, ...], SurfaceBandRequestCounts]:
     occupied: set[CellKey] = set()
+    occupancy_requests = 0
     for requests in iter_chunk_occupancy_batches(plan, chunk):
+        occupancy_requests += len(requests)
         for request, response in zip(requests, _oracle_batch(oracle, requests)):
             if _occupied_from_response(response):
                 center = request["start"]
@@ -522,50 +770,9 @@ def _discover_chunk(
                     visited.add(neighbor)  # type: ignore[arg-type]
                     queue.append((neighbor, depth + 1))  # type: ignore[arg-type]
 
-    cells: list[SurfaceBandCell] = []
-    for cell in sorted(best, key=_zyx):
-        depth, raw_witnesses = best[cell]
-        unique = {
-            (
-                witness.surface_cell,
-                witness.clear_neighbor,
-                witness.normal,
-                witness.classification,
-                witness.surface_flags,
-                witness.surface_name,
-                witness.surface_value,
-            ): witness
-            for witness in raw_witnesses
-        }
-        witnesses = tuple(
-            sorted(
-                unique.values(),
-                key=lambda item: (
-                    _zyx(item.surface_cell),
-                    _zyx(item.clear_neighbor),
-                    item.normal,
-                    item.surface_flags,
-                    item.surface_name,
-                    item.surface_value,
-                ),
-            )
-        )
-        classifications = tuple(
-            sorted({witness.classification for witness in witnesses}, key=lambda item: item.value)
-        )
-        surface_flags = 0
-        for witness in witnesses:
-            surface_flags |= witness.surface_flags
-        cells.append(
-            SurfaceBandCell(
-                index=cell,
-                depth_cells=depth,
-                classifications=classifications,
-                surface_flags=surface_flags,
-                witnesses=witnesses,
-            )
-        )
-    return tuple(cells)
+    return _materialize_band_cells(best), SurfaceBandRequestCounts(
+        occupancy_requests, len(candidates)
+    )
 
 
 def _reserve_materialized_chunk(
@@ -597,9 +804,13 @@ def execute_surface_band_plan(
     chunks: list[SurfaceBandChunk] = []
     state = plan.initial_budget_state
     queried_chunks = 0
+    occupancy_requests = 0
+    surface_requests = 0
     try:
         for chunk in plan.authorized_chunks:
-            cells = _discover_chunk(plan, chunk, oracle)
+            cells, counts = _discover_chunk(plan, chunk, oracle)
+            occupancy_requests += counts.occupancy
+            surface_requests += counts.surface
             queried_chunks += 1
             if not cells:
                 continue
@@ -618,7 +829,114 @@ def execute_surface_band_plan(
             state = prospective
     except _OracleEvidenceError as exc:
         return AuthorityResult.unknown(None, str(exc))
-    return AuthorityResult.exact(SurfaceBandResult(True, tuple(chunks), state, queried_chunks))
+    return AuthorityResult.exact(
+        SurfaceBandResult(
+            True,
+            tuple(chunks),
+            state,
+            queried_chunks,
+            request_counts=SurfaceBandRequestCounts(occupancy_requests, surface_requests),
+        )
+    )
+
+
+def execute_scoped_surface_band_plan(
+    plan: ScopedSurfaceBandPlan, oracle: BatchCollisionOracle
+) -> AuthorityResult[SurfaceBandResult]:
+    """Execute candidate-scoped discovery without a whole-chunk occupancy scan."""
+
+    base = plan.base_plan
+    if not plan.accepted:
+        return AuthorityResult.exact(
+            SurfaceBandResult(False, (), base.initial_budget_state, 0, plan.rejection)
+        )
+
+    best: dict[CellKey, tuple[int, list[SurfaceWitness]]] = {}
+    occupancy_requests = 0
+    surface_requests = 0
+    queried_chunks = 0
+    authorized = set(base.authorized_chunks)
+    try:
+        for group in plan.candidate_groups:
+            if not group.cells:
+                continue
+            local, counts = _discover_scoped_group(base, group, authorized, oracle)
+            queried_chunks += 1
+            occupancy_requests += counts.occupancy
+            surface_requests += counts.surface
+            for cell, (depth, witnesses) in local.items():
+                prior = best.get(cell)
+                if prior is None or depth < prior[0]:
+                    best[cell] = (depth, list(witnesses))
+                elif depth == prior[0]:
+                    prior[1].extend(witnesses)
+    except _OracleEvidenceError as exc:
+        return AuthorityResult.unknown(None, str(exc))
+
+    by_chunk: dict[ChunkKey, dict[CellKey, tuple[int, list[SurfaceWitness]]]] = {}
+    for cell, evidence in best.items():
+        by_chunk.setdefault(_cell_chunk(cell), {})[cell] = evidence
+
+    chunks: list[SurfaceBandChunk] = []
+    state = base.initial_budget_state
+    counts = SurfaceBandRequestCounts(occupancy_requests, surface_requests)
+    for chunk in sorted(by_chunk, key=_zyx):
+        cells = _materialize_band_cells(by_chunk[chunk])
+        combined_flags = 0
+        for cell in cells:
+            combined_flags |= cell.surface_flags
+        prospective, rejection = _reserve_materialized_chunk(
+            state, chunk, base.occupancy_plane, combined_flags
+        )
+        if rejection:
+            return AuthorityResult.exact(
+                SurfaceBandResult(
+                    False,
+                    (),
+                    base.initial_budget_state,
+                    queried_chunks,
+                    rejection,
+                    counts,
+                )
+            )
+        chunks.append(SurfaceBandChunk(chunk, cells))
+        state = prospective
+    return AuthorityResult.exact(
+        SurfaceBandResult(True, tuple(chunks), state, queried_chunks, request_counts=counts)
+    )
+
+
+def discover_scoped_surface_bands(
+    *,
+    candidate_groups: Sequence[SurfaceCandidateGroup],
+    reachable_chunks: Sequence[ChunkKey],
+    boundary_chunk: ChunkKey | None,
+    atlas_origin: Vec3,
+    collision_mask: int,
+    pose: CollisionPose,
+    budget_state: L0BudgetState,
+    oracle: BatchCollisionOracle,
+    batch_size: int = DEFAULT_ORACLE_BATCH_SIZE,
+) -> AuthorityResult[SurfaceBandResult]:
+    """Discover exact CM bands only around caller-supplied candidate cells.
+
+    Exact describes collision evidence within the admitted candidate scope; it
+    does not assert that the caller supplied every surface candidate in a map.
+    """
+
+    planned = plan_scoped_surface_band_discovery(
+        candidate_groups=candidate_groups,
+        reachable_chunks=reachable_chunks,
+        boundary_chunk=boundary_chunk,
+        atlas_origin=atlas_origin,
+        collision_mask=collision_mask,
+        pose=pose,
+        budget_state=budget_state,
+        batch_size=batch_size,
+    )
+    if not planned.is_exact or planned.value is None:
+        return AuthorityResult.unknown(None, planned.reason)
+    return execute_scoped_surface_band_plan(planned.value, oracle)
 
 
 def discover_surface_bands(
