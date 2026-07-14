@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
@@ -13,6 +13,7 @@ import select
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any, Iterable, Mapping, Sequence
@@ -34,12 +35,39 @@ CONTENTS_WINDOW = 2
 CONTENTS_LAVA = 8
 CONTENTS_SLIME = 16
 CONTENTS_WATER = 32
+CONTENTS_MIST = 64
 CONTENTS_PLAYERCLIP = 0x10000
+CONTENTS_MONSTERCLIP = 0x20000
+CONTENTS_CURRENT_0 = 0x40000
+CONTENTS_CURRENT_90 = 0x80000
+CONTENTS_CURRENT_180 = 0x100000
+CONTENTS_CURRENT_270 = 0x200000
+CONTENTS_CURRENT_UP = 0x400000
+CONTENTS_CURRENT_DOWN = 0x800000
 CONTENTS_LADDER = 0x20000000
+CONTENTS_CURRENT_MASK = (
+    CONTENTS_CURRENT_0 | CONTENTS_CURRENT_90 | CONTENTS_CURRENT_180
+    | CONTENTS_CURRENT_270 | CONTENTS_CURRENT_UP | CONTENTS_CURRENT_DOWN
+)
+CONTENTS_FLUID_MASK = CONTENTS_WATER | CONTENTS_SLIME | CONTENTS_LAVA
+SURF_SKY = 4
+SURF_SLICK = 2
+SURF_WARP = 8
+SURF_NODRAW = 128
 STANDING_MINS = [-16, -16, -24]
 STANDING_MAXS = [16, 16, 32]
 CROUCHED_MINS = [-16, -16, -24]
 CROUCHED_MAXS = [16, 16, 4]
+FROZEN_L0_BIT_PLANE_NAMES = frozenset({
+    "solid", "window", "playerclip", "monsterclip", "water", "slime", "lava",
+    "mist", "ladder", "hurt", "push_or_gravity", "teleport_trigger",
+    "mover_reference_solid", "mover_swept_envelope", "areaportal", "sky",
+    "slick", "warp", "nodraw", "hookable_surface", "standing_forbidden_origin",
+    "crouched_forbidden_origin", "unknown", "spawn_column", "hook_corridor",
+})
+FROZEN_L0_SCALAR_PLANE_NAMES = frozenset({
+    "current_direction", "hazard_severity", "confidence",
+})
 SHA256_KEYS = {"tool_identity", "physics_identity", "map_sha256"}
 COMMON_RESPONSE_KEYS = {
     "ok", "id", "op", "schema", "tool_identity", "physics_identity",
@@ -104,6 +132,7 @@ class AnalyzerLimits:
     flood_source_batch: int = 128
     max_visibility_pairs: int = 16_384
     max_pmove_sources: int = 2_048
+    full_cold_timeout_seconds: float = 300.0
 
 
 class OracleProcess:
@@ -322,6 +351,8 @@ class NavNode:
     contents: int
     floor_normal: tuple[float, float, float]
     region_id: int = 0
+    floor_surface_flags: int = 0
+    floor_surface_name: str = ""
 
     def plan(self, passable: bool) -> dict:
         safe = self.standing_clear and self.supported and not (
@@ -575,6 +606,8 @@ def _build_navigation(
             not stand["startsolid"] and not stand["allsolid"],
             not crouch["startsolid"] and not crouch["allsolid"], True,
             contents["contents"], tuple(seed_support[ordinal]["plane"]["normal"]),
+            floor_surface_flags=(seed_support[ordinal].get("surface") or {}).get("flags", 0),
+            floor_surface_name=(seed_support[ordinal].get("surface") or {}).get("name", ""),
         )
         nodes.setdefault(key, node)
         queue.append(key)
@@ -625,6 +658,8 @@ def _build_navigation(
             nodes[key] = NavNode(
                 key, point, standing, crouched, True, contents["contents"],
                 tuple(floor["plane"]["normal"]),
+                floor_surface_flags=(floor.get("surface") or {}).get("flags", 0),
+                floor_surface_name=(floor.get("surface") or {}).get("name", ""),
             )
             queue.append(key)
         traces = []
@@ -785,28 +820,79 @@ def _l0_chunks(
     nodes: Mapping[tuple[int, int, int], NavNode],
     spawns: Sequence[tuple[int, tuple[float, float, float]]],
     origin: tuple[int, int, int],
+    *,
+    cm: OracleProcess | None = None,
+    metadata: BspMetadata | None = None,
+    evidenced_l0_points: Mapping[str, Sequence[Sequence[float]]] | None = None,
+    semantic_summary: dict[str, int] | None = None,
 ) -> list[dict]:
     chunks: dict[tuple[int, int, int], dict[str, Any]] = {}
+    semantic_cells: dict[str, set[tuple[int, int, int]]] = defaultdict(set)
 
-    def set_bit(point: Sequence[float], plane: str) -> None:
-        l0 = _grid_index(point, origin, 4)
+    def item_for(l0: tuple[int, int, int]) -> tuple[dict[str, Any], int]:
         chunk = tuple(value // 16 for value in l0)
         local = tuple(value % 16 for value in l0)
         linear = local[0] + 16 * local[1] + 256 * local[2]
         item = chunks.setdefault(chunk, {"key": list(chunk), "bits": defaultdict(set), "scalars": {}})
+        return item, linear
+
+    def set_index(l0: tuple[int, int, int], plane: str) -> None:
+        item, linear = item_for(l0)
         item["bits"][plane].add(linear)
 
+    def set_bit(point: Sequence[float], plane: str) -> None:
+        set_index(_grid_index(point, origin, 4), plane)
+
+    def set_scalar(point: Sequence[float], plane: str, value: int) -> None:
+        if not 0 < value <= 255:
+            return
+        item, linear = item_for(_grid_index(point, origin, 4))
+        values = item["scalars"].setdefault(plane, {})
+        values[linear] = max(value, values.get(linear, 0))
+
+    def mark_semantic(point: Sequence[float], name: str) -> None:
+        semantic_cells[name].add(_grid_index(point, origin, 4))
+
+    def fill_bounds(
+        mins: Sequence[float], maxs: Sequence[float], plane: str,
+        *, scalar: tuple[str, int] | None = None,
+        semantic: str | None = None,
+    ) -> None:
+        lower = _grid_index(mins, origin, 4)
+        # Bounds are half-open.  Subtract an epsilon so an exact upper grid
+        # plane does not materialize a neighboring cell.
+        upper = _grid_index(tuple(value - 1e-6 for value in maxs), origin, 4)
+        if any(upper[axis] < lower[axis] for axis in range(3)):
+            return
+        cell_count = math.prod(upper[axis] - lower[axis] + 1 for axis in range(3))
+        if cell_count > 2_000_000:
+            raise AtlasAnalysisError(f"L0 {plane} field exceeds bounded sparse fill")
+        for z in range(lower[2], upper[2] + 1):
+            for y in range(lower[1], upper[1] + 1):
+                for x in range(lower[0], upper[0] + 1):
+                    index = (x, y, z)
+                    set_index(index, plane)
+                    if semantic is not None:
+                        semantic_cells[semantic].add(index)
+                    if scalar is not None:
+                        point = _center(index, origin, 4)
+                        set_scalar(point, scalar[0], scalar[1])
+
+    def expanded_bounds(
+        mins: Sequence[float], maxs: Sequence[float],
+        hull_mins: Sequence[float], hull_maxs: Sequence[float],
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        return (
+            tuple(mins[axis] - hull_maxs[axis] for axis in range(3)),
+            tuple(maxs[axis] - hull_mins[axis] for axis in range(3)),
+        )
+
+    # Retain the exact narrow-band facts already established during the L1
+    # flood.  Full open floors remain L1-only; L0 records boundary surfaces.
+    boundary_keys: set[tuple[int, int, int]] = set()
     for key, node in nodes.items():
-        # L1 supported_floor is authoritative for ordinary traversable floor.
-        # L0 retains only surface/obstacle boundary bands; materializing one
-        # solid voxel beneath every reachable L1 origin would be the forbidden
-        # complete floor fill described by the Atlas contract.
         boundary = False
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            # A legal 18-unit step commonly changes the snapped L1 z index by
-            # one. Treat the horizontal column as present when any of those
-            # exact oracle-supported origins exists; same-z-only lookup would
-            # mislabel ordinary stairs/sloped floors as obstacle boundaries.
             neighbors = [
                 candidate for dz in (-1, 0, 1)
                 if (candidate := nodes.get((key[0] + dx, key[1] + dy, key[2] + dz)))
@@ -821,7 +907,17 @@ def _l0_chunks(
                 boundary = True
                 break
         if boundary:
+            boundary_keys.add(key)
             set_bit((node.position[0], node.position[1], node.position[2] - 25), "solid")
+        surface_point = (node.position[0], node.position[1], node.position[2] - 25)
+        if node.floor_surface_flags & SURF_SKY:
+            set_bit(surface_point, "sky")
+        if node.floor_surface_flags & SURF_SLICK:
+            set_bit(surface_point, "slick")
+        if node.floor_surface_flags & SURF_WARP:
+            set_bit(surface_point, "warp")
+        if node.floor_surface_flags & SURF_NODRAW:
+            set_bit(surface_point, "nodraw")
         if node.contents & CONTENTS_WATER:
             set_bit(node.position, "water")
         if node.contents & CONTENTS_SLIME:
@@ -834,6 +930,248 @@ def _l0_chunks(
             set_bit(node.position, "playerclip")
         if node.contents & CONTENTS_LADDER:
             set_bit(node.position, "ladder")
+
+    if cm is not None:
+        # Challenge every 4-unit player-origin sample inside each reachable
+        # L1 column.  This records hull-expanded forbidden origins and raw
+        # contents without ever allocating dense world-AABB free space.
+        retained_keys = set(boundary_keys)
+        retained_keys.update(
+            key for key, node in nodes.items()
+            if node.contents & (
+                CONTENTS_WINDOW | CONTENTS_PLAYERCLIP | CONTENTS_MONSTERCLIP
+                | CONTENTS_FLUID_MASK | CONTENTS_MIST | CONTENTS_LADDER
+                | CONTENTS_CURRENT_MASK
+            )
+        )
+        retained_keys.update(
+            _grid_index(point, origin, 16) for _, point in spawns
+            if _grid_index(point, origin, 16) in nodes
+        )
+        ordered = sorted(retained_keys, key=lambda item: (item[2], item[1], item[0]))
+        for start in range(0, len(ordered), 32):
+            requests: list[dict] = []
+            samples: list[tuple[float, float, float]] = []
+            for key in ordered[start:start + 32]:
+                node = nodes[key]
+                base_x = origin[0] + key[0] * 16
+                base_y = origin[1] + key[1] * 16
+                for dy in (2, 6, 10, 14):
+                    for dx in (2, 6, 10, 14):
+                        point = (base_x + dx, base_y + dy, node.position[2])
+                        ordinal = len(samples)
+                        samples.append(point)
+                        requests.extend([
+                            _box_request(f"l0-stand:{ordinal}", point, point,
+                                         STANDING_MINS, STANDING_MAXS),
+                            _box_request(f"l0-crouch:{ordinal}", point, point,
+                                         CROUCHED_MINS, CROUCHED_MAXS),
+                            _box_request(f"l0-stand-hazard:{ordinal}", point, point,
+                                         STANDING_MINS, STANDING_MAXS,
+                                         CONTENTS_LAVA | CONTENTS_SLIME),
+                            _box_request(f"l0-crouch-hazard:{ordinal}", point, point,
+                                         CROUCHED_MINS, CROUCHED_MAXS,
+                                         CONTENTS_LAVA | CONTENTS_SLIME),
+                            {"id": f"l0-contents:{ordinal}", "op": "point_contents",
+                             "point": list(point)},
+                        ])
+            results = cm.call(requests)
+            for ordinal, point in enumerate(samples):
+                stand, crouch, stand_hazard, crouch_hazard, contents_result = (
+                    results[ordinal * 5:ordinal * 5 + 5]
+                )
+                contents = contents_result["contents"]
+                stand_blocked = stand["startsolid"] or stand["allsolid"]
+                crouch_blocked = crouch["startsolid"] or crouch["allsolid"]
+                stand_hazardous = stand_hazard["startsolid"] or stand_hazard["allsolid"]
+                crouch_hazardous = crouch_hazard["startsolid"] or crouch_hazard["allsolid"]
+                if stand_blocked or stand_hazardous:
+                    set_bit(point, "standing_forbidden_origin")
+                if crouch_blocked or crouch_hazardous:
+                    set_bit(point, "crouched_forbidden_origin")
+                for mask, plane in (
+                    (CONTENTS_SOLID, "solid"), (CONTENTS_WINDOW, "window"),
+                    (CONTENTS_PLAYERCLIP, "playerclip"),
+                    (CONTENTS_MONSTERCLIP, "monsterclip"),
+                    (CONTENTS_WATER, "water"), (CONTENTS_SLIME, "slime"),
+                    (CONTENTS_LAVA, "lava"), (CONTENTS_MIST, "mist"),
+                    (CONTENTS_LADDER, "ladder"),
+                ):
+                    if contents & mask:
+                        set_bit(point, plane)
+                if stand_hazardous:
+                    # Expanded hazard semantics remain distinct from raw
+                    # point contents through forbidden-origin and severity
+                    # planes. A stationary trace identifies the brush type.
+                    hazard_contents = stand_hazard.get("contents", 0)
+                    if hazard_contents & CONTENTS_LAVA:
+                        mark_semantic(point, "lava_expanded")
+                        set_scalar(point, "hazard_severity", 255)
+                    if hazard_contents & CONTENTS_SLIME:
+                        mark_semantic(point, "slime_expanded")
+                        set_scalar(point, "hazard_severity", 160)
+                current = (contents & CONTENTS_CURRENT_MASK) >> 18
+                if current:
+                    set_scalar(point, "current_direction", current)
+
+        # Classify uncontained or physically lethal fall approaches from the
+        # exact reachable boundary.  Short ordinary drops are not hazards.
+        void_candidates: dict[tuple[int, int, int], tuple[float, float, float]] = {}
+        for key, node in nodes.items():
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                if any((key[0] + dx, key[1] + dy, key[2] + dz) in nodes
+                       for dz in (-1, 0, 1)):
+                    continue
+                point = (node.position[0] + dx * 16, node.position[1] + dy * 16,
+                         node.position[2])
+                void_candidates.setdefault(_grid_index(point, origin, 4), point)
+        candidates = list(void_candidates.values())
+        for start in range(0, len(candidates), 512):
+            batch = candidates[start:start + 512]
+            traces = cm.call([
+                _box_request(
+                    f"l0-void:{ordinal}", point,
+                    (point[0], point[1], point[2] - 2048),
+                    STANDING_MINS, STANDING_MAXS,
+                )
+                for ordinal, point in enumerate(batch)
+            ])
+            for point, trace in zip(batch, traces):
+                drop = point[2] - trace["endpos"][2]
+                if trace["startsolid"] or trace["allsolid"]:
+                    continue
+                if trace["fraction"] >= 1 or drop >= 1400:
+                    set_bit(point, "unknown")
+                    set_bit(point, "standing_forbidden_origin")
+                    set_bit(point, "crouched_forbidden_origin")
+                    mark_semantic(point, "lethal_void")
+                    set_scalar(point, "hazard_severity", 255)
+
+    if metadata is not None:
+        entities = {entity.index: entity for entity in metadata.entities}
+        path_corners = {
+            entity.value("targetname"): entity
+            for entity in metadata.entities
+            if entity.classname == "path_corner" and entity.value("targetname")
+        }
+        for record in metadata.entity_catalog.brush_submodels:
+            entity = entities[int(record["entity_index"])]
+            model = metadata.models[int(record["model_index"])]
+            mins, maxs = model.mins, model.maxs
+            classname = entity.classname
+            if classname == "trigger_hurt":
+                fill_bounds(mins, maxs, "hurt", scalar=("hazard_severity", 255))
+                standing = expanded_bounds(mins, maxs, STANDING_MINS, STANDING_MAXS)
+                crouched = expanded_bounds(mins, maxs, CROUCHED_MINS, CROUCHED_MAXS)
+                fill_bounds(
+                    *standing, "standing_forbidden_origin",
+                    scalar=("hazard_severity", 255), semantic="hurt_expanded",
+                )
+                fill_bounds(*standing, "standing_forbidden_origin")
+                fill_bounds(*crouched, "crouched_forbidden_origin")
+            elif classname in {"trigger_push", "trigger_gravity"}:
+                fill_bounds(mins, maxs, "push_or_gravity")
+            elif "teleport" in classname:
+                fill_bounds(mins, maxs, "teleport_trigger")
+            elif classname == "func_areaportal":
+                fill_bounds(mins, maxs, "areaportal")
+
+            if not classname.startswith("func_") or classname == "func_areaportal":
+                continue
+            fill_bounds(mins, maxs, "mover_reference_solid")
+            swept_mins = list(mins)
+            swept_maxs = list(maxs)
+            size = [maxs[axis] - mins[axis] for axis in range(3)]
+            displacement = [0.0, 0.0, 0.0]
+            if classname == "func_train":
+                positions: list[tuple[float, float, float]] = []
+                seen: set[str] = set()
+                target = entity.value("target")
+                closed = False
+                while target and target not in seen and len(seen) <= len(path_corners):
+                    seen.add(target)
+                    corner = path_corners.get(target)
+                    if corner is None:
+                        break
+                    positions.append(_origin(corner))
+                    target = corner.value("target")
+                if target and positions and target == entity.value("target"):
+                    positions.append(positions[0])
+                    closed = True
+                if not positions:
+                    set_bit(model.origin, "unknown")
+                    mark_semantic(model.origin, "mover_train_unknown")
+                    continue
+                if len(positions) == 1:
+                    positions.append(positions[0])
+                for source, target_position in zip(positions, positions[1:]):
+                    segment_mins = [min(source[axis], target_position[axis]) for axis in range(3)]
+                    segment_maxs = [
+                        max(source[axis], target_position[axis]) + size[axis]
+                        for axis in range(3)
+                    ]
+                    fill_bounds(
+                        segment_mins, segment_maxs, "mover_swept_envelope",
+                        scalar=("hazard_severity", 192), semantic="crush",
+                    )
+                if not closed:
+                    mark_semantic(positions[-1], "mover_train_open_path")
+                continue
+            if classname in {"func_door", "func_button", "func_water"}:
+                angle = float(entity.value("angle", "0") or 0)
+                if angle == -1:
+                    direction = (0.0, 0.0, 1.0)
+                elif angle == -2:
+                    direction = (0.0, 0.0, -1.0)
+                else:
+                    radians = math.radians(angle)
+                    direction = (math.cos(radians), math.sin(radians), 0.0)
+                default_lip = 4.0 if classname == "func_button" else 8.0
+                lip = float(entity.value("lip", str(default_lip)) or default_lip)
+                distance = max(0.0, abs(sum(direction[axis] * size[axis] for axis in range(3))) - lip)
+                displacement = [direction[axis] * distance for axis in range(3)]
+            elif classname == "func_plat":
+                lip = float(entity.value("lip", "8") or 8)
+                height = float(entity.value("height", "0") or 0)
+                displacement[2] = -(height if height else max(0.0, size[2] - lip))
+            elif classname in {"func_rotating", "func_door_rotating"}:
+                center = model.origin
+                radius = max(
+                    math.sqrt(sum((corner[axis] - center[axis]) ** 2 for axis in range(3)))
+                    for corner in (
+                        (mins[0], mins[1], mins[2]), (mins[0], mins[1], maxs[2]),
+                        (mins[0], maxs[1], mins[2]), (mins[0], maxs[1], maxs[2]),
+                        (maxs[0], mins[1], mins[2]), (maxs[0], mins[1], maxs[2]),
+                        (maxs[0], maxs[1], mins[2]), (maxs[0], maxs[1], maxs[2]),
+                    )
+                )
+                swept_mins = [center[axis] - radius for axis in range(3)]
+                swept_maxs = [center[axis] + radius for axis in range(3)]
+            for axis in range(3):
+                swept_mins[axis] = min(swept_mins[axis], mins[axis] + displacement[axis])
+                swept_maxs[axis] = max(swept_maxs[axis], maxs[axis] + displacement[axis])
+            if classname not in {"func_wall", "func_object", "func_explosive"}:
+                fill_bounds(
+                    swept_mins, swept_maxs, "mover_swept_envelope",
+                    scalar=("hazard_severity", 192), semantic="crush",
+                )
+            else:
+                fill_bounds(swept_mins, swept_maxs, "mover_swept_envelope")
+
+    # Generated-map glue may inject only already-admitted hook evidence here;
+    # the stock analyzer never promotes a CM surface guess to hook authority.
+    if evidenced_l0_points:
+        if set(evidenced_l0_points) - {"hookable_surface", "hook_corridor"}:
+            raise AtlasAnalysisError("unsupported externally evidenced L0 plane")
+        for plane, points in evidenced_l0_points.items():
+            for point in points:
+                if len(point) != 3 or any(
+                    isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) for value in point
+                ):
+                    raise AtlasAnalysisError(f"invalid evidenced {plane} L0 point")
+                set_bit(point, plane)
+
     for _, spawn in spawns:
         # A 96-unit column is the half-open interval [0, 96); sampling the
         # endpoint would retain a 100-unit column and can create an unrelated
@@ -843,8 +1181,23 @@ def _l0_chunks(
     output = []
     for key in sorted(chunks, key=lambda item: (item[2], item[1], item[0])):
         item = chunks[key]
+        unknown_bits = set(item["bits"]) - FROZEN_L0_BIT_PLANE_NAMES
+        unknown_scalars = set(item["scalars"]) - FROZEN_L0_SCALAR_PLANE_NAMES
+        if unknown_bits or unknown_scalars:
+            raise AtlasAnalysisError(
+                f"L0 planes differ from frozen Rust schema: "
+                f"bits={sorted(unknown_bits)}, scalars={sorted(unknown_scalars)}"
+            )
         item["bits"] = {name: sorted(values) for name, values in sorted(item["bits"].items())}
+        item["scalars"] = {
+            name: [[linear, value] for linear, value in sorted(values.items())]
+            for name, values in sorted(item["scalars"].items())
+        }
         output.append(item)
+    if semantic_summary is not None:
+        semantic_summary.update({
+            name: len(cells) for name, cells in sorted(semantic_cells.items())
+        })
     return output
 
 
@@ -856,6 +1209,152 @@ def _write_binary_json(path: Path, magic: bytes, value: Any) -> dict:
     return {
         "sha256": sha256_bytes(raw), "uncompressed_bytes": len(raw),
         "transport_sha256": sha256_bytes(compressed), "compressed_bytes": len(compressed),
+    }
+
+
+def _process_tree_rss_bytes(root_pid: int) -> int:
+    """Sample Linux resident bytes for one process and its live descendants."""
+    pending = [root_pid]
+    visited: set[int] = set()
+    total = 0
+    while pending:
+        pid = pending.pop()
+        if pid in visited:
+            continue
+        visited.add(pid)
+        try:
+            status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+            children = Path(f"/proc/{pid}/task/{pid}/children").read_text(
+                encoding="ascii"
+            )
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        for line in status.splitlines():
+            if line.startswith("VmRSS:"):
+                words = line.split()
+                if len(words) >= 2:
+                    total += int(words[1]) * 1024
+                break
+        pending.extend(int(value) for value in children.split())
+    return total
+
+
+def _run_measured_process(
+    command: Sequence[str], *, timeout: float,
+) -> tuple[subprocess.CompletedProcess[str], int]:
+    """Run a process while sampling whole-process-tree RSS at 100 Hz."""
+    process = subprocess.Popen(
+        list(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    deadline = time.monotonic() + timeout
+    peak_rss = 0
+    while True:
+        peak_rss = max(peak_rss, _process_tree_rss_bytes(process.pid))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            process.kill()
+            stdout, stderr = process.communicate()
+            raise AtlasAnalysisError(
+                f"independent cold analyzer timed out: {stderr.strip()}"
+            )
+        try:
+            stdout, stderr = process.communicate(timeout=min(0.01, remaining))
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    peak_rss = max(peak_rss, _process_tree_rss_bytes(process.pid))
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr), peak_rss
+
+
+def _full_cold_rebuild(
+    bsp: Path,
+    primary_dir: Path,
+    canonical_map_id: str,
+    provenance: Mapping[str, Any],
+    *,
+    cm_oracle: Path,
+    pmove_oracle: Path | None,
+    hook_oracle: Path | None,
+    hook_attestation: Path | None,
+    packer: Path,
+    limits: AnalyzerLimits,
+    generator_claims_sha256: str | None,
+    generator_claims: Mapping[str, Any] | None,
+    evidenced_l0_points: Mapping[str, Sequence[Sequence[float]]] | None,
+) -> dict:
+    """Re-run the complete analyzer in a fresh process and compare artifacts."""
+    worker = Path(__file__).resolve().parents[1] / "tools/atlas_cold_worker.py"
+    if not worker.is_file():
+        raise AtlasAnalysisError(f"independent cold analyzer worker missing: {worker}")
+    artifact_suffixes = (
+        ".atlas.bin", ".atlas.bin.zst", ".navigation.bin.zst",
+        ".visibility.bin.zst", ".design-signature.json", ".routes.json",
+    )
+    with tempfile.TemporaryDirectory(prefix="q2-atlas-full-cold-") as temporary:
+        root = Path(temporary)
+        cold_dir = root / "output"
+        specification = {
+            "schema": "q2-atlas-cold-worker-v1",
+            "bsp": str(bsp.resolve()),
+            "output_dir": str(cold_dir),
+            "canonical_map_id": canonical_map_id,
+            "provenance": dict(provenance),
+            "cm_oracle": str(cm_oracle.resolve()),
+            "pmove_oracle": None if pmove_oracle is None else str(pmove_oracle.resolve()),
+            "hook_oracle": None if hook_oracle is None else str(hook_oracle.resolve()),
+            "hook_attestation": (
+                None if hook_attestation is None else str(hook_attestation.resolve())
+            ),
+            "packer": str(packer.resolve()),
+            "limits": asdict(limits),
+            "generator_claims_sha256": generator_claims_sha256,
+            "generator_claims": None if generator_claims is None else dict(generator_claims),
+            "evidenced_l0_points": (
+                None if evidenced_l0_points is None
+                else {name: [list(point) for point in points]
+                      for name, points in evidenced_l0_points.items()}
+            ),
+        }
+        specification_path = root / "worker.json"
+        specification_path.write_bytes(canonical_json(specification) + b"\n")
+        completed, peak_rss = _run_measured_process(
+            [sys.executable, str(worker), str(specification_path)],
+            timeout=limits.full_cold_timeout_seconds,
+        )
+        if completed.returncode:
+            raise AtlasAnalysisError(
+                "independent cold analyzer failed: " + completed.stderr.strip()
+            )
+        try:
+            result = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise AtlasAnalysisError("independent cold analyzer emitted invalid JSON") from error
+        if result != {
+            "atlas_sha256": sha256_file(cold_dir / f"{canonical_map_id}.atlas.bin"),
+            "canonical_map_id": canonical_map_id,
+            "schema": "q2-atlas-cold-worker-result-v1",
+        }:
+            raise AtlasAnalysisError("independent cold analyzer result contract mismatch")
+        digests = {}
+        for suffix in artifact_suffixes:
+            primary = primary_dir / f"{canonical_map_id}{suffix}"
+            cold = cold_dir / f"{canonical_map_id}{suffix}"
+            if not primary.is_file() or not cold.is_file():
+                raise AtlasAnalysisError(f"independent cold artifact missing: {suffix}")
+            primary_digest = sha256_file(primary)
+            if primary_digest != sha256_file(cold):
+                raise AtlasAnalysisError(f"independent cold artifact mismatch: {suffix}")
+            digests[suffix] = primary_digest
+    if peak_rss > 512 * 1024 * 1024:
+        raise AtlasAnalysisError("independent cold analyzer exceeded 512 MiB peak RSS")
+    return {
+        "schema": "q2-atlas-full-cold-proof-v1",
+        "independent_process_launches": 1,
+        "artifact_count": len(artifact_suffixes),
+        "artifact_sha256": digests,
+        "sample_interval_milliseconds": 10,
+        "sampled_process_tree_peak_rss_bytes": peak_rss,
+        "peak_rss_limit_bytes": 512 * 1024 * 1024,
     }
 
 
@@ -963,7 +1462,28 @@ def analyze_map(
     packer: Path,
     limits: AnalyzerLimits = AnalyzerLimits(),
     generator_claims_sha256: str | None = None,
+    generator_claims: Mapping[str, Any] | None = None,
+    evidenced_l0_points: Mapping[str, Sequence[Sequence[float]]] | None = None,
+    independent_cold: bool = True,
 ) -> dict:
+    if generator_claims is not None:
+        from .generated_claim_probes import (
+            generator_claims_sha256 as claims_sha256,
+            validate_generator_claims,
+        )
+
+        claims = validate_generator_claims(dict(generator_claims))
+        if claims["map"] != canonical_map_id:
+            raise AtlasAnalysisError("generator claims map differs from requested map")
+        actual_claims_sha256 = claims_sha256(claims)
+        if generator_claims_sha256 != actual_claims_sha256:
+            raise AtlasAnalysisError("generator claims content/digest mismatch")
+    elif generator_claims_sha256 is not None and independent_cold:
+        raise AtlasAnalysisError(
+            "full cold verification requires canonical generator claims content"
+        )
+    if evidenced_l0_points and generator_claims is None:
+        raise AtlasAnalysisError("external L0 evidence requires bound generator claims")
     metadata = parse_ibsp38(bsp)
     if metadata.sha256 != provenance.get("bsp_sha256"):
         raise AtlasAnalysisError("BSP/provenance digest mismatch")
@@ -1019,6 +1539,17 @@ def analyze_map(
                     "reachable_spawn_ordinals": reachable,
                     "cost_to_safety_q8": 0 if node else 0xFFFFFFFF,
                 })
+            l0_semantics: dict[str, int] = {}
+            l0_chunks = _l0_chunks(
+                nodes, player_spawns, origin, cm=cm, metadata=metadata,
+                evidenced_l0_points=evidenced_l0_points,
+                semantic_summary=l0_semantics,
+            )
+            l0_plane_counts: dict[str, int] = defaultdict(int)
+            for chunk in l0_chunks:
+                for plane, cells in chunk["bits"].items():
+                    l0_plane_counts[plane] += len(cells)
+            l0_plane_counts = dict(sorted(l0_plane_counts.items()))
             admissions = _admissions(metadata.sha256, provenance_sha256, cm, pmove_context)
             cm_identity = dict(cm.identity)
             cm_identity.pop("map", None)
@@ -1052,7 +1583,7 @@ def analyze_map(
             "ibsp_version": metadata.version,
         },
         "oracles": admissions,
-        "chunks": _l0_chunks(nodes, player_spawns, origin),
+        "chunks": l0_chunks,
         "nodes": plan_nodes,
         "edges": edges,
     }
@@ -1117,6 +1648,7 @@ def analyze_map(
     }
     analyzer_inputs = [
         Path(__file__),
+        Path(__file__).resolve().parents[1] / "tools/atlas_cold_worker.py",
         Path(__file__).resolve().parents[1] / "crates/q2-lattice/src/bin/q2_atlas_pack.rs",
         Path(__file__).resolve().parents[1] / "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md",
     ]
@@ -1125,9 +1657,9 @@ def analyze_map(
     ]))
     manifest = {
         "schema": SCHEMA,
-        "status": "passed",
-        "deterministic_rebuild": True,
-        "confidence": "high",
+        "status": "candidate",
+        "deterministic_rebuild": False,
+        "confidence": "pending-independent-cold-rebuild",
         "analyzer_version": "b2-a-v1",
         "canonical_map_id": canonical_map_id,
         "bsp": {
@@ -1171,12 +1703,26 @@ def analyze_map(
         "compiled_world": {
             "spawns": spawn_records,
             "hazards": {
-                "l0_raw_cells": sum(1 for node in nodes.values() if node.contents & (CONTENTS_LAVA | CONTENTS_SLIME)),
-                "l0_expanded_cells": 0, "types": sorted(
-                    ({"lava"} if any(node.contents & CONTENTS_LAVA for node in nodes.values()) else set()) |
-                    ({"slime"} if any(node.contents & CONTENTS_SLIME for node in nodes.values()) else set())
+                "l0_raw_cells": sum(
+                    l0_plane_counts.get(name, 0) for name in ("lava", "slime", "hurt")
                 ),
-                "lethal_drop_edges": 0, "guarded_drop_edges": 0, "uncontained_drop_edges": 0,
+                "l0_expanded_cells": sum(
+                    l0_semantics.get(name, 0)
+                    for name in ("lava_expanded", "slime_expanded", "hurt_expanded")
+                ),
+                "types": [
+                    name for name, present in (
+                        ("lava", l0_plane_counts.get("lava", 0)),
+                        ("slime", l0_plane_counts.get("slime", 0)),
+                        ("hurt", l0_plane_counts.get("hurt", 0)),
+                        ("void", l0_semantics.get("lethal_void", 0)),
+                        ("crush", l0_semantics.get("crush", 0)),
+                    ) if present
+                ],
+                "lethal_drop_edges": l0_semantics.get("lethal_void", 0),
+                "guarded_drop_edges": 0,
+                "uncontained_drop_edges": l0_semantics.get("lethal_void", 0),
+                "semantic_cells": dict(sorted(l0_semantics.items())),
             },
             "hazard_claims": [],
             "lighting": {
@@ -1189,6 +1735,8 @@ def analyze_map(
             "hooks": {
                 "authority_admitted": hook["authority_admitted"],
                 "omission_reason": hook["omission_reason"], "edges": [],
+                "hookable_surface_l0_cells": l0_plane_counts.get("hookable_surface", 0),
+                "hook_corridor_l0_cells": l0_plane_counts.get("hook_corridor", 0),
             },
             "route_claims": [],
         },
@@ -1197,7 +1745,12 @@ def analyze_map(
             "l0_chunks": pack_result["l0_chunks"], "l1_nodes": len(nodes),
             "l1_edges": len(edges), "l2_cells": pack_result["l2_cells"],
             "l3_cells": pack_result["l3_cells"],
+            "l0_bit_cells": sum(l0_plane_counts.values()),
+            "l0_scalar_cells": sum(
+                len(cells) for chunk in l0_chunks for cells in chunk["scalars"].values()
+            ),
         },
+        "l0_plane_counts": l0_plane_counts,
         "confidence_summary": {
             "collision": "exact-engine", "movement": "exact-engine" if pmove_oracle else "omitted",
             "hook": "attested-but-no-discovered-edge" if hook["authority_admitted"] else "omitted",
@@ -1206,7 +1759,7 @@ def analyze_map(
         "limitations": sorted([
             "areaportal summaries use declared map-static state only",
             "hook authority is admitted but stock surface discovery emits no hook edge in B2-A v1",
-            "inline mover transforms remain confidence-tagged metadata and are not static corridors",
+            "mover envelopes are L0 occupancy; no mover traversal edge is emitted without state evidence",
             "L0 is a reachable surface/hazard/spawn narrow band, never dense free-space fill",
         ]),
         "performance": {
@@ -1214,6 +1767,20 @@ def analyze_map(
             "pmove_requests": 0 if oracle_manifest["pmove"] is None else oracle_manifest["pmove"]["requests"],
         },
     }
+    if independent_cold:
+        cold_proof = _full_cold_rebuild(
+            bsp, output_dir, canonical_map_id, provenance,
+            cm_oracle=cm_oracle, pmove_oracle=pmove_oracle,
+            hook_oracle=hook_oracle, hook_attestation=hook_attestation,
+            packer=packer, limits=limits,
+            generator_claims_sha256=generator_claims_sha256,
+            generator_claims=generator_claims,
+            evidenced_l0_points=evidenced_l0_points,
+        )
+        manifest["status"] = "passed"
+        manifest["deterministic_rebuild"] = True
+        manifest["confidence"] = "high"
+        manifest["performance"]["full_cold_rebuild"] = cold_proof
     manifest_path = base.with_suffix(".analysis.manifest.json")
     manifest_path.write_bytes(canonical_json(manifest) + b"\n")
     return manifest

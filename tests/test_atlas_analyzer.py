@@ -12,6 +12,8 @@ from harness.atlas_analyzer import (
     AnalyzerLimits,
     CONTENTS_LAVA,
     CONTENTS_PLAYERCLIP,
+    FROZEN_L0_BIT_PLANE_NAMES,
+    FROZEN_L0_SCALAR_PLANE_NAMES,
     NavNode,
     _l0_chunks,
     analyze_map,
@@ -104,22 +106,26 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
     second = sorted(path.name for path in outputs[1].iterdir())
     assert first == second
     for name in first:
-        left = (outputs[0] / name).read_bytes()
-        right = (outputs[1] / name).read_bytes()
-        if name == "atlas-fixture.analysis.manifest.json":
-            left_manifest = json.loads(left)
-            right_manifest = json.loads(right)
-            for manifest in (left_manifest, right_manifest):
-                atlas = manifest["artifacts"]["atlas"]
-                measured = atlas.pop("build_peak_rss_bytes")
-                assert 0 < measured <= 512 * 1024 * 1024
-                assert atlas["build_peak_rss_measurement"] == "linux_proc_self_status_vmhwm"
-                assert atlas["build_peak_rss_gate_passed"] is True
-                assert atlas["max_build_rss_bytes"] == 512 * 1024 * 1024
-            assert left_manifest == right_manifest, name
-        else:
-            assert left == right, name
-    manifest = json.loads((outputs[0] / "atlas-fixture.analysis.manifest.json").read_bytes())
+        if name.endswith(".analysis.manifest.json"):
+            continue
+        assert (outputs[0] / name).read_bytes() == (outputs[1] / name).read_bytes(), name
+    manifests = [
+        json.loads((output / "atlas-fixture.analysis.manifest.json").read_bytes())
+        for output in outputs
+    ]
+    for manifest in manifests:
+        atlas = manifest["artifacts"]["atlas"]
+        measured = atlas.pop("build_peak_rss_bytes")
+        assert 0 < measured <= 512 * 1024 * 1024
+        assert atlas["build_peak_rss_measurement"] == "linux_proc_self_status_vmhwm"
+        assert atlas["build_peak_rss_gate_passed"] is True
+        assert atlas["max_build_rss_bytes"] == 512 * 1024 * 1024
+        proof = manifest["performance"]["full_cold_rebuild"]
+        assert proof["artifact_count"] == 6
+        assert 0 < proof["sampled_process_tree_peak_rss_bytes"] <= proof["peak_rss_limit_bytes"]
+        del proof["sampled_process_tree_peak_rss_bytes"]
+    assert manifests[0] == manifests[1]
+    manifest = manifests[0]
     assert manifest["artifacts"]["atlas"]["uncompressed_sha256"] == sha256_file(
         outputs[0] / "atlas-fixture.atlas.bin"
     )
@@ -149,3 +155,11 @@ def test_l0_omits_open_floor_interior_but_keeps_required_bands() -> None:
     assert any("lava" in planes for planes in by_key.values())
     assert any("playerclip" in planes for planes in by_key.values())
     assert any("spawn_column" in planes for planes in by_key.values())
+
+
+def test_python_l0_names_match_frozen_rust_packer_schema() -> None:
+    source = (ROOT / "crates/q2-lattice/src/bin/q2_atlas_pack.rs").read_text()
+    for name in FROZEN_L0_BIT_PLANE_NAMES:
+        assert f'"{name}" => L0BitPlane::' in source
+    for name in FROZEN_L0_SCALAR_PLANE_NAMES:
+        assert f'"{name}" => L0ScalarPlane::' in source
