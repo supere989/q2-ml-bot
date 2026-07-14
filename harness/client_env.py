@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import time
@@ -21,6 +23,17 @@ from .protocol import (
     pack_action,
 )
 from .spatial import VoxelSpatialReward
+
+
+@dataclass(frozen=True)
+class ClientActionDispatch:
+    """Identity and wire tick for one action sent to the embedded client."""
+
+    client_id: str
+    client_slot: int
+    after_sequence: int
+    action_tick: int
+    action: Action
 
 
 def authoritative_reward(obs) -> float:
@@ -51,6 +64,7 @@ class Q2NetworkClientEnv:
         telemetry_token: str,
         client_binary: str,
         client_root: str,
+        client_data_root: str | None = None,
         harness_host: str = "127.0.0.1",
         harness_port: int = 39000,
         qport: int | None = None,
@@ -67,10 +81,25 @@ class Q2NetworkClientEnv:
         self.telemetry_token = telemetry_token
         self.client_binary = Path(client_binary).resolve()
         self.client_root = Path(client_root).resolve()
+        self.client_data_root = (
+            Path(client_data_root).resolve()
+            if client_data_root is not None
+            else self.client_root / ".ml-clients"
+        )
         self.harness_host = harness_host
         self.harness_port = int(harness_port)
         self.qport = int(qport if qport is not None else 10000 + harness_port % 50000)
         self.client_id = client_id or uuid.uuid4().hex
+        try:
+            encoded_client_id = self.client_id.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise ValueError("client_id must contain only ASCII characters") from error
+        if not encoded_client_id or len(encoded_client_id) >= 40:
+            raise ValueError("client_id must contain between 1 and 39 ASCII bytes")
+        if re.fullmatch(r"[A-Za-z0-9._-]+", self.client_id) is None:
+            raise ValueError(
+                "client_id may contain only letters, digits, dot, underscore, and dash"
+            )
         self.name = name or f"ml-{self.client_id[:8]}"
         self.game = game
         self.timeout = timeout
@@ -94,8 +123,20 @@ class Q2NetworkClientEnv:
         env = os.environ.copy()
         env.setdefault("SDL_VIDEODRIVER", "dummy")
         env.setdefault("SDL_AUDIODRIVER", "dummy")
+        # WITH_XDG Yamagi clients otherwise race on generated-map downloads.
+        # Give every routed client a private data/config/cache namespace.
+        client_sandbox = self.client_data_root / self.client_id
+        client_home = client_sandbox / "home"
+        client_data_home = client_sandbox / "data"
+        client_home.mkdir(parents=True, exist_ok=True)
+        client_data_home.mkdir(parents=True, exist_ok=True)
+        # Yamagi prefers an existing ~/.yq2 over XDG paths, so HOME must be
+        # private as well; otherwise a legacy host install defeats isolation.
+        env["HOME"] = str(client_home)
+        env["XDG_DATA_HOME"] = str(client_data_home)
         args = [
             str(self.client_binary),
+            "-datadir", str(self.client_root),
             "+set", "game", self.game,
             "+set", "name", self.name,
             "+set", "qport", str(self.qport),
@@ -116,16 +157,23 @@ class Q2NetworkClientEnv:
             cwd=self.client_root,
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
+            # An unread PIPE eventually blocks a long-running client. Keep it
+            # only for explicit diagnostics, where crash output is valuable.
+            stdout=subprocess.PIPE if self.debug else subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
-            text=True,
+            text=self.debug,
         )
         return self._receive(after_sequence=None)
 
-    def _receive(self, after_sequence: int | None) -> ClientTelemetry:
+    def _receive(
+        self,
+        after_sequence: int | None,
+        timeout: float | None = None,
+    ) -> ClientTelemetry:
         if self._socket is None:
             raise RuntimeError("network client is not started")
-        deadline = time.monotonic() + self.timeout
+        receive_timeout = self.timeout if timeout is None else float(timeout)
+        deadline = time.monotonic() + receive_timeout
         while time.monotonic() < deadline:
             if self._process is not None and self._process.poll() is not None:
                 output = self._process.stdout.read() if self._process.stdout else ""
@@ -148,55 +196,126 @@ class Q2NetworkClientEnv:
             f"no telemetry for client_id={self.client_id} from {self.telemetry_server}"
         )
 
-    def step(self, action: Action):
+    def dispatch_action(self, action: Action) -> ClientActionDispatch:
+        """Send without waiting so a manager can dispatch a complete batch."""
         if self._socket is None or self._client_address is None or self._last is None:
             raise RuntimeError("call start() before step()")
-        previous_sequence = self._last.sequence
+        dispatch = ClientActionDispatch(
+            client_id=self.client_id,
+            client_slot=self._last.client_slot,
+            after_sequence=self._last.sequence,
+            action_tick=self._last.server_frame,
+            action=action,
+        )
         self._socket.sendto(
             pack_action(action, self._last.server_frame), self._client_address
         )
-        current = self._receive(after_sequence=previous_sequence)
+        return dispatch
+
+    def receive_telemetry(
+        self,
+        *,
+        after_sequence: int,
+        timeout: float | None = None,
+    ) -> ClientTelemetry:
+        """Receive the next routed packet after an explicitly known sequence."""
+        return self._receive(after_sequence=after_sequence, timeout=timeout)
+
+    @staticmethod
+    def _base_info(current: ClientTelemetry) -> dict:
         obs = current.observation
-        return obs, authoritative_reward(obs), obs.is_terminal, False, {
+        return {
             "client_id": current.client_id,
             "client_slot": current.client_slot,
             "sequence": current.sequence,
             "server_frame": current.server_frame,
             "network_native": True,
             "map": current.map_name,
+            "terminal_reason": int(obs.terminal_reason),
+            "action_debug_tick": int(obs.action_debug[0]),
+            "action_debug_accepted": int(obs.action_debug[1]),
+            "action_debug_timeout_count": int(obs.action_debug[2]),
+            "action_debug_weapon": int(obs.action_debug[3]),
+            "action_debug_movement": [float(value) for value in obs.action_debug[4:8]],
         }
+
+    def initial_result(
+        self,
+        current: ClientTelemetry,
+        *,
+        vector: bool = False,
+    ):
+        """Convert a packet returned by :meth:`start` into reset output."""
+        info = self._base_info(current)
+        if not vector:
+            return current.observation, info
+        self._spatial.reset(current.map_name, current.observation)
+        self._spatial_map = current.map_name
+        memory = self._spatial.memory_features(current.observation)
+        return current.observation.to_vector(memory), info
+
+    def transition_result(
+        self,
+        current: ClientTelemetry,
+        *,
+        vector: bool = False,
+    ):
+        """Convert an already echo-validated telemetry packet into a step result."""
+        obs = current.observation
+        reward = authoritative_reward(obs)
+        info = self._base_info(current)
+        info.update({
+            "reward_base": float(reward),
+            "damage_dealt": float(obs.reward_damage_dealt),
+            "damage_taken": float(obs.reward_damage_taken),
+            "kills": float(obs.reward_kill),
+            "deaths": float(obs.reward_death),
+            "items": float(obs.reward_item_pickup),
+            "hook_reward": float(obs.reward_hook_traversal),
+            "damage_prox": float(obs.reward_damage_taken_prox),
+            "offense": float(obs.reward_offense),
+            "survival": float(obs.reward_survival),
+            "rune_held": float(obs.rune_flags.sum() > 0.0),
+            "self_debug_flags": int(obs.self_debug[3]),
+            "self_debug_control_source": int(obs.self_debug[2]),
+            "spatial_bonus": 0.0,
+        })
+        if vector:
+            if current.map_name != self._spatial_map:
+                self._spatial.reset(current.map_name, obs)
+                self._spatial_map = current.map_name
+            spatial_bonus, spatial_info = self._spatial.update(obs)
+            memory = self._spatial.memory_features(obs)
+            info.update(spatial_info)
+            info["spatial_bonus"] = float(spatial_bonus)
+            obs_result = obs.to_vector(memory)
+            reward += spatial_bonus
+        else:
+            obs_result = obs
+        return obs_result, reward, obs.is_terminal, False, info
+
+    def reset_episode_vector(self):
+        """Reset only policy-side episode memory around the latest live frame."""
+        if self._last is None:
+            raise RuntimeError("call start() before resetting an episode")
+        observation, _info = self.initial_result(self._last, vector=True)
+        return observation
+
+    def step(self, action: Action):
+        dispatch = self.dispatch_action(action)
+        current = self.receive_telemetry(after_sequence=dispatch.after_sequence)
+        return self.transition_result(current)
 
     def reset(self):
         """Start the real client and return the existing policy input shape."""
         current = self.start()
-        self._spatial.reset(current.map_name, current.observation)
-        self._spatial_map = current.map_name
-        memory = self._spatial.memory_features(current.observation)
-        return current.observation.to_vector(memory), {
-            "client_id": current.client_id,
-            "client_slot": current.client_slot,
-            "server_frame": current.server_frame,
-            "map": current.map_name,
-            "network_native": True,
-        }
+        return self.initial_result(current, vector=True)
 
     def step_vector(self, action: Action):
         """Gym-like policy step with the same lattice-extended observation."""
-        obs, reward, terminal, truncated, info = self.step(action)
-        map_name = str(info["map"])
-        if map_name != self._spatial_map:
-            self._spatial.reset(map_name, obs)
-            self._spatial_map = map_name
-        spatial_bonus, spatial_info = self._spatial.update(obs)
-        memory = self._spatial.memory_features(obs)
-        info.update(spatial_info)
-        return (
-            obs.to_vector(memory),
-            reward + spatial_bonus,
-            terminal,
-            truncated,
-            info,
-        )
+        dispatch = self.dispatch_action(action)
+        current = self.receive_telemetry(after_sequence=dispatch.after_sequence)
+        return self.transition_result(current, vector=True)
 
     def close(self):
         if self._process is not None:
