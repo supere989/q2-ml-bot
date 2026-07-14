@@ -1,0 +1,140 @@
+{
+  "schema": "q2-multires-batch-gate-v1",
+  "batch": "B1",
+  "status": "green",
+  "recorded_at": "2026-07-14T12:27:41-07:00",
+  "owner_directive": {
+    "replacement": "one-way",
+    "legacy_model_lineages": "retired",
+    "operational_fallback": "forbidden",
+    "legacy_runtime_or_model_used": false
+  },
+  "normative_documents": {
+    "design_sha256": "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5",
+    "plan_sha256": "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b"
+  },
+  "integration_heads": {
+    "q2-ml-bot": "45ae6665fd1ca4cc8893cfee264b156e199543c7",
+    "q2-ml-client": "9d6b4117237cb8e89f1d837a3b451e3a97b29162",
+    "q2-lithium-3zb2": "950be00ee5c9a4ca4c37834b1b60262090a997be"
+  },
+  "integrated_work": {
+    "atlas_core": {
+      "agent_commit": "d45d2967a0b8dc6d9ded31c319458bb69828998c",
+      "integration_commit": "5d634ca"
+    },
+    "corpus_quarantine": {
+      "agent_commit": "bc2577e7fec948b557557a80d238e9078b189d31",
+      "integration_commit": "d43c112"
+    },
+    "atlas_oracle_admission": {
+      "agent_commit": "5fa19b766b604dd3580f0825b19d5fa7a4ac714b",
+      "integration_commit": "45ae666"
+    },
+    "collision_pmove_oracles": {
+      "agent_commit": "fd45897b0afc6c7e67f2113b97e3749011955417",
+      "integration_commit": "d6feff59"
+    },
+    "client_oracle_provenance": {
+      "agent_commit": "120a05f47a75388355214abd0c87a3d0a662d91e",
+      "integration_commit": "9d6b4117"
+    },
+    "hook_oracle": {
+      "agent_commit": "7fe7bc2346ba8b47c51724b0a8ae9263c9c7a106",
+      "integration_commit": "47839ad"
+    },
+    "hook_parity_attestation": {
+      "agent_commit": "93dcaf8bcf170a3a04866fe2b0925a8693d11e23",
+      "integration_commit": "950be00"
+    }
+  },
+  "artifacts": {
+    "atlas_fixture_uncompressed_sha256": "2577be4ec3f813ce001bd2bd82de39722d1631f787301a993de89b99bc3a9774",
+    "atlas_hardened_manifest_sha256": "9cd1970e9abdac3966129f91c0696a5ac01288c525883ff68fb00bccc9fcb60a",
+    "stock_corpus_report_sha256": "3600059c1f1b475d45d3eb06371908c46710a108f260f72d183bd8ba9ca2babf",
+    "stock_pak_sha256": "678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad",
+    "hook_parity_attestation": {
+      "path": "/home/raymondj/multires-artifacts/atlas-v1/B1/hook-parity-pullspeed-1700.json",
+      "sha256": "616a97289c7a2c282940a4d4a804462a7dd940b16e009f0bc8098acddf290866",
+      "schema": "q2-hook-parity-attestation-v1",
+      "passed": true,
+      "case_count": 8,
+      "hook_pullspeed": 1700,
+      "hook_physics_identity": "cc196ac3aa76a312c72b3f23b1d5d75c264d5404098638d91c70c82eab461861",
+      "collision_fixture_identity": "d8ed6a1e5e85f1f18dc91a4b7c3d77184f077677ddf0de0fb36c48dca6b1c7c5",
+      "pmove_fixture_identity": "7eb6b2c3c5311797f7d9497f397aa272201c57d78cf5fa8604075a7d5640b1ca",
+      "fixture_bsp_sha256": "ed6c3ae52dffce93b932756486fdaea3992f6a8ce68dddf2fbfd4281e4515b3f",
+      "vector_results_sha256": "e983d1fc5f661c4c5b39b85a1724d240309559f793535ebf741b522fe5c495f8"
+    }
+  },
+  "physics_source_sha256": {
+    "collision_c": "01566c63fb16b2a3a310274706c05faee43818f83292e1ba0e16fd29835c4133",
+    "pmove_c": "bd5c4ec92b8bb038a39cec118da9559aec94108451794109ecdde77df7aa52c1",
+    "yamagi_shared_c": "b652fa4721c74583553429b20c69217391b3f988a5d947d036157cb2660799a2",
+    "yamagi_shared_h": "36d79cbaa24a3b77f1ce453a87def4fc548aa3c29158976c8b08fcab13d11454",
+    "hook_shared_c": "5d3362f3173e36563e1999da36d386679f7b0fcf30643840cc4c8f8f00e333cc",
+    "hook_shared_h": "067fb1756d8b82dda0a91d180a97cd4ef744883b9ff91f211fe696e4db0a2f43"
+  },
+  "tests": {
+    "rust": {
+      "passed": 21,
+      "ignored_manual": 1,
+      "doc_tests_passed": true,
+      "fmt_passed": true,
+      "clippy_deny_warnings_passed": true
+    },
+    "python_wsl_dependency_complete": {
+      "passed": 186,
+      "skipped": 2,
+      "skip_reasons": [
+        "Rust extension is validated by the native Cargo suite",
+        "WSL lacks the retail PAK; the pinned local stock-Pak gate passed separately"
+      ]
+    },
+    "stock_corpus_local": {
+      "maps": 8,
+      "structural_quarantine_passed": true,
+      "deterministic_reports_matched": true
+    },
+    "client_oracles": {
+      "passed": 10,
+      "q2ded_clean_build_passed": true
+    },
+    "hook_contract": {
+      "passed": 12,
+      "q2ded_parity_cases": 8,
+      "attestation_reproduced_byte_identically": true,
+      "pullspeed_and_vector_mutations_rejected": true,
+      "normal_module_probe_absent": true
+    }
+  },
+  "admission_invariants": {
+    "collision_failure_rejects_build": true,
+    "pmove_absence_forbids_jump_and_controlled_drop": true,
+    "hook_or_parity_absence_forbids_hook_edges": true,
+    "all_edges_require_nonzero_evidence_and_validation_version": true,
+    "bsp_tool_schema_parameter_source_and_parity_mismatches_reject": true,
+    "canonical_reencode_blocks_same_count_artifact_substitution": true
+  },
+  "limitations_carried_to_B2": [
+    "Collision authority is map-static model 0; transformed inline movers and live entities require explicit downstream handling.",
+    "External .ent fixups are disabled.",
+    "Closed/open areaportal golden coverage remains to be added by the analyzer batch.",
+    "Hook parity stores a canonical evidence digest; full raw vector evidence remains producer-side."
+  ],
+  "deployment": {
+    "public_or_teacher_service_changed": false,
+    "cross_host_runtime_copy_performed": false,
+    "external_or_community_download_performed": false,
+    "trainer_or_tensorboard_started": false
+  },
+  "gate": {
+    "physics_oracles_build_and_match_engine": true,
+    "atlas_serialization_deterministic": true,
+    "all_stock_maps_structurally_admitted": true,
+    "oracle_admission_fail_closed": true,
+    "worktrees_clean": true,
+    "failures": [],
+    "green": true
+  }
+}
