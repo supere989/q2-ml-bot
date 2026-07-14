@@ -35,6 +35,14 @@ PLAYER_H    = 56           # player standing height
 PLAYER_XY_HALF = 16        # Quake II player bbox half-width
 PLAYER_MINS_Z = -24        # origin-relative standing bbox bottom
 PLAYER_MAXS_Z = 32         # origin-relative standing bbox top
+PLAYER_DIAMETER = PLAYER_XY_HALF * 2
+# A 56u Quake II standing hull can enter a gap that is still too cramped for
+# reliable movement, steps, knockback, and spawn recovery.  Horizontal slab
+# gaps therefore need 40u of motion margin above the standing hull.
+MIN_SAFE_HEADROOM = 96
+MIN_SANDWICH_OVERLAP = PLAYER_DIAMETER + 16
+SPAWN_ESCAPE_DISTANCE = 96
+SPAWN_ESCAPE_STEP = 16
 JUMP_H      = 50           # max jump height (units)
 HOOK_MIN    = 150          # minimum useful hook distance
 HOOK_MAX    = 580          # maximum hook range
@@ -44,11 +52,16 @@ SPAWN_EDGE_MARGIN = 96     # keep starts away from room edges/sky walls
 SPAWN_SOLID_MARGIN = 48    # extra XY clearance from cover and low blockers
 LIGHT_REGION_SIZE = 512    # maximum XY extent of one base-floor light region
 LIGHT_SAMPLE_SPACING = 128 # fixed coverage probes within each region
-MIN_FLOOR_LIGHT_COVERAGE = 0.90
-FLOOR_LIGHT_RADIUS = 420   # guaranteed horizontal reach used by validation
-OVERHEAD_LIGHT_VALUE = 700 # qrad point-light intensity
-UNDER_PLATFORM_LIGHT_VALUE = 450
-MIN_FLOOR_LIGHT_VALUE = 450
+MIN_FLOOR_LIGHT_COVERAGE = 0.98
+FLOOR_LIGHT_RADIUS = 448   # guaranteed horizontal reach used by validation
+OVERHEAD_LIGHT_VALUE = 900 # qrad point-light intensity
+UNDER_PLATFORM_LIGHT_VALUE = 700
+MIN_FLOOR_LIGHT_VALUE = 650
+INTERIOR_LIGHT_VALUE = 850
+INTERIOR_LIGHT_RADIUS = 384
+MIN_INTERIOR_LIGHT_VALUE = 800
+MIN_INTERIOR_LIGHT_RADIUS = 320
+WORLD_AMBIENT_LIGHT = 180
 KILL_PLANE_DROP = 64       # distance below the lowest playable floor
 KILL_PLANE_MARGIN = 512    # XY overhang beyond the generated layout
 KILL_PLANE_DAMAGE = 100000 # instant-kill damage for out-of-bounds falls
@@ -154,6 +167,27 @@ class SolidBox:
 
 
 @dataclass(frozen=True)
+class HorizontalSurface:
+    """Thin overhead/platform/roof assembly used by the trap-gap contract."""
+
+    surface_id: str
+    kind: str
+    box: SolidBox
+
+
+@dataclass(frozen=True)
+class InteriorLightZone:
+    """One enterable room-like location that owns an internal light."""
+
+    zone_id: str
+    kind: str
+    bounds: Tuple[int, int, int, int]
+    floor_z: int
+    ceiling_z: int
+    anchor: Tuple[float, float, float]
+
+
+@dataclass(frozen=True)
 class FloorLightRegion:
     """A fixed, measurable patch of spawn-clear base-floor space."""
 
@@ -172,6 +206,53 @@ class LightSource:
     origin: Tuple[float, float, float]
     radius: float
     value: int
+
+
+def _xy_overlap_size(a: SolidBox, b: SolidBox) -> Tuple[int, int]:
+    return (
+        max(0, min(a.x1, b.x1) - max(a.x0, b.x0)),
+        max(0, min(a.y1, b.y1) - max(a.y0, b.y0)),
+    )
+
+
+def horizontal_sandwich_gap(
+    a: HorizontalSurface,
+    b: HorizontalSurface,
+) -> Optional[int]:
+    """Return an unsafe free gap, or ``None`` when the pair is acceptable.
+
+    A pair is player-admitting only when its overlapping footprint is at least
+    48x48u (the 32u hull plus 8u lateral margin on each side).  Free vertical
+    gaps from the 56u standing hull height through 95u are rejected; 96u is the
+    minimum safe movement headroom.  Touching/merged slabs are always safe.
+    """
+    overlap_x, overlap_y = _xy_overlap_size(a.box, b.box)
+    if (overlap_x < MIN_SANDWICH_OVERLAP or
+            overlap_y < MIN_SANDWICH_OVERLAP):
+        return None
+    lower, upper = ((a.box, b.box) if a.box.z0 <= b.box.z0
+                    else (b.box, a.box))
+    gap = upper.z0 - lower.z1
+    if PLAYER_H <= gap < MIN_SAFE_HEADROOM:
+        return gap
+    return None
+
+
+def unsafe_horizontal_sandwiches(
+    surfaces: List[HorizontalSurface],
+) -> List[Tuple[HorizontalSurface, HorizontalSurface, int]]:
+    """Deterministically enumerate all player-admitting trap gaps."""
+    ordered = sorted(
+        surfaces,
+        key=lambda item: (item.box.z0, item.box.z1, item.surface_id),
+    )
+    unsafe = []
+    for index, first in enumerate(ordered):
+        for second in ordered[index + 1:]:
+            gap = horizontal_sandwich_gap(first, second)
+            if gap is not None:
+                unsafe.append((first, second, gap))
+    return unsafe
 
 
 def light_reaches_sample(source: LightSource,
@@ -449,7 +530,7 @@ class MapWriter:
         lines.append('"classname" "worldspawn"')
         lines.append('"message" "ML Training Map"')
         lines.append(f'"sky" "{T_SKY}"')
-        lines.append('"light" "100"')
+        lines.append(f'"light" "{WORLD_AMBIENT_LIGHT}"')
         for key, value in self.world_props.items():
             lines.append(f'"{key}" "{value}"')
         for b in self.brushes:
@@ -478,6 +559,12 @@ class MapGenerator:
         self.light_regions: List[FloorLightRegion] = []
         self.light_sources: List[LightSource] = []
         self.light_coverages: dict = {}
+        self.horizontal_surfaces: List[HorizontalSurface] = []
+        self.interior_light_zones: List[InteriorLightZone] = []
+        self.interior_light_sources: List[LightSource] = []
+        self._interior_zone_specs: List[
+            Tuple[str, str, Tuple[int, int, int, int], int, int]
+        ] = []
         self.writer = MapWriter()
         self._adjacent: List[Tuple[int, int]] = []   # grid-neighbour room pairs
         self.lava_pools: List[SolidBox] = []
@@ -576,6 +663,69 @@ class MapGenerator:
             h = r.randint(160, 224)
         return w, d, h
 
+    def _normalize_room_ceiling_sandwiches(self):
+        """Separate unsafe overlapping ceiling bands without changing RNG.
+
+        Room footprints deliberately overlap to make one connected arena.  A
+        96u terrace offset used to leave a second, reachable ceiling plate only
+        76--80u above the first.  Iteratively raising the lower ceiling to the
+        upper band removes that player-admitting pocket without changing the
+        seeded room graph or consuming any RNG state. The lower band is moved
+        down when it can retain 96u internally; otherwise the bands are merged.
+        """
+        while True:
+            surfaces = self._room_overhead_surfaces()
+            unsafe = unsafe_horizontal_sandwiches(surfaces)
+            if not unsafe:
+                return
+            first, second, _gap = unsafe[0]
+            first_index = int(first.surface_id.rsplit("_", 1)[1])
+            second_index = int(second.surface_id.rsplit("_", 1)[1])
+            if first_index == second_index:
+                raise RuntimeError("room overhead assembly contains an unsafe gap")
+            first_room = self.rooms[first_index]
+            second_room = self.rooms[second_index]
+            lower_room = first_room
+            upper_room = second_room
+            upper_surface = second
+            if lower_room.ceil_z > upper_room.ceil_z:
+                lower_room, upper_room = upper_room, lower_room
+                upper_surface = first
+            # Prefer moving the lower band downward until a full 96u gap
+            # exists. This preserves deliberately low hallway and mid-room
+            # composition; only fall back to merging upward when the lower
+            # room cannot retain a safe 96u interior of its own.
+            target_ceiling = int(
+                upper_surface.box.z0 - MIN_SAFE_HEADROOM - WALL_T
+            )
+            if target_ceiling - lower_room.floor_z >= MIN_SAFE_HEADROOM:
+                lower_room.ceil_z = target_ceiling
+            else:
+                lower_room.ceil_z = upper_room.ceil_z
+
+    def _room_overhead_surfaces(self) -> List[HorizontalSurface]:
+        surfaces = []
+        for index, room in enumerate(self.rooms):
+            surfaces.append(HorizontalSurface(
+                f"room_ceiling_{index}", "ceiling",
+                SolidBox(room.wx, room.wy, room.ceil_z,
+                         room.wx + room.w, room.wy + room.d,
+                         room.ceil_z + WALL_T),
+            ))
+            if room.kind == "arena":
+                lx = room.wx + room.w // 4
+                ly = room.wy + room.d // 4
+                surfaces.append(HorizontalSurface(
+                    f"room_light_panel_{index}", "light_panel",
+                    SolidBox(lx, ly, room.ceil_z - 4,
+                             lx + room.w // 2, ly + room.d // 2,
+                             room.ceil_z + WALL_T),
+                ))
+        return surfaces
+
+    def _register_room_overheads(self):
+        self.horizontal_surfaces.extend(self._room_overhead_surfaces())
+
     def build_layout(self, grid_n: int = 5):
         """Generate room graph using Prim's MST + extra edges on grid_n × grid_n."""
         rng = self.rng
@@ -663,12 +813,18 @@ class MapGenerator:
                         self._make_connection(idx_a, idx_b)
                         self._adjacent.append((idx_a, idx_b))
 
-        # 4. Add platforms to arenas and tall rooms
-        for room in self.rooms:
-            if room.kind in ('arena', 'room'):
-                self._add_platforms(room)
+        # 4. Overlapping room footprints must not create reachable low voids
+        # between separate ceiling/light bands.
+        self._normalize_room_ceiling_sandwiches()
+        self._register_room_overheads()
 
-        # 5. Register every floor plate as a spawn blocker: with terracing,
+        # 5. Add platforms to arenas and tall rooms. Candidate platforms are
+        # checked against all registered overhead assemblies.
+        for room_index, room in enumerate(self.rooms):
+            if room.kind in ('arena', 'room'):
+                self._add_platforms(room, room_index)
+
+        # 6. Register every floor plate as a spawn blocker: with terracing,
         # a higher room's plate can overhang a lower room's area, and spawns
         # or items placed there would be inside solid rock. Boundary contact
         # (standing ON a plate) does not count as overlap.
@@ -703,24 +859,50 @@ class MapGenerator:
                           cx=cx, cy=cy, cz=cz, width=w, height=height)
         self.connections.append(conn)
 
-    def _add_platforms(self, room: Room):
-        """Add floating platforms inside tall rooms."""
+    def _add_platforms(self, room: Room, room_index: int):
+        """Add floating platforms with at least 96u overhead headroom."""
         rng = self.rng
         room_h = room.ceil_z - room.floor_z
         if room_h < 256:
             return
         n_platforms = rng.randint(1, 2) if room.kind == 'arena' else 1
-        for _ in range(n_platforms):
-            plat_z  = room.floor_z + rng.randint(128, room_h - 96)
-            plat_w  = rng.randint(96, min(256, room.w - 64))
-            plat_d  = rng.randint(96, min(256, room.d - 64))
-            plat_x0 = room.wx + rng.randint(32, max(33, room.w - plat_w - 32))
-            plat_y0 = room.wy + rng.randint(32, max(33, room.d - plat_d - 32))
+        max_platform_z = room.ceil_z - MIN_SAFE_HEADROOM - 20
+        min_platform_z = room.floor_z + 128
+        if max_platform_z < min_platform_z:
+            return
+        for platform_index in range(n_platforms):
+            accepted = None
+            for _attempt in range(16):
+                plat_z = rng.randint(min_platform_z, max_platform_z)
+                plat_w = rng.randint(96, min(256, room.w - 64))
+                plat_d = rng.randint(96, min(256, room.d - 64))
+                plat_x0 = room.wx + rng.randint(
+                    32, max(33, room.w - plat_w - 32)
+                )
+                plat_y0 = room.wy + rng.randint(
+                    32, max(33, room.d - plat_d - 32)
+                )
+                surface = HorizontalSurface(
+                    f"platform_{room_index}_{platform_index}", "platform",
+                    # Include the 8u underside trim and 16u platform slab as
+                    # one physical assembly for free-gap measurement.
+                    SolidBox(plat_x0, plat_y0, plat_z - 8,
+                             plat_x0 + plat_w, plat_y0 + plat_d, plat_z + 16),
+                )
+                if any(horizontal_sandwich_gap(surface, existing) is not None
+                       for existing in self.horizontal_surfaces):
+                    continue
+                accepted = (plat_z, plat_w, plat_d, plat_x0, plat_y0, surface)
+                break
+            if accepted is None:
+                continue
+            plat_z, plat_w, plat_d, plat_x0, plat_y0, surface = accepted
             room.platforms.append({
                 'z': plat_z, 'thick': 16,
                 'x0': plat_x0, 'y0': plat_y0,
                 'x1': plat_x0 + plat_w, 'y1': plat_y0 + plat_d,
             })
+            self.horizontal_surfaces.append(surface)
             # With terraces, a platform from one room can overhang another
             # room's floor at body height — keep spawns/items out of it.
             # (Covers the railing strip at z-8 too.)
@@ -771,7 +953,7 @@ class MapGenerator:
             ld = room.d // 2
             w.add_brush(lx, ly, cz - 4,  lx+lw, ly+ld, cz,
                         tf=pal['light'], tc=pal['light'], tw=pal['trim'],
-                        surf_flags=SURF_LIGHT, value=200)
+                        surf_flags=SURF_LIGHT, value=300)
 
     def _emit_connection(self, conn: Connection):
         """Connections are graph metadata only in the open-layout generator."""
@@ -868,7 +1050,10 @@ class MapGenerator:
             ]
             rng.shuffle(corners)
             target = rng.randint(*self.corner_range)
-            for x, y, sx, sy in corners[:target]:
+            placed = 0
+            for x, y, sx, sy in corners:
+                if placed >= target:
+                    break
                 length, thick, height = 144, 24, 112
                 horizontal = SolidBox(
                     min(x, x + sx * length), y - thick // 2, room.floor_z,
@@ -883,13 +1068,29 @@ class MapGenerator:
                 if not (self._structure_is_clear(horizontal) and
                         self._structure_is_clear(vertical)):
                     continue
+                pocket_bounds = (
+                    min(x, x + sx * length) + thick,
+                    min(y, y + sy * length) + thick,
+                    max(x, x + sx * length) - thick,
+                    max(y, y + sy * length) - thick,
+                )
+                pocket_x = (pocket_bounds[0] + pocket_bounds[2]) / 2.0
+                pocket_y = (pocket_bounds[1] + pocket_bounds[3]) / 2.0
+                if not self._player_column_is_clear(
+                        pocket_x, pocket_y, room.floor_z):
+                    continue
                 for box in (horizontal, vertical):
                     self.writer.add_brush(
                         box.x0, box.y0, box.z0, box.x1, box.y1, box.z1,
                         tf=self.pal['trim'], tc=self.pal['trim'], tw=self.pal['wall'],
                     )
                     self.spawn_blockers.append(box)
+                self._interior_zone_specs.append((
+                    f"corner_{self.corner_count}", "corner_pocket",
+                    pocket_bounds, room.floor_z, room.ceil_z,
+                ))
                 self.corner_count += 1
+                placed += 1
 
     def _emit_large_buildings(self):
         """Add enterable roofed buildings to arena presets.
@@ -952,6 +1153,12 @@ class MapGenerator:
                 ]
                 roof = SolidBox(x0, y0, fz + height,
                                 x0 + size, y0 + size, fz + height + 24)
+                roof_surface = HorizontalSurface(
+                    f"building_roof_{self.large_building_count}", "roof", roof
+                )
+                if any(horizontal_sandwich_gap(roof_surface, existing) is not None
+                       for existing in self.horizontal_surfaces):
+                    continue
                 for box in (*walls, roof):
                     self.writer.add_brush(
                         box.x0, box.y0, box.z0, box.x1, box.y1, box.z1,
@@ -959,7 +1166,14 @@ class MapGenerator:
                     )
                     self.spawn_blockers.append(box)
                 self.light_occluders.append(roof)
+                self.horizontal_surfaces.append(roof_surface)
                 cx, cy = x0 + size // 2, y0 + size // 2
+                self._interior_zone_specs.append((
+                    f"building_{self.large_building_count}", "building",
+                    (x0 + thick, y0 + thick,
+                     x0 + size - thick, y0 + size - thick),
+                    fz, fz + height,
+                ))
                 self._loot_sites.append(("platform", cx, cy, fz + 24))
                 self._loot_sites.append(("tower", cx, cy, fz + height + 48))
                 if HOOK_MIN <= height <= HOOK_MAX:
@@ -1220,10 +1434,63 @@ class MapGenerator:
             return True
         return False
 
+    def _player_column_is_clear(self, x: float, y: float, floor_z: int) -> bool:
+        """Check the full 96u safe-headroom column for a standing hull."""
+        px0, px1 = x - PLAYER_XY_HALF, x + PLAYER_XY_HALF
+        py0, py1 = y - PLAYER_XY_HALF, y + PLAYER_XY_HALF
+        column_bottom = floor_z + 1
+        column_top = floor_z + MIN_SAFE_HEADROOM
+        for box in self.spawn_blockers:
+            if box.x1 <= px0 or box.x0 >= px1:
+                continue
+            if box.y1 <= py0 or box.y0 >= py1:
+                continue
+            if box.z1 <= column_bottom or box.z0 >= column_top:
+                continue
+            return False
+        return True
+
+    def _spawn_has_escape(self, room: Room, x: int, y: int) -> bool:
+        """Require one clear, supported 96u horizontal route from a start."""
+        floor_z = room.floor_z
+        if not self._player_column_is_clear(x, y, floor_z):
+            return False
+        directions = (
+            (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0),
+            (math.sqrt(0.5), math.sqrt(0.5)),
+            (math.sqrt(0.5), -math.sqrt(0.5)),
+            (-math.sqrt(0.5), math.sqrt(0.5)),
+            (-math.sqrt(0.5), -math.sqrt(0.5)),
+        )
+        for dx, dy in directions:
+            clear = True
+            for distance in range(
+                    SPAWN_ESCAPE_STEP,
+                    SPAWN_ESCAPE_DISTANCE + SPAWN_ESCAPE_STEP,
+                    SPAWN_ESCAPE_STEP):
+                px = x + dx * distance
+                py = y + dy * distance
+                if not (
+                    room.wx + PLAYER_XY_HALF <= px <=
+                    room.wx + room.w - PLAYER_XY_HALF and
+                    room.wy + PLAYER_XY_HALF <= py <=
+                    room.wy + room.d - PLAYER_XY_HALF
+                ):
+                    clear = False
+                    break
+                if not self._player_column_is_clear(px, py, floor_z):
+                    clear = False
+                    break
+            if clear:
+                return True
+        return False
+
     def _spawn_is_clear(self, room: Room, x: int, y: int, z: int) -> bool:
         if not self._inside_room_for_spawn(room, x, y):
             return False
         if self._spawn_overlaps_blocker(x, y, z):
+            return False
+        if not self._spawn_has_escape(room, x, y):
             return False
         for sx, sy, _ in self.spawn_points:
             if math.hypot(x - sx, y - sy) < MIN_SPAWN_SEPARATION:
@@ -1249,6 +1516,8 @@ class MapGenerator:
             if not self._inside_room_for_spawn(room, x, y):
                 continue
             if self._spawn_overlaps_blocker(x, y, fz):
+                continue
+            if not self._spawn_has_escape(room, x, y):
                 continue
             if self.spawn_points:
                 dist = min(math.hypot(x - sx, y - sy) for sx, sy, _ in self.spawn_points)
@@ -1923,11 +2192,139 @@ class MapGenerator:
             self.light_coverages[region.region_id] = coverage
 
         self.writer.world_props.update({
-            "_ml_lighting_version": "1",
+            "_ml_lighting_version": "2",
             "_ml_light_regions": str(len(self.light_regions)),
             "_ml_floor_lights": str(len(self.light_sources)),
             "_ml_min_light_coverage": f"{MIN_FLOOR_LIGHT_COVERAGE:.3f}",
             "_ml_min_floor_light_value": str(MIN_FLOOR_LIGHT_VALUE),
+        })
+
+    def _collect_interior_light_zones(self) -> List[InteriorLightZone]:
+        """Build deterministic, enterability-proven room-like light zones."""
+        specs = []
+        for index, room in enumerate(self.rooms):
+            specs.append((
+                f"room_{index}",
+                "hallway" if room.kind == "corridor" else room.kind,
+                (room.wx, room.wy, room.wx + room.w, room.wy + room.d),
+                room.floor_z,
+                room.ceil_z,
+            ))
+        specs.extend(self._interior_zone_specs)
+        for room_index, room in enumerate(self.rooms):
+            for platform_index, platform in enumerate(room.platforms):
+                underside_z = platform["z"] - 8
+                if underside_z - room.floor_z < MIN_SAFE_HEADROOM:
+                    continue
+                specs.append((
+                    f"under_platform_{room_index}_{platform_index}",
+                    "under_platform",
+                    (platform["x0"], platform["y0"],
+                     platform["x1"], platform["y1"]),
+                    room.floor_z,
+                    underside_z,
+                ))
+
+        zones = []
+        for zone_id, kind, bounds, floor_z, ceiling_z in specs:
+            x0, y0, x1, y1 = bounds
+            if (x1 - x0 < PLAYER_DIAMETER or
+                    y1 - y0 < PLAYER_DIAMETER or
+                    ceiling_z - floor_z < MIN_SAFE_HEADROOM):
+                continue
+            samples = sorted({
+                sample
+                for region in self.light_regions
+                if region.floor_z == floor_z
+                for sample in region.samples
+                if x0 + PLAYER_XY_HALF <= sample[0] <= x1 - PLAYER_XY_HALF
+                and y0 + PLAYER_XY_HALF <= sample[1] <= y1 - PLAYER_XY_HALF
+            })
+            if not samples:
+                probes = [
+                    (float(x), float(y), float(floor_z + 1))
+                    for x in range(x0 + PLAYER_XY_HALF,
+                                   x1 - PLAYER_XY_HALF + 1,
+                                   PLAYER_XY_HALF)
+                    for y in range(y0 + PLAYER_XY_HALF,
+                                   y1 - PLAYER_XY_HALF + 1,
+                                   PLAYER_XY_HALF)
+                    if self._player_column_is_clear(x, y, floor_z)
+                ]
+                if not probes:
+                    continue
+                samples = probes
+
+            # General room lights belong in open room volume, not accidentally
+            # above a building roof/platform. Dedicated building/platform zones
+            # intentionally select an anchor beneath their own occluder.
+            candidates = samples
+            if kind in ("arena", "room", "hallway", "corner_pocket"):
+                open_samples = [
+                    sample for sample in samples
+                    if not any(self._sample_under_box(sample, box)
+                               for box in self.light_occluders)
+                ]
+                if open_samples:
+                    candidates = open_samples
+            cx = (x0 + x1) / 2.0
+            cy = (y0 + y1) / 2.0
+            anchor = min(
+                candidates,
+                key=lambda sample: (
+                    (sample[0] - cx) ** 2 + (sample[1] - cy) ** 2,
+                    sample,
+                ),
+            )
+            zones.append(InteriorLightZone(
+                zone_id=zone_id,
+                kind=kind,
+                bounds=bounds,
+                floor_z=floor_z,
+                ceiling_z=ceiling_z,
+                anchor=anchor,
+            ))
+        return zones
+
+    def _emit_interior_lighting(self):
+        """Give every enterable room-like location its own internal source."""
+        self.interior_light_zones = self._collect_interior_light_zones()
+        for zone in self.interior_light_zones:
+            ax, ay, _az = zone.anchor
+            light_z = min(
+                float(zone.ceiling_z - 24),
+                float(zone.floor_z + MIN_SAFE_HEADROOM),
+            )
+            source = LightSource(
+                region_id=zone.zone_id,
+                kind=zone.kind,
+                origin=(ax, ay, light_z),
+                radius=float(INTERIOR_LIGHT_RADIUS),
+                value=INTERIOR_LIGHT_VALUE,
+            )
+            # This is also a generator invariant: a tagged interior source may
+            # never depend on light above the location's roof/platform.
+            if not light_reaches_sample(source, zone.anchor,
+                                        self.light_occluders):
+                raise RuntimeError(
+                    f"interior light for {zone.zone_id} is occluded"
+                )
+            self.interior_light_sources.append(source)
+            ox, oy, oz = source.origin
+            self.writer.add_entity("light", {
+                "origin": f"{ox:g} {oy:g} {oz:g}",
+                "light": str(source.value),
+                "_color": "1.0 0.96 0.88",
+                "_ml_interior_light": "1",
+                "_ml_zone": zone.zone_id,
+                "_ml_kind": zone.kind,
+                "_ml_radius": f"{source.radius:g}",
+            })
+        self.writer.world_props.update({
+            "_ml_interior_zones": str(len(self.interior_light_zones)),
+            "_ml_interior_lights": str(len(self.interior_light_sources)),
+            "_ml_min_interior_light_value": str(MIN_INTERIOR_LIGHT_VALUE),
+            "_ml_min_interior_light_radius": str(MIN_INTERIOR_LIGHT_RADIUS),
         })
 
     # ----- hook zone annotation -----
@@ -2081,7 +2478,6 @@ class MapGenerator:
 
         self._emit_hallways()
         self._emit_large_buildings()
-        self._emit_corner_pockets()
 
         self._place_objectives()
         self._emit_stairs()
@@ -2089,9 +2485,23 @@ class MapGenerator:
         self._emit_lane_walls()
         self._emit_lava_pools()
         self._emit_arena_cover()
+        # Corners are placed last so later towers, lane walls, lava rims, and
+        # cover cannot silently occupy a pocket already promised as enterable.
+        self._emit_corner_pockets()
+
+        unsafe_surfaces = unsafe_horizontal_sandwiches(
+            self.horizontal_surfaces
+        )
+        if unsafe_surfaces:
+            first, second, gap = unsafe_surfaces[0]
+            raise RuntimeError(
+                "generated unsafe horizontal sandwich: "
+                f"{first.surface_id}/{second.surface_id} gap={gap}"
+            )
 
         self._place_entities()
         self._emit_floor_lighting()
+        self._emit_interior_lighting()
         self._annotate_hook_zones()
 
         return self.writer, self.hook_zones
@@ -2130,6 +2540,16 @@ class MapGenerator:
             "spawns": len(self.spawn_points),
             "light_regions": len(self.light_regions),
             "floor_lights": len(self.light_sources),
+            "interior_light_zones": len(self.interior_light_zones),
+            "interior_lights": len(self.interior_light_sources),
+            "enterable_room_zones": sum(
+                zone.kind in ("arena", "room", "hallway")
+                for zone in self.interior_light_zones
+            ),
+            "enterable_under_platforms": sum(
+                zone.kind == "under_platform"
+                for zone in self.interior_light_zones
+            ),
             "under_platform_lights": sum(
                 source.kind == "under_platform" for source in self.light_sources
             ),
@@ -2149,11 +2569,20 @@ class MapGenerator:
     def lighting_manifest(self) -> dict:
         """Serializable inputs for independent static coverage validation."""
         return {
-            "version": 1,
+            "version": 2,
             "region_size": LIGHT_REGION_SIZE,
             "sample_spacing": LIGHT_SAMPLE_SPACING,
             "minimum_coverage": MIN_FLOOR_LIGHT_COVERAGE,
             "minimum_light_value": MIN_FLOOR_LIGHT_VALUE,
+            "minimum_interior_light_value": MIN_INTERIOR_LIGHT_VALUE,
+            "minimum_interior_light_radius": MIN_INTERIOR_LIGHT_RADIUS,
+            "player_hull": {
+                "width": PLAYER_DIAMETER,
+                "standing_height": PLAYER_H,
+                "minimum_safe_headroom": MIN_SAFE_HEADROOM,
+                "minimum_sandwich_overlap": MIN_SANDWICH_OVERLAP,
+                "spawn_escape_distance": SPAWN_ESCAPE_DISTANCE,
+            },
             "regions": [
                 {
                     "id": region.region_id,
@@ -2169,6 +2598,17 @@ class MapGenerator:
             "occluders": [
                 [box.x0, box.y0, box.z0, box.x1, box.y1, box.z1]
                 for box in self.light_occluders
+            ],
+            "interior_zones": [
+                {
+                    "id": zone.zone_id,
+                    "kind": zone.kind,
+                    "bounds": list(zone.bounds),
+                    "floor_z": zone.floor_z,
+                    "ceiling_z": zone.ceiling_z,
+                    "anchor": list(zone.anchor),
+                }
+                for zone in self.interior_light_zones
             ],
         }
 
@@ -2199,7 +2639,7 @@ def generate_map(name: str, seed: Optional[int], out_dir: Path, grid_n: int = 5,
     meta = {
         "name": name,
         "seed": seed,
-        "generator": "v4",
+        "generator": "v5",
         **gen.stats(),
         "lighting": gen.lighting_manifest(),
     }
