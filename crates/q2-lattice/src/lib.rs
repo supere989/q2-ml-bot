@@ -145,15 +145,15 @@ fn nearest_signals_iter<'a>(
             continue;
         }
         let distance_scale = (distance / voxel).max(1.0);
-        for channel in 0..CHANNELS {
+        for (channel, candidate) in best.iter_mut().enumerate() {
             let raw = cell.raw_scores[channel];
             if raw <= 0.0 {
                 continue;
             }
             let score = (raw / scale).tanh() * cell.confidence;
             let rank = score / distance_scale;
-            if rank > best[channel].rank {
-                best[channel] = Candidate {
+            if rank > candidate.rank {
+                *candidate = Candidate {
                     rank,
                     score,
                     center,
@@ -284,9 +284,9 @@ impl LatticeIndex {
             output[4] = current.confidence;
         }
         let nearest = self.nearest_signals(position);
-        for channel in 0..4 {
+        for (channel, values) in nearest.iter().take(4).enumerate() {
             let offset = 5 + channel * OUTPUTS;
-            output[offset..offset + OUTPUTS].copy_from_slice(&nearest[channel]);
+            output[offset..offset + OUTPUTS].copy_from_slice(values);
         }
         output[21..24].copy_from_slice(&survivability);
         output[24] = nearest[4][3];
