@@ -2,9 +2,11 @@
 
 ML-based bot engine for Quake 2 (Lithium II + 3ZB2 base).
 
-**Status:** The network-native lattice trainer remains the primary design, but
-training is intentionally paused while the target/thermal-lattice prototype is
-cut over.
+**Status:** The network-native target/thermal-lattice prototype is training on
+the live public server. A fully fresh policy lineage,
+`public_network_thermal_fresh_v1`, replaced the rejected warm-start canary on
+2026-07-14. It uses four ordinary headless clients, the Rust persistent
+lattice, a per-client transient thermal overlay, and exact damage-point aim.
 Four headless Yamagi clients connect as ordinary protocol-34 players while a
 private per-client conduit supplies authoritative 219-feature observations to
 PPO on WSL. It warm-started at 4,008,192 steps from
@@ -28,7 +30,16 @@ now consumes chest-first actionable target labels in one full 512-sample
 minibatch. It also supplies exposure-weighted, per-client transient target heat
 through correctly transformed world voxels, dual eye/muzzle-clear damage
 points, generation-counted target tracks, and exact full-action PPO provenance.
-The replacement lineage must use `--reset_optimizer 1 --reset_lattice 1`.
+The warm-start replacement also reproduced the inherited failure (100%
+down-look and about 66% backward commands) despite healthy target telemetry,
+so it was archived. The active lineage starts at step zero with a fresh model,
+fresh optimizer, and reset lattice. Its bootstrap uses LR `1e-4`, a temporary
+look/posture anchor coefficient of `0.1`, no supervised fire-head pressure,
+and the exact-point fire gate. In its first 1,536 accepted transitions,
+down-look fell to 0%, mean view pitch was -4.18 degrees, backward commands fell
+to 42.6% versus 48.4% forward commands, and hook use fell to 7.4%. Target
+contact was sparse on stock `q2dm7`, so combat quality still requires a
+stock/generated seasonal gate.
 Combat quality remains below the promotion target and must be
 judged by a fresh seasonal soak, not loss convergence.
 **See `docs/HANDOFF-2026-07-13-NETWORK.md` for the exact active topology,

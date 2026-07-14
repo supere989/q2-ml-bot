@@ -6,6 +6,19 @@
 > step-4,063,488 anchor checkpoint described below is quality-invalid and must
 > not be resumed.
 
+> **2026-07-14 fresh-policy cutover:** the subsequent
+> `public_network_thermal_target_v1` warm-start also reproduced 100% down-look
+> and about 66% backward commands despite healthy exact-target telemetry and
+> action echoes, so it was archived. The active run is now
+> `public_network_thermal_fresh_v1`, starting at step zero with a fresh model,
+> optimizer, and lattice. It uses seed `7142026`, LR `1e-4`, batch 512, two
+> epochs, look/posture anchor `0.1`, fire-anchor weight zero, and the hard
+> exact-point fire gate. TensorBoard watches only
+> `training-data/runs/current_public_network_thermal_fresh_v1`; the trainer and
+> TensorBoard tmux sessions are `q2_ppo` and `q2_tb`. The mode-0600 WSL client
+> credential is `/home/raymond/q2-rollout/public-client-telemetry.env` and is
+> intentionally not the rollout-worker token.
+
 This supersedes the runtime/process sections of
 `HANDOFF-2026-07-11.md`. The older document remains the historical record for
 the aim, reward, movement, and first lattice investigations.
@@ -18,12 +31,11 @@ live evidence, sufficiency verdict, and remaining representation gaps.
   server-only `q2mlbot.service`. Normal game traffic is UDP 28000. The private
   per-client observation conduit is UDP 28049.
 - WSL (`rtx2080-wsl`, Tailscale `100.86.206.50`) runs four headless Yamagi
-  clients plus PPO in tmux session `q2_public_train`. These are ordinary
+  clients plus PPO in tmux session `q2_ppo`. These are ordinary
   protocol-34 player connections, not in-process bot entities.
 - Two of the public server's six client slots remain available for humans.
-- The existing TensorBoard process still watches
-  `/home/raymond/q2-ml-bot/runs`; that directory contains only the current
-  `ppo_public_network_engagement_anchor_v3_*` run.
+- TensorBoard tmux `q2_tb` watches only the current fresh-policy event root
+  under the staging tree.
 - The separate teacher server remains active on VPS loopback UDP 28001. The
   WSL map farm remains the source of generated `mllive_*` maps. The live queue
   holds two ready bundles and the teacher queue four, all using generator v6
@@ -44,8 +56,9 @@ live evidence, sufficiency verdict, and remaining representation gaps.
 - WSL staged source/runtime root:
   `/home/raymond/q2-network-client-staging-20260713`.
 - The shared conduit secret is intentionally absent from git. The VPS copy is
-  root-owned mode 0600 at `/etc/q2mlbot/network-client-harness.env`; the WSL
-  copy is mode 0600 at `~/.config/q2-network-live-trainer.env`.
+  root-owned mode 0600 at `/etc/q2mlbot/network-client-harness.env`; the active
+  WSL copy is mode 0600 at
+  `/home/raymond/q2-rollout/public-client-telemetry.env`.
 
 ## Training start and rollback
 

@@ -130,16 +130,28 @@ hook/weapon corruption remains fatal. Yaw echoes use wrapped angular deltas.
 
 ## Training migration
 
-Use only the immutable policy checkpoint at step 4,055,296, not the rejected
-4,063,488 descendant. The observation shape is unchanged, so policy weights
-strict-load. Start a new lineage with `--reset_optimizer 1 --reset_lattice 1`:
-six entity features changed meaning, old Adam moments are not trustworthy, and
-the old dynamic lattice contains deposits made with the incorrect local/world
-transform. Attested map sidecar priors rebuild the persistent lattice;
-transient target heat always starts empty.
+The first migration used the immutable policy checkpoint at step 4,055,296,
+not the rejected 4,063,488 descendant, and correctly reset its optimizer and
+lattice. Live telemetry then proved that the shape-compatible policy still
+carried the same bad action prior: on the generated-map segment it returned to
+100% down-look and about 66% backward commands while target visibility,
+exposure, and authoritative action echoes remained healthy. That canary is
+rejected; optimizer/lattice reset was not enough because it did not reset the
+actor and recurrent weights.
 
-Keep the 512-sample recurrent minibatch, two epochs, and conservative 0.02 aim
-anchor. A new run must use its own checkpoint and TensorBoard directory.
+The active migration therefore uses a genuinely fresh policy, optimizer, and
+dynamic lattice under `public_network_thermal_fresh_v1`. It keeps the
+512-sample recurrent minibatch and two epochs, raises LR from the warm-start
+`1e-5` to `1e-4`, and temporarily raises the look/posture anchor to `0.1` while
+setting `aim_anchor_fire_weight=0`. The hard exact-point fire gate remains the
+only fire permission; the fresh categorical fire head can learn from admitted
+aligned contact without repeating the earlier combined-anchor pressure.
+
+First live evidence at step 1,536: 0% down-look, -4.18-degree mean view pitch,
+42.6% backward versus 48.4% forward commands, 7.4% hook use, 1.46-degree
+visible pitch-anchor MAE, and zero transport failures/timeouts. Stock `q2dm7`
+had sparse visible contact, so these are posture/transport proofs, not a combat
+promotion. Every run must keep its own checkpoint and TensorBoard directory.
 
 ## Prototype gates
 

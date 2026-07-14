@@ -165,14 +165,17 @@ backup/visibility only, not a compute migration.
 `public_network_engagement_anchor_v3` trainer and four clients are stopped. Its
 step-4,063,488 checkpoint is quality-invalid: true pitch averaged about +86
 degrees, down-look rate was 100%, and backward commands were 70.5%. Never
-resume or promote that checkpoint. The only eligible source is the immutable
-policy pin at step 4,055,296 under
-`training-data/resume/public_network_live_v1_04055296`.
+resume or promote that checkpoint. A second target/thermal canary loaded the
+formerly eligible immutable step-4,055,296 policy with a fresh optimizer and
+lattice, but reproduced 100% down-look and about 66% backward commands. It is
+also rejected and archived under the staging tree.
 
-The replacement target/thermal-lattice lineage must use `Q2_EXT_OBS=1`, the
-Rust persistent lattice, deterministic seed `7132026`, two PPO epochs, one full
-512-sample recurrent minibatch, `aim_anchor_coef=0.02`, and
-`--reset_optimizer 1 --reset_lattice 1`. Exact target vectors now mean
+The active `public_network_thermal_fresh_v1` lineage starts from a genuinely
+fresh policy at step zero. It uses `Q2_EXT_OBS=1`, the Rust persistent lattice,
+deterministic seed `7142026`, two PPO epochs, one full 512-sample recurrent
+minibatch, LR `1e-4`, a bootstrap `aim_anchor_coef=0.1`,
+`aim_anchor_fire_weight=0`, and `--reset_lattice 1`. Do not add `--resume` or
+`Q2_RESUME_DIR`. Exact target vectors mean
 eye-to-chest-first damage points clear from eye and common muzzle; entity
 velocity is local relative velocity. Exposure magnitude is exact; positive is
 fire-actionable and negative is shooter-protected tracking. A separate
@@ -180,6 +183,14 @@ per-client 64-unit thermal overlay cools for at most five ticks and is never
 checkpointed. Old dynamic lattice state is invalid because it contains
 pre-transform-fix deposits; rebuild it from attested map sidecars. See
 `docs/TARGET-THERMAL-LATTICE-PROTOTYPE-2026-07-14.md`.
+
+The active trainer is tmux `q2_ppo`; TensorBoard tmux `q2_tb` watches only
+`training-data/runs/current_public_network_thermal_fresh_v1`. The public
+client-telemetry credential is durably mirrored on WSL, mode 0600, at
+`/home/raymond/q2-rollout/public-client-telemetry.env`. It is intentionally
+different from `Q2_ROLLOUT_TOKEN`; sourcing the rollout-worker secret for the
+public client conduit causes registration timeouts. Never print either value
+or full client command lines.
 
 The public client conduit is wire version 4. Its protocol-34 impulse and five
 unused button bits carry a modulo-192 action generation plus hook/weapon
@@ -197,9 +208,9 @@ corruption remains fatal.
 Do not downgrade the client, game module, or Python parser independently.
 
 Do not point `Q2_RESUME_DIR` at the rolling checkpoint directory: `--resume`
-always chooses its latest lexicographic triple. The next run must read
-the three-file pin under
-`training-data/resume/public_network_live_v1_04055296`. Network
+always chooses its latest lexicographic triple. The immutable three-file pin
+under `training-data/resume/public_network_live_v1_04055296` is retained only
+for historical comparison; it is not a source for the active fresh lineage. Network
 collection enters a persistent map-epoch barrier at intermission: it dispatches
 no actions through BSP download/load, tolerates staggered clients without an
 echo timeout, and clears only when every client reports the same non-intermission

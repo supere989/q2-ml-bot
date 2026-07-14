@@ -9,9 +9,24 @@ four quality blockers: origin-to-origin target geometry, absolute world target
 velocity, incorrect local-to-world lattice deposits, and incomplete
 continuous-action provenance. The shape-compatible prototype corrects them.
 The `engagement_anchor_v3` step-4,063,488 checkpoint was stopped and rejected
-after reaching 100% down-look and 70.5% backward commands; only the immutable
-step-4,055,296 policy pin is eligible for the next lineage, with a new
-optimizer and reset dynamic lattice.
+after reaching 100% down-look and 70.5% backward commands. A subsequent
+target/thermal canary loaded the immutable step-4,055,296 policy with a new
+optimizer and reset lattice. It received actionable target data on up to 54.5%
+of accepted transitions and maintained 97.5--99.2% authoritative action
+acceptance with zero failed rounds or echo timeouts, but still returned to
+100% down-look and about 66% backward commands on a generated map. Claude,
+Agy, Grok, and the local code audit agreed this was an inherited
+action/recurrent prior plus weak corrective leverage, not a coordinate,
+conduit, or thermal/fire-role defect.
+
+That warm-start is also rejected and archived. The active
+`public_network_thermal_fresh_v1` lineage starts from a fresh model at step
+zero. By step 1,536 it recorded 0% down-look, -4.18 degrees mean view pitch,
+42.6% backward versus 48.4% forward commands, 7.4% hook use, and no transport
+failures/timeouts. Visible contact was sparse on stock `q2dm7`, so the
+telemetry is sufficient to train the bot, but combat sufficiency is not yet a
+promotion: alignment, admitted fire, hits, repeat hits, and kills must become
+nonzero in that causal order across both stock and generated maps.
 
 ## Original verdict
 
