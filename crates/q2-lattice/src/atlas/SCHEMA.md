@@ -58,6 +58,13 @@ The binary graph is structurally decoded before its separate canonical
 analysis manifest is available. Admission is complete only after pairing the
 payload with that manifest and calling `verify_atlas_artifact`.
 
+`q2-atlas-verify CANONICAL_ATLAS_MANIFEST.json RAW_ATLAS.bin` is the narrow
+process boundary for consumers that cannot link the Rust crate. It requires one
+and only one `application/vnd.q2.atlas-v1` artifact identity, applies default
+budgets and full oracle admission, and rechecks the raw digest, counts, graph,
+and origin. Success is a single canonical `q2-atlas-verification-v1` JSON line;
+failure writes no summary and exits with status 65.
+
 The manifest requires a semantic `q2-cm-oracle` contract bound to the compiled
 BSP SHA-256 and its provenance digest. `q2-pmove-oracle` and `q2-hook-oracle`
 contracts are optional. Jump and controlled-drop edges require an admitted

@@ -24,3 +24,7 @@ zstd = "0.13"
 [[bin]]
 name = "q2-atlas-pack"
 path = "src/bin/q2_atlas_pack.rs"
+
+[[bin]]
+name = "q2-atlas-verify"
+path = "src/bin/q2_atlas_verify.rs"

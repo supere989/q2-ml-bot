@@ -551,6 +551,7 @@ fn run() -> Result<(), String> {
         "l3_cells": artifact.l3.len(),
         "resident_bytes_estimate": artifact.resident_bytes_estimate(),
         "build_peak_rss_measurement": "linux_proc_self_status_vmhwm",
+        "build_peak_rss_bytes": build_peak_rss_bytes,
         "max_build_rss_bytes": limits.max_build_rss_bytes,
         "build_peak_rss_gate_passed": true,
     });

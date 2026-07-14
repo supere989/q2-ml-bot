@@ -102,7 +102,21 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
     second = sorted(path.name for path in outputs[1].iterdir())
     assert first == second
     for name in first:
-        assert (outputs[0] / name).read_bytes() == (outputs[1] / name).read_bytes(), name
+        left = (outputs[0] / name).read_bytes()
+        right = (outputs[1] / name).read_bytes()
+        if name == "atlas-fixture.analysis.manifest.json":
+            left_manifest = json.loads(left)
+            right_manifest = json.loads(right)
+            for manifest in (left_manifest, right_manifest):
+                atlas = manifest["artifacts"]["atlas"]
+                measured = atlas.pop("build_peak_rss_bytes")
+                assert 0 < measured <= 512 * 1024 * 1024
+                assert atlas["build_peak_rss_measurement"] == "linux_proc_self_status_vmhwm"
+                assert atlas["build_peak_rss_gate_passed"] is True
+                assert atlas["max_build_rss_bytes"] == 512 * 1024 * 1024
+            assert left_manifest == right_manifest, name
+        else:
+            assert left == right, name
     manifest = json.loads((outputs[0] / "atlas-fixture.analysis.manifest.json").read_bytes())
     assert manifest["artifacts"]["atlas"]["uncompressed_sha256"] == sha256_file(
         outputs[0] / "atlas-fixture.atlas.bin"
