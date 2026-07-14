@@ -90,8 +90,12 @@ bash tools/train_service.sh start
 ## Generated-Map Curriculum
 
 `maps/generator.py` creates Lithium/3ZB2 deathmatch maps with spawns, weapons,
-items, platforms, and hook affordances. `maps/compile.sh` installs compiled BSPs,
-hook zones, lattice priors, and route/item-timing sidecars into
+items, platforms, hook affordances, and measured floor lighting. Spawn-clear
+base floors are divided into deterministic 512-unit regions and sampled every
+128 units. At least 90% of every region must have a direct tagged point light;
+the generator adds lights below platforms and building roofs when those block
+the ceiling source. `maps/compile.sh` installs compiled BSPs, hook zones,
+lattice priors, and route/item-timing sidecars into
 `q2_lithium_merge/baseq2/maps/`.
 
 Use `--map_glob 'mltrain_*.bsp'` to train from the installed generated maps. Use
@@ -100,7 +104,10 @@ each ML episode. Keep `--map_name q2dm1` for fixed benchmark runs.
 
 Run `python tools/validate_maps.py --glob 'mltrain_*.map' --runtime` before
 overnight training to check spawn spread, map scale, pickups, hook zones, and
-q2ded loadability with a four-bot setup.
+q2ded loadability with a four-bot setup. Static validation recomputes lighting
+from the point lights in the `.map` and the floor samples/occluders in
+`.meta.json`; missing, weak, moved, or platform-occluded lights fail the map.
+Use `--min-light-coverage` only to raise the default 0.90 promotion floor.
 
 ## KD Evaluation Gate
 

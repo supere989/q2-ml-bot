@@ -42,6 +42,13 @@ DM_SPAWN_COUNT = 8         # headroom for six-player live matches
 MIN_SPAWN_SEPARATION = 384 # minimum 2D spacing for generated DM spawns
 SPAWN_EDGE_MARGIN = 96     # keep starts away from room edges/sky walls
 SPAWN_SOLID_MARGIN = 48    # extra XY clearance from cover and low blockers
+LIGHT_REGION_SIZE = 512    # maximum XY extent of one base-floor light region
+LIGHT_SAMPLE_SPACING = 128 # fixed coverage probes within each region
+MIN_FLOOR_LIGHT_COVERAGE = 0.90
+FLOOR_LIGHT_RADIUS = 420   # guaranteed horizontal reach used by validation
+OVERHEAD_LIGHT_VALUE = 700 # qrad point-light intensity
+UNDER_PLATFORM_LIGHT_VALUE = 450
+MIN_FLOOR_LIGHT_VALUE = 450
 KILL_PLANE_DROP = 64       # distance below the lowest playable floor
 KILL_PLANE_MARGIN = 512    # XY overhang beyond the generated layout
 KILL_PLANE_DAMAGE = 100000 # instant-kill damage for out-of-bounds falls
@@ -144,6 +151,68 @@ class HookZone:
 class SolidBox:
     x0: int; y0: int; z0: int
     x1: int; y1: int; z1: int
+
+
+@dataclass(frozen=True)
+class FloorLightRegion:
+    """A fixed, measurable patch of spawn-clear base-floor space."""
+
+    region_id: str
+    bounds: Tuple[int, int, int, int]
+    floor_z: int
+    samples: Tuple[Tuple[float, float, float], ...]
+
+
+@dataclass(frozen=True)
+class LightSource:
+    """A generated point light participating in the floor-light contract."""
+
+    region_id: str
+    kind: str
+    origin: Tuple[float, float, float]
+    radius: float
+    value: int
+
+
+def light_reaches_sample(source: LightSource,
+                         sample: Tuple[float, float, float],
+                         occluders: List[SolidBox]) -> bool:
+    """Return whether a point light has a direct path to a floor sample.
+
+    Coverage intentionally uses horizontal reach rather than pretending to
+    duplicate qrad's build-specific falloff.  The emitted ``light`` value
+    controls brightness; this contract guarantees that a sufficiently strong
+    source is nearby and that platforms/roofs do not sit between it and the
+    base floor.
+    """
+    sx, sy, sz = sample
+    lx, ly, lz = source.origin
+    if lz <= sz or math.hypot(lx - sx, ly - sy) > source.radius:
+        return False
+    height = lz - sz
+    for box in occluders:
+        if not (sz < box.z0 < lz):
+            continue
+        t = (box.z0 - sz) / height
+        ix = sx + (lx - sx) * t
+        iy = sy + (ly - sy) * t
+        if box.x0 <= ix <= box.x1 and box.y0 <= iy <= box.y1:
+            return False
+    return True
+
+
+def floor_light_coverage(region: FloorLightRegion,
+                         sources: List[LightSource],
+                         occluders: List[SolidBox]) -> float:
+    """Fraction of a region's spawn-clear samples with direct point light."""
+    if not region.samples:
+        return 0.0
+    lit = sum(
+        any(light_reaches_sample(source, sample, occluders)
+            for source in sources)
+        for sample in region.samples
+    )
+    return lit / len(region.samples)
 
 
 # ── Heat-field placement engine ───────────────────────────────────────────────
@@ -317,6 +386,7 @@ class MapWriter:
     def __init__(self):
         self.brushes: List[str] = []
         self.entities: List[str] = []
+        self.world_props: dict = {}
 
     # ----- primitive: axis-aligned box brush (6 faces) -----
 
@@ -380,6 +450,8 @@ class MapWriter:
         lines.append('"message" "ML Training Map"')
         lines.append(f'"sky" "{T_SKY}"')
         lines.append('"light" "100"')
+        for key, value in self.world_props.items():
+            lines.append(f'"{key}" "{value}"')
         for b in self.brushes:
             lines.append(b)
         lines.append('}')
@@ -402,6 +474,10 @@ class MapGenerator:
         self.hook_zones: List[HookZone] = []
         self.spawn_points: List[Tuple[int, int, int]] = []
         self.spawn_blockers: List[SolidBox] = []
+        self.light_occluders: List[SolidBox] = []
+        self.light_regions: List[FloorLightRegion] = []
+        self.light_sources: List[LightSource] = []
+        self.light_coverages: dict = {}
         self.writer = MapWriter()
         self._adjacent: List[Tuple[int, int]] = []   # grid-neighbour room pairs
         self.lava_pools: List[SolidBox] = []
@@ -651,6 +727,9 @@ class MapGenerator:
             self.spawn_blockers.append(SolidBox(
                 plat_x0, plat_y0, plat_z - 8,
                 plat_x0 + plat_w, plat_y0 + plat_d, plat_z + 16))
+            self.light_occluders.append(SolidBox(
+                plat_x0, plat_y0, plat_z - 8,
+                plat_x0 + plat_w, plat_y0 + plat_d, plat_z + 16))
 
     # ----- brush generation -----
 
@@ -879,6 +958,7 @@ class MapGenerator:
                         tf=self.pal['metal'], tc=self.pal['ceil'], tw=self.pal['wall'],
                     )
                     self.spawn_blockers.append(box)
+                self.light_occluders.append(roof)
                 cx, cy = x0 + size // 2, y0 + size // 2
                 self._loot_sites.append(("platform", cx, cy, fz + 24))
                 self._loot_sites.append(("tower", cx, cy, fz + height + 48))
@@ -1648,6 +1728,208 @@ class MapGenerator:
                 x += stride
         return out
 
+    # ----- measurable base-floor lighting -----
+
+    def _build_floor_light_regions(self) -> List[Tuple[FloorLightRegion, int]]:
+        """Partition spawn-clear base floors into deterministic light regions.
+
+        Regions align to the generator's 512-unit world grid.  Samples retain
+        the normal spawn bbox clearance, so cover, lava, walls, towers, and
+        buried terrace overlaps do not create artificial lighting obligations.
+        Duplicate room overlaps collapse to one physical floor region.
+        """
+        pending: dict = {}
+        for room in self.rooms:
+            for x0 in range(room.wx, room.wx + room.w, LIGHT_REGION_SIZE):
+                x1 = min(x0 + LIGHT_REGION_SIZE, room.wx + room.w)
+                for y0 in range(room.wy, room.wy + room.d, LIGHT_REGION_SIZE):
+                    y1 = min(y0 + LIGHT_REGION_SIZE, room.wy + room.d)
+                    key = (x0, y0, x1, y1, room.floor_z)
+                    entry = pending.setdefault(key, {
+                        "ceiling_z": room.ceil_z,
+                        "samples": set(),
+                    })
+                    entry["ceiling_z"] = min(entry["ceiling_z"], room.ceil_z)
+                    x = x0 + LIGHT_SAMPLE_SPACING // 2
+                    while x < x1:
+                        y = y0 + LIGHT_SAMPLE_SPACING // 2
+                        while y < y1:
+                            origin_z = room.floor_z + 24
+                            if (self._inside_room_for_spawn(room, x, y) and
+                                    not self._spawn_overlaps_blocker(x, y, origin_z)):
+                                entry["samples"].add(
+                                    (float(x), float(y), float(room.floor_z + 1))
+                                )
+                            y += LIGHT_SAMPLE_SPACING
+                        x += LIGHT_SAMPLE_SPACING
+
+        # Randomly selected DM origins need the same guarantee even when a
+        # narrow platform shadow happens to fall between regular grid probes.
+        for spawn_x, spawn_y, spawn_origin_z in self.spawn_points:
+            floor_z = spawn_origin_z - 24
+            for (x0, y0, x1, y1, region_floor_z), entry in pending.items():
+                if (region_floor_z == floor_z and
+                        x0 <= spawn_x < x1 and y0 <= spawn_y < y1):
+                    entry["samples"].add(
+                        (float(spawn_x), float(spawn_y), float(floor_z + 1))
+                    )
+
+        regions: List[Tuple[FloorLightRegion, int]] = []
+        for (x0, y0, x1, y1, floor_z), entry in sorted(pending.items()):
+            samples = tuple(sorted(entry["samples"]))
+            if not samples:
+                continue
+            region = FloorLightRegion(
+                region_id=f"floor_{x0}_{y0}_{floor_z}",
+                bounds=(x0, y0, x1, y1),
+                floor_z=floor_z,
+                samples=samples,
+            )
+            regions.append((region, int(entry["ceiling_z"])))
+        return regions
+
+    def _add_floor_light(self, region: FloorLightRegion, kind: str,
+                         origin: Tuple[float, float, float], value: int):
+        source = LightSource(
+            region_id=region.region_id,
+            kind=kind,
+            origin=origin,
+            radius=float(FLOOR_LIGHT_RADIUS),
+            value=value,
+        )
+        self.light_sources.append(source)
+        ox, oy, oz = source.origin
+        self.writer.add_entity("light", {
+            "origin": f"{ox:g} {oy:g} {oz:g}",
+            "light": str(source.value),
+            "_color": "1.0 0.94 0.82",
+            "_ml_floor_light": "1",
+            "_ml_region": source.region_id,
+            "_ml_kind": source.kind,
+            "_ml_radius": f"{source.radius:g}",
+        })
+
+    @staticmethod
+    def _sample_under_box(sample: Tuple[float, float, float], box: SolidBox) -> bool:
+        x, y, z = sample
+        return box.x0 <= x <= box.x1 and box.y0 <= y <= box.y1 and z < box.z0
+
+    def _emit_floor_lighting(self):
+        """Guarantee direct overhead light across every spawn-clear region.
+
+        One ceiling source covers each open region.  Where a platform or
+        building roof shadows base floor, a source is added below that
+        occluder.  A deterministic final fill pass handles overlapping roofs
+        and edge cases until the measurable coverage floor is met.
+        """
+        planned = self._build_floor_light_regions()
+        self.light_regions = [region for region, _ceiling_z in planned]
+
+        for region, ceiling_z in planned:
+            region_occluders = [
+                box for box in self.light_occluders
+                if box.x1 > region.bounds[0] and box.x0 < region.bounds[2]
+                and box.y1 > region.bounds[1] and box.y0 < region.bounds[3]
+                and box.z0 > region.floor_z + PLAYER_MAXS_Z
+            ]
+            # Pick an already spawn-clear XY point nearest the tile centre so
+            # the point entity cannot land inside a tower or wall.
+            cx = (region.bounds[0] + region.bounds[2]) / 2.0
+            cy = (region.bounds[1] + region.bounds[3]) / 2.0
+            overhead_xy = min(
+                region.samples,
+                key=lambda sample: ((sample[0] - cx) ** 2 +
+                                    (sample[1] - cy) ** 2, sample),
+            )
+            overhead_z = max(
+                float(region.floor_z + PLAYER_H + 24),
+                float(ceiling_z - 24),
+            )
+            self._add_floor_light(
+                region, "overhead",
+                (overhead_xy[0], overhead_xy[1], overhead_z),
+                OVERHEAD_LIGHT_VALUE,
+            )
+
+            for box in region_occluders:
+                shadowed = [
+                    sample for sample in region.samples
+                    if self._sample_under_box(sample, box)
+                ]
+                if not shadowed:
+                    continue
+                bx = (box.x0 + box.x1) / 2.0
+                by = (box.y0 + box.y1) / 2.0
+                under_xy = min(
+                    shadowed,
+                    key=lambda sample: ((sample[0] - bx) ** 2 +
+                                        (sample[1] - by) ** 2, sample),
+                )
+                under_z = max(
+                    float(region.floor_z + PLAYER_H + 16),
+                    float(box.z0 - 24),
+                )
+                # Keep the fill source strictly below the occluding face.
+                under_z = min(under_z, float(box.z0 - 8))
+                self._add_floor_light(
+                    region, "under_platform",
+                    (under_xy[0], under_xy[1], under_z),
+                    UNDER_PLATFORM_LIGHT_VALUE,
+                )
+
+            region_sources = [
+                source for source in self.light_sources
+                if source.region_id == region.region_id
+            ]
+            coverage = floor_light_coverage(
+                region, region_sources, region_occluders
+            )
+            # A direct vertical fill at an unlit sample is guaranteed to sit
+            # below its lowest overhead occluder.  Iterate in sample order to
+            # preserve byte-identical output for a fixed seed.
+            while coverage < MIN_FLOOR_LIGHT_COVERAGE:
+                uncovered = [
+                    sample for sample in region.samples
+                    if not any(light_reaches_sample(source, sample,
+                                                    region_occluders)
+                               for source in region_sources)
+                ]
+                if not uncovered:
+                    break
+                sample = uncovered[0]
+                overhead_faces = [
+                    box.z0 for box in region_occluders
+                    if self._sample_under_box(sample, box)
+                ]
+                limit_z = min(overhead_faces) if overhead_faces else ceiling_z
+                fill_z = min(
+                    float(limit_z - 8),
+                    max(float(region.floor_z + PLAYER_H + 16),
+                        float(limit_z - 24)),
+                )
+                kind = "under_platform" if overhead_faces else "overhead_fill"
+                self._add_floor_light(
+                    region, kind, (sample[0], sample[1], fill_z),
+                    (UNDER_PLATFORM_LIGHT_VALUE if overhead_faces
+                     else OVERHEAD_LIGHT_VALUE),
+                )
+                region_sources = [
+                    source for source in self.light_sources
+                    if source.region_id == region.region_id
+                ]
+                coverage = floor_light_coverage(
+                    region, region_sources, region_occluders
+                )
+            self.light_coverages[region.region_id] = coverage
+
+        self.writer.world_props.update({
+            "_ml_lighting_version": "1",
+            "_ml_light_regions": str(len(self.light_regions)),
+            "_ml_floor_lights": str(len(self.light_sources)),
+            "_ml_min_light_coverage": f"{MIN_FLOOR_LIGHT_COVERAGE:.3f}",
+            "_ml_min_floor_light_value": str(MIN_FLOOR_LIGHT_VALUE),
+        })
+
     # ----- hook zone annotation -----
 
     def _annotate_hook_zones(self):
@@ -1809,6 +2091,7 @@ class MapGenerator:
         self._emit_arena_cover()
 
         self._place_entities()
+        self._emit_floor_lighting()
         self._annotate_hook_zones()
 
         return self.writer, self.hook_zones
@@ -1845,6 +2128,15 @@ class MapGenerator:
             "lava_pools": len(self.lava_pools),
             "lava_area": sum((b.x1 - b.x0) * (b.y1 - b.y0) for b in self.lava_pools),
             "spawns": len(self.spawn_points),
+            "light_regions": len(self.light_regions),
+            "floor_lights": len(self.light_sources),
+            "under_platform_lights": sum(
+                source.kind == "under_platform" for source in self.light_sources
+            ),
+            "min_light_coverage": (
+                round(min(self.light_coverages.values()), 4)
+                if self.light_coverages else 0.0
+            ),
             "objectives": len(self.objectives),
             "heat_placed_items": len(self._heat_placed),
             "structure_loot_sites": len(self._loot_sites),
@@ -1852,6 +2144,32 @@ class MapGenerator:
                                if c in ARMOR_CLASSES),
             "relax_moves": self.relax_moves,
             "observed_heat_sources": len(self._observed_heat),
+        }
+
+    def lighting_manifest(self) -> dict:
+        """Serializable inputs for independent static coverage validation."""
+        return {
+            "version": 1,
+            "region_size": LIGHT_REGION_SIZE,
+            "sample_spacing": LIGHT_SAMPLE_SPACING,
+            "minimum_coverage": MIN_FLOOR_LIGHT_COVERAGE,
+            "minimum_light_value": MIN_FLOOR_LIGHT_VALUE,
+            "regions": [
+                {
+                    "id": region.region_id,
+                    "bounds": list(region.bounds),
+                    "floor_z": region.floor_z,
+                    "samples": [list(sample) for sample in region.samples],
+                    "generated_coverage": round(
+                        self.light_coverages.get(region.region_id, 0.0), 6
+                    ),
+                }
+                for region in self.light_regions
+            ],
+            "occluders": [
+                [box.x0, box.y0, box.z0, box.x1, box.y1, box.z1]
+                for box in self.light_occluders
+            ],
         }
 
 
@@ -1878,7 +2196,13 @@ def generate_map(name: str, seed: Optional[int], out_dir: Path, grid_n: int = 5,
 
     # Map descriptor for curriculum selection / replay analysis. Separate
     # file: the .json sidecar stays in the line format ML_LoadHookZones parses.
-    meta = {"name": name, "seed": seed, "generator": "v3", **gen.stats()}
+    meta = {
+        "name": name,
+        "seed": seed,
+        "generator": "v4",
+        **gen.stats(),
+        "lighting": gen.lighting_manifest(),
+    }
     meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
     # Lattice prior seed: value sites + danger volumes the spatial-memory

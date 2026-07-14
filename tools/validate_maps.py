@@ -2,8 +2,9 @@
 """
 Validate generated Q2 ML maps for basic 4-player training playability.
 
-Checks static .map/.json structure and can optionally smoke-load every map in
-q2ded through the training environment.
+Checks static .map/.json structure, recomputes per-region direct floor-light
+coverage, and can optionally smoke-load every map in q2ded through the training
+environment.
 """
 
 import argparse
@@ -23,6 +24,15 @@ LOCAL_Q2_ROOT = ROOT.parent / "q2_lithium_merge"
 if LOCAL_Q2_ROOT.exists():
     os.environ.setdefault("Q2_ROOT", str(LOCAL_Q2_ROOT))
 sys.path.insert(0, str(ROOT))
+
+from maps.generator import (  # noqa: E402
+    FloorLightRegion,
+    LightSource,
+    MIN_FLOOR_LIGHT_COVERAGE,
+    MIN_FLOOR_LIGHT_VALUE,
+    SolidBox,
+    floor_light_coverage,
+)
 
 
 ENTITY_RE = re.compile(r'"([^"\\]+)"\s+"([^"\\]*)"')
@@ -159,6 +169,141 @@ def _hook_counts(path: Path) -> Tuple[int, int]:
     return zones, required
 
 
+def _floor_lighting_metrics(
+    map_path: Path,
+    ents: List[Dict[str, str]],
+    worldspawn: Dict[str, str],
+    required_coverage: float,
+) -> Dict[str, object]:
+    """Recompute floor coverage from map lights and generator metadata.
+
+    The metadata supplies fixed spawn-clear samples and horizontal occluders;
+    the source list always comes from the map itself.  Removing a light,
+    lowering its intensity, or moving it behind a platform therefore fails
+    validation instead of trusting the generator's recorded coverage value.
+    """
+    result: Dict[str, object] = {
+        "light_regions": 0,
+        "floor_lights": 0,
+        "under_platform_lights": 0,
+        "min_light_coverage": 0.0,
+        "lighting_ok": False,
+    }
+    meta_path = map_path.with_suffix(".meta.json")
+    if not meta_path.exists():
+        result["lighting_error"] = "missing .meta.json lighting contract"
+        return result
+
+    try:
+        metadata = json.loads(meta_path.read_text())
+        contract = metadata["lighting"]
+        if int(contract.get("version", 0)) != 1:
+            raise ValueError("unsupported lighting contract version")
+        contract_min = float(contract["minimum_coverage"])
+        min_light_value = max(
+            MIN_FLOOR_LIGHT_VALUE,
+            int(contract.get("minimum_light_value", MIN_FLOOR_LIGHT_VALUE)),
+        )
+        regions = [
+            FloorLightRegion(
+                region_id=str(item["id"]),
+                bounds=tuple(int(value) for value in item["bounds"]),
+                floor_z=int(item["floor_z"]),
+                samples=tuple(
+                    tuple(float(value) for value in sample)
+                    for sample in item["samples"]
+                ),
+            )
+            for item in contract["regions"]
+        ]
+        occluders = [
+            SolidBox(*(int(value) for value in box))
+            for box in contract["occluders"]
+        ]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        result["lighting_error"] = f"invalid lighting contract: {exc}"
+        return result
+
+    tagged = [
+        ent for ent in ents
+        if ent.get("classname") == "light"
+        and ent.get("_ml_floor_light") == "1"
+    ]
+    sources: List[LightSource] = []
+    invalid_sources = 0
+    for ent in tagged:
+        origin = _origin(ent)
+        try:
+            if origin is None:
+                raise ValueError("missing origin")
+            source = LightSource(
+                region_id=ent["_ml_region"],
+                kind=ent["_ml_kind"],
+                origin=origin,
+                radius=float(ent["_ml_radius"]),
+                value=int(float(ent.get("light", "0"))),
+            )
+        except (KeyError, TypeError, ValueError):
+            invalid_sources += 1
+            continue
+        if source.value >= min_light_value:
+            sources.append(source)
+
+    region_ids = {region.region_id for region in regions}
+    coverages = []
+    for region in regions:
+        region_sources = [
+            source for source in sources
+            if source.region_id == region.region_id
+        ]
+        coverages.append(floor_light_coverage(region, region_sources, occluders))
+
+    try:
+        expected_regions = int(worldspawn.get("_ml_light_regions", "-1"))
+        expected_lights = int(worldspawn.get("_ml_floor_lights", "-1"))
+        map_contract_min = float(
+            worldspawn.get("_ml_min_light_coverage", "0")
+        )
+        map_min_value = int(float(
+            worldspawn.get("_ml_min_floor_light_value", "0")
+        ))
+    except ValueError as exc:
+        result["lighting_error"] = f"invalid world lighting contract: {exc}"
+        return result
+    effective_min = max(required_coverage, contract_min)
+    min_coverage = min(coverages) if coverages else 0.0
+    source_region_ids = {source.region_id for source in sources}
+    lighting_ok = (
+        worldspawn.get("_ml_lighting_version") == "1" and
+        bool(regions) and
+        len(region_ids) == len(regions) and
+        expected_regions == len(regions) and
+        expected_lights == len(tagged) and
+        invalid_sources == 0 and
+        len(sources) == len(tagged) and
+        source_region_ids <= region_ids and
+        map_contract_min >= required_coverage and
+        map_min_value >= MIN_FLOOR_LIGHT_VALUE and
+        min_coverage + 1e-9 >= effective_min
+    )
+    result.update({
+        "light_regions": len(regions),
+        "floor_lights": len(tagged),
+        "under_platform_lights": sum(
+            ent.get("_ml_kind") == "under_platform" for ent in tagged
+        ),
+        "min_light_coverage": round(min_coverage, 4),
+        "lighting_ok": lighting_ok,
+    })
+    if not lighting_ok:
+        result["lighting_error"] = (
+            f"minimum direct coverage {min_coverage:.3f}; "
+            f"required {effective_min:.3f}; valid lights "
+            f"{len(sources)}/{len(tagged)}"
+        )
+    return result
+
+
 def static_validate(map_path: Path, args: argparse.Namespace) -> Dict[str, object]:
     text = map_path.read_text(errors="ignore")
     ents = _parse_entities(text)
@@ -181,6 +326,12 @@ def static_validate(map_path: Path, args: argparse.Namespace) -> Dict[str, objec
     sky_name = worldspawn.get("sky", "")
     sky_ok = sky_name.lower() != "e1u1/skip"
     hook_zones, required_hooks = _hook_counts(map_path.with_suffix(".json"))
+    lighting = _floor_lighting_metrics(
+        map_path,
+        ents,
+        worldspawn,
+        getattr(args, "min_light_coverage", MIN_FLOOR_LIGHT_COVERAGE),
+    )
 
     min_spawn_dist = 0.0
     if len(spawns) > 1:
@@ -215,7 +366,8 @@ def static_validate(map_path: Path, args: argparse.Namespace) -> Dict[str, objec
         sky_ok and
         len(weapons) >= args.min_weapons and
         len(pickups) >= args.min_pickups and
-        hook_zones >= args.min_hook_zones
+        hook_zones >= args.min_hook_zones and
+        lighting["lighting_ok"]
     )
 
     return {
@@ -233,6 +385,7 @@ def static_validate(map_path: Path, args: argparse.Namespace) -> Dict[str, objec
         "pickups": len(pickups),
         "hook_zones": hook_zones,
         "required_hooks": required_hooks,
+        **lighting,
         "static_ok": static_ok,
     }
 
@@ -417,6 +570,12 @@ def main() -> int:
     parser.add_argument("--min-weapons", type=int, default=4)
     parser.add_argument("--min-pickups", type=int, default=8)
     parser.add_argument("--min-hook-zones", type=int, default=6)
+    parser.add_argument(
+        "--min-light-coverage",
+        type=float,
+        default=MIN_FLOOR_LIGHT_COVERAGE,
+        help="minimum direct-light sample fraction in every spawn-clear floor region",
+    )
     args = parser.parse_args()
 
     map_paths = sorted(Path(args.generated_dir).glob(args.glob))
