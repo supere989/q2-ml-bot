@@ -2,14 +2,16 @@
 
 ML-based bot engine for Quake 2 (Lithium II + 3ZB2 base).
 
-**Status:** Live-deployed. The Season 3 lattice prototype,
-`checkpoints/policy_43507714.onnx` (43.5M training steps), runs a public 1v1
-human-vs-bot server via `tools/live_match_onnx.py` with the Rust lattice index
-enabled (see **Live Deployment**). Movement/control is solid; aim and combat
-conversion remain below the promotion target — see **Known Issues / Roadmap**
-item 2.
-**See `docs/HANDOFF-2026-07-11.md` for the current artifacts, evidence, and
-next controlled experiment if picking this up fresh.**
+**Status:** The network-native lattice trainer is live on the public server.
+Four headless Yamagi clients connect as ordinary protocol-34 players while a
+private per-client conduit supplies authoritative 219-feature observations to
+PPO on WSL. It warm-started at 4,008,192 steps from
+`movement_reset_v2/policy_04008192.pt`; two of six slots remain available for
+humans. The old in-process ONNX runtime is archived/rollback-only. Transport
+and action admission are proven; combat quality remains below the promotion
+target and must be judged by the seasonal soak, not loss convergence.
+**See `docs/HANDOFF-2026-07-13-NETWORK.md` for the exact active topology,
+commits, rollback locations, validation evidence, and next checks.**
 
 ## Architecture
 
@@ -22,6 +24,8 @@ harness/spatial.py           Voxel/spatial reward shaping from existing observat
 models/policy.py             LSTM actor-critic policy + ONNX export
 train/ppo.py                 PPO training loop (parallel envs, overnight on Vega 10)
 tools/live_match_onnx.py     ONNX-Runtime live match server — human-joinable, --live_maps
+tools/network_public_server.py Server-only public lane for ordinary training clients
+harness/client_batch.py      Synchronous multi-client action/echo admission and map resync
 maps/                        Procedurally generated maps + hook-zone annotations
 data/                        Recorded human demonstrations for imitation learning
 ```
@@ -43,10 +47,10 @@ and current known issues) lives at `docs/architecture-map.svg`.
 | ext_obs *(Q2_EXT_OBS=1)* | 10 | rune_flags[5] + inbound_dmg_dir[3] + dist/recency[2] |
 | session_memory | 24 | per-voxel-cell lattice: engagement/threat/opportunity/self-fire scores + nearest-signal pull vectors + survivability projection (win_margin, effective-HP, DPS-share) — see `harness/spatial.py` |
 
-`OBS_DIM = 185 + 24 + (10 if Q2_EXT_OBS else 0)`. The deployed live checkpoint
-(`policy_43507714.onnx`) was trained with `Q2_EXT_OBS=1` → 219 dims; running it
-with the env var unset is a silent shape mismatch, not a training bug — see
-`harness/protocol.py` and the `Q2_EXT_OBS` gotcha noted in project memory.
+`OBS_DIM = 185 + 24 + (10 if Q2_EXT_OBS else 0)`. The active public trainer
+and its `policy_04008192.pt` warm start use `Q2_EXT_OBS=1` → 219 dims. Loading
+that checkpoint with the variable unset fails at the encoder with a ten-input
+shape mismatch; see `harness/protocol.py` and the handoff gotcha.
 
 ## Action space (8 dims)
 
