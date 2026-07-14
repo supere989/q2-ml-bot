@@ -25,7 +25,9 @@
         "lattice_sha256": {"$ref": "#/$defs/sha256"},
         "hook_zones_sha256": {"$ref": "#/$defs/sha256"},
         "hook_materialization_sha256": {"$ref": "#/$defs/sha256"},
-        "routes_sha256": {"$ref": "#/$defs/sha256"}
+        "routes_sha256": {"$ref": "#/$defs/sha256"},
+        "stock_provenance_sha256": {"$ref": "#/$defs/sha256"},
+        "stock_inventory_sha256": {"$ref": "#/$defs/sha256"}
       },
       "additionalProperties": false
     },
@@ -39,6 +41,50 @@
       "items": {"type": "string", "minLength": 1}
     }
   },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "generated_v6_promotion"}}},
+      "then": {
+        "properties": {
+          "identities": {
+            "required": [
+              "map_sha256", "meta_sha256", "lattice_sha256",
+              "hook_zones_sha256", "hook_materialization_sha256", "routes_sha256"
+            ],
+            "properties": {
+              "generator_claims_sha256": {"$ref": "#/$defs/sha256"}
+            },
+            "not": {
+              "anyOf": [
+                {"required": ["stock_provenance_sha256"]},
+                {"required": ["stock_inventory_sha256"]}
+              ]
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "identities": {
+            "required": ["stock_provenance_sha256", "stock_inventory_sha256"],
+            "properties": {
+              "generator_claims_sha256": {"type": "null"}
+            },
+            "not": {
+              "anyOf": [
+                {"required": ["map_sha256"]},
+                {"required": ["meta_sha256"]},
+                {"required": ["lattice_sha256"]},
+                {"required": ["hook_zones_sha256"]},
+                {"required": ["hook_materialization_sha256"]},
+                {"required": ["routes_sha256"]}
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "criterion": {

@@ -16,6 +16,7 @@ import json
 import math
 from pathlib import Path
 import re
+import struct
 import sys
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -56,6 +57,30 @@ INFINITE_COST_Q8 = 0xFFFFFFFF
 MAX_INPUT_BYTES = 32 * 1024 * 1024
 MAX_ROUTE_COST_ABSOLUTE_ERROR_Q8 = 1024 * Q8
 MAX_ROUTE_COST_RATIO = 2.0
+MAX_L0_CHUNKS = 1_200
+MAX_L0_DECOMPRESSED_BYTES = 16 * 1024 * 1024
+MAX_ATLAS_DECOMPRESSED_BYTES = 32 * 1024 * 1024
+MAX_ATLAS_RESIDENT_BYTES = 32 * 1024 * 1024
+MAX_BUILD_RSS_BYTES = 512 * 1024 * 1024
+MAX_FULL_COLD_MILLISECONDS = 300_000
+FULL_COLD_EXACT_SUFFIXES = (
+    ".atlas.bin", ".atlas.bin.zst", ".navigation.bin.zst",
+    ".visibility.bin.zst", ".design-signature.json", ".routes.json",
+)
+FULL_COLD_SEMANTIC_SUFFIXES = (".atlas.manifest.json",)
+FULL_COLD_SUFFIXES = FULL_COLD_EXACT_SUFFIXES + FULL_COLD_SEMANTIC_SUFFIXES
+STOCK_PROVENANCE = ROOT / "docs/multires/stock-q2dm1-q2dm8.provenance.json"
+STOCK_INVENTORY = ROOT / "tests/fixtures/corpus/stock-q2dm1-q2dm8.json"
+ANALYZER_AUTHORITY_INPUTS = (
+    ROOT / "harness/atlas_analyzer.py",
+    ROOT / "harness/generated_claim_probes.py",
+    ROOT / "tools/atlas_cold_worker.py",
+    ROOT / "crates/q2-lattice/src/bin/q2_atlas_pack.rs",
+    ROOT / "crates/q2-lattice/src/atlas/admission.rs",
+    ROOT / "crates/q2-lattice/src/atlas/manifest.rs",
+    ROOT / "crates/q2-lattice/src/atlas/storage.rs",
+    ROOT / "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md",
+)
 CLAIM_ID_RE = re.compile(r"^[a-z0-9:_-]{1,127}$")
 HEX = frozenset("0123456789abcdef")
 
@@ -87,6 +112,22 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _expected_analyzer_sha256() -> str:
+    """Reproduce the analyzer's source-closure authority identity."""
+
+    records = [
+        {
+            "path": str(path.relative_to(ROOT)),
+            "sha256": file_sha256(path),
+        }
+        for path in sorted(ANALYZER_AUTHORITY_INPUTS)
+    ]
+    payload = json.dumps(
+        records, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+    ).encode("ascii")
+    return sha256_bytes(payload)
 
 
 def _no_duplicates(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
@@ -670,11 +711,296 @@ def _analysis_sections(analysis: Mapping[str, Any]) -> tuple[Mapping[str, Any], 
     return compiled, identity
 
 
+def _canonical_semantic_manifest(path: Path) -> str:
+    value = _mapping(load_json(path), "Atlas manifest")
+    normalized = dict(value)
+    if "build_peak_rss_bytes" not in normalized:
+        raise ClaimValidationError("Atlas manifest lacks build_peak_rss_bytes")
+    normalized.pop("build_peak_rss_bytes")
+    payload = json.dumps(
+        normalized, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+    ).encode("ascii")
+    return sha256_bytes(payload)
+
+
+def _atlas_header(path: Path) -> tuple[int, tuple[int, int, int, int, int]]:
+    with path.open("rb") as handle:
+        header = handle.read(136)
+    if len(header) != 136 or header[:8] != b"Q2ATL001":
+        raise ClaimValidationError("Atlas artifact lacks the Q2ATL001 header")
+    schema, byte_order, header_bytes = struct.unpack_from("<HHI", header, 8)
+    if schema != 1 or byte_order != 0x454C or header_bytes != 136:
+        raise ClaimValidationError("Atlas artifact header contract differs")
+    counts = struct.unpack_from("<5Q", header, 56)
+    lengths = struct.unpack_from("<5Q", header, 96)
+    if header_bytes + sum(lengths) != path.stat().st_size:
+        raise ClaimValidationError("Atlas artifact section lengths differ from file size")
+    return int(lengths[0]), tuple(int(value) for value in counts)
+
+
+def _full_cold_authority(
+    analysis: Mapping[str, Any], analysis_path: Path,
+) -> tuple[dict[str, Any], Mapping[str, Any]]:
+    """Validate evidence, local artifacts, hard budgets, and cold equality.
+
+    The producer must publish both primary and cold digests plus elapsed time.
+    Older self-declared ``deterministic_rebuild`` manifests are intentionally
+    rejected; those booleans are not evidence.
+    """
+
+    failures: list[str] = []
+    artifacts: Mapping[str, Any] = {}
+    try:
+        if analysis_path.read_bytes() != canonical_bytes(analysis):
+            failures.append("analysis manifest is not canonical sorted JSON plus LF")
+        artifacts = _mapping(analysis.get("artifacts"), "analysis artifacts")
+        identity = _mapping(analysis.get("identity"), "analysis identity")
+        counts = _mapping(analysis.get("counts"), "analysis counts")
+        performance = _mapping(analysis.get("performance"), "analysis performance")
+        proof = _mapping(
+            performance.get("full_cold_rebuild"), "full-cold proof"
+        )
+        expected_proof_keys = {
+            "schema", "independent_process_launches", "artifact_count",
+            "artifact_sha256", "artifact_semantic_sha256",
+            "cold_artifact_sha256", "cold_artifact_semantic_sha256",
+            "verifier_sha256", "verification", "sample_interval_milliseconds",
+            "sampled_process_tree_peak_rss_bytes", "peak_rss_limit_bytes",
+            "elapsed_milliseconds", "timeout_limit_milliseconds",
+        }
+        actual_proof_keys = set(proof)
+        if actual_proof_keys != expected_proof_keys:
+            missing = sorted(expected_proof_keys - actual_proof_keys)
+            extra = sorted(actual_proof_keys - expected_proof_keys)
+            failures.append(
+                "full-cold producer contract differs; analyzer follow-up must emit "
+                f"primary/cold digest and elapsed-time evidence; missing={missing}, "
+                f"extra={extra}"
+            )
+            return _criterion(failures, 0), artifacts
+        if proof.get("schema") != "q2-atlas-full-cold-proof-v1":
+            failures.append("full-cold proof schema differs")
+        if proof.get("independent_process_launches") != 1:
+            failures.append("full-cold proof did not use exactly one independent launch")
+        if proof.get("artifact_count") != len(FULL_COLD_SUFFIXES):
+            failures.append("full-cold proof does not cover seven artifacts")
+        if proof.get("sample_interval_milliseconds") != 10:
+            failures.append("full-cold RSS sample interval is not the frozen 10 ms")
+        _digest(proof.get("verifier_sha256"), "full-cold verifier")
+
+        exact = _mapping(proof.get("artifact_sha256"), "primary artifact digests")
+        cold_exact = _mapping(
+            proof.get("cold_artifact_sha256"), "cold artifact digests"
+        )
+        semantic = _mapping(
+            proof.get("artifact_semantic_sha256"), "primary semantic digests"
+        )
+        cold_semantic = _mapping(
+            proof.get("cold_artifact_semantic_sha256"), "cold semantic digests"
+        )
+        if set(exact) != set(FULL_COLD_EXACT_SUFFIXES):
+            failures.append("primary exact digest set does not cover six byte-stable artifacts")
+        if set(cold_exact) != set(FULL_COLD_EXACT_SUFFIXES):
+            failures.append("cold exact digest set does not cover six byte-stable artifacts")
+        if set(semantic) != set(FULL_COLD_SEMANTIC_SUFFIXES):
+            failures.append("primary semantic digest set does not cover Atlas manifest")
+        if set(cold_semantic) != set(FULL_COLD_SEMANTIC_SUFFIXES):
+            failures.append("cold semantic digest set does not cover Atlas manifest")
+        for label, values in (
+            ("primary artifact", exact), ("cold artifact", cold_exact),
+            ("primary semantic artifact", semantic),
+            ("cold semantic artifact", cold_semantic),
+        ):
+            for suffix, digest in values.items():
+                _digest(digest, f"{label} {suffix}")
+        if exact != cold_exact or semantic != cold_semantic:
+            failures.append("primary and independent-cold artifact hashes differ")
+
+        elapsed = _integer(
+            proof.get("elapsed_milliseconds"), "full-cold elapsed milliseconds", minimum=1
+        )
+        timeout = _integer(
+            proof.get("timeout_limit_milliseconds"),
+            "full-cold timeout limit milliseconds", minimum=1,
+        )
+        if timeout != MAX_FULL_COLD_MILLISECONDS:
+            failures.append("full-cold timeout limit is not the frozen 300 seconds")
+        if elapsed > MAX_FULL_COLD_MILLISECONDS:
+            failures.append("full-cold elapsed time exceeds 300 seconds")
+        peak_limit = _integer(
+            proof.get("peak_rss_limit_bytes"), "full-cold RSS limit", minimum=1
+        )
+        peak = _integer(
+            proof.get("sampled_process_tree_peak_rss_bytes"),
+            "full-cold sampled process-tree RSS", minimum=1,
+        )
+        if peak_limit != MAX_BUILD_RSS_BYTES:
+            failures.append("full-cold RSS limit is not the frozen 512 MiB")
+        if peak > MAX_BUILD_RSS_BYTES:
+            failures.append("full-cold process-tree RSS exceeds 512 MiB")
+
+        map_id = analysis.get("canonical_map_id")
+        if not isinstance(map_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", map_id):
+            raise ClaimValidationError("analysis canonical_map_id is invalid")
+        if map_id != analysis_path.name.removesuffix(".analysis.manifest.json"):
+            failures.append("analysis filename differs from canonical map ID")
+        base = analysis_path.parent / map_id
+        for suffix in FULL_COLD_EXACT_SUFFIXES:
+            path = Path(f"{base}{suffix}")
+            if not path.is_file():
+                failures.append(f"full-cold artifact is missing: {path.name}")
+            elif exact.get(suffix) != file_sha256(path):
+                failures.append(f"on-disk artifact digest differs: {path.name}")
+        atlas_manifest_path = Path(f"{base}.atlas.manifest.json")
+        if not atlas_manifest_path.is_file():
+            failures.append(f"full-cold artifact is missing: {atlas_manifest_path.name}")
+            return _criterion(failures, len(FULL_COLD_SUFFIXES)), artifacts
+        elif semantic.get(".atlas.manifest.json") != _canonical_semantic_manifest(
+            atlas_manifest_path
+        ):
+            failures.append("on-disk Atlas manifest semantic digest differs")
+
+        atlas_path = Path(f"{base}.atlas.bin")
+        atlas_zst_path = Path(f"{base}.atlas.bin.zst")
+        if atlas_path.is_file():
+            l0_bytes, header_counts = _atlas_header(atlas_path)
+            if l0_bytes > MAX_L0_DECOMPRESSED_BYTES:
+                failures.append("Atlas L0 section exceeds 16 MiB")
+            if atlas_path.stat().st_size > MAX_ATLAS_DECOMPRESSED_BYTES:
+                failures.append("Atlas artifact exceeds 32 MiB decompressed")
+            if header_counts[0] > MAX_L0_CHUNKS:
+                failures.append("Atlas header exceeds 1200 L0 chunks")
+        else:
+            l0_bytes, header_counts = 0, (0, 0, 0, 0, 0)
+        expected_count_names = (
+            "l0_chunks", "l1_nodes", "l1_edges", "l2_cells", "l3_cells"
+        )
+        analysis_counts = tuple(
+            _integer(counts.get(name), f"analysis {name}", minimum=0)
+            for name in expected_count_names
+        )
+        if analysis_counts != header_counts:
+            failures.append("analysis counts differ from Atlas header")
+        if analysis_counts[0] > MAX_L0_CHUNKS:
+            failures.append("analysis exceeds 1200 L0 chunks")
+
+        atlas = _mapping(artifacts.get("atlas"), "analysis Atlas artifact")
+        if atlas_path.is_file() and atlas.get("uncompressed_sha256") != file_sha256(atlas_path):
+            failures.append("analysis Atlas digest differs from artifact")
+        if atlas_path.is_file() and atlas.get("uncompressed_bytes") != atlas_path.stat().st_size:
+            failures.append("analysis Atlas byte count differs from artifact")
+        if _integer(
+            atlas.get("uncompressed_bytes"), "analysis Atlas decompressed bytes", minimum=0
+        ) > MAX_ATLAS_DECOMPRESSED_BYTES:
+            failures.append("analysis Atlas decompressed bytes exceed 32 MiB")
+        if atlas_zst_path.is_file() and atlas.get("transport_sha256") != file_sha256(atlas_zst_path):
+            failures.append("analysis Atlas transport digest differs")
+        if atlas.get("compressed_sha256") != atlas.get("transport_sha256"):
+            failures.append("analysis Atlas compressed/transport digests differ")
+        _integer(
+            atlas.get("compressed_bytes"), "analysis Atlas compressed bytes", minimum=0
+        )
+        for name, suffix, digest_name in (
+            ("navigation", ".navigation.bin.zst", "transport_sha256"),
+            ("visibility", ".visibility.bin.zst", "transport_sha256"),
+            ("design_signature", ".design-signature.json", "sha256"),
+            ("routes", ".routes.json", "sha256"),
+        ):
+            artifact = _mapping(artifacts.get(name), f"analysis {name} artifact")
+            if artifact.get(digest_name) != exact.get(suffix):
+                failures.append(f"analysis {name} digest differs from full-cold proof")
+        resident = _integer(
+            atlas.get("resident_bytes_estimate"), "Atlas resident estimate", minimum=0
+        )
+        if resident > MAX_ATLAS_RESIDENT_BYTES:
+            failures.append("Atlas resident estimate exceeds 32 MiB")
+        build_rss = _integer(
+            atlas.get("build_peak_rss_bytes"), "Atlas packer peak RSS", minimum=1
+        )
+        if (
+            atlas.get("build_peak_rss_gate_passed") is not True
+            or atlas.get("max_build_rss_bytes") != MAX_BUILD_RSS_BYTES
+            or build_rss > MAX_BUILD_RSS_BYTES
+        ):
+            failures.append("Atlas packer RSS proof does not pass 512 MiB")
+
+        manifest = _mapping(load_json(atlas_manifest_path), "Atlas manifest")
+        budgets = _mapping(manifest.get("budgets"), "Atlas manifest budgets")
+        expected_budgets = {
+            "max_l0_chunks": MAX_L0_CHUNKS,
+            "max_l0_decompressed_bytes": MAX_L0_DECOMPRESSED_BYTES,
+            "max_atlas_decompressed_bytes": MAX_ATLAS_DECOMPRESSED_BYTES,
+            "max_atlas_resident_bytes": MAX_ATLAS_RESIDENT_BYTES,
+            "max_build_rss_bytes": MAX_BUILD_RSS_BYTES,
+        }
+        if budgets != expected_budgets:
+            failures.append("Atlas manifest budgets differ from frozen hard limits")
+        if _integer(
+            manifest.get("build_peak_rss_bytes"), "Atlas manifest peak RSS", minimum=1
+        ) > MAX_BUILD_RSS_BYTES:
+            failures.append("Atlas manifest packer RSS exceeds 512 MiB")
+        if _mapping(manifest.get("counts"), "Atlas manifest counts") != {
+            name: value for name, value in zip(expected_count_names, analysis_counts)
+        }:
+            failures.append("Atlas manifest counts differ from analysis")
+        if _mapping(manifest.get("bsp"), "Atlas manifest BSP").get("sha256") != identity.get(
+            "bsp_sha256"
+        ):
+            failures.append("Atlas manifest BSP differs from analysis")
+        if _mapping(manifest.get("analyzer"), "Atlas manifest analyzer").get("sha256") != identity.get(
+            "analyzer_sha256"
+        ):
+            failures.append("Atlas manifest analyzer identity differs")
+
+        atlas_manifest_artifact = _mapping(
+            artifacts.get("atlas_manifest"), "analysis Atlas-manifest artifact"
+        )
+        expected_manifest_name = f"{map_id}.atlas.manifest.json"
+        if atlas_manifest_artifact.get("path") != expected_manifest_name:
+            failures.append("analysis Atlas-manifest path differs")
+        manifest_digest = file_sha256(atlas_manifest_path)
+        if (
+            atlas_manifest_artifact.get("sha256") != manifest_digest
+            or identity.get("atlas_manifest_sha256") != manifest_digest
+        ):
+            failures.append("analysis Atlas-manifest identity differs")
+        if proof.get("verifier_sha256") != atlas_manifest_artifact.get("verifier_sha256"):
+            failures.append("full-cold verifier identity differs from analysis")
+        verification = _mapping(proof.get("verification"), "full-cold verification")
+        local_verification = dict(_mapping(
+            atlas_manifest_artifact.get("verification"), "analysis Atlas verification"
+        ))
+        local_verification.pop("manifest_sha256", None)
+        if verification != local_verification:
+            failures.append("full-cold verifier result differs from primary verification")
+        _digest(
+            verification.get("collision_contract_sha256"),
+            "full-cold collision contract",
+        )
+        expected_verification = {
+            "schema": "q2-atlas-verification-v1",
+            "passed": True,
+            "canonical_map_id": map_id,
+            "bsp_sha256": identity.get("bsp_sha256"),
+            "artifact_name": f"{map_id}.atlas.bin",
+            "atlas_sha256": identity.get("atlas_sha256"),
+            "origin": analysis.get("grid", {}).get("origin") if isinstance(analysis.get("grid"), Mapping) else None,
+            "counts": {name: value for name, value in zip(expected_count_names, analysis_counts)},
+            "collision_contract_sha256": verification.get("collision_contract_sha256"),
+        }
+        if verification != expected_verification:
+            failures.append("full-cold verifier summary differs from analysis identities")
+    except (ClaimValidationError, OSError, struct.error, UnicodeError) as exc:
+        failures.append(str(exc))
+    return _criterion(failures, len(FULL_COLD_SUFFIXES)), artifacts
+
+
 def _analysis_quality(
     analysis: Mapping[str, Any],
     *,
     bsp_sha256: str,
     claims_sha256: str | None,
+    b1_gate: Mapping[str, Any],
 ) -> tuple[dict[str, Any], Mapping[str, Any]]:
     compiled, identity = _analysis_sections(analysis)
     failures = []
@@ -687,13 +1013,31 @@ def _analysis_quality(
     try:
         _digest(identity.get("atlas_sha256"), "analysis Atlas")
         _digest(identity.get("analyzer_sha256"), "analysis analyzer")
-    except ClaimValidationError as exc:
+        if identity.get("analyzer_sha256") != _expected_analyzer_sha256():
+            failures.append(
+                "analysis analyzer identity differs from the local admitted source closure"
+            )
+    except (ClaimValidationError, OSError) as exc:
         failures.append(str(exc))
     try:
         oracles = _mapping(analysis.get("oracles"), "analysis oracles")
         failures.extend(
             _oracle_record(oracles.get("collision"), "collision oracle")
         )
+        collision = _mapping(oracles.get("collision"), "collision oracle")
+        b1_collision = _mapping(
+            _mapping(b1_gate.get("artifacts"), "B1 artifacts").get(
+                "transformed_inline_collision"
+            ),
+            "B1 transformed collision",
+        )
+        expected_collision_sha256 = _digest(
+            b1_collision.get("cm_oracle_sha256"), "B1 collision executable"
+        )
+        if collision.get("executable_sha256") != expected_collision_sha256:
+            failures.append(
+                "collision oracle executable differs from the accepted B1 authority"
+            )
     except ClaimValidationError as exc:
         failures.append(str(exc))
     if analysis.get("deterministic_rebuild") is not True:
@@ -701,7 +1045,7 @@ def _analysis_quality(
     confidence = analysis.get("confidence")
     if confidence not in {"high", "complete"}:
         failures.append("analysis confidence is not complete/high")
-    return _criterion(failures, 6), compiled
+    return _criterion(failures, 8), compiled
 
 
 def _validate_spawns(
@@ -887,7 +1231,9 @@ def _validate_lighting(
 
 
 def _validate_hooks(
-    claims: Mapping[str, Any], compiled: Mapping[str, Any], b1_gate: Mapping[str, Any]
+    claims: Mapping[str, Any], compiled: Mapping[str, Any],
+    analysis: Mapping[str, Any], b1_gate: Mapping[str, Any],
+    materialization: Mapping[str, Any],
 ) -> dict[str, Any]:
     hooks = _mapping(compiled.get("hooks"), "compiled hooks")
     _exact_keys(
@@ -903,13 +1249,32 @@ def _validate_hooks(
         hooks.get("edges"), expected, "hook claims"
     )
     failures.extend(coverage_failures)
-    expected_physics = (
-        _mapping(
-            _mapping(b1_gate.get("artifacts"), "B1 artifacts").get("hook_parity_attestation"),
-            "B1 hook attestation",
-        ).get("hook_physics_identity")
+    b1_hook = _mapping(
+        _mapping(b1_gate.get("artifacts"), "B1 artifacts").get(
+            "hook_parity_attestation"
+        ),
+        "B1 hook attestation",
     )
+    expected_physics = b1_hook.get("hook_physics_identity")
+    expected_attestation = b1_hook.get("sha256")
     _digest(expected_physics, "B1 hook physics identity")
+    _digest(expected_attestation, "B1 hook parity attestation")
+    try:
+        analysis_hook = _mapping(
+            _mapping(analysis.get("oracles"), "analysis oracles").get("hook"),
+            "analysis hook oracle",
+        )
+        if analysis_hook.get("authority_admitted") is not True:
+            failures.append("analysis hook authority is not admitted")
+        if analysis_hook.get("attestation_sha256") != expected_attestation:
+            failures.append("analysis hook parity digest differs from accepted B1 attestation")
+        materialized_oracles = _mapping(
+            materialization.get("oracles"), "hook materialization oracles"
+        )
+        if materialized_oracles.get("hook_parity_attestation_sha256") != expected_attestation:
+            failures.append("hook claims carry a non-B1 parity attestation digest")
+    except ClaimValidationError as exc:
+        failures.append(str(exc))
     for claim in expected:
         edge = by_id.get(claim["claim_id"])
         if edge is None:
@@ -1048,9 +1413,22 @@ def validate_generated_map(
     bsp_digest = file_sha256(bsp_path)
     analysis = _mapping(load_json(analysis_path), "compiled analysis")
     b1_gate, b1_gate_digest = _b1_gate(b1_gate_path)
+    materialization_path = Path(
+        f"{map_path.with_suffix('')}.hook-materialization.json"
+    )
+    try:
+        materialization, _materialization_digest = load_materialization(
+            materialization_path
+        )
+    except (HookClaimsV2Error, OSError) as error:
+        raise ClaimValidationError(str(error)) from error
 
     analysis_quality, compiled = _analysis_quality(
-        analysis, bsp_sha256=bsp_digest, claims_sha256=claims_digest
+        analysis, bsp_sha256=bsp_digest, claims_sha256=claims_digest,
+        b1_gate=b1_gate,
+    )
+    artifact_authority, _artifacts = _full_cold_authority(
+        analysis, analysis_path
     )
     static_result = static_validate(map_path, _static_args())
     static_failures = [] if static_result.get("static_ok") is True else [
@@ -1058,6 +1436,7 @@ def validate_generated_map(
     ]
     criteria = {
         "analysis_quality": analysis_quality,
+        "artifact_authority": artifact_authority,
         "source_static_v6": _criterion(static_failures, 1),
         "spawns": _validate_spawns(claims_context, compiled),
     }
@@ -1067,7 +1446,9 @@ def validate_generated_map(
             "hazards": hazards,
             "lethal_containment": lethal,
             "lighting": _validate_lighting(claims_context, compiled),
-            "hooks": _validate_hooks(claims_context, compiled, b1_gate),
+            "hooks": _validate_hooks(
+                claims_context, compiled, analysis, b1_gate, materialization
+            ),
             "routes": _validate_routes(claims_context, compiled),
         }
     )
@@ -1100,19 +1481,75 @@ def validate_stock_analysis(
     analysis_path: Path,
     *,
     b1_gate_path: Path = ROOT / "docs" / "multires" / "B1-GATE.json",
+    stock_provenance_path: Path = STOCK_PROVENANCE,
+    stock_inventory_path: Path = STOCK_INVENTORY,
 ) -> dict[str, Any]:
     """Validate authored-map analysis quality without generator-v6 rules."""
 
     bsp_digest = file_sha256(bsp_path)
     analysis = _mapping(load_json(analysis_path), "compiled analysis")
-    _gate, b1_gate_digest = _b1_gate(b1_gate_path)
+    b1_gate, b1_gate_digest = _b1_gate(b1_gate_path)
     quality, compiled = _analysis_quality(
-        analysis, bsp_sha256=bsp_digest, claims_sha256=None
+        analysis, bsp_sha256=bsp_digest, claims_sha256=None, b1_gate=b1_gate,
     )
+    artifact_authority, _artifacts = _full_cold_authority(
+        analysis, analysis_path
+    )
+    provenance_digest = file_sha256(stock_provenance_path)
+    inventory_digest = file_sha256(stock_inventory_path)
+    provenance_failures: list[str] = []
+    structural_failures: list[str] = []
+    provenance = _mapping(load_json(stock_provenance_path), "stock provenance")
+    inventory = _mapping(load_json(stock_inventory_path), "stock inventory")
+    if provenance.get("schema") != "q2-corpus-provenance-v1":
+        provenance_failures.append("stock provenance schema differs")
+    if inventory.get("schema") != "q2-stock-map-fixtures-v1":
+        structural_failures.append("stock structural-inventory schema differs")
+    provenance_records = {
+        record.get("canonical_id"): record
+        for record in (
+            _mapping(value, "stock provenance record")
+            for value in _list(provenance.get("records"), "stock provenance records")
+        )
+    }
+    inventory_records = {
+        record.get("canonical_id"): record
+        for record in (
+            _mapping(value, "stock inventory record")
+            for value in _list(inventory.get("maps"), "stock inventory maps")
+        )
+    }
+    expected_map_ids = {f"q2dm{number}" for number in range(1, 9)}
+    if set(provenance_records) != expected_map_ids:
+        provenance_failures.append("stock provenance does not pin exactly q2dm1-q2dm8")
+    if set(inventory_records) != expected_map_ids:
+        structural_failures.append("stock inventory does not pin exactly q2dm1-q2dm8")
+    map_id = bsp_path.stem
+    expected_provenance = provenance_records.get(map_id)
+    expected_inventory = inventory_records.get(map_id)
+    if expected_provenance is None or expected_inventory is None:
+        provenance_failures.append(f"{map_id} is not a pinned stock-map identity")
+        expected_spawn_count = -1
+        expected_items: Mapping[str, Any] = {}
+    else:
+        if expected_provenance.get("bsp_sha256") != bsp_digest:
+            provenance_failures.append("stock BSP differs from pinned provenance")
+        if expected_inventory.get("bsp_sha256") != bsp_digest:
+            structural_failures.append("stock BSP differs from pinned structural inventory")
+        expected_spawn_count = _integer(
+            expected_inventory.get("deathmatch_spawn_count"),
+            "pinned stock deathmatch-spawn count", minimum=2,
+        )
+        expected_items = _mapping(
+            expected_inventory.get("item_classes"), "pinned stock item-class multiset"
+        )
+
     failures = list(quality["failures"])
     spawns = [_mapping(item, "compiled stock spawn") for item in _list(compiled.get("spawns"), "compiled stock spawns")]
-    if len(spawns) < 2:
-        failures.append("stock analysis has fewer than two clear spawns")
+    if len(spawns) != expected_spawn_count:
+        structural_failures.append(
+            "compiled stock deathmatch-spawn count differs from pinned inventory"
+        )
     ordinals = {item.get("entity_ordinal") for item in spawns}
     for item in spawns:
         if item.get("standing_clear") is not True or item.get("supported") is not True:
@@ -1120,12 +1557,61 @@ def validate_stock_analysis(
         reachable = set(_list(item.get("reachable_spawn_ordinals"), "stock reachable spawns"))
         if not (reachable & (ordinals - {item.get("entity_ordinal")})):
             failures.append(f"stock spawn {item.get('entity_ordinal')} reaches no other spawn")
+    design_path = analysis_path.parent / f"{map_id}.design-signature.json"
+    if not design_path.is_file():
+        structural_failures.append("stock design signature is missing")
+    else:
+        design = _mapping(load_json(design_path), "stock design signature")
+        design_counts = _mapping(design.get("counts"), "stock design counts")
+        if design_counts.get("deathmatch_spawns") != expected_spawn_count:
+            structural_failures.append(
+                "design-signature spawn count differs from pinned inventory"
+            )
+        if _mapping(
+            design.get("item_class_multiset"), "stock design item-class multiset"
+        ) != expected_items:
+            structural_failures.append(
+                "design-signature item-class multiset differs from pinned inventory"
+            )
+
+    hazard_failures: list[str] = []
     hazards = _mapping(compiled.get("hazards"), "compiled stock hazards")
-    _list(hazards.get("types"), "compiled stock hazard types")
+    required_hazard_keys = {
+        "l0_raw_cells", "l0_expanded_cells", "types", "lethal_drop_edges",
+        "guarded_drop_edges", "uncontained_drop_edges", "classification_status",
+        "evidence", "validation_version",
+    }
+    if not required_hazard_keys.issubset(hazards):
+        hazard_failures.append(
+            "stock hazard evidence is incomplete; analyzer follow-up must emit "
+            "classification_status, evidence, and validation_version"
+        )
+    else:
+        types = _list(hazards.get("types"), "compiled stock hazard types")
+        if types != sorted(set(types)) or not set(types).issubset(
+            {"lava", "slime", "hurt", "void", "crush", "current"}
+        ):
+            hazard_failures.append("compiled stock hazard types are not canonical")
+        for name in (
+            "l0_raw_cells", "l0_expanded_cells", "lethal_drop_edges",
+            "guarded_drop_edges", "uncontained_drop_edges",
+        ):
+            _integer(hazards.get(name), f"compiled stock {name}", minimum=0)
+        if hazards.get("classification_status") != ORACLE_STATUS:
+            hazard_failures.append("stock hazard classification is not oracle-authoritative")
+        if _integer(hazards.get("evidence"), "stock hazard evidence", minimum=0) <= 0:
+            hazard_failures.append("stock hazard classification has no evidence")
+        if _integer(
+            hazards.get("validation_version"), "stock hazard validation version", minimum=0
+        ) <= 0:
+            hazard_failures.append("stock hazard classification has no validation version")
     criteria = {
         "analysis_quality": quality,
+        "artifact_authority": artifact_authority,
+        "stock_provenance": _criterion(provenance_failures, 1),
         "stock_reachable_spawns": _criterion(failures[len(quality["failures"]):], len(spawns)),
-        "stock_hazard_classification": _criterion([], 1),
+        "stock_structural_inventory": _criterion(structural_failures, 2),
+        "stock_hazard_classification": _criterion(hazard_failures, 1),
     }
     all_failures = sorted(
         f"{name}: {failure}"
@@ -1142,6 +1628,8 @@ def validate_stock_analysis(
             "bsp_sha256": bsp_digest,
             "analysis_sha256": file_sha256(analysis_path),
             "generator_claims_sha256": None,
+            "stock_provenance_sha256": provenance_digest,
+            "stock_inventory_sha256": inventory_digest,
         },
         "criteria": criteria,
         "failures": all_failures,
@@ -1176,10 +1664,13 @@ def validate_report(value: object) -> dict[str, Any]:
         "map_sha256", "meta_sha256", "lattice_sha256",
         "hook_zones_sha256", "hook_materialization_sha256", "routes_sha256",
     }
+    stock_identities = common_identities | {
+        "stock_provenance_sha256", "stock_inventory_sha256",
+    }
     expected_identities = (
         generated_identities
         if report["mode"] == "generated_v6_promotion"
-        else common_identities
+        else stock_identities
     )
     _exact_keys(identities, expected_identities, "claim-validation identities")
     for name, digest in identities.items():
@@ -1202,12 +1693,13 @@ def validate_report(value: object) -> dict[str, Any]:
     criteria = _mapping(report["criteria"], "claim-validation criteria")
     expected_criteria = (
         {
-            "analysis_quality", "source_static_v6", "spawns", "hazards",
+            "analysis_quality", "artifact_authority", "source_static_v6", "spawns", "hazards",
             "lethal_containment", "lighting", "hooks", "routes",
         }
         if report["mode"] == "generated_v6_promotion"
         else {
-            "analysis_quality", "stock_reachable_spawns",
+            "analysis_quality", "artifact_authority", "stock_provenance",
+            "stock_reachable_spawns", "stock_structural_inventory",
             "stock_hazard_classification",
         }
     )

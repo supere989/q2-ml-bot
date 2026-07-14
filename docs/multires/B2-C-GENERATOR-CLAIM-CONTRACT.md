@@ -47,28 +47,44 @@ older analysis report inadmissible.
 The generated path requires every criterion below:
 
 1. B1 is green, collision admission is positive, the BSP identity matches,
-   the Atlas cold rebuild is deterministic, and analysis confidence is
-   complete/high.
-2. Existing source/static v6 validation passes against the same-name compiled
+   and analysis confidence is complete/high. The collision executable must
+   equal the exact B1-admitted binary SHA-256 and the analyzer identity must
+   reproduce its local admitted source-closure SHA-256. A self-declared
+   `deterministic_rebuild` boolean is not rebuild evidence.
+2. A single independent full-cold producer launch finishes in at most 300
+   seconds while 10 ms process-tree sampling stays at or below 512 MiB RSS.
+   Its primary and cold digests must be equal and cover exactly seven local
+   artifacts: byte digests for Atlas, Atlas transport, navigation,
+   visibility, design signature, and routes, plus the normalized Atlas
+   manifest digest. The verifier result and identity must also match the
+   primary analysis.
+3. The local artifacts and Atlas header independently satisfy all frozen
+   limits: at most 1200 L0 chunks, 16 MiB decompressed L0, 32 MiB decompressed
+   and resident Atlas, and 512 MiB packer RSS. Analysis, Atlas-manifest,
+   header, and verifier identities and counts must agree.
+4. Existing source/static v6 validation passes against the same-name compiled
    BSP.
-3. Compiled spawn origins exactly match all eight claims. Every spawn is
+5. Compiled spawn origins exactly match all eight claims. Every spawn is
    supported, standing/crouched clear, has an oracle-swept 96-unit column, has
    an escape edge, and is mutually connected to all other spawns. Compiled XY
    separation remains at least 384 units.
-4. Every lava/hurt claim has positive raw and hull-expanded Atlas cells and
+6. Every lava/hurt claim has positive raw and hull-expanded Atlas cells and
    positive oracle containment evidence. Aggregate hazard types must include
    every claimed type.
-5. Compiled lethal-edge count matches the safety contract, all lethal exterior
+7. Compiled lethal-edge count matches the safety contract, all lethal exterior
    edges are guarded, and no uncontained edge remains.
-6. qrad lightdata is nonempty and at most 2 MiB, has a nonzero digest and
+8. qrad lightdata is nonempty and at most 2 MiB, has a nonzero digest and
    lightmapped faces, the compiled spawn-region count matches the v6 lighting
    contract, and no dark spawn region remains.
-7. Hook authority is admitted under the B1 hook physics identity. Every claim
-   has exactly one source-bound, spawn-reachable edge whose exact source,
-   anchor, release ticks, first grounded 1/8-unit landing, and ordered Pmove
-   trajectory reproduce the materialization independently. L0 hook corridors
-   contain only those replayed trajectory frames.
-8. Every route segment has positive oracle/validation evidence, exact claimed
+9. Hook authority is admitted under both the B1 hook physics identity and the
+   exact SHA-256 of the accepted B1 hook-parity attestation. The analysis and
+   hook materialization must independently carry that same attestation digest;
+   matching physics text alone is insufficient. Every claim has exactly one
+   source-bound, spawn-reachable edge whose exact source, anchor, release ticks,
+   first grounded 1/8-unit landing, and ordered Pmove trajectory reproduce the
+   materialization independently. L0 hook corridors contain only those
+   replayed trajectory frames.
+10. Every route segment has positive oracle/validation evidence, exact claimed
    endpoints, finite cost, and compiled connectivity. A route fails cost
    consistency only when its total differs by more than 1024 units **and** by
    more than 2x; the joint threshold accounts for the legacy room-centre cost
@@ -79,12 +95,34 @@ promotion. Claim values are never consulted as fallback evidence.
 
 ## Stock analysis is separate
 
-`--mode stock` applies authored-map analysis quality only: matching BSP and
-Atlas identity, admitted collision authority, deterministic rebuild, declared
-confidence, at least two clear/supported spawns with real mutual reachability,
-and hazard classification. It does **not** require generator tags, eight
-spawns, 98% tagged floor-light coverage, v6 hook claims, or v6 headroom/guard
-metadata.
+`--mode stock` applies authored-map analysis quality only, but it uses the same
+full-cold artifact authority. A BSP is stock only when its canonical ID and
+SHA-256 match `docs/multires/stock-q2dm1-q2dm8.provenance.json`. Its exact
+deathmatch-spawn count and item-class multiset must match
+`tests/fixtures/corpus/stock-q2dm1-q2dm8.json` and the compiled design
+signature. Stock hazard classification must carry positive oracle status,
+evidence, and a validation version; an unconditional pass is rejected. Stock
+analysis does **not** require generator tags, eight spawns, 98% tagged
+floor-light coverage, v6 hook claims, or v6 headroom/guard metadata.
+
+## Current producer gap (fail closed)
+
+The validator consumes `q2-atlas-full-cold-proof-v1`, but the analyzer at this
+integration point does not yet emit the cold-launch artifact digest sets or
+elapsed/timeout evidence. The analyzer must add these exact proof members:
+
+- `cold_artifact_sha256`, with the six exact artifact suffixes;
+- `cold_artifact_semantic_sha256`, with `.atlas.manifest.json`;
+- `elapsed_milliseconds`; and
+- `timeout_limit_milliseconds`, exactly `300000`.
+
+For stock maps it must also add
+`compiled_world.hazards.classification_status`, `evidence`, and
+`validation_version`. (The analyzer already emits
+`oracles.hook.attestation_sha256`; promotion now validates it against the exact
+B1-accepted attestation.) Until the producing analyzer publishes the missing
+facts from the independent process and oracle path, B2 promotion remains red.
+No validator-side fallback or inferred success is permitted.
 
 ## Offline workflow
 
@@ -126,6 +164,7 @@ python tools/run_generator_claim_campaign.py \
   --output /isolated/B2/compiled-claim-campaign.json
 ```
 
-Campaign reports contain no timestamps or wall-clock measurements and are
-canonical across identical inputs. Measure elapsed time outside the report so
-performance observations do not change its identity.
+Campaign reports contain no timestamps and remain canonical across identical
+inputs. The full-cold proof does carry integer elapsed milliseconds because
+the frozen 300-second limit is an admission fact; semantic Atlas-manifest
+comparison excludes only the independently sampled peak-RSS field.
