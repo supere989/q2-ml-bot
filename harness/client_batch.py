@@ -29,6 +29,10 @@ from .protocol import (
     ML_FIRE_GATE_PROTECTED,
     ML_FIRE_GATE_SUPPRESSED,
     ML_FIRE_GATE_TARGET,
+    ML_ACTION_GENERATION_COUNT,
+    ML_ACTION_GENERATION_MASK,
+    ML_ACTION_GENERATION_SHIFT,
+    ML_ACTION_GENERATION_VALID,
     ML_TERMINAL_INTERMISSION,
 )
 
@@ -241,10 +245,21 @@ class Q2NetworkClientBatch:
             return "mismatch", -1
         echo_tick = int(debug[0])
         accepted = int(debug[1]) == 1
-        if not accepted or echo_tick <= dispatch.action_tick:
+        if not accepted or echo_tick < dispatch.action_tick:
             return "stale", echo_tick
         if echo_tick > telemetry.server_frame:
             return "mismatch", echo_tick
+        gate_flags = int(debug[11]) if len(debug) >= 12 else 0
+        if echo_tick == dispatch.action_tick:
+            echoed_generation = (
+                gate_flags & ML_ACTION_GENERATION_MASK
+            ) >> ML_ACTION_GENERATION_SHIFT
+            if (
+                not bool(gate_flags & ML_ACTION_GENERATION_VALID)
+                or echoed_generation
+                != dispatch.action_tick % ML_ACTION_GENERATION_COUNT
+            ):
+                return "stale", echo_tick
         expected_forward = self._clamp_movement(dispatch.action.move_forward)
         expected_right = self._clamp_movement(dispatch.action.move_right)
         movement_matches = (
@@ -259,7 +274,6 @@ class Q2NetworkClientBatch:
         )
         echoed_fire = bool(int(debug[9]))
         requested_fire = bool(dispatch.action.fire)
-        gate_flags = int(debug[11]) if len(debug) >= 12 else 0
         fire_suppressed = (
             requested_fire
             and not echoed_fire

@@ -181,6 +181,12 @@ checkpointed. Old dynamic lattice state is invalid because it contains
 pre-transform-fix deposits; rebuild it from attested map sidecars. See
 `docs/TARGET-THERMAL-LATTICE-PROTOTYPE-2026-07-14.md`.
 
+The public client conduit is wire version 3. Its protocol-34 impulse attestation
+contains a modulo-six action generation plus hook/weapon request. Same-frame
+action echoes are admissible only when that generation matches; C accumulates
+the full look delta across multiple `ClientThink` calls in one server frame.
+Do not downgrade the client, game module, or Python parser independently.
+
 Do not point `Q2_RESUME_DIR` at the rolling checkpoint directory: `--resume`
 always chooses its latest lexicographic triple. The next run must read
 the three-file pin under

@@ -14,6 +14,10 @@ from harness.client_env import Q2NetworkClientEnv
 from harness.client_protocol import ClientTelemetry
 from harness.protocol import Action
 from harness.protocol import ML_FIRE_GATE_SUPPRESSED
+from harness.protocol import (
+    ML_ACTION_GENERATION_SHIFT,
+    ML_ACTION_GENERATION_VALID,
+)
 
 
 class _Spatial:
@@ -274,6 +278,65 @@ def test_look_echo_must_match_the_dispatched_policy_action():
             )
         assert batch.metrics.mismatched_echoes_rejected == 1
         assert batch.metrics.transitions_accepted == 0
+    finally:
+        batch.close()
+
+
+def test_same_tick_echo_requires_matching_action_generation():
+    events = []
+    generation_flags = ML_ACTION_GENERATION_VALID | (
+        (10 % 6) << ML_ACTION_GENERATION_SHIFT
+    )
+    env = _FakeEnv(
+        "client-a",
+        0,
+        [
+            _telemetry(
+                "client-a", 0, 2, 11, echo_tick=10, accepted=1,
+                look_yaw=5.5, look_pitch=-3.25,
+                gate_flags=generation_flags,
+            )
+        ],
+        events,
+    )
+    batch = Q2NetworkClientBatch([env], round_timeout=1.0)
+    try:
+        batch.reset()
+        result = batch.collect_round(
+            [Action(look_yaw=5.5, look_pitch=-3.25)], policy_version=8
+        )
+        assert result.infos[0]["authoritative_echo_tick"] == 10
+        assert result.infos[0]["authoritative_echo_valid"] is True
+    finally:
+        batch.close()
+
+
+def test_same_tick_echo_rejects_stale_action_generation():
+    events = []
+    stale_generation_flags = ML_ACTION_GENERATION_VALID | (
+        (9 % 6) << ML_ACTION_GENERATION_SHIFT
+    )
+    env = _FakeEnv(
+        "client-a",
+        0,
+        [
+            _telemetry(
+                "client-a", 0, 2, 11, echo_tick=10, accepted=1,
+                look_yaw=5.5, look_pitch=-3.25,
+                gate_flags=stale_generation_flags,
+            )
+        ],
+        events,
+    )
+    batch = Q2NetworkClientBatch(
+        [env], round_timeout=1.0, max_rejected_echoes=0
+    )
+    try:
+        batch.reset()
+        with pytest.raises(AuthoritativeEchoError):
+            batch.collect_round(
+                [Action(look_yaw=5.5, look_pitch=-3.25)], policy_version=8
+            )
     finally:
         batch.close()
 

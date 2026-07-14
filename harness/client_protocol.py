@@ -13,7 +13,7 @@ from typing import Optional
 
 from .protocol import OBS_SIZE, Observation, parse_obs
 
-ML_CLIENT_WIRE_VERSION = 2
+ML_CLIENT_WIRE_VERSION = 3
 ML_CLIENT_TELEM_MAGIC = 0x54434D51
 ML_CLIENT_ID_SIZE = 40
 
