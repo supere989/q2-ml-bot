@@ -8,6 +8,8 @@
 
 use std::collections::BTreeMap;
 
+pub mod atlas;
+
 const CHANNELS: usize = 5;
 const OUTPUTS: usize = 4;
 const FEATURES: usize = 24;
