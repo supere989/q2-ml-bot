@@ -121,11 +121,12 @@ echo is admitted only when that generation matches, while multiple
 `ClientThink` calls record the latest intended angle relative to the current
 decision generation's initial view within that frame, so a previous decision
 in the same server frame and duplicate held usercmds can neither contaminate,
-multiply, nor erase the look decision. If live death/respawn timing changes pitch
-after inference and Quake clips the causal command at its hard 89-degree view
-bound, the whole four-client round becomes a nontrainable resynchronization
-boundary; PPO never stores the requested action as though it executed. Yaw
-echoes use wrapped angular deltas.
+multiply, nor erase the look decision. If live death/respawn, delta-angle, or
+pitch-clamp timing alters engine-owned look/buttons after inference,
+same-generation movement and reliable-command matches turn the whole
+four-client round into a nontrainable action-state resynchronization boundary;
+PPO never stores the requested action as though it executed. Movement or
+hook/weapon corruption remains fatal. Yaw echoes use wrapped angular deltas.
 
 ## Training migration
 

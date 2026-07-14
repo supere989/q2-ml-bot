@@ -189,9 +189,11 @@ latest intended angle relative to that decision generation's initial view in
 the frame across multiple `ClientThink` calls. Never reuse the prior
 generation's base or sum per-call deltas: same-frame prior actions and duplicate
 held usercmds can otherwise contaminate or multiply the current action.
-An otherwise exact same-generation echo clipped at Quake's pitch bound is a
-nontrainable whole-batch resync (`network_client/look_clamp_resyncs`), not a
-PPO transition and not a fatal transport error.
+When same-generation movement and reliable commands prove delivery but an
+intervening engine view/lifecycle change alters look or buttons, the result is
+a nontrainable whole-batch resync (`network_client/action_state_resyncs`), not
+a PPO transition and not a fatal transport error. Movement or hook/weapon
+corruption remains fatal.
 Do not downgrade the client, game module, or Python parser independently.
 
 Do not point `Q2_RESUME_DIR` at the rolling checkpoint directory: `--resume`

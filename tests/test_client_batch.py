@@ -50,6 +50,7 @@ def _telemetry(
     map_name="q2dm1",
     gate_flags=0,
     pitch=0.0,
+    action_generation=10,
 ):
     debug = np.zeros(12, dtype=np.float32)
     debug[0] = echo_tick
@@ -62,6 +63,11 @@ def _telemetry(
     debug[9] = int(fire)
     debug[10] = int(hook)
     debug[3] = int(weapon)
+    if accepted and not (int(gate_flags) & 0x00FF0000):
+        gate_flags = int(gate_flags) | (
+            ((int(action_generation) % 192) + 1)
+            << ML_ACTION_GENERATION_SHIFT
+        )
     debug[11] = int(gate_flags)
     obs = SimpleNamespace(
         action_debug=debug,
@@ -167,7 +173,7 @@ def test_dispatches_whole_round_and_rejects_stale_and_mismatched_echoes():
         [
             _telemetry(
                 "client-a", 0, 2, 10, echo_tick=10, accepted=1,
-                terminal=True, damage_dealt=1.0,
+                terminal=True, damage_dealt=1.0, action_generation=9,
             ),
             _telemetry(
                 "client-a", 0, 3, 11, echo_tick=11, accepted=1,
@@ -254,7 +260,7 @@ def test_failed_echo_round_never_returns_a_trainable_transition():
         batch.close()
 
 
-def test_look_echo_must_match_the_dispatched_policy_action():
+def test_look_echo_from_another_generation_is_rejected_as_stale():
     events = []
     env = _FakeEnv(
         "client-a",
@@ -262,7 +268,7 @@ def test_look_echo_must_match_the_dispatched_policy_action():
         [
             _telemetry(
                 "client-a", 0, 2, 11, echo_tick=11, accepted=1,
-                look_yaw=0.0, look_pitch=0.0,
+                look_yaw=0.0, look_pitch=0.0, action_generation=9,
             )
         ],
         events,
@@ -277,7 +283,7 @@ def test_look_echo_must_match_the_dispatched_policy_action():
                 [Action(look_yaw=8.0, look_pitch=-4.0)],
                 policy_version=8,
             )
-        assert batch.metrics.mismatched_echoes_rejected == 1
+        assert batch.metrics.stale_echoes_rejected == 1
         assert batch.metrics.transitions_accepted == 0
     finally:
         batch.close()
@@ -338,7 +344,7 @@ def test_same_tick_echo_rejects_stale_action_generation():
         batch.close()
 
 
-def test_same_tick_engine_pitch_clamp_returns_nontrainable_resync():
+def test_same_tick_engine_action_change_returns_nontrainable_resync():
     events = []
     generation_flags = ((10 % 192) + 1) << ML_ACTION_GENERATION_SHIFT
     env = _FakeEnv(
@@ -347,7 +353,7 @@ def test_same_tick_engine_pitch_clamp_returns_nontrainable_resync():
         [
             _telemetry(
                 "client-a", 0, 2, 11, echo_tick=10, accepted=1,
-                look_yaw=-16.48, look_pitch=-15.59, pitch=-89.0,
+                look_yaw=9.81, look_pitch=40.18, pitch=-89.0,
                 forward=-0.03, right=0.71, jump=True, hook=1, weapon=7,
                 gate_flags=generation_flags,
             )
@@ -360,15 +366,15 @@ def test_same_tick_engine_pitch_clamp_returns_nontrainable_resync():
         result = batch.collect_round(
             [Action(
                 move_forward=-0.03, move_right=0.71,
-                look_yaw=-16.48, look_pitch=-26.85,
+                look_yaw=21.66, look_pitch=15.61,
                 jump=True, hook=1, weapon=7,
             )],
             policy_version=8,
         )
-        assert result.infos[0]["look_clamp_resync"] is True
+        assert result.infos[0]["action_state_resync"] is True
         assert result.infos[0]["trainable_transition"] is False
         assert result.infos[0]["action_dispatched"] is True
-        assert batch.metrics.look_clamp_resyncs == 1
+        assert batch.metrics.action_state_resyncs == 1
         assert batch.metrics.failed_rounds == 0
         assert batch.metrics.transitions_accepted == 0
     finally:
@@ -474,7 +480,8 @@ def test_preflight_drains_large_backlog_without_dispatching_stale_action():
         "client-a",
         0,
         [_telemetry(
-            "client-a", 0, 22, 31, echo_tick=31, accepted=1, forward=0.3
+            "client-a", 0, 22, 31, echo_tick=31, accepted=1, forward=0.3,
+            action_generation=30,
         )],
         events,
         preflight=backlog_a,
@@ -483,7 +490,8 @@ def test_preflight_drains_large_backlog_without_dispatching_stale_action():
         "client-b",
         1,
         [_telemetry(
-            "client-b", 1, 19, 28, echo_tick=28, accepted=1, forward=0.3
+            "client-b", 1, 19, 28, echo_tick=28, accepted=1, forward=0.3,
+            action_generation=27,
         )],
         events,
         preflight=backlog_b,
@@ -642,6 +650,7 @@ def test_intermission_before_echo_is_nontrainable_until_new_map_is_active():
                     2,
                     echo_tick=2,
                     accepted=1,
+                    action_generation=1,
                     forward=0.3,
                     map_name="mllive_test",
                 ),
@@ -761,6 +770,7 @@ def test_map_download_pause_and_staggered_clients_never_dispatch_actions():
                 2,
                 echo_tick=2,
                 accepted=1,
+                action_generation=1,
                 forward=0.4,
                 map_name="mllive_staggered",
             ))
