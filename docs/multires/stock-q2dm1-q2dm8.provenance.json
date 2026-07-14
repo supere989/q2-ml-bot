@@ -1,0 +1,109 @@
+{
+  "records": [
+    {
+      "aliases": [],
+      "archive_sha256": "678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad",
+      "author": "id Software",
+      "bsp_member": "maps/q2dm1.bsp",
+      "bsp_sha256": "2345b0b4a955adb5f7e549acdd5b604fc25de1d617a6ea19d3a560c01400e5cf",
+      "canonical_id": "q2dm1",
+      "license_evidence": "Locally installed retail pak1.pak; no redistribution grant recorded for BSP bytes.",
+      "license_name": "Quake II commercial game data",
+      "manual_origin": "Locally installed Quake II retail pak1.pak",
+      "redistribution": "analysis-only",
+      "source_url": null
+    },
+    {
+      "aliases": [],
+      "archive_sha256": "678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad",
+      "author": "id Software",
+      "bsp_member": "maps/q2dm2.bsp",
+      "bsp_sha256": "493c1a778c50921137c10f4b80902929b9eb7d10ee8dba06cb988df8ea4e8adb",
+      "canonical_id": "q2dm2",
+      "license_evidence": "Locally installed retail pak1.pak; no redistribution grant recorded for BSP bytes.",
+      "license_name": "Quake II commercial game data",
+      "manual_origin": "Locally installed Quake II retail pak1.pak",
+      "redistribution": "analysis-only",
+      "source_url": null
+    },
+    {
+      "aliases": [],
+      "archive_sha256": "678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad",
+      "author": "id Software",
+      "bsp_member": "maps/q2dm3.bsp",
+      "bsp_sha256": "f2b85fce41b785cbfd7fb847355e9af3831b9fe520f6433d174face07e84664f",
+      "canonical_id": "q2dm3",
+      "license_evidence": "Locally installed retail pak1.pak; no redistribution grant recorded for BSP bytes.",
+      "license_name": "Quake II commercial game data",
+      "manual_origin": "Locally installed Quake II retail pak1.pak",
+      "redistribution": "analysis-only",
+      "source_url": null
+    },
+    {
+      "aliases": [],
+      "archive_sha256": "678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad",
+      "author": "id Software",
+      "bsp_member": "maps/q2dm4.bsp",
+      "bsp_sha256": "9a92057dbda6dcbbe86579cee2cfadda924d1c439651099491d42b8aeeda7736",
+      "canonical_id": "q2dm4",
+      "license_evidence": "Locally installed retail pak1.pak; no redistribution grant recorded for BSP bytes.",
+      "license_name": "Quake II commercial game data",
+      "manual_origin": "Locally installed Quake II retail pak1.pak",
+      "redistribution": "analysis-only",
+      "source_url": null
+    },
+    {
+      "aliases": [],
+      "archive_sha256": "678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad",
+      "author": "id Software",
+      "bsp_member": "maps/q2dm5.bsp",
+      "bsp_sha256": "f369c65e630415735ae78057457183c3f90f14ec38bb9f5d09a0c435b52d2132",
+      "canonical_id": "q2dm5",
+      "license_evidence": "Locally installed retail pak1.pak; no redistribution grant recorded for BSP bytes.",
+      "license_name": "Quake II commercial game data",
+      "manual_origin": "Locally installed Quake II retail pak1.pak",
+      "redistribution": "analysis-only",
+      "source_url": null
+    },
+    {
+      "aliases": [],
+      "archive_sha256": "678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad",
+      "author": "id Software",
+      "bsp_member": "maps/q2dm6.bsp",
+      "bsp_sha256": "1cbae70f2ee82292f3f24faf719bf6e69c70a8ba2aa3f9deec95a4c31a55dcdf",
+      "canonical_id": "q2dm6",
+      "license_evidence": "Locally installed retail pak1.pak; no redistribution grant recorded for BSP bytes.",
+      "license_name": "Quake II commercial game data",
+      "manual_origin": "Locally installed Quake II retail pak1.pak",
+      "redistribution": "analysis-only",
+      "source_url": null
+    },
+    {
+      "aliases": [],
+      "archive_sha256": "678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad",
+      "author": "id Software",
+      "bsp_member": "maps/q2dm7.bsp",
+      "bsp_sha256": "b83aa85675f99e29f2912c7db82a0edc77c2844d12dd74ba53bd37ddca268e4c",
+      "canonical_id": "q2dm7",
+      "license_evidence": "Locally installed retail pak1.pak; no redistribution grant recorded for BSP bytes.",
+      "license_name": "Quake II commercial game data",
+      "manual_origin": "Locally installed Quake II retail pak1.pak",
+      "redistribution": "analysis-only",
+      "source_url": null
+    },
+    {
+      "aliases": [],
+      "archive_sha256": "678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad",
+      "author": "id Software",
+      "bsp_member": "maps/q2dm8.bsp",
+      "bsp_sha256": "c4baf022c69334bb20c42bc113f163c16c44e443df59ccb0d66e26bc0e3f6d9b",
+      "canonical_id": "q2dm8",
+      "license_evidence": "Locally installed retail pak1.pak; no redistribution grant recorded for BSP bytes.",
+      "license_name": "Quake II commercial game data",
+      "manual_origin": "Locally installed Quake II retail pak1.pak",
+      "redistribution": "analysis-only",
+      "source_url": null
+    }
+  ],
+  "schema": "q2-corpus-provenance-v1"
+}
