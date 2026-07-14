@@ -88,9 +88,9 @@ clients on that server share the one port and are separated by `client_id`.
 
 ### Yamagi client
 
-Local prototype repository: `/home/raymondj/q2-ml-client`, based on upstream
-Yamagi commit `c4b5fe33a8a3c250cb35227209d4a2d469f8fd97`, branch
-`feature/ml-client-harness`.
+Repository: `supere989/yquake2`, branch `feature/ml-client-harness`; local
+checkout `/home/raymondj/q2-ml-client`. It is based on upstream Yamagi commit
+`c4b5fe33a8a3c250cb35227209d4a2d469f8fd97`.
 
 - `cl_ml_harness.c`: registration, private telemetry forwarding, latest-action
   cache, and action-to-usercmd/reliable-command projection.
