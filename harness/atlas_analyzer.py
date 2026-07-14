@@ -51,6 +51,16 @@ from .hook_claims_v2 import (
     validate_record as validate_hook_record_v2,
     validation_trace_sha256,
 )
+from .atlas_b1_authority import B1AuthorityError, admit_b1_runtime_authorities
+from .atlas_exact_drops import (
+    DROP_EVIDENCE_EXACT,
+    DROP_VALIDATION_VERSION,
+    DropTrajectory,
+    ExactDropAnalysisError,
+    FallOracleProcess,
+    classify_drop_trajectories,
+    summarize_drop_classifications,
+)
 
 
 SCHEMA = "q2-atlas-analysis-v1"
@@ -58,6 +68,7 @@ BUILD_PLAN_SCHEMA = "q2-atlas-build-plan-v1"
 EVIDENCE_CM_TRACE_V1 = 1
 EVIDENCE_PMOVE_V1 = 2
 EVIDENCE_HOOK_LAW_V1 = 4
+EVIDENCE_FALL_LAW_V1 = 8
 VALIDATION_VERSION = 1
 MASK_PLAYERSOLID = 33_619_971
 MASK_SHOT = 100_663_299
@@ -702,11 +713,18 @@ def _mutually_reachable_spawn_pairs(
 def _build_navigation(
     cm: OracleProcess,
     pmove: OracleProcess | None,
+    fall: FallOracleProcess | None,
+    bsp: Path,
     spawns: Sequence[tuple[int, tuple[float, float, float]]],
     origin: tuple[int, int, int],
     limits: AnalyzerLimits,
     candidate_points: Sequence[tuple[float, float, float]] = (),
-) -> tuple[dict[tuple[int, int, int], NavNode], list[dict], dict[int, tuple[int, int, int]]]:
+) -> tuple[
+    dict[tuple[int, int, int], NavNode],
+    list[dict],
+    dict[int, tuple[int, int, int]],
+    list[dict[str, Any]],
+]:
     seeds = [
         (entity_ordinal, point, True) for entity_ordinal, point in spawns
     ] + [
@@ -846,7 +864,12 @@ def _build_navigation(
     # Exact Pmove validates step/drop/jump traversal only from a bounded,
     # deterministic set of spawn and CM-boundary nodes. Atlas v1 omits all
     # unprobed movement candidates; it never extrapolates a usercmd result.
+    drop_classifications: list[dict[str, Any]] = []
     if pmove is not None:
+        if fall is None:
+            raise AtlasAnalysisError(
+                "Pmove traversal lacks mandatory exact fall authority"
+            )
         requests = []
         metadata = []
         outgoing = defaultdict(int)
@@ -861,44 +884,115 @@ def _build_navigation(
             source = nodes[key]
             for yaw in (0, 90, 180, 270):
                 walk_id = f"pmove-walk:{key[0]}:{key[1]}:{key[2]}:{yaw}"
-                requests.append({
+                walk_request = {
                     "id": walk_id, "op": "simulate",
-                    "origin": list(source.position), "pm_flags": 4, "snapinitial": False,
+                    "origin": list(source.position), "velocity": [0.0, 0.0, 0.0],
+                    "pm_type": 0, "pm_flags": 4, "pm_time": 0,
+                    "gravity": pmove.identity["parameters"]["gravity"],
+                    "airaccelerate": pmove.identity["parameters"]["airaccelerate"],
+                    "delta_angles_short": [0, 0, 0], "snapinitial": False,
                     "commands": [
                         {"msec": 50, "angles": [0, yaw, 0], "forwardmove": 300}
                         for _ in range(4)
                     ],
-                })
-                metadata.append((key, "ground"))
+                }
+                requests.append(walk_request)
+                metadata.append((key, "ground", yaw, walk_request))
                 if outgoing[key] < 2 or key in spawn_indices.values():
                     jump_id = f"pmove-jump:{key[0]}:{key[1]}:{key[2]}:{yaw}"
-                    requests.append({
+                    jump_request = {
                         "id": jump_id, "op": "simulate",
-                        "origin": list(source.position), "pm_flags": 4, "snapinitial": False,
+                        "origin": list(source.position), "velocity": [0.0, 0.0, 0.0],
+                        "pm_type": 0, "pm_flags": 4, "pm_time": 0,
+                        "gravity": pmove.identity["parameters"]["gravity"],
+                        "airaccelerate": pmove.identity["parameters"]["airaccelerate"],
+                        "delta_angles_short": [0, 0, 0], "snapinitial": False,
                         "commands": [
                             {"msec": 50, "angles": [0, yaw, 0], "forwardmove": 300, "upmove": 300},
                             *[
                                 {"msec": 50, "angles": [0, yaw, 0], "forwardmove": 300}
                                 for _ in range(15)
                             ],
-                        ],
-                    })
-                    metadata.append((key, "jump"))
-        for (source_key, mode), result in zip(metadata, pmove.call(requests)):
+                            ],
+                    }
+                    requests.append(jump_request)
+                    metadata.append((key, "jump", yaw, jump_request))
+        pmove_results = pmove.call(requests)
+        exact_candidates: list[DropTrajectory] = []
+        for (source_key, mode, yaw, request), result in zip(metadata, pmove_results):
+            target_key = _grid_index(result["final"]["origin"], origin, 16)
+            target = nodes.get(target_key)
+            vertical = (
+                None if target is None
+                else target.position[2] - nodes[source_key].position[2]
+            )
+            any_airborne = any(not frame["grounded"] for frame in result["frames"])
+            if (
+                (mode == "ground" and any_airborne)
+                or (
+                    mode == "jump" and result["final"]["grounded"]
+                    and vertical is not None and vertical < -18
+                )
+            ):
+                radians = math.radians(yaw)
+                exact_candidates.append(DropTrajectory(
+                    identifier=f"drop:{source_key[0]}:{source_key[1]}:{source_key[2]}:{mode}:{yaw}",
+                    source_l1=source_key,
+                    direction=(round(math.cos(radians)), round(math.sin(radians))),
+                    mode=mode,
+                    request=request,
+                    response=result,
+                ))
+        try:
+            drop_classifications = classify_drop_trajectories(
+                exact_candidates, bsp=bsp, pmove_process=pmove,
+                fall_process=fall,
+            )
+        except ExactDropAnalysisError as error:
+            raise AtlasAnalysisError(str(error)) from error
+        drop_by_id = {item["id"]: item for item in drop_classifications}
+        for (source_key, mode, yaw, request), result in zip(metadata, pmove_results):
             target_key = _grid_index(result["final"]["origin"], origin, 16)
             if target_key == source_key or target_key not in nodes or not result["final"]["grounded"]:
                 continue
             vertical = nodes[target_key].position[2] - nodes[source_key].position[2]
+            drop_record = None
             if mode == "jump":
                 if not any(not frame["grounded"] for frame in result["frames"]):
                     continue
                 kind = "jump"
+                if vertical < -18:
+                    drop_record = drop_by_id.get(
+                        f"drop:{source_key[0]}:{source_key[1]}:{source_key[2]}:{mode}:{yaw}"
+                    )
             elif vertical < -18:
                 kind = "controlled_drop"
+                drop_record = drop_by_id.get(
+                    f"drop:{source_key[0]}:{source_key[1]}:{source_key[2]}:{mode}:{yaw}"
+                )
             elif abs(vertical) <= 18.0:
                 kind = "step"
             else:
                 continue
+            risk = 0
+            evidence = EVIDENCE_PMOVE_V1
+            validation_version = VALIDATION_VERSION
+            if vertical < -18 and drop_record is None:
+                # No exact Pmove->fall admission means no lower landing edge.
+                continue
+            if drop_record is not None:
+                classification = drop_record["classification"]
+                if (
+                    classification.get("classification") != "Exact"
+                    or classification.get("lethal") is True
+                ):
+                    continue
+                risk = {
+                    "none": 0, "footstep": 0, "short": 8192,
+                    "fall": 32768, "far": 65535,
+                }.get(classification.get("severity"), 65535)
+                evidence = DROP_EVIDENCE_EXACT
+                validation_version = DROP_VALIDATION_VERSION
             key = (source_key, target_key, kind, "standing")
             if key in edge_keys:
                 continue
@@ -906,8 +1000,8 @@ def _build_navigation(
             edges.append({
                 "source": list(source_key), "target": list(target_key), "edge_type": kind,
                 "stance": "standing", "flags": 0, "blocker": 0,
-                "cost": 4096, "risk": 0, "confidence": 65535,
-                "evidence": EVIDENCE_PMOVE_V1, "validation_version": VALIDATION_VERSION,
+                "cost": 4096, "risk": risk, "confidence": 65535,
+                "evidence": evidence, "validation_version": validation_version,
                 "auxiliary": 0xFFFFFFFF,
             })
 
@@ -915,7 +1009,7 @@ def _build_navigation(
     mutual = _mutually_reachable_spawn_pairs(edges, spawn_indices)
     if not mutual:
         raise AtlasAnalysisError("fewer than two mutually reachable deathmatch spawns")
-    return nodes, edges, spawn_indices
+    return nodes, edges, spawn_indices, drop_classifications
 
 
 def _admissions(
@@ -1283,6 +1377,7 @@ def _l0_chunks(
     cm: OracleProcess | None = None,
     metadata: BspMetadata | None = None,
     admitted_hooks: Sequence[Mapping[str, Any]] = (),
+    exact_drops: Sequence[Mapping[str, Any]] = (),
     semantic_summary: dict[str, int] | None = None,
     surface_summary: dict[str, Any] | None = None,
     budget_state: L0BudgetState | None = None,
@@ -1556,38 +1651,36 @@ def _l0_chunks(
                 if current:
                     set_scalar(point, "current_direction", current)
 
-        # Classify uncontained or physically lethal fall approaches from the
-        # exact reachable boundary.  Short ordinary drops are not hazards.
-        void_candidates: dict[tuple[int, int, int], tuple[float, float, float]] = {}
-        for key, node in nodes.items():
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                if any((key[0] + dx, key[1] + dy, key[2] + dz) in nodes
-                       for dz in (-1, 0, 1)):
-                    continue
-                point = (node.position[0] + dx * 16, node.position[1] + dy * 16,
-                         node.position[2])
-                void_candidates.setdefault(_grid_index(point, origin, 4), point)
-        candidates = list(void_candidates.values())
-        for start in range(0, len(candidates), 512):
-            batch = candidates[start:start + 512]
-            traces = cm.call([
-                _box_request(
-                    f"l0-void:{ordinal}", point,
-                    (point[0], point[1], point[2] - 2048),
-                    STANDING_MINS, STANDING_MAXS,
-                )
-                for ordinal, point in enumerate(batch)
-            ])
-            for point, trace in zip(batch, traces):
-                drop = point[2] - trace["endpos"][2]
-                if trace["startsolid"] or trace["allsolid"]:
-                    continue
-                if trace["fraction"] >= 1 or drop >= 1400:
-                    set_bit(point, "unknown")
-                    set_bit(point, "standing_forbidden_origin")
-                    set_bit(point, "crouched_forbidden_origin")
-                    mark_semantic(point, "lethal_void")
-                    set_scalar(point, "hazard_severity", 255)
+        # Drop/void facts come only from the exact Pmove landing transition and
+        # exact Lithium fall-damage oracle.  The old fixed-distance vertical
+        # trace and height threshold are intentionally absent.  Unknown
+        # trajectories remain conservative forbidden boundary cells without a
+        # fabricated severity or lethal/void label.
+        for item in exact_drops:
+            source_key = tuple(item["source_l1"])
+            direction = tuple(item["direction"])
+            source = nodes.get(source_key)
+            if source is None:
+                raise AtlasAnalysisError("exact drop source is absent from L1")
+            point = (
+                source.position[0] + direction[0] * 16,
+                source.position[1] + direction[1] * 16,
+                source.position[2],
+            )
+            result = item["classification"]
+            if result.get("classification") == "Unknown":
+                set_bit(point, "unknown")
+                set_bit(point, "standing_forbidden_origin")
+                set_bit(point, "crouched_forbidden_origin")
+                mark_semantic(point, "drop_unknown")
+            elif (
+                result.get("classification") == "Exact"
+                and result.get("lethal") is True
+            ):
+                set_bit(point, "standing_forbidden_origin")
+                set_bit(point, "crouched_forbidden_origin")
+                mark_semantic(point, "lethal_drop")
+                set_scalar(point, "hazard_severity", 255)
 
     if metadata is not None:
         entities = {entity.index: entity for entity in metadata.entities}
@@ -2976,6 +3069,7 @@ def analyze_map(
     cm_oracle: Path,
     pmove_oracle: Path | None,
     hook_oracle: Path | None,
+    fall_oracle: Path | None,
     hook_attestation: Path | None,
     packer: Path,
     verifier: Path | None = None,
@@ -2986,6 +3080,28 @@ def analyze_map(
     hook_materialization: Mapping[str, Any] | None = None,
     independent_cold: bool = True,
 ) -> dict:
+    primary_started = time.monotonic()
+    if (
+        pmove_oracle is None or hook_oracle is None or fall_oracle is None
+        or hook_attestation is None
+    ):
+        raise AtlasAnalysisError(
+            "Atlas v1 requires the complete CM/Pmove/hook/fall B1 authority set"
+        )
+    try:
+        b1_authority_seal = admit_b1_runtime_authorities(
+            cm_oracle=cm_oracle,
+            pmove_oracle=pmove_oracle,
+            hook_oracle=hook_oracle,
+            fall_oracle=fall_oracle,
+            hook_parity_attestation=hook_attestation,
+            analysis_bsp=bsp,
+            repo_root=Path(__file__).resolve().parents[1],
+        )
+    except B1AuthorityError as error:
+        raise AtlasAnalysisError(
+            f"B1 runtime authority admission failed: {error}"
+        ) from error
     if generator_claims is not None:
         from .generated_claim_probes import (
             generator_claims_sha256 as claims_sha256,
@@ -3064,19 +3180,44 @@ def analyze_map(
         if cm.identity["map_sha256"] != metadata.sha256:
             raise AtlasAnalysisError("collision oracle loaded different BSP bytes")
         origin = _oracle_atlas_origin(metadata, cm.identity)
-        pmove_context = OracleProcess(pmove_oracle, bsp, "pmove", limits) if pmove_oracle else None
+        fall_context = None
+        pmove_context = None
         hook_context = None
-        if (
-            generator_claims is not None
-            and hook_oracle is not None
-            and hook["authority_admitted"] is True
-        ):
-            hook_context = HookOracleProcess(
-                hook_oracle, str(hook["physics_identity"]), limits
-            )
         try:
+            fall_context = FallOracleProcess(
+                fall_oracle,
+                max_requests=limits.max_oracle_requests,
+                batch_size=limits.oracle_batch,
+                batch_timeout_seconds=limits.oracle_batch_timeout_seconds,
+                exit_timeout_seconds=limits.process_exit_timeout_seconds,
+            )
+            pmove_context = OracleProcess(pmove_oracle, bsp, "pmove", limits)
+            if (
+                generator_claims is not None
+                and hook["authority_admitted"] is True
+            ):
+                hook_context = HookOracleProcess(
+                    hook_oracle, str(hook["physics_identity"]), limits
+                )
             if pmove_context and pmove_context.identity["map_sha256"] != metadata.sha256:
                 raise AtlasAnalysisError("Pmove oracle loaded different BSP bytes")
+            if any((
+                cm.identity["tool_identity"]
+                != b1_authority_seal.collision_tool_identity,
+                cm.identity["physics_identity"]
+                != b1_authority_seal.collision_physics_identity,
+                pmove_context.identity["tool_identity"]
+                != b1_authority_seal.pmove_tool_identity,
+                pmove_context.identity["physics_identity"]
+                != b1_authority_seal.pmove_physics_identity,
+                fall_context.identity["tool_identity"]
+                != b1_authority_seal.fall_tool_identity,
+                fall_context.identity["physics_identity"]
+                != b1_authority_seal.fall_physics_identity,
+            )):
+                raise AtlasAnalysisError(
+                    "persistent oracle identities differ from admitted B1 seal"
+                )
             if hook_materialization is not None:
                 process_identities = {
                     "collision": cm.identity,
@@ -3086,8 +3227,8 @@ def analyze_map(
                 _validate_materialized_oracle_identities(
                     materialized_oracles, process_identities
                 )
-            nodes, edges, spawn_indices = _build_navigation(
-                cm, pmove_context, player_spawns, origin, limits,
+            nodes, edges, spawn_indices, drop_classifications = _build_navigation(
+                cm, pmove_context, fall_context, bsp, player_spawns, origin, limits,
                 claim_seed_points,
             )
             spawn_reachability = _spawn_reachability(edges, spawn_indices)
@@ -3210,11 +3351,30 @@ def analyze_map(
                         "dark_spawn_regions": 0,
                     },
                 }
+            drop_summary = summarize_drop_classifications(drop_classifications)
+            compiled_non_hook["hazards"].update({
+                "classification_status": "oracle",
+                "evidence": EVIDENCE_CM_TRACE_V1 | DROP_EVIDENCE_EXACT,
+                "validation_version": DROP_VALIDATION_VERSION,
+                "drop_classification": drop_summary,
+            })
+            if generator_claims is None:
+                compiled_non_hook["hazards"]["lethal_drop_edges"] = (
+                    drop_summary["exact_lethal"]
+                )
+                compiled_non_hook["hazards"]["uncontained_drop_edges"] = (
+                    drop_summary["unknown_omitted"]
+                )
+                if drop_summary["exact_lethal"]:
+                    compiled_non_hook["hazards"]["types"] = sorted(set(
+                        compiled_non_hook["hazards"]["types"] + ["void"]
+                    ))
             l0_semantics: dict[str, int] = {}
             surface_evidence: dict[str, Any] = {}
             l0_chunks = _l0_chunks(
                 nodes, player_spawns, origin, cm=cm, metadata=metadata,
                 admitted_hooks=compiled_hooks["edges"],
+                exact_drops=drop_classifications,
                 semantic_summary=l0_semantics,
                 surface_summary=surface_evidence,
             )
@@ -3242,12 +3402,19 @@ def analyze_map(
                     "identity": pmove_identity,
                     "requests": pmove_context.requests,
                 },
+                "fall": {
+                    "binary_sha256": sha256_file(fall_context.binary),
+                    "identity": dict(fall_context.identity),
+                    "requests": fall_context.requests,
+                },
             }
         finally:
             if hook_context is not None:
                 hook_context.close()
             if pmove_context is not None:
                 pmove_context.close()
+            if fall_context is not None:
+                fall_context.close()
     plan_nodes = []
     incident = {tuple(edge["source"]) for edge in edges} | {tuple(edge["target"]) for edge in edges}
     for key in sorted(nodes, key=lambda item: (item[2], item[1], item[0])):
