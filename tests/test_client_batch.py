@@ -398,6 +398,13 @@ def test_map_epoch_resyncs_every_client_and_returns_nontrainable_boundary():
     batch = Q2NetworkClientBatch([env_a, env_b], round_timeout=1.0)
     try:
         batch.reset()
+        waiting = batch.collect_round(
+            [Action(move_forward=0.2), Action(move_forward=0.2)],
+            policy_version=50,
+        )
+        assert all(info["map_epoch_pending"] for info in waiting.infos)
+        assert waiting.observations[:, 0].tolist() == [1.0, 11.0]
+
         result = batch.collect_round(
             [Action(move_forward=0.2), Action(move_forward=0.2)],
             policy_version=50,
@@ -407,11 +414,12 @@ def test_map_epoch_resyncs_every_client_and_returns_nontrainable_boundary():
         assert result.truncated.tolist() == [False, False]
         assert result.observations[:, 0].tolist() == [1.0, 1.0]
         assert all(info["map_epoch_resync"] for info in result.infos)
+        assert all(not info["map_epoch_pending"] for info in result.infos)
         assert all(not info["trainable_transition"] for info in result.infos)
         assert all(not info["authoritative_echo_valid"] for info in result.infos)
         assert {info["map_epoch_target"] for info in result.infos} == {"q2dm2"}
-        assert env_a.initial_maps == ["q2dm1", "q2dm2"]
-        assert env_b.initial_maps == ["q2dm1", "q2dm2"]
+        assert env_a.initial_maps == ["q2dm1", "q2dm2", "q2dm2"]
+        assert env_b.initial_maps == ["q2dm1", "q2dm1", "q2dm2"]
         metrics = batch.metrics
         assert metrics.map_epoch_resyncs == 1
         assert metrics.rounds_accepted == 0
@@ -494,10 +502,94 @@ def test_intermission_before_echo_is_nontrainable_until_new_map_is_active():
         assert accepted.observations[:, 0].tolist() == [2.0] * 4
         assert batch.metrics.failed_rounds == 0
         assert batch.metrics.transitions_accepted == 4
-        assert batch.metrics.map_epoch_resyncs == 2
+        assert batch.metrics.map_epoch_resyncs == 1
 
         with pytest.raises(StalePolicyVersionError):
             batch.collect_round([Action()] * 4, policy_version=71)
+    finally:
+        batch.close()
+
+
+def test_map_download_pause_and_staggered_clients_never_dispatch_actions():
+    events = []
+    envs = []
+    for slot in range(4):
+        client_id = f"client-{slot}"
+        envs.append(_FakeEnv(
+            client_id,
+            slot,
+            [
+                _telemetry(
+                    client_id,
+                    slot,
+                    2,
+                    11,
+                    echo_tick=10,
+                    accepted=1,
+                    terminal=True,
+                    terminal_reason=2,
+                ),
+            ],
+            events,
+        ))
+    batch = Q2NetworkClientBatch(
+        envs, round_timeout=1.0, max_rejected_echoes=0
+    )
+    try:
+        batch.reset()
+
+        initial_boundary = batch.collect_round(
+            [Action(move_forward=0.4)] * 4, policy_version=80
+        )
+        assert all(info["map_epoch_pending"] for info in initial_boundary.infos)
+        assert sum(event[0] == "dispatch" for event in events) == 4
+
+        download_pause = batch.collect_round(
+            [Action(move_forward=0.4)] * 4, policy_version=81
+        )
+        assert all(info["map_epoch_pending"] for info in download_pause.infos)
+        assert sum(event[0] == "dispatch" for event in events) == 4
+
+        for env in envs[:2]:
+            env.script.append(_telemetry(
+                env.client_id, env.slot, 3, 1, map_name="mllive_staggered"
+            ))
+        partial = batch.collect_round(
+            [Action(move_forward=0.4)] * 4, policy_version=82
+        )
+        assert all(info["map_epoch_pending"] for info in partial.infos)
+        assert sum(event[0] == "dispatch" for event in events) == 4
+
+        for env in envs[2:]:
+            env.script.append(_telemetry(
+                env.client_id, env.slot, 3, 1, map_name="mllive_staggered"
+            ))
+        ready = batch.collect_round(
+            [Action(move_forward=0.4)] * 4, policy_version=83
+        )
+        assert all(not info["map_epoch_pending"] for info in ready.infos)
+        assert all(not info["trainable_transition"] for info in ready.infos)
+        assert sum(event[0] == "dispatch" for event in events) == 4
+
+        for env in envs:
+            env.script.append(_telemetry(
+                env.client_id,
+                env.slot,
+                4,
+                2,
+                echo_tick=2,
+                accepted=1,
+                forward=0.4,
+                map_name="mllive_staggered",
+            ))
+        accepted = batch.collect_round(
+            [Action(move_forward=0.4)] * 4, policy_version=84
+        )
+        assert all(info["trainable_transition"] for info in accepted.infos)
+        assert sum(event[0] == "dispatch" for event in events) == 8
+        assert batch.metrics.failed_rounds == 0
+        assert batch.metrics.echo_timeouts == 0
+        assert batch.metrics.map_epoch_resyncs == 1
     finally:
         batch.close()
 

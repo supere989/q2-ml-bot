@@ -209,6 +209,10 @@ class Q2NetworkClientBatch:
         self._preflight_packets_drained = 0
         self._max_observed_frame_span = 0
         self._fire_gate_suppressions = 0
+        # Generated-map downloads can outlive one action round.  Once a map
+        # boundary is observed, do not dispatch again until every client is
+        # on the same playable map after this source epoch.
+        self._map_epoch_source: str | None = None
 
     @staticmethod
     def _policy_version(value: int) -> int:
@@ -373,56 +377,173 @@ class Q2NetworkClientBatch:
             return 0, 0
         return result.stale_echoes, result.mismatched_echoes
 
-    def _resync_to_map(
-        self,
-        env: Q2NetworkClientEnv,
-        dispatch: ClientActionDispatch,
-        current: ClientTelemetry | None,
-        target_map: str,
-        deadline: float,
-    ) -> ClientTelemetry:
-        sequence = dispatch.after_sequence
-        if current is not None:
-            sequence = current.sequence
-            if current.map_name == target_map:
-                return current
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"map epoch resync timed out for {dispatch.client_id}"
-                )
-            telemetry = env.receive_telemetry(
-                after_sequence=sequence,
-                timeout=remaining,
-            )
-            sequence = telemetry.sequence
-            if telemetry.map_name == target_map:
-                return telemetry
+    @staticmethod
+    def _is_intermission(telemetry: ClientTelemetry) -> bool:
+        observation = telemetry.observation
+        return bool(getattr(observation, "is_terminal", False)) and int(
+            getattr(observation, "terminal_reason", 0)
+        ) == ML_TERMINAL_INTERMISSION
 
-    def _resync_preflight_map(
+    def _wait_for_map_progress(
         self,
         env: Q2NetworkClientEnv,
         current: ClientTelemetry,
-        target_map: str,
+        source_map: str,
         deadline: float,
     ) -> ClientTelemetry:
-        if current.map_name == target_map:
-            return current
-        sequence = current.sequence
+        """Wait for a playable post-source packet without failing on timeout."""
+        latest = current
+        if latest.map_name != source_map and not self._is_intermission(latest):
+            return latest
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(
-                    f"preflight map resync timed out for {current.client_id}"
+                return latest
+            try:
+                latest = env.receive_telemetry(
+                    after_sequence=latest.sequence,
+                    timeout=remaining,
                 )
-            telemetry = env.receive_telemetry(
-                after_sequence=sequence,
-                timeout=remaining,
+            except TimeoutError:
+                # A generated-map download pause is not an action-echo
+                # failure. Keep the barrier active for the next call.
+                return latest
+            if latest.map_name != source_map and not self._is_intermission(latest):
+                return latest
+
+    def _begin_map_epoch(self, source_map: str) -> None:
+        if self._map_epoch_source is None:
+            self._map_epoch_source = source_map
+            self._map_epoch_resyncs += 1
+            return
+        if self._map_epoch_source != source_map:
+            self._failed_rounds += 1
+            raise AuthoritativeEchoError(
+                "map epoch source changed while synchronization was pending: "
+                f"{self._map_epoch_source} -> {source_map}"
             )
-            sequence = telemetry.sequence
-            if telemetry.map_name == target_map:
-                return telemetry
+
+    def _pending_map_boundary(
+        self,
+        drains: Sequence[ClientTelemetryDrain],
+        *,
+        round_id: int,
+        policy_version: int,
+        poll: bool,
+        tags: tuple[BatchActionTag, ...] | None = None,
+        action_dispatched: bool = False,
+        rejections: Sequence[tuple[int, int]] | None = None,
+    ) -> BatchRound:
+        """Return a non-trainable barrier until one new map is playable."""
+        source_map = self._map_epoch_source
+        if source_map is None:
+            raise RuntimeError("map epoch boundary requested without a source map")
+
+        samples = [drain.latest for drain in drains]
+        if poll:
+            deadline = time.monotonic() + self.round_timeout
+            futures = [
+                self._executor.submit(
+                    self._wait_for_map_progress,
+                    env,
+                    sample,
+                    source_map,
+                    deadline,
+                )
+                for env, sample in zip(self.envs, samples)
+            ]
+            samples = [future.result() for future in futures]
+
+        post_source_maps = {
+            sample.map_name for sample in samples
+            if sample.map_name != source_map
+        }
+        if len(post_source_maps) > 1:
+            self._failed_rounds += 1
+            raise AuthoritativeEchoError(
+                "clients crossed multiple map epochs in one batch: "
+                + ", ".join(sorted(post_source_maps))
+            )
+        target_map = (
+            next(iter(post_source_maps)) if post_source_maps else source_map
+        )
+        ready = bool(post_source_maps) and all(
+            sample.map_name == target_map and not self._is_intermission(sample)
+            for sample in samples
+        )
+
+        if tags is None:
+            tags = tuple(
+                BatchActionTag(
+                    round_id=round_id,
+                    policy_version=policy_version,
+                    client_index=index,
+                    client_id=drain.latest.client_id,
+                    client_slot=drain.latest.client_slot,
+                    action_tick=drain.previous.server_frame,
+                )
+                for index, drain in enumerate(drains)
+            )
+        if rejections is None:
+            rejections = [(0, 0)] * len(samples)
+
+        initial_results = [
+            env.initial_result(sample, vector=self.vector)
+            for env, sample in zip(self.envs, samples)
+        ]
+        infos = []
+        for initial, tag, sample, drain, rejection in zip(
+            initial_results, tags, samples, drains, rejections
+        ):
+            stale, mismatched = rejection
+            info = dict(initial[1])
+            info.update({
+                "batch_round_id": tag.round_id,
+                "policy_version": tag.policy_version,
+                "action_tick": tag.action_tick,
+                "action_dispatched": action_dispatched,
+                "authoritative_echo_tick": int(
+                    sample.observation.action_debug[0]
+                ),
+                "authoritative_echo_valid": False,
+                "authoritative_echo_stale": True,
+                "trainable_transition": False,
+                "realtime_catchup_resync": True,
+                "preflight_packets_drained": drain.packet_count,
+                "preflight_from_frame": drain.previous.server_frame,
+                "preflight_to_frame": sample.server_frame,
+                "map_epoch_resync": True,
+                "map_epoch_pending": not ready,
+                "map_epoch_from": source_map,
+                "map_epoch_target": target_map,
+                "terminal_reason": ML_TERMINAL_INTERMISSION,
+                "stale_echoes_rejected": stale,
+                "mismatched_echoes_rejected": mismatched,
+            })
+            infos.append(info)
+
+        frame_values = [sample.server_frame for sample in samples]
+        self._max_observed_frame_span = max(
+            self._max_observed_frame_span,
+            max(frame_values) - min(frame_values),
+        )
+        drained_count = sum(drain.packet_count for drain in drains)
+        self._preflight_packets_drained += drained_count
+        self._realtime_catchup_resyncs += 1
+        if ready:
+            self._map_epoch_source = None
+        return BatchRound(
+            round_id=round_id,
+            policy_version=policy_version,
+            observations=self._collate_observations(
+                [initial[0] for initial in initial_results], self.vector
+            ),
+            rewards=np.zeros(len(self.envs), dtype=np.float32),
+            terminated=np.ones(len(self.envs), dtype=np.bool_),
+            truncated=np.zeros(len(self.envs), dtype=np.bool_),
+            infos=tuple(infos),
+            tags=tags,
+        )
 
     @staticmethod
     def _collate_observations(values: Sequence[Any], vector: bool):
@@ -446,38 +567,24 @@ class Q2NetworkClientBatch:
             for drain in drains
         )
         map_boundary = map_changed or intermission
+        if map_boundary:
+            source_maps = {drain.previous.map_name for drain in drains}
+            if len(source_maps) != 1:
+                self._failed_rounds += 1
+                raise AuthoritativeEchoError(
+                    "preflight crossed multiple source maps: "
+                    + ", ".join(sorted(source_maps))
+                )
+            self._begin_map_epoch(next(iter(source_maps)))
+            return self._pending_map_boundary(
+                drains,
+                round_id=round_id,
+                policy_version=policy_version,
+                poll=False,
+            )
+
         samples = [drain.latest for drain in drains]
         target_map = samples[0].map_name
-        if map_changed:
-            changed_targets = {
-                drain.latest.map_name for drain in drains if drain.map_changed
-            }
-            if len(changed_targets) != 1:
-                self._failed_rounds += 1
-                raise AuthoritativeEchoError(
-                    "preflight crossed multiple map epochs: "
-                    + ", ".join(sorted(changed_targets))
-                )
-            target_map = next(iter(changed_targets))
-            deadline = time.monotonic() + self.round_timeout
-            futures = [
-                self._executor.submit(
-                    self._resync_preflight_map,
-                    env,
-                    sample,
-                    target_map,
-                    deadline,
-                )
-                for env, sample in zip(self.envs, samples)
-            ]
-            try:
-                samples = [future.result() for future in futures]
-            except TimeoutError as error:
-                self._failed_rounds += 1
-                self._echo_timeouts += 1
-                raise AuthoritativeEchoError(
-                    "preflight map epoch resync timed out", timed_out=True
-                ) from error
 
         initial_results = [
             env.initial_result(sample, vector=self.vector)
@@ -534,8 +641,6 @@ class Q2NetworkClientBatch:
         drained_count = sum(drain.packet_count for drain in drains)
         self._preflight_packets_drained += drained_count
         self._realtime_catchup_resyncs += 1
-        if map_boundary:
-            self._map_epoch_resyncs += 1
         return BatchRound(
             round_id=round_id,
             policy_version=policy_version,
@@ -603,6 +708,13 @@ class Q2NetworkClientBatch:
                 for env in self.envs
             ]
             drains = [future.result() for future in drain_futures]
+            if self._map_epoch_source is not None:
+                return self._pending_map_boundary(
+                    drains,
+                    round_id=round_id,
+                    policy_version=version,
+                    poll=True,
+                )
             if any(drain.advanced for drain in drains):
                 return self._preflight_boundary(
                     drains,
@@ -654,111 +766,28 @@ class Q2NetworkClientBatch:
                 result for result in echo_results if isinstance(result, _MapEpoch)
             ]
             if map_epochs:
-                changed_targets = {
-                    result.telemetry.map_name
-                    for result, dispatch in zip(echo_results, dispatches)
-                    if isinstance(result, _MapEpoch)
-                    and result.telemetry.map_name != dispatch.map_name
-                }
-                if len(changed_targets) > 1:
+                source_maps = {dispatch.map_name for dispatch in dispatches}
+                if len(source_maps) != 1:
                     self._failed_rounds += 1
                     raise AuthoritativeEchoError(
-                        "clients crossed multiple map epochs in one batch: "
-                        + ", ".join(sorted(changed_targets))
+                        "map boundary crossed multiple source maps: "
+                        + ", ".join(sorted(source_maps))
                     )
-                if changed_targets:
-                    target_map = next(iter(changed_targets))
-                else:
-                    source_maps = {dispatch.map_name for dispatch in dispatches}
-                    if len(source_maps) != 1:
-                        self._failed_rounds += 1
-                        raise AuthoritativeEchoError(
-                            "intermission crossed multiple source maps: "
-                            + ", ".join(sorted(source_maps))
-                        )
-                    target_map = next(iter(source_maps))
-                map_epoch_pending = not changed_targets
-                resync_deadline = time.monotonic() + self.round_timeout
-                resync_futures = []
-                for env, dispatch, result in zip(
-                    self.envs, dispatches, echo_results
-                ):
-                    current = result.telemetry if result is not None else None
-                    resync_futures.append(
-                        self._executor.submit(
-                            self._resync_to_map,
-                            env,
-                            dispatch,
-                            current,
-                            target_map,
-                            resync_deadline,
-                        )
-                    )
-                resynced: list[ClientTelemetry | None] = [None] * len(
-                    resync_futures
-                )
-                resync_errors = []
-                for index, future in enumerate(resync_futures):
-                    try:
-                        resynced[index] = future.result()
-                    except TimeoutError as error:
-                        resync_errors.append(error)
-                if resync_errors:
-                    self._failed_rounds += 1
-                    self._echo_timeouts += len(resync_errors)
-                    raise AuthoritativeEchoError(
-                        f"map epoch resync failed for {len(resync_errors)} client(s)",
-                        timed_out=True,
-                    ) from resync_errors[0]
-
-                samples = [sample for sample in resynced if sample is not None]
-                initial_results = [
-                    env.initial_result(sample, vector=self.vector)
-                    for env, sample in zip(self.envs, samples)
+                self._begin_map_epoch(next(iter(source_maps)))
+                boundary_drains = [
+                    env.drain_latest_telemetry() for env in self.envs
                 ]
-                infos = []
-                for initial, tag, sample, dispatch, result in zip(
-                    initial_results, tags, samples, dispatches, echo_results
-                ):
-                    stale, mismatched = self._result_rejections(result)
-                    info = dict(initial[1])
-                    info.update({
-                        "batch_round_id": tag.round_id,
-                        "policy_version": tag.policy_version,
-                        "action_tick": tag.action_tick,
-                        "authoritative_echo_tick": int(
-                            sample.observation.action_debug[0]
-                        ),
-                        "authoritative_echo_valid": False,
-                        "authoritative_echo_stale": True,
-                        "trainable_transition": False,
-                        "map_epoch_resync": True,
-                        "map_epoch_pending": map_epoch_pending,
-                        "map_epoch_from": dispatch.map_name,
-                        "map_epoch_target": target_map,
-                        "terminal_reason": 2,
-                        "stale_echoes_rejected": stale,
-                        "mismatched_echoes_rejected": mismatched,
-                    })
-                    infos.append(info)
-
-                frame_values = [sample.server_frame for sample in samples]
-                frame_span = max(frame_values) - min(frame_values)
-                self._max_observed_frame_span = max(
-                    self._max_observed_frame_span, frame_span
-                )
-                self._map_epoch_resyncs += 1
-                return BatchRound(
+                return self._pending_map_boundary(
+                    boundary_drains,
                     round_id=round_id,
                     policy_version=version,
-                    observations=self._collate_observations(
-                        [initial[0] for initial in initial_results], self.vector
-                    ),
-                    rewards=np.zeros(len(self.envs), dtype=np.float32),
-                    terminated=np.ones(len(self.envs), dtype=np.bool_),
-                    truncated=np.zeros(len(self.envs), dtype=np.bool_),
-                    infos=tuple(infos),
+                    poll=False,
                     tags=tags,
+                    action_dispatched=True,
+                    rejections=[
+                        self._result_rejections(result)
+                        for result in echo_results
+                    ],
                 )
 
             if errors:
