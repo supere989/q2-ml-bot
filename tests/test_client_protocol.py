@@ -10,6 +10,11 @@ from harness.client_protocol import (
 from harness.protocol import OBS_FMT, OBS_SIZE, ML_OBS_MAGIC
 
 
+def test_target_solution_wire_semantics_are_versioned():
+    assert ML_CLIENT_WIRE_VERSION == 2
+    assert ML_OBS_MAGIC == 0x514D4C50
+
+
 def _packet(client_id="client-a", slot=2, frame=77, sequence=4):
     obs_values = [0] * len(struct.unpack(OBS_FMT, bytes(OBS_SIZE)))
     obs_values[0] = ML_OBS_MAGIC

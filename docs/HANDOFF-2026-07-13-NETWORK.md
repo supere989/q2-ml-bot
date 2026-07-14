@@ -1,5 +1,11 @@
 # Network-native public trainer handoff — 2026-07-13
 
+> Superseded for target geometry/training state by
+> `TELEMETRY-AUDIT-2026-07-14.md` and
+> `TARGET-THERMAL-LATTICE-PROTOTYPE-2026-07-14.md`. In particular, the
+> step-4,063,488 anchor checkpoint described below is quality-invalid and must
+> not be resumed.
+
 This supersedes the runtime/process sections of
 `HANDOFF-2026-07-11.md`. The older document remains the historical record for
 the aim, reward, movement, and first lattice investigations.

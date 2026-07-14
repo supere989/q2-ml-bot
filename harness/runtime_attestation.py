@@ -181,6 +181,8 @@ def describe_observation(environment: Mapping[str, str]) -> dict[str, Any]:
         "observation_magic": int(protocol.ML_OBS_MAGIC),
         "action_magic": int(protocol.ML_ACT_MAGIC),
         "max_entities": int(protocol.ML_MAX_ENTITIES),
+        "entity_semantics": "target-solution-v2",
+        "session_memory_semantics": "thermal-overlay-v1",
         "ray_count": int(protocol.ML_RAY_COUNT),
         "hook_zone_count": int(protocol.ML_HOOK_ZONES),
     }

@@ -115,7 +115,7 @@ def test_synthetic_vectors_match_policy_normalization_and_fire_subset():
         assert np.all(obs[:, 193] == -1.0)
 
     entities = obs[:, 10:82].reshape(-1, 8, 9)
-    visible = ((entities[:, :, 7] > 0.5) & (entities[:, :, 8] > 0.5)).any(axis=1)
+    visible = ((entities[:, :, 7] > 0.5) & (entities[:, :, 8] > 0.0)).any(axis=1)
     fires = actions[:, 5] > 0.5
     assert int(visible.sum()) == stats["visible_samples"]
     assert int(fires.sum()) == stats["fire_samples"]

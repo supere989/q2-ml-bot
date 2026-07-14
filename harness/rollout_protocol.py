@@ -53,7 +53,7 @@ def _valid_sha256(value: str) -> bool:
 # Telemetry carried beside every real PPO rollout.  The order is part of the
 # PPO telemetry schema so workers and learners cannot silently disagree about
 # vector positions.
-PPO_TELEMETRY_SCHEMA = "ppo-telemetry-v6"
+PPO_TELEMETRY_SCHEMA = "ppo-telemetry-v8"
 PPO_EPISODE_SUMMARY_COLUMNS = (
     "reward",
     "base_reward",
@@ -99,10 +99,16 @@ PPO_BEHAVIOR_METRIC_KEYS = (
     "enemy_visible_any",
     "enemy_visible_count",
     "enemy_visible_nearest",
+    "enemy_visible_exposure_sum",
+    "enemy_visible_exposure_max",
     "aim_aligned",
     "aim_yaw_error",
     "aim_pitch_error",
     "aim_tracking_quality",
+    "target_hit_event",
+    "target_hit_streak",
+    "target_repeat_hit_event",
+    "target_kill_event",
     "fire_aligned",
     "fire_unseen",
     "fire_unaligned",
@@ -119,6 +125,9 @@ PPO_BEHAVIOR_METRIC_KEYS = (
     "session_nearest_engagement",
     "session_nearest_threat",
     "session_nearest_opportunity",
+    "thermal_target_tracks",
+    "thermal_target_heat",
+    "thermal_target_age",
     "lattice_prior_loaded",
     "lattice_routes_loaded",
     "lattice_dynamic_cells",

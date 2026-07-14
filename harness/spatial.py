@@ -18,7 +18,15 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-from .protocol import OBS_SESSION_MEMORY_DIM, Observation
+from .protocol import (
+    ML_ENTITY_DUCKED,
+    ML_ENTITY_EPOCH_MASK,
+    ML_ENTITY_EPOCH_SHIFT,
+    ML_HIT_STREAK_MASK,
+    ML_HIT_STREAK_SHIFT,
+    OBS_SESSION_MEMORY_DIM,
+    Observation,
+)
 from .item_timing import ItemTimingTable
 from tools.map_bundle import (
     farm_map_requires_attestation,
@@ -30,6 +38,9 @@ from tools.map_bundle import (
 
 HOOK_REQUIRED = 4
 BLASTER_ITEM_INDEX = 8
+# Fixed policy-readout contract: immediate hostile thermal direction/heat.
+# Persistent engagement is the fallback producer for the same tactical signal.
+IMMEDIATE_ENGAGEMENT_SLICE = slice(5, 9)
 
 
 @dataclass
@@ -70,6 +81,17 @@ class SessionMemoryCell:
             + abs(self.prior_opportunity)
             + abs(self.prior_threat)
         )
+
+
+@dataclass
+class ThermalTargetTrack:
+    """Per-client, non-persistent hostile heat with an exact subvoxel point."""
+
+    target_id: int
+    world_point: np.ndarray
+    world_velocity: np.ndarray
+    exposure: float
+    last_tick: int
 
 
 def _env_float(name: str, default: float) -> float:
@@ -132,7 +154,7 @@ class VoxelSpatialReward:
     nominal_speed_max: float = 360.0
     movement_intent_min: float = 0.55
     nominal_speed_reward: float = 0.008
-    backward_movement_penalty: float = 0.010
+    backward_movement_penalty: float = 0.020
     slow_movement_penalty: float = 0.012
     overspeed_penalty: float = 0.008
     horizon_pitch_limit: float = 15.0
@@ -163,6 +185,10 @@ class VoxelSpatialReward:
     session_memory_death_aversion: float = 0.010
     session_memory_self_fire_penalty: float = 0.012
     session_memory_camp_penalty: float = 0.004
+    thermal_target_enabled: bool = True
+    thermal_target_voxel_size: float = 64.0
+    thermal_target_decay: float = 0.75
+    thermal_target_max_age_ticks: int = 5
     rust_lattice_enabled: bool = False
     lattice_preload_enabled: bool = True
     lattice_routes_enabled: bool = True
@@ -246,6 +272,13 @@ class VoxelSpatialReward:
     ] = field(default_factory=dict, init=False, repr=False)
     _rust_fallback_reason: str = field(default="", init=False)
     _rust_event_rows_applied: int = field(default=0, init=False)
+    _thermal_tracks: Dict[int, ThermalTargetTrack] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _thermal_last_tick: int = field(default=-1, init=False, repr=False)
+    _thermal_last_signal: Tuple[float, float, float, float, float] = field(
+        default=(0.0, 0.0, 0.0, 0.0, 0.0), init=False, repr=False
+    )
     _hook_correction_target: Optional[Tuple[float, float, float]] = field(
         default=None, init=False, repr=False
     )
@@ -341,7 +374,7 @@ class VoxelSpatialReward:
             nominal_speed_max=_env_float("Q2_NOMINAL_SPEED_MAX", 360.0),
             movement_intent_min=_env_float("Q2_MOVEMENT_INTENT_MIN", 0.55),
             nominal_speed_reward=_env_float("R_MOVE_NOMINAL", 0.008),
-            backward_movement_penalty=_env_float("R_MOVE_BACKWARD", 0.010),
+            backward_movement_penalty=_env_float("R_MOVE_BACKWARD", 0.020),
             slow_movement_penalty=_env_float("R_MOVE_SLOW", 0.012),
             overspeed_penalty=_env_float("R_MOVE_OVERSPEED", 0.008),
             horizon_pitch_limit=_env_float("Q2_HORIZON_PITCH_LIMIT", 15.0),
@@ -389,6 +422,16 @@ class VoxelSpatialReward:
             ),
             session_memory_camp_penalty=_env_float(
                 "R_SESSION_MEMORY_CAMP", 0.004
+            ),
+            thermal_target_enabled=os.environ.get(
+                "Q2_THERMAL_TARGETS", "1"
+            ).lower() not in {"0", "false", "off", "no"},
+            thermal_target_voxel_size=_env_float(
+                "Q2_THERMAL_VOXEL_SIZE", 64.0
+            ),
+            thermal_target_decay=_env_float("Q2_THERMAL_DECAY", 0.75),
+            thermal_target_max_age_ticks=_env_int(
+                "Q2_THERMAL_MAX_AGE_TICKS", 5
             ),
             rust_lattice_enabled=bool(_env_int("Q2_RUST_LATTICE", 0)),
             lattice_preload_enabled=os.environ.get(
@@ -465,6 +508,9 @@ class VoxelSpatialReward:
         self.last_visible_count = 0
         self.last_damage_tick = -1000000
         self.last_damage_cell = None
+        self._thermal_tracks.clear()
+        self._thermal_last_tick = -1
+        self._thermal_last_signal = (0.0, 0.0, 0.0, 0.0, 0.0)
         self._clear_hook_correction()
         self._reset_episode_state()
         if obs is not None:
@@ -984,6 +1030,15 @@ class VoxelSpatialReward:
         splash_viable = bool(fire_context["splash_viable"])
         splash_weapon = bool(fire_context["splash_weapon"])
         audio_contact = bool(fire_context["audio_contact"])
+        damage_dealt = max(
+            0.0, float(getattr(obs, "reward_damage_dealt", 0.0))
+        )
+        kills = max(0.0, float(getattr(obs, "reward_kill", 0.0)))
+        action_debug = getattr(obs, "action_debug", ())
+        hit_streak = (
+            (int(action_debug[11]) & ML_HIT_STREAK_MASK)
+            >> ML_HIT_STREAK_SHIFT
+        ) if len(action_debug) >= 12 else 0
 
         tactical_engagement = (
             visible_count > 0 and
@@ -1318,10 +1373,24 @@ class VoxelSpatialReward:
             "enemy_visible_any": float(visible_count > 0),
             "enemy_visible_count": float(visible_count),
             "enemy_visible_nearest": float(nearest_visible if visible_count > 0 else 0.0),
+            "enemy_visible_exposure_sum": float(
+                fire_context["enemy_visible_exposure_sum"]
+            ),
+            "enemy_visible_exposure_max": float(
+                fire_context["enemy_visible_exposure_max"]
+            ),
             "aim_aligned": float(aim_aligned),
             "aim_yaw_error": float(aim_yaw_error),
             "aim_pitch_error": float(aim_pitch_error),
             "aim_tracking_quality": float(aim_tracking_quality),
+            "target_hit_event": float(damage_dealt > 0.0),
+            "target_hit_streak": float(
+                hit_streak if damage_dealt > 0.0 else 0
+            ),
+            "target_repeat_hit_event": float(
+                damage_dealt > 0.0 and hit_streak >= 2
+            ),
+            "target_kill_event": float(kills > 0.0),
             "memory_death_aversion": float(death_aversion),
             "hook_required_near": float(hook_required_near),
             "hook_action": float(hook_action > 0),
@@ -1430,6 +1499,9 @@ class VoxelSpatialReward:
             "session_nearest_engagement": float(nearest_engagement),
             "session_nearest_threat": float(nearest_threat),
             "session_nearest_opportunity": float(nearest_opportunity),
+            "thermal_target_tracks": float(len(self._thermal_tracks)),
+            "thermal_target_heat": float(self._thermal_last_signal[3]),
+            "thermal_target_age": float(self._thermal_last_signal[4]),
             "lattice_prior_loaded": float(
                 "lattice" in self.sidecar_sources.get(self.map_name, {})
             ),
@@ -1511,6 +1583,7 @@ class VoxelSpatialReward:
     def memory_features(self, obs: Observation) -> np.ndarray:
         """Compact non-decaying session memory features for the policy input.
         Last 3 slots are the survivability projection (always set)."""
+        self._update_thermal_tracks(obs)
         cache_key = (self.map_name or "unknown", int(obs.tick))
         if self._feature_cache_key == cache_key and self._feature_cache is not None:
             return self._feature_cache
@@ -1523,9 +1596,9 @@ class VoxelSpatialReward:
                         self, obs
                     )
                     self._feature_nearest_deaths = float(nearest_deaths)
-                    self._feature_cache_key = cache_key
-                    self._feature_cache = features
-                    return features
+                    return self._finish_memory_features(
+                        obs, features, cache_key
+                    )
             except (RuntimeError, ValueError, AttributeError) as error:
                 self._rust_fallback_reason = str(error)
                 self.rust_lattice_enabled = False
@@ -1549,15 +1622,11 @@ class VoxelSpatialReward:
         features[23] = dps_sh
 
         if not self.session_memory_enabled:
-            self._feature_cache_key = cache_key
-            self._feature_cache = features
-            return features
+            return self._finish_memory_features(obs, features, cache_key)
 
         memory = self._memory_for_map(self.map_name)
         if not memory:
-            self._feature_cache_key = cache_key
-            self._feature_cache = features
-            return features
+            return self._finish_memory_features(obs, features, cache_key)
 
         cell = self.cell_for(obs)
         current = memory.get(cell)
@@ -1577,6 +1646,21 @@ class VoxelSpatialReward:
             dx, dy, dz, score = nearest[kind]
             features[offset:offset + 4] = (dx, dy, dz, score)
 
+        return self._finish_memory_features(obs, features, cache_key)
+
+    def _finish_memory_features(
+        self,
+        obs: Observation,
+        features: np.ndarray,
+        cache_key: Tuple[str, int],
+    ) -> np.ndarray:
+        features = np.asarray(features, dtype=np.float32).copy()
+        dx, dy, dz, heat, age = self._thermal_target_signal(obs)
+        self._thermal_last_signal = (dx, dy, dz, heat, age)
+        if heat > 0.0:
+            # Live/cooling hostile occupancy owns the immediate engagement
+            # pull. Persistent map knowledge resumes automatically at expiry.
+            features[IMMEDIATE_ENGAGEMENT_SLICE] = (dx, dy, dz, heat)
         self._feature_cache_key = cache_key
         self._feature_cache = features
         return features
@@ -1634,6 +1718,7 @@ class VoxelSpatialReward:
         deaths = max(0.0, float(obs.reward_death))
         items = max(0.0, float(obs.reward_item_pickup))
         visible_contact = visible_count > 0
+        exposure_sum, _exposure_max = self._visible_enemy_exposure(obs)
         contact = (
             visible_contact or
             audio_contact or
@@ -1648,7 +1733,7 @@ class VoxelSpatialReward:
             if contact:
                 here.engagement_count += 1.0
             if visible_contact:
-                here.enemy_seen += float(visible_count)
+                here.enemy_seen += exposure_sum
             if fired:
                 here.self_fire += 1.0
             if hook_enemy:
@@ -1663,11 +1748,11 @@ class VoxelSpatialReward:
                 cell,
                 engagement=(
                     (1.0 if contact else 0.0)
-                    + 0.35 * visible_count
+                    + 0.35 * exposure_sum
                     + (0.50 if hook_enemy else 0.0)
                     + (0.35 * items if contact else 0.0)
                 ),
-                threat=0.15 * visible_count + 0.03 * damage_taken + 3.0 * deaths,
+                threat=0.15 * exposure_sum + 0.03 * damage_taken + 3.0 * deaths,
                 opportunity=(
                     (0.45 if hook_enemy else 0.0)
                     + (0.45 * items if contact else 0.0)
@@ -1678,7 +1763,7 @@ class VoxelSpatialReward:
                 deaths=3.0 * deaths,
                 samples=(
                     (1.0 if contact else 0.0)
-                    + visible_count
+                    + exposure_sum
                     + (1.0 if fired else 0.0)
                     + (1.0 if hook_enemy else 0.0)
                     + (items if contact else 0.0)
@@ -1688,10 +1773,10 @@ class VoxelSpatialReward:
             )
 
         if visible_contact:
-            for enemy_cell in self._visible_enemy_cells(obs):
+            for enemy_cell, exposure in self._visible_enemy_heat_samples(obs):
                 seen = self._memory_cell(enemy_cell, tick)
                 seen.engagement_count += 1.0
-                seen.enemy_seen += 1.0
+                seen.enemy_seen += exposure
                 seen.damage_dealt += damage_dealt / max(1, visible_count)
                 seen.kills += kills / max(1, visible_count)
                 if fire_audio_contact:
@@ -1700,12 +1785,12 @@ class VoxelSpatialReward:
                 kill_share = kills / max(1, visible_count)
                 self._mark_rust_score_event(
                     enemy_cell,
-                    engagement=1.35,
-                    threat=0.15,
+                    engagement=1.0 + 0.35 * exposure,
+                    threat=0.15 * exposure,
                     opportunity=0.03 * dealt_share + 3.0 * kill_share,
                     self_fire=(0.25 if fire_audio_contact else 0.0),
                     samples=(
-                        2.0
+                        1.0 + exposure
                         + kill_share
                         + (0.25 if fire_audio_contact else 0.0)
                     ),
@@ -1732,13 +1817,150 @@ class VoxelSpatialReward:
 
         self.last_visible_count = visible_count
 
-    def _visible_enemy_cells(self, obs: Observation):
+    @staticmethod
+    def _local_to_world_vector(
+        local: np.ndarray, yaw_deg: float, pitch_deg: float
+    ) -> np.ndarray:
+        """Invert Quake AngleVectors' forward/Quake-right/up projection."""
+        yaw = np.deg2rad(float(yaw_deg))
+        pitch = np.deg2rad(float(pitch_deg))
+        sy, cy = np.sin(yaw), np.cos(yaw)
+        sp, cp = np.sin(pitch), np.cos(pitch)
+        forward = np.array((cp * cy, cp * sy, -sp), dtype=np.float32)
+        right = np.array((sy, -cy, 0.0), dtype=np.float32)
+        up = np.array((sp * cy, sp * sy, cp), dtype=np.float32)
+        vector = np.asarray(local, dtype=np.float32)
+        return forward * vector[0] + right * vector[1] + up * vector[2]
+
+    def _target_world_point(self, obs: Observation, ent: np.ndarray) -> np.ndarray:
+        # The C target contract is camera-eye-relative. Quake II viewheight is
+        # 22 standing and -2 ducked; muzzle clearance is checked separately.
+        eye = np.asarray(obs.self_state[:3], dtype=np.float32).copy()
+        flags = 0
+        if hasattr(obs, "self_debug") and len(obs.self_debug) >= 4:
+            flags = int(obs.self_debug[3])
+        eye[2] += -2.0 if flags & ML_ENTITY_DUCKED else 22.0
+        return eye + self._local_to_world_vector(
+            ent[:3], getattr(obs, "yaw", 0.0), getattr(obs, "pitch", 0.0)
+        )
+
+    def _update_thermal_tracks(self, obs: Observation) -> None:
+        if not self.thermal_target_enabled:
+            self._thermal_tracks.clear()
+            self._thermal_last_tick = int(obs.tick)
+            return
+
+        tick = int(obs.tick)
+        if tick == self._thermal_last_tick:
+            return
+        if tick < self._thermal_last_tick or float(obs.self_state[6]) <= 0.0:
+            self._thermal_tracks.clear()
+        if float(getattr(obs, "reward_kill", 0.0)) > 0.0:
+            # Hit attribution is not yet target-specific; clearing is safer
+            # than retaining a dead hostile as actionable thermal evidence.
+            self._thermal_tracks.clear()
+
         count = max(0, min(int(obs.entity_count), obs.entities.shape[0]))
-        origin = obs.self_state[:3]
-        for ent in obs.entities[:count]:
-            if not (ent[7] > 0.5 and ent[8] > 0.5):
+        for index, ent in enumerate(obs.entities[:count]):
+            exposure = abs(float(ent[8]))
+            if not (ent[6] > 0.0 and ent[7] > 0.5 and exposure > 0.0):
                 continue
-            yield self.cell_for_pos(origin + ent[:3])
+            target_id = index + 1
+            if (
+                hasattr(obs, "entity_debug")
+                and index < obs.entity_debug.shape[0]
+                and int(obs.entity_debug[index, 0]) > 0
+            ):
+                debug = obs.entity_debug[index]
+                edict_index = int(debug[0])
+                life_epoch = (
+                    int(debug[3]) & ML_ENTITY_EPOCH_MASK
+                ) >> ML_ENTITY_EPOCH_SHIFT
+                target_id = (edict_index << 14) | life_epoch
+                for previous_id in tuple(self._thermal_tracks):
+                    if (
+                        previous_id != target_id
+                        and previous_id >> 14 == edict_index
+                    ):
+                        self._thermal_tracks.pop(previous_id, None)
+            rel_velocity = self._local_to_world_vector(
+                ent[3:6], getattr(obs, "yaw", 0.0),
+                getattr(obs, "pitch", 0.0)
+            )
+            target_velocity = (
+                rel_velocity + np.asarray(obs.self_state[3:6], dtype=np.float32)
+            )
+            self._thermal_tracks[target_id] = ThermalTargetTrack(
+                target_id=target_id,
+                world_point=self._target_world_point(obs, ent),
+                world_velocity=target_velocity,
+                exposure=float(np.clip(exposure, 0.0, 1.0)),
+                last_tick=tick,
+            )
+
+        max_age = max(0, int(self.thermal_target_max_age_ticks))
+        self._thermal_tracks = {
+            target_id: track
+            for target_id, track in self._thermal_tracks.items()
+            if 0 <= tick - track.last_tick <= max_age
+        }
+        self._thermal_last_tick = tick
+
+    def _thermal_target_signal(
+        self, obs: Observation
+    ) -> Tuple[float, float, float, float, float]:
+        if not self.thermal_target_enabled or not self._thermal_tracks:
+            return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+        tick = int(obs.tick)
+        tick_rate = max(1.0, float(self.lattice_tick_rate))
+        decay = float(np.clip(self.thermal_target_decay, 0.0, 1.0))
+        voxel_size = max(1.0, float(self.thermal_target_voxel_size))
+        origin = np.asarray(obs.self_state[:3], dtype=np.float32)
+        best = None
+        best_rank = -1.0
+        for target_id in sorted(self._thermal_tracks):
+            track = self._thermal_tracks[target_id]
+            age = max(0, tick - track.last_tick)
+            predicted = track.world_point + track.world_velocity * (
+                float(age) / tick_rate
+            )
+            cell = np.floor(predicted / voxel_size)
+            center = (cell + 0.5) * voxel_size
+            delta = center - origin
+            distance = float(np.linalg.norm(delta))
+            confidence = (0.5 + 0.5 * track.exposure) * (decay ** age)
+            rank = confidence / max(1.0, distance / voxel_size)
+            if rank > best_rank:
+                best_rank = rank
+                best = (delta, confidence, float(age))
+
+        if best is None:
+            return (0.0, 0.0, 0.0, 0.0, 0.0)
+        delta, confidence, age = best
+        radius = max(float(self.session_memory_search_radius), voxel_size)
+        direction = np.clip(delta / radius, -1.0, 1.0)
+        return (
+            float(direction[0]),
+            float(direction[1]),
+            float(direction[2]),
+            float(confidence),
+            age,
+        )
+
+    def _visible_enemy_heat_samples(self, obs: Observation):
+        count = max(0, min(int(obs.entity_count), obs.entities.shape[0]))
+        for ent in obs.entities[:count]:
+            if not (ent[7] > 0.5 and abs(float(ent[8])) > 0.0):
+                continue
+            yield (
+                self.cell_for_pos(self._target_world_point(obs, ent)),
+                float(np.clip(abs(float(ent[8])), 0.0, 1.0)),
+            )
+
+    def _visible_enemy_cells(self, obs: Observation):
+        for cell, _exposure in self._visible_enemy_heat_samples(obs):
+            yield cell
 
     def apply_directive(self, map_name: str, action: str,
                         x: float, y: float, z: float,
@@ -1923,7 +2145,7 @@ class VoxelSpatialReward:
         n = min(int(obs.entity_count), obs.entities.shape[0])
         for k in range(n):
             e = obs.entities[k]
-            if e[7] < 0.5 or e[8] < 0.5:   # is_enemy, visible
+            if e[7] < 0.5 or abs(float(e[8])) <= 0.0:
                 continue
             d = float(e[0] * e[0] + e[1] * e[1] + e[2] * e[2])
             if d < best_d:
@@ -2134,6 +2356,7 @@ class VoxelSpatialReward:
 
     def fire_context(self, obs: Observation, weapon_id: Optional[int] = None) -> Dict[str, float]:
         visible_count, nearest_visible = self._visible_enemy_stats(obs)
+        exposure_sum, exposure_max = self._visible_enemy_exposure(obs)
         aim_aligned, aim_yaw_error, aim_pitch_error = self._aim_alignment(obs)
         splash_weapon = self._is_splash_weapon(obs, weapon_id)
         splash_viable, splash_yaw_error, splash_pitch_error = self._splash_viability(
@@ -2144,6 +2367,8 @@ class VoxelSpatialReward:
             "enemy_visible_any": float(visible_count > 0),
             "enemy_visible_count": float(visible_count),
             "enemy_visible_nearest": float(nearest_visible if visible_count > 0 else 0.0),
+            "enemy_visible_exposure_sum": exposure_sum,
+            "enemy_visible_exposure_max": exposure_max,
             "aim_aligned": float(aim_aligned),
             "aim_yaw_error": float(aim_yaw_error),
             "aim_pitch_error": float(aim_pitch_error),
@@ -2200,7 +2425,7 @@ class VoxelSpatialReward:
         nearest = float("inf")
         for ent in obs.entities[:count]:
             is_enemy = ent[7] > 0.5
-            visible = ent[8] > 0.5
+            visible = abs(float(ent[8])) > 0.0
             if not (is_enemy and visible):
                 continue
             # Avoid np.linalg.norm overhead for small 3D slices
@@ -2209,6 +2434,17 @@ class VoxelSpatialReward:
             nearest = min(nearest, dist)
         return visible_count, nearest
 
+    def _visible_enemy_exposure(self, obs: Observation) -> Tuple[float, float]:
+        count = max(0, min(int(obs.entity_count), obs.entities.shape[0]))
+        values = [
+            float(np.clip(abs(float(ent[8])), 0.0, 1.0))
+            for ent in obs.entities[:count]
+            if ent[6] > 0.0 and ent[7] > 0.5 and abs(float(ent[8])) > 0.0
+        ]
+        if not values:
+            return 0.0, 0.0
+        return float(sum(values)), float(max(values))
+
     def _aim_alignment(self, obs: Observation) -> Tuple[bool, float, float]:
         count = max(0, min(int(obs.entity_count), obs.entities.shape[0]))
         best_yaw = 180.0
@@ -2216,7 +2452,7 @@ class VoxelSpatialReward:
         aligned = False
         
         for ent in obs.entities[:count]:
-            if not (ent[7] > 0.5 and ent[8] > 0.5):
+            if not (ent[7] > 0.5 and abs(float(ent[8])) > 0.0):
                 continue
             x, y, z = (float(ent[0]), float(ent[1]), float(ent[2]))
             if x <= 0.0:
@@ -2250,7 +2486,7 @@ class VoxelSpatialReward:
         aligned = False
 
         for ent in obs.entities[:count]:
-            if not (ent[7] > 0.5 and ent[8] > 0.5):
+            if not (ent[7] > 0.5 and abs(float(ent[8])) > 0.0):
                 continue
             x, y, z = (float(ent[0]), float(ent[1]), float(ent[2]))
             if x <= 0.0:
@@ -2286,7 +2522,7 @@ class VoxelSpatialReward:
         best_pitch = 90.0
         viable = False
         for ent in obs.entities[:count]:
-            if not (ent[7] > 0.5 and ent[8] > 0.5):
+            if not (ent[7] > 0.5 and abs(float(ent[8])) > 0.0):
                 continue
             x, y, z = (float(ent[0]), float(ent[1]), float(ent[2]))
             if x <= 0.0:

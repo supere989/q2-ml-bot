@@ -35,8 +35,12 @@ def _telemetry(
     accepted=0,
     forward=0.0,
     right=0.0,
+    look_yaw=0.0,
+    look_pitch=0.0,
     jump=False,
     fire=False,
+    hook=0,
+    weapon=0,
     terminal=False,
     terminal_reason=None,
     damage_dealt=0.0,
@@ -48,8 +52,12 @@ def _telemetry(
     debug[1] = accepted
     debug[4] = forward
     debug[5] = right
+    debug[6] = look_yaw
+    debug[7] = look_pitch
     debug[8] = int(jump)
     debug[9] = int(fire)
+    debug[10] = int(hook)
+    debug[3] = int(weapon)
     debug[11] = int(gate_flags)
     obs = SimpleNamespace(
         action_debug=debug,
@@ -237,6 +245,83 @@ def test_failed_echo_round_never_returns_a_trainable_transition():
         assert metrics.failed_rounds == 1
         assert metrics.mismatched_echoes_rejected == 1
         assert metrics.transitions_accepted == 0
+    finally:
+        batch.close()
+
+
+def test_look_echo_must_match_the_dispatched_policy_action():
+    events = []
+    env = _FakeEnv(
+        "client-a",
+        0,
+        [
+            _telemetry(
+                "client-a", 0, 2, 11, echo_tick=11, accepted=1,
+                look_yaw=0.0, look_pitch=0.0,
+            )
+        ],
+        events,
+    )
+    batch = Q2NetworkClientBatch(
+        [env], round_timeout=1.0, max_rejected_echoes=0
+    )
+    try:
+        batch.reset()
+        with pytest.raises(AuthoritativeEchoError):
+            batch.collect_round(
+                [Action(look_yaw=8.0, look_pitch=-4.0)],
+                policy_version=8,
+            )
+        assert batch.metrics.mismatched_echoes_rejected == 1
+        assert batch.metrics.transitions_accepted == 0
+    finally:
+        batch.close()
+
+
+def test_wrapped_yaw_and_reliable_command_echoes_are_admitted():
+    events = []
+    env = _FakeEnv(
+        "client-a",
+        0,
+        [
+            _telemetry(
+                "client-a", 0, 2, 11, echo_tick=11, accepted=1,
+                look_yaw=2.0, hook=2, weapon=7,
+            )
+        ],
+        events,
+    )
+    batch = Q2NetworkClientBatch([env], round_timeout=1.0)
+    try:
+        batch.reset()
+        result = batch.collect_round(
+            [Action(look_yaw=2.0, hook=2, weapon=7)],
+            policy_version=9,
+        )
+        assert result.infos[0]["authoritative_echo_valid"]
+    finally:
+        batch.close()
+
+
+def test_mismatched_reliable_command_echo_is_rejected():
+    events = []
+    env = _FakeEnv(
+        "client-a", 0,
+        [_telemetry(
+            "client-a", 0, 2, 11, echo_tick=11, accepted=1,
+            hook=0, weapon=0,
+        )],
+        events,
+    )
+    batch = Q2NetworkClientBatch(
+        [env], round_timeout=1.0, max_rejected_echoes=0
+    )
+    try:
+        batch.reset()
+        with pytest.raises(AuthoritativeEchoError):
+            batch.collect_round(
+                [Action(hook=1, weapon=7)], policy_version=10
+            )
     finally:
         batch.close()
 

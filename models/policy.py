@@ -2,7 +2,7 @@
 policy.py — recurrent attention policy network for the Q2 ML bot.
 
 Architecture (v2):
-  obs_vector (206,)
+  obs_vector (209, or 219 with extended observations)
     ├─ entity block (8 × 9) → shared embed → attention + max pool ─┐
     └─ rest (134,)          → MLP ─────────────────────────────────┴→ combine → (256,)
     → LSTM (hidden=256, layers=1) → (256,)
@@ -28,7 +28,7 @@ import numpy as np
 import os
 from typing import Tuple, Optional
 
-# OBS_DIM follows protocol.py: 206 (Run A) or 216 when Q2_EXT_OBS=1 (Run B).
+# OBS_DIM follows protocol.py: 209 (Run A) or 219 when Q2_EXT_OBS=1 (Run B).
 # The extended block is appended at the very END of the vector (after session
 # memory), so the entity-attention offsets below are unaffected either way.
 from harness.protocol import OBS_DIM as OBS_DIM  # noqa: E402
@@ -40,12 +40,66 @@ ENT_OFF = 10     # self_state occupies [0:10]
 ENT_CNT = 8
 ENT_DIM = 9      # floats per entity slot
 ENT_LEN = ENT_CNT * ENT_DIM          # 72, entities occupy [10:82]
-REST_DIM = OBS_DIM - ENT_LEN         # 134 (A) / 144 (B)
+REST_DIM = OBS_DIM - ENT_LEN         # 137 (A) / 147 (B)
 
 WEAPON_CLASSES = 10
 WEAPON_EMB_DIM = 16
 
 LOG_STD_MIN, LOG_STD_MAX = -3.0, 1.0
+_CONT_LOW = (-1.0, -1.0, -45.0, -30.0)
+_CONT_HIGH = (1.0, 1.0, 45.0, 30.0)
+
+
+def _continuous_bounds(
+    reference: torch.Tensor,
+    obs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    low = reference.new_tensor(_CONT_LOW).expand_as(reference).clone()
+    high = reference.new_tensor(_CONT_HIGH).expand_as(reference).clone()
+    if obs is not None:
+        current_pitch = obs[..., _AIM_PITCH_OBS_INDEX] * 90.0
+        low[..., 3] = torch.maximum(low[..., 3], -89.0 - current_pitch)
+        high[..., 3] = torch.minimum(high[..., 3], 89.0 - current_pitch)
+    return low, high
+
+
+def _censored_normal_log_prob(
+    distribution: torch.distributions.Normal,
+    actions: torch.Tensor,
+    low: Optional[torch.Tensor] = None,
+    high: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Exact log mass/density after clipping a Normal to action bounds."""
+    if low is None or high is None:
+        low, high = _continuous_bounds(actions)
+    standard_low = (low - distribution.loc) / distribution.scale
+    standard_high_survival = (distribution.loc - high) / distribution.scale
+    # log_ndtr remains finite in the extreme tails where ndtr rounds to zero;
+    # those tails are common while recovering a saturated legacy policy.
+    lower_mass = torch.special.log_ndtr(standard_low)
+    upper_mass = torch.special.log_ndtr(standard_high_survival)
+    density = distribution.log_prob(actions)
+    return torch.where(
+        actions <= low,
+        lower_mass,
+        torch.where(actions >= high, upper_mass, density),
+    )
+
+
+def _sample_continuous(
+    distribution: torch.distributions.Normal,
+    deterministic: bool,
+    low: Optional[torch.Tensor] = None,
+    high: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    raw = distribution.loc if deterministic else distribution.sample()
+    if low is None or high is None:
+        low, high = _continuous_bounds(raw)
+    action = torch.maximum(torch.minimum(raw, high), low)
+    log_prob = _censored_normal_log_prob(
+        distribution, action, low, high
+    ).sum(-1)
+    return action, log_prob
 
 # Observation layout after entities: rays[16*4], hook zones[4*8], audio[5],
 # yaw, pitch. Extended observations are appended later and do not shift this.
@@ -84,7 +138,7 @@ def target_fire_allowed(
     candidates = (
         (entities[..., 6] > 0.0)
         & (entities[..., 7] > 0.5)
-        & (entities[..., 8] > 0.5)
+        & (entities[..., 8] > 0.0)
     )
     xyz = entities[..., :3]
     current_pitch = obs[..., _AIM_PITCH_OBS_INDEX] * 90.0
@@ -312,14 +366,22 @@ class Q2BotPolicy(nn.Module):
         act_params: dict,
         actions: torch.Tensor,
         fire_allowed: Optional[torch.Tensor] = None,
+        obs: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Log-probability and entropy for the full mixed action vector."""
         cont_dist = torch.distributions.Normal(
             act_params["cont_mean"],
             act_params["cont_log_std"].exp(),
         )
-        log_prob = cont_dist.log_prob(actions[..., :4]).sum(-1)
-        entropy = cont_dist.entropy().sum(-1)
+        cont_low, cont_high = _continuous_bounds(actions[..., :4], obs)
+        log_prob = _censored_normal_log_prob(
+            cont_dist, actions[..., :4], cont_low, cont_high
+        ).sum(-1)
+        # A clipped/censored Normal has boundary point masses, so the ordinary
+        # Normal entropy is not its entropy and would reward saturation. Omit
+        # continuous entropy until an exact mixed-measure estimator is added;
+        # categorical exploration remains fully represented below.
+        entropy = torch.zeros_like(log_prob)
 
         weapon_idx = actions[..., 7].round().long().clamp(0, WEAPON_CLASSES - 1)
         fire_logits = self.fire_logits_for(act_params["feat"], weapon_idx)
@@ -365,8 +427,10 @@ class Q2BotPolicy(nn.Module):
         cont_std  = act_params["cont_log_std"].exp().squeeze()
         cont_dist = torch.distributions.Normal(cont_mean, cont_std)
 
-        cont = cont_mean if deterministic else cont_dist.sample()
-        log_prob_t = cont_dist.log_prob(cont).sum()
+        cont_low, cont_high = _continuous_bounds(cont_mean, obs_t.squeeze())
+        cont, log_prob_t = _sample_continuous(
+            cont_dist, deterministic, cont_low, cont_high
+        )
 
         def sample_cat(logits, det):
             d = torch.distributions.Categorical(logits=logits.reshape(-1))
@@ -447,8 +511,12 @@ class Q2BotPolicy(nn.Module):
         cont_mean = act_params["cont_mean"].squeeze(1)              # (N, 4)
         cont_std  = act_params["cont_log_std"].squeeze(1).exp()     # (N, 4)
         cont_dist = torch.distributions.Normal(cont_mean, cont_std)
-        cont = cont_mean if deterministic else cont_dist.sample()   # (N, 4)
-        log_probs = cont_dist.log_prob(cont).sum(-1)                # (N,)
+        cont_low, cont_high = _continuous_bounds(
+            cont_mean, obs_t.squeeze(1)
+        )
+        cont, log_probs = _sample_continuous(
+            cont_dist, deterministic, cont_low, cont_high
+        )
 
         def sample_cat(logits):
             logits = logits.squeeze(1)

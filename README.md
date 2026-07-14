@@ -2,15 +2,20 @@
 
 ML-based bot engine for Quake 2 (Lithium II + 3ZB2 base).
 
-**Status:** The network-native lattice trainer is live on the public server.
+**Status:** The network-native lattice trainer remains the primary design, but
+training is intentionally paused while the target/thermal-lattice prototype is
+cut over.
 Four headless Yamagi clients connect as ordinary protocol-34 players while a
 private per-client conduit supplies authoritative 219-feature observations to
 PPO on WSL. It warm-started at 4,008,192 steps from
 `movement_reset_v2/policy_04008192.pt`; two of six slots remain available for
 humans. The old in-process ONNX runtime is archived/rollback-only. Transport
-and action admission are proven. The current `public_network_engagement_anchor_v3`
-run starts from an immutable policy/optimizer/lattice snapshot at 4,055,296
-steps, with a target-aligned fire
+and action admission are proven. The rejected
+`public_network_engagement_anchor_v3` descendant reached 100% down-look and
+70.5% backward commands at step 4,063,488 and must not be resumed. The clean
+policy source remains the immutable 4,055,296 snapshot; its old dynamic lattice
+must be reset because it contains pre-transform-fix deposits. The replacement
+prototype adds a target-aligned fire
 gate, bounded target-acquisition reward, escalating same-target hit credit,
 automatic network-client respawn, attested generated-map lattice sidecars, and
 lattice-directed hook corrections. A persistent map-epoch barrier now holds
@@ -19,13 +24,19 @@ four report the same playable map. The live conduit now uses the client's true
 view angles (Quake's rendered model pitch is intentionally divided by three),
 and TensorBoard records entity visibility, alignment error, damage events,
 signed movement, and posture reward. A conservative 0.02 recurrent aim anchor
-now consumes the verified target labels in one full 512-sample minibatch.
-Combat quality remains below the promotion
-target and must be judged by the seasonal soak, not loss convergence.
+now consumes chest-first actionable target labels in one full 512-sample
+minibatch. It also supplies exposure-weighted, per-client transient target heat
+through correctly transformed world voxels, dual eye/muzzle-clear damage
+points, generation-counted target tracks, and exact full-action PPO provenance.
+The replacement lineage must use `--reset_optimizer 1 --reset_lattice 1`.
+Combat quality remains below the promotion target and must be
+judged by a fresh seasonal soak, not loss convergence.
 **See `docs/HANDOFF-2026-07-13-NETWORK.md` for the exact active topology,
 commits, rollback locations, validation evidence, and next checks.**
 The channel-by-channel sufficiency review is in
 `docs/TELEMETRY-AUDIT-2026-07-14.md`.
+The implemented redesign and cutover gates are in
+`docs/TARGET-THERMAL-LATTICE-PROTOTYPE-2026-07-14.md`.
 
 ## Architecture
 

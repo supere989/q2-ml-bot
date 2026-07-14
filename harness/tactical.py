@@ -123,14 +123,15 @@ def _visible_enemy_stats(obs: Observation) -> Tuple[int, float, float, float]:
     best_exposure = 0.0
     nearest_health = 0.0
     for ent in obs.entities[:count]:
-        if not (ent[7] > 0.5 and ent[8] > 0.5):
+        exposure = abs(float(ent[8]))
+        if not (ent[7] > 0.5 and exposure > 0.0):
             continue
         dist = float(np.linalg.norm(ent[:3]))
         visible += 1
         if dist < nearest:
             nearest = dist
             nearest_health = float(ent[6])
-        best_exposure = max(best_exposure, float(ent[8]))
+        best_exposure = max(best_exposure, exposure)
     if visible == 0:
         nearest = 0.0
     return visible, nearest, best_exposure, nearest_health

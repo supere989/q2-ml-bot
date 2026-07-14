@@ -215,6 +215,150 @@ def test_memory_features_cache_one_nearest_pass_per_tick(monkeypatch):
     assert calls == 2
 
 
+def test_local_target_vector_round_trips_full_quake_view_basis():
+    yaw = 73.0
+    pitch = -21.0
+    world = np.array((140.0, -85.0, 42.0), dtype=np.float32)
+    yaw_rad = np.deg2rad(yaw)
+    pitch_rad = np.deg2rad(pitch)
+    forward = np.array((
+        np.cos(pitch_rad) * np.cos(yaw_rad),
+        np.cos(pitch_rad) * np.sin(yaw_rad),
+        -np.sin(pitch_rad),
+    ))
+    right = np.array((np.sin(yaw_rad), -np.cos(yaw_rad), 0.0))
+    up = np.array((
+        np.sin(pitch_rad) * np.cos(yaw_rad),
+        np.sin(pitch_rad) * np.sin(yaw_rad),
+        np.cos(pitch_rad),
+    ))
+    local = np.array((
+        np.dot(world, forward),
+        np.dot(world, right),
+        np.dot(world, up),
+    ))
+
+    restored = VoxelSpatialReward._local_to_world_vector(local, yaw, pitch)
+
+    assert restored == pytest.approx(world, abs=1e-3)
+
+
+def test_visible_enemy_heat_uses_world_voxel_and_cools_without_persistence():
+    reward = VoxelSpatialReward(
+        voxel_size=64.0,
+        thermal_target_voxel_size=64.0,
+        thermal_target_decay=0.5,
+        thermal_target_max_age_ticks=2,
+    )
+    visible = _obs(tick=10)
+    visible.yaw = 90.0
+    visible.pitch = 0.0
+    visible.entity_count = 1
+    visible.entities[0, :3] = (160.0, 0.0, 0.0)
+    visible.entities[0, 6:9] = (100.0, 1.0, 0.5)
+    visible.entity_debug = np.zeros((8, 4), dtype=np.uint32)
+    visible.entity_debug[0, 0] = 4
+    reward.reset("thermal", visible)
+
+    cells = list(reward._visible_enemy_cells(visible))
+    hot = reward.memory_features(visible).copy()
+
+    assert cells == [(0, 2, 0)]
+    assert hot[6] > hot[5]  # yaw=90: local forward is world +Y
+    assert hot[8] == pytest.approx(0.75)
+
+    hidden = _obs(tick=11)
+    hidden.yaw = 90.0
+    hidden.pitch = 0.0
+    cooling = reward.memory_features(hidden).copy()
+    assert cooling[8] == pytest.approx(0.375)
+
+    expired = _obs(tick=13)
+    expired.yaw = 90.0
+    expired.pitch = 0.0
+    cold = reward.memory_features(expired).copy()
+    assert cold[8] == 0.0
+
+
+def test_protected_visible_enemy_still_heats_tracking_lattice():
+    reward = VoxelSpatialReward(
+        voxel_size=64.0,
+        thermal_target_voxel_size=64.0,
+    )
+    visible = _obs(tick=10)
+    visible.entity_count = 1
+    visible.entities[0, :3] = (96.0, 0.0, 0.0)
+    visible.entities[0, 6:9] = (100.0, 1.0, -0.5)
+    visible.entity_debug = np.zeros((8, 4), dtype=np.uint32)
+    visible.entity_debug[0, 0] = 4
+
+    reward.reset("protected-thermal", visible)
+    features = reward.memory_features(visible)
+
+    assert features[5] > 0.0
+    assert features[8] == pytest.approx(0.75)
+
+
+def test_new_life_epoch_replaces_reused_target_slot_heat():
+    reward = VoxelSpatialReward(thermal_target_voxel_size=64.0)
+    first = _obs(tick=10)
+    first.entity_count = 1
+    first.entities[0, :3] = (96.0, 0.0, 0.0)
+    first.entities[0, 6:9] = (100.0, 1.0, 0.5)
+    first.entity_debug = np.zeros((8, 4), dtype=np.uint32)
+    first.entity_debug[0, 0] = 4
+    first.entity_debug[0, 3] = 1 << 18
+    reward.reset("epoch", first)
+    reward.memory_features(first)
+    old_ids = set(reward._thermal_tracks)
+
+    second = _obs(tick=11)
+    second.entity_count = 1
+    second.entities[0, :3] = (-96.0, 0.0, 0.0)
+    second.entities[0, 6:9] = (100.0, 1.0, 0.5)
+    second.entity_debug = np.zeros((8, 4), dtype=np.uint32)
+    second.entity_debug[0, 0] = 4
+    second.entity_debug[0, 3] = 2 << 18
+    reward.memory_features(second)
+
+    assert len(reward._thermal_tracks) == 1
+    assert set(reward._thermal_tracks).isdisjoint(old_ids)
+
+
+def test_visible_target_rust_event_matches_python_engagement_delta():
+    reward = VoxelSpatialReward(voxel_size=64.0)
+    reward.map_name = "event-parity"
+    obs = _obs(tick=20)
+    obs.entity_count = 1
+    obs.entities[0, :3] = (160.0, 0.0, 0.0)
+    obs.entities[0, 6:9] = (100.0, 1.0, 0.5)
+    obs.reward_damage_dealt = 0.0
+    obs.reward_damage_taken = 0.0
+    obs.reward_kill = 0.0
+    obs.reward_death = 0.0
+    events = []
+    reward._mark_rust_score_event = lambda cell, **values: events.append(
+        (cell, values)
+    )
+
+    reward._update_session_memory(
+        obs=obs,
+        cell=(0, 0, 0),
+        visible_count=1,
+        fired=False,
+        hook_enemy=False,
+        fire_audio_contact=False,
+        audio_contact=False,
+    )
+
+    target_cell = reward.cell_for_pos((160.0, 0.0, 22.0))
+    target_entry = reward._memory_for_map(reward.map_name)[target_cell]
+    target_event = next(values for cell, values in events if cell == target_cell)
+    assert target_event["engagement"] == pytest.approx(
+        reward._engagement_score(target_entry)
+    )
+
+
 def test_batched_nearest_signals_match_single_channel_queries():
     reward = VoxelSpatialReward.from_env(seed=4)
     reward.map_name = "prototype"
@@ -296,6 +440,23 @@ def test_direction_objective_converts_visible_combat_to_pursuit():
     assert result["samples"].item() == 1.0
     assert result["cosine"].item() == pytest.approx(0.5)
     assert result["loss"].item() == pytest.approx(0.0)
+
+
+@pytest.mark.skipif(torch is None, reason="direction objective requires PyTorch")
+def test_direction_objective_does_not_teach_backpedal_to_target_behind():
+    obs = torch.zeros((1, 1, 219), dtype=torch.float32)
+    obs[..., 6] = 0.5
+    obs[..., 9] = 0.5
+    obs[..., 10:13] = torch.tensor([-0.25, 0.0, 0.0])
+    obs[..., 10 + 6] = 0.5
+    obs[..., 10 + 7] = 1.0
+    obs[..., 10 + 8] = 1.0
+    backward = {"cont_mean": torch.tensor([[[-1.0, 0.0, 0.0, 0.0]]])}
+
+    result = _lattice_direction_loss(backward, obs)
+
+    assert result["samples"].item() == 0.0
+    assert result["loss"].item() == 0.0
 
 
 @pytest.mark.skipif(torch is None, reason="direction objective requires PyTorch")

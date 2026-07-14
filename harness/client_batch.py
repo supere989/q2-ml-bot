@@ -169,6 +169,7 @@ class Q2NetworkClientBatch:
         round_timeout: float = 2.0,
         max_rejected_echoes: int = 16,
         movement_tolerance: float = 0.05,
+        look_tolerance: float = 0.25,
     ):
         self.envs = tuple(envs)
         if not self.envs:
@@ -179,6 +180,8 @@ class Q2NetworkClientBatch:
             raise ValueError("max_rejected_echoes cannot be negative")
         if movement_tolerance < 0 or not math.isfinite(movement_tolerance):
             raise ValueError("movement_tolerance must be finite and non-negative")
+        if look_tolerance < 0 or not math.isfinite(look_tolerance):
+            raise ValueError("look_tolerance must be finite and non-negative")
         client_ids = [env.client_id for env in self.envs]
         if len(set(client_ids)) != len(client_ids):
             raise ValueError("network client IDs must be unique within a batch")
@@ -187,6 +190,7 @@ class Q2NetworkClientBatch:
         self.round_timeout = float(round_timeout)
         self.max_rejected_echoes = int(max_rejected_echoes)
         self.movement_tolerance = float(movement_tolerance)
+        self.look_tolerance = float(look_tolerance)
         self._executor = ThreadPoolExecutor(
             max_workers=len(self.envs), thread_name_prefix="q2-client"
         )
@@ -247,6 +251,12 @@ class Q2NetworkClientBatch:
             abs(float(debug[4]) - expected_forward) <= self.movement_tolerance
             and abs(float(debug[5]) - expected_right) <= self.movement_tolerance
         )
+        look_matches = (
+            abs(float(debug[6]) - float(dispatch.action.look_yaw))
+            <= self.look_tolerance
+            and abs(float(debug[7]) - float(dispatch.action.look_pitch))
+            <= self.look_tolerance
+        )
         echoed_fire = bool(int(debug[9]))
         requested_fire = bool(dispatch.action.fire)
         gate_flags = int(debug[11]) if len(debug) >= 12 else 0
@@ -259,7 +269,20 @@ class Q2NetworkClientBatch:
             bool(int(debug[8])) == bool(dispatch.action.jump)
             and (echoed_fire == requested_fire or fire_suppressed)
         )
-        return ("matched" if movement_matches and button_matches else "mismatch"), echo_tick
+        reliable_command_matches = (
+            len(debug) >= 11
+            and int(debug[10]) == int(dispatch.action.hook)
+            and int(debug[3]) == int(dispatch.action.weapon)
+        )
+        return (
+            "matched" if (
+                movement_matches
+                and look_matches
+                and button_matches
+                and reliable_command_matches
+            )
+            else "mismatch"
+        ), echo_tick
 
     def _collect_echo(
         self,
@@ -836,6 +859,8 @@ class Q2NetworkClientBatch:
                     ),
                     "fire_gate_suppressed": fire_suppressed,
                     "effective_action_fire": bool(int(debug[9])),
+                    "effective_action_look_yaw": float(debug[6]),
+                    "effective_action_look_pitch": float(debug[7]),
                 })
                 infos.append(info)
 
@@ -943,6 +968,7 @@ class Q2NetworkClientMultiEnv:
         round_timeout: float = 2.0,
         max_rejected_echoes: int = 16,
         movement_tolerance: float = 0.05,
+        look_tolerance: float = 0.25,
     ):
         env_tuple = tuple(envs)
         self._batch = Q2NetworkClientBatch(
@@ -951,6 +977,7 @@ class Q2NetworkClientMultiEnv:
             round_timeout=round_timeout,
             max_rejected_echoes=max_rejected_echoes,
             movement_tolerance=movement_tolerance,
+            look_tolerance=look_tolerance,
         )
         self.n_ml = len(env_tuple)
         self.max_ep_steps = max(1, int(max_ep_steps))
@@ -1073,6 +1100,7 @@ def build_network_client_multi_env(
     round_timeout: float = 2.0,
     max_rejected_echoes: int = 16,
     movement_tolerance: float = 0.05,
+    look_tolerance: float = 0.25,
     max_ep_steps: int = 1000,
     initial_policy_version: int = 0,
     spatial_seed: int | None = None,
@@ -1117,4 +1145,5 @@ def build_network_client_multi_env(
         round_timeout=round_timeout,
         max_rejected_echoes=max_rejected_echoes,
         movement_tolerance=movement_tolerance,
+        look_tolerance=look_tolerance,
     )

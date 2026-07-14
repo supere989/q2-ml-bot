@@ -5,7 +5,7 @@ import socket, struct, time, sys
 PORT = 27957
 LOG  = "/tmp/dump_obs.log"
 
-ML_OBS_MAGIC = 0x514D4C4F
+ML_OBS_MAGIC = 0x514D4C50
 ML_ACT_MAGIC = 0x514D4C41
 ACT_FMT = "<IIffff4B"
 

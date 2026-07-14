@@ -29,11 +29,14 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 ML_BASE_PORT   = 27950
-ML_OBS_MAGIC   = 0x514D4C4F   # "QMLO"
+ML_OBS_MAGIC   = 0x514D4C50   # "QMLP": target-solution semantics
 ML_ACT_MAGIC   = 0x514D4C41   # "QMLA"
 ML_MAX_ENTITIES = 8
 ML_RAY_COUNT    = 16
 ML_HOOK_ZONES   = 4
+ML_ENTITY_DUCKED = 0x20000
+ML_ENTITY_EPOCH_SHIFT = 18
+ML_ENTITY_EPOCH_MASK = 0xFFFC0000
 
 ML_CONTROL_UNKNOWN    = 0
 ML_CONTROL_HUMAN      = 1
@@ -49,13 +52,16 @@ ML_TERMINAL_INTERMISSION = 2
 ML_FIRE_GATE_PROTECTED  = 0x01
 ML_FIRE_GATE_TARGET     = 0x02
 ML_FIRE_GATE_SUPPRESSED = 0x04
+ML_HIT_STREAK_SHIFT = 8
+ML_HIT_STREAK_MASK = 0x0000FF00
 
 # ── Observation ────────────────────────────────────────────────────────
 
 # ml_self_t:  pos[3] vel[3] health armor weapon_id ammo  → 10 floats
 _SELF_FMT = "10f"
 
-# ml_entity_t: rel_pos[3] vel[3] health is_enemy visible → 9 floats
+# ml_entity_t: eye-to-damage-point[3], local relative velocity[3], health,
+# is_enemy, signed exact exposure → 9 floats
 _ENT_FMT  = "9f"
 
 # ml_ray_t: direction[3] distance → 4 floats
@@ -110,7 +116,10 @@ OBS_SESSION_MEMORY_DIM = 24
 # self_state: [pos.xyz, vel.xyz, health, armor, weapon_id, ammo]
 SELF_SCALE = np.array([4096, 4096, 4096, 1000, 1000, 1000,
                        200, 200, 40, 100], dtype=np.float32)
-# entity: [rel_pos.xyz, vel.xyz, health, is_enemy(0/1), visible(0/1)]
+# entity: [aim_point_local.xyz, relative_velocity_local.xyz, health,
+#          is_enemy(0/1), signed_exposure(-1..1)]. Exposure magnitude is the
+# exact clear-probe fraction; positive is fire-actionable, negative is sensed
+# while the shooter is protected (track/aim only).
 ENT_SCALE = np.array([4096, 4096, 4096, 1000, 1000, 1000, 200, 1, 1],
                      dtype=np.float32)
 # Extended observation block (rune_flags[5] + inbound_dmg_dir[3] + dist +
@@ -136,7 +145,8 @@ class Observation:
     # self state as flat numpy array [pos_xyz, vel_xyz, health, armor, weapon_id, ammo]
     self_state:     np.ndarray  # shape (10,)
 
-    # visible entities as array [rel_pos_xyz, vel_xyz, health, is_enemy, visible] × N
+    # entities: [eye-to-best-damage-point local xyz, local relative velocity,
+    #            health, is_enemy, signed exact exposure] × N
     entities:       np.ndarray  # shape (ML_MAX_ENTITIES, 9)
     entity_count:   int
 
@@ -253,7 +263,7 @@ class Observation:
         def key(idx: int):
             ent = entities[idx]
             is_enemy = ent[7] > 0.5
-            visible = ent[8] > 0.5
+            visible = abs(float(ent[8])) > 0.0
             dist = float(np.linalg.norm(ent[:3]))
             return (
                 0 if (is_enemy and visible) else 1,

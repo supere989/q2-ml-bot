@@ -21,7 +21,7 @@ from train.ppo import (
 PITCH_INDEX = ENT_OFF + 8 * ENT_DIM + 16 * 4 + 4 * 8 + 5 + 1
 
 
-def _observation(*, rel_xyz=None, alive=True, pitch=0.0):
+def _observation(*, rel_xyz=None, alive=True, pitch=0.0, exposure=1.0):
     obs = torch.zeros(OBS_DIM, dtype=torch.float32)
     obs[6] = 0.5 if alive else 0.0
     obs[PITCH_INDEX] = float(pitch) / 90.0
@@ -30,7 +30,8 @@ def _observation(*, rel_xyz=None, alive=True, pitch=0.0):
             rel_xyz, dtype=torch.float32
         )
         obs[ENT_OFF + 6] = 0.5
-        obs[ENT_OFF + 7:ENT_OFF + 9] = 1.0
+        obs[ENT_OFF + 7] = 1.0
+        obs[ENT_OFF + 8] = float(exposure)
     return obs
 
 
@@ -65,6 +66,20 @@ def test_target_fire_gate_accepts_any_aligned_visible_enemy():
     obs[second + 7:second + 9] = 1.0
 
     assert target_fire_allowed(obs.unsqueeze(0), torch.zeros(1, 2)).item()
+
+
+def test_target_fire_gate_accepts_single_clear_probe_exposure():
+    obs = _observation(rel_xyz=[1.0, 0.0, 0.0], exposure=1.0 / 6.0)
+
+    assert target_fire_allowed(obs.unsqueeze(0), torch.zeros(1, 2)).item()
+
+
+def test_target_fire_gate_rejects_sensed_spawn_protection_exposure():
+    obs = _observation(rel_xyz=[1.0, 0.0, 0.0], exposure=-0.5)
+
+    assert not target_fire_allowed(
+        obs.unsqueeze(0), torch.zeros(1, 2)
+    ).item()
 
 
 def test_gated_batch_sampling_and_ppo_logprob_replay_match():
@@ -103,6 +118,7 @@ def test_gated_batch_sampling_and_ppo_logprob_replay_match():
         params,
         torch.from_numpy(actions).unsqueeze(1),
         fire_allowed=torch.from_numpy(metadata["fire_allowed"]).unsqueeze(1),
+        obs=obs_t,
     )
 
     assert torch.isfinite(replay_log_probs).all()
@@ -117,6 +133,55 @@ def test_gated_batch_sampling_and_ppo_logprob_replay_match():
     assert ratio.detach().numpy() == pytest.approx(np.ones(2), abs=1e-6)
 
 
+def test_censored_continuous_actions_replay_exactly_at_bounds():
+    policy = Q2BotPolicy()
+    with torch.no_grad():
+        policy.actor_cont.weight.zero_()
+        policy.actor_cont.bias.copy_(torch.tensor([8.0, -8.0, 90.0, -90.0]))
+        policy.log_std_head.weight.zero_()
+        policy.log_std_head.bias.zero_()
+    observation = _observation().unsqueeze(0)
+    initial = [policy.init_hidden(1)]
+
+    actions, _values, old_log_probs, _new_hx = policy.act_batch(
+        observation.numpy(), initial, deterministic=False
+    )
+
+    assert actions[0, :4] == pytest.approx([1.0, -1.0, 45.0, -30.0])
+    params, _value, _ = policy(
+        observation.unsqueeze(1), initial[0]
+    )
+    replay, _entropy = policy.action_log_prob_entropy(
+        params,
+        torch.from_numpy(actions).unsqueeze(1),
+        obs=observation.unsqueeze(1),
+    )
+    assert replay.item() == pytest.approx(float(old_log_probs[0]), abs=1e-6)
+
+
+def test_continuous_pitch_is_bounded_by_remaining_view_range():
+    policy = Q2BotPolicy()
+    with torch.no_grad():
+        policy.actor_cont.weight.zero_()
+        policy.actor_cont.bias.copy_(torch.tensor([0.0, 0.0, 0.0, 60.0]))
+    observation = _observation(pitch=86.0).unsqueeze(0)
+
+    actions, _values, old_log_probs, _new_hx = policy.act_batch(
+        observation.numpy(), [policy.init_hidden(1)], deterministic=True
+    )
+
+    assert actions[0, 3] == pytest.approx(3.0, abs=1e-5)
+    params, _value, _ = policy(
+        observation.unsqueeze(1), policy.init_hidden(1)
+    )
+    replay, _entropy = policy.action_log_prob_entropy(
+        params,
+        torch.from_numpy(actions).unsqueeze(1),
+        obs=observation.unsqueeze(1),
+    )
+    assert replay.item() == pytest.approx(float(old_log_probs[0]), abs=1e-6)
+
+
 def test_closed_gate_does_not_create_actor_fire_gradient():
     policy = Q2BotPolicy()
     obs = _observation().reshape(1, 1, -1)
@@ -126,6 +191,7 @@ def test_closed_gate_does_not_create_actor_fire_gradient():
         params,
         action,
         fire_allowed=torch.zeros(1, 1, dtype=torch.bool),
+        obs=obs,
     )
     (-(log_prob + 0.01 * entropy).sum()).backward()
 
@@ -228,6 +294,7 @@ def test_reconciled_logprob_replays_with_closed_server_mask():
         params,
         torch.from_numpy(actions).unsqueeze(1),
         fire_allowed=torch.from_numpy(fire_allowed).unsqueeze(1),
+        obs=observation.reshape(1, 1, -1),
     )
     assert replay_log_prob.item() == pytest.approx(float(log_probs[0]), abs=1e-6)
 

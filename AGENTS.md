@@ -161,24 +161,28 @@ backup/visibility only, not a compute migration.
   via the wsl-tunnel service above); events in `~/q2-ml-bot/runs/`.
 - Headless `q2ded` servers on ports 27910+, configs `ml_server_*.cfg`.
 
-**Active public run (updated 2026-07-14):** WSL tmux `q2_public_train` runs
-four normal Yamagi clients at live 10 Hz pacing from the pinned checkout under
-`~/q2-network-client-staging-20260713`. The
-`public_network_engagement_anchor_v3` segment starts from the immutable
-`public_network_live_v1_04055296` policy/optimizer/lattice snapshot at step
-4,055,296. It uses `Q2_EXT_OBS=1`, the
-Rust lattice extension, deterministic seed `7132026`, two PPO epochs, one full
-512-sample recurrent minibatch, and `aim_anchor_coef=0.02`. TensorBoard watches
-only the current `ppo_public_network_engagement_anchor_v3_*` segment. The previous movement run and every
-discarded live segment are archived; never merge those later updates into the
-clean resume point.
+**Current public-training state (updated 2026-07-14):** the
+`public_network_engagement_anchor_v3` trainer and four clients are stopped. Its
+step-4,063,488 checkpoint is quality-invalid: true pitch averaged about +86
+degrees, down-look rate was 100%, and backward commands were 70.5%. Never
+resume or promote that checkpoint. The only eligible source is the immutable
+policy pin at step 4,055,296 under
+`training-data/resume/public_network_live_v1_04055296`.
 
-The first complete checkpoint produced by this exact true-view/dense-posture/
-anchor configuration is policy/optimizer/lattice step 4,063,488 under
-`training-data/checkpoints/public_network_engagement_anchor_v3`.
+The replacement target/thermal-lattice lineage must use `Q2_EXT_OBS=1`, the
+Rust persistent lattice, deterministic seed `7132026`, two PPO epochs, one full
+512-sample recurrent minibatch, `aim_anchor_coef=0.02`, and
+`--reset_optimizer 1 --reset_lattice 1`. Exact target vectors now mean
+eye-to-chest-first damage points clear from eye and common muzzle; entity
+velocity is local relative velocity. Exposure magnitude is exact; positive is
+fire-actionable and negative is shooter-protected tracking. A separate
+per-client 64-unit thermal overlay cools for at most five ticks and is never
+checkpointed. Old dynamic lattice state is invalid because it contains
+pre-transform-fix deposits; rebuild it from attested map sidecars. See
+`docs/TARGET-THERMAL-LATTICE-PROTOTYPE-2026-07-14.md`.
 
 Do not point `Q2_RESUME_DIR` at the rolling checkpoint directory: `--resume`
-always chooses its latest lexicographic triple. The active run instead reads
+always chooses its latest lexicographic triple. The next run must read
 the three-file pin under
 `training-data/resume/public_network_live_v1_04055296`. Network
 collection enters a persistent map-epoch barrier at intermission: it dispatches

@@ -81,6 +81,8 @@ DEFAULT = dict(
     seed                = 0,
     game_seed           = -1,        # >=0 enables deterministic game.so rand() per server
     deterministic       = 0,         # opt-in deterministic Torch/CUDA kernels for A/B runs
+    reset_optimizer     = 0,         # warm-start policy but discard stale Adam moments
+    reset_lattice       = 0,         # rebuild dynamic memory from attested map sidecars
     n_servers           = 2,         # parallel q2ded instances
     n_bots_per_server   = 4,         # total bots in server (ML + 3ZB2 opponents)
     n_ml_bots           = 1,         # ML-controlled slots per server (venvs each)
@@ -109,6 +111,7 @@ DEFAULT = dict(
     aux_coef            = 0.05,  # auxiliary next-obs prediction loss weight
     aim_anchor_coef     = 0.0,   # opt-in recurrent geometric aim/fire supervision
     aim_anchor_look_weight = 16.0,
+    aim_anchor_posture_weight = 4.0,
     aim_anchor_fire_weight = 1.0,
     aim_anchor_yaw_deg  = 12.0,
     aim_anchor_pitch_deg = 14.0,
@@ -157,7 +160,7 @@ def _lattice_direction_loss(act_params: dict, obs: torch.Tensor) -> dict:
     candidates = (
         (entities[..., 6] > 0.0)
         & (entities[..., 7] > 0.5)
-        & (entities[..., 8] > 0.5)
+        & (entities[..., 8].abs() > 0.0)
     )
     visible = candidates.any(dim=-1)
     distance_sq = entities[..., :3].square().sum(dim=-1).masked_fill(
@@ -167,13 +170,16 @@ def _lattice_direction_loss(act_params: dict, obs: torch.Tensor) -> dict:
     gather_index = nearest_index.unsqueeze(-1).unsqueeze(-1).expand(
         *nearest_index.shape, 1, 2
     )
-    pursuit_target = entities[..., :2].gather(-2, gather_index).squeeze(-2)
-    pursuit_target = pursuit_target / torch.linalg.vector_norm(
-        pursuit_target, dim=-1, keepdim=True
+    pursuit_xy = entities[..., :2].gather(-2, gather_index).squeeze(-2)
+    pursuit_target = pursuit_xy / torch.linalg.vector_norm(
+        pursuit_xy, dim=-1, keepdim=True
     ).clamp_min(1e-6)
     alive = obs[..., 6] > 0.0
     combat_ready = alive & (obs[..., 6] > 0.175) & (obs[..., 9] > 0.0)
-    committed = visible & combat_ready
+    # Never teach backpedaling toward a target behind the bot. The look anchor
+    # first turns the view; positive-forward pursuit begins once the target is
+    # in the forward hemisphere.
+    committed = visible & combat_ready & (pursuit_xy[..., 0] > 0.0)
     target = torch.where(committed.unsqueeze(-1), pursuit_target, memory_target)
     mask = alive & (committed | ((strength > 0.03) & ~visible))
     predicted = act_params["cont_mean"][..., :2]
@@ -399,6 +405,7 @@ def _explained_variance(prediction: torch.Tensor, target: torch.Tensor) -> torch
 # yaw, pitch. Extended observations are appended later and do not shift this.
 _AIM_PITCH_OBS_INDEX = ENT_OFF + ENT_CNT * ENT_DIM + 16 * 4 + 4 * 8 + 5 + 1
 _POSTURE_DOWNLOOK_DEG = 15.0
+_AIM_POSTURE_MIN_SPEED = 96.0
 
 
 def _wrap_degrees_tensor(angle: torch.Tensor) -> torch.Tensor:
@@ -428,7 +435,7 @@ def _aim_anchor_targets(
     candidates = (
         (entities[..., 6] > 0.0)
         & (entities[..., 7] > 0.5)
-        & (entities[..., 8] > 0.5)
+        & (entities[..., 8].abs() > 0.0)
     )
     has_target = candidates.any(dim=-1)
     distance_sq = xyz.square().sum(dim=-1).masked_fill(
@@ -459,22 +466,33 @@ def _aim_anchor_targets(
 
     yaw_command = desired_yaw.clamp(-45.0, 45.0)
     pitch_command = desired_pitch.clamp(-30.0, 30.0)
-    look_target = torch.stack((yaw_command, pitch_command), dim=-1)
+    new_pitch = (current_pitch + pitch_command).clamp(-89.0, 89.0)
+    effective_pitch_command = new_pitch - current_pitch
+    look_target = torch.stack((yaw_command, effective_pitch_command), dim=-1)
     look_target = torch.where(
         has_target.unsqueeze(-1), look_target, torch.zeros_like(look_target)
     )
 
     self_alive = obs[..., 6] > 0.0
     look_mask = self_alive & has_target
-    new_pitch = (current_pitch + pitch_command).clamp(-89.0, 89.0)
-    effective_pitch_command = new_pitch - current_pitch
     yaw_residual = _wrap_degrees_tensor(-desired_yaw + yaw_command)
     pitch_residual = -desired_pitch + effective_pitch_command
     aligned_after_teacher = (
         (yaw_residual.abs() <= float(yaw_threshold_deg))
         & (pitch_residual.abs() <= float(pitch_threshold_deg))
     )
-    fire_target = (look_mask & aligned_after_teacher).long()
+    nearest_exposure = entities[..., 8].gather(
+        -1, nearest_index.unsqueeze(-1)
+    ).squeeze(-1)
+    fire_target = (
+        look_mask & (nearest_exposure > 0.0) & aligned_after_teacher
+    ).long()
+    horizontal_speed = torch.linalg.vector_norm(obs[..., 3:5], dim=-1) * 1000.0
+    posture_mask = (
+        self_alive & ~has_target
+        & (horizontal_speed >= _AIM_POSTURE_MIN_SPEED)
+    )
+    posture_pitch_target = (-current_pitch).clamp(-30.0, 30.0)
 
     return {
         "look_target": look_target,
@@ -482,6 +500,8 @@ def _aim_anchor_targets(
         "fire_target": fire_target,
         "fire_mask": self_alive,
         "has_target": has_target,
+        "posture_mask": posture_mask,
+        "posture_pitch_target": posture_pitch_target,
     }
 
 
@@ -519,6 +539,7 @@ def _aim_anchor_loss(
     targets: Dict[str, torch.Tensor],
     fire_class_weights: torch.Tensor,
     look_weight: float,
+    posture_weight: float,
     fire_weight: float,
 ) -> Dict[str, torch.Tensor]:
     """Aim/fire loss on the same recurrent features used by PPO."""
@@ -526,6 +547,12 @@ def _aim_anchor_loss(
     look_error = act_params["cont_mean"][..., 2:4] - targets["look_target"]
     look_scaled_sq = (look_error / look_error.new_tensor([45.0, 30.0])).square()
     look_loss = _masked_mean(look_scaled_sq, look_mask.unsqueeze(-1).expand_as(look_scaled_sq))
+    posture_error = (
+        act_params["cont_mean"][..., 3] - targets["posture_pitch_target"]
+    )
+    posture_loss = _masked_mean(
+        (posture_error / 30.0).square(), targets["posture_mask"]
+    )
 
     weapon_idx = recorded_actions[..., 7].round().long().clamp(
         0, WEAPON_CLASSES - 1
@@ -540,10 +567,17 @@ def _aim_anchor_loss(
     fire_mask = targets["fire_mask"]
     fire_loss = _masked_mean(fire_ce * target_weights, fire_mask)
 
-    inner = float(look_weight) * look_loss + float(fire_weight) * fire_loss
+    inner = (
+        float(look_weight) * look_loss
+        + float(posture_weight) * posture_loss
+        + float(fire_weight) * fire_loss
+    )
     with torch.no_grad():
         yaw_mae = _masked_mean(look_error[..., 0].abs(), look_mask)
         pitch_mae = _masked_mean(look_error[..., 1].abs(), look_mask)
+        posture_pitch_mae = _masked_mean(
+            posture_error.abs(), targets["posture_mask"]
+        )
         fire_probability = fire_logits.softmax(dim=-1)[..., 1]
         positive = fire_mask & (targets["fire_target"] > 0)
         negative = fire_mask & ~positive
@@ -559,9 +593,11 @@ def _aim_anchor_loss(
     return {
         "inner": inner,
         "look": look_loss,
+        "posture": posture_loss,
         "fire": fire_loss,
         "yaw_mae_deg": yaw_mae,
         "pitch_mae_deg": pitch_mae,
+        "posture_pitch_mae_deg": posture_pitch_mae,
         "fire_accuracy": fire_accuracy,
         "fire_positive_probability": positive_probability,
         "fire_negative_probability": negative_probability,
@@ -586,6 +622,8 @@ def _pick_device() -> torch.device:
 def train(cfg: dict):
     seed = int(cfg.get("seed", 0))
     deterministic = bool(int(cfg.get("deterministic", 0)))
+    reset_optimizer = bool(int(cfg.get("reset_optimizer", 0)))
+    reset_lattice = bool(int(cfg.get("reset_lattice", 0)))
     if deterministic:
         # Must be set before the first CUDA context is created. This is
         # required by deterministic cuBLAS matrix multiplies on CUDA 10.2+.
@@ -615,6 +653,9 @@ def train(cfg: dict):
     }
     aim_anchor_coef = float(cfg.get("aim_anchor_coef", 0.0) or 0.0)
     aim_anchor_look_weight = float(cfg.get("aim_anchor_look_weight", 16.0))
+    aim_anchor_posture_weight = float(
+        cfg.get("aim_anchor_posture_weight", 4.0)
+    )
     aim_anchor_fire_weight = float(cfg.get("aim_anchor_fire_weight", 1.0))
     aim_anchor_yaw_deg = float(cfg.get("aim_anchor_yaw_deg", 12.0))
     aim_anchor_pitch_deg = float(cfg.get("aim_anchor_pitch_deg", 14.0))
@@ -623,6 +664,7 @@ def train(cfg: dict):
     for name, value in (
         ("aim_anchor_coef", aim_anchor_coef),
         ("aim_anchor_look_weight", aim_anchor_look_weight),
+        ("aim_anchor_posture_weight", aim_anchor_posture_weight),
         ("aim_anchor_fire_weight", aim_anchor_fire_weight),
         ("aim_anchor_yaw_deg", aim_anchor_yaw_deg),
         ("aim_anchor_pitch_deg", aim_anchor_pitch_deg),
@@ -643,7 +685,9 @@ def train(cfg: dict):
         print(
             "Recurrent aim anchor: ON "
             f"coef={aim_anchor_coef:g} "
-            f"look={aim_anchor_look_weight:g} fire={aim_anchor_fire_weight:g}"
+            f"look={aim_anchor_look_weight:g} "
+            f"posture={aim_anchor_posture_weight:g} "
+            f"fire={aim_anchor_fire_weight:g}"
         )
     if lattice_direction_coef > 0:
         print(f"Lattice direction objective: ON coef={lattice_direction_coef:g}")
@@ -672,11 +716,13 @@ def train(cfg: dict):
         except ValueError:
             resume_steps = 0
         optimizer_checkpoint = resume_dir / f"optimizer_{resume_steps:08d}.pt"
-        if optimizer_checkpoint.is_file():
+        if optimizer_checkpoint.is_file() and not reset_optimizer:
             optimizer.load_state_dict(torch.load(
                 optimizer_checkpoint, map_location=device
             ))
             print(f"Restored optimizer from {optimizer_checkpoint}")
+        elif reset_optimizer:
+            print("Optimizer reset requested; loaded policy weights only")
         print(f"Resumed from {latest} (env_steps={resume_steps:,})")
 
     from harness.env import Q2MultiEnv, discover_map_pool
@@ -947,7 +993,7 @@ def train(cfg: dict):
     lattice_instances = [
         sr for server in servers for sr in server._spatial_rewards
     ]
-    if resume_dir is not None:
+    if resume_dir is not None and not reset_lattice:
         from harness.spatial import load_lattice_state
         lattice_candidates = (
             resume_dir / f"lattice_{resume_steps:08d}.json.gz",
@@ -962,6 +1008,8 @@ def train(cfg: dict):
             )
         else:
             print("No lattice checkpoint found; maps will start from sidecar priors")
+    elif resume_dir is not None:
+        print("Lattice reset requested; rebuilding dynamic memory from map sidecar priors")
 
     def _close_all_servers() -> None:
         for server in servers:
@@ -1426,6 +1474,9 @@ def train(cfg: dict):
                 "visible_alive_rate": (
                     aim_anchor_targets["look_mask"].float().sum() / fire_denom
                 ),
+                "posture_moving_alive_rate": (
+                    aim_anchor_targets["posture_mask"].float().sum() / fire_denom
+                ),
                 "fire_positive_rate": (
                     aim_anchor_targets["fire_target"].float().sum() / fire_denom
                 ),
@@ -1502,9 +1553,11 @@ def train(cfg: dict):
             "aim_anchor_inner_loss",
             "aim_anchor_weighted_loss",
             "aim_anchor_look_loss",
+            "aim_anchor_posture_loss",
             "aim_anchor_fire_loss",
             "aim_anchor_yaw_mae_deg",
             "aim_anchor_pitch_mae_deg",
+            "aim_anchor_posture_pitch_mae_deg",
             "aim_anchor_fire_accuracy",
             "aim_anchor_fire_positive_probability",
             "aim_anchor_fire_negative_probability",
@@ -1543,6 +1596,7 @@ def train(cfg: dict):
                     act_params,
                     act_b,
                     fire_allowed=fire_allowed_chunked[b],
+                    obs=obs_b,
                 )
                 log_prob = log_prob.reshape(-1)
                 entropy = entropy.reshape(-1)
@@ -1586,9 +1640,11 @@ def train(cfg: dict):
                 aim_anchor_metrics = {
                     "inner": anchor_zero,
                     "look": anchor_zero,
+                    "posture": anchor_zero,
                     "fire": anchor_zero,
                     "yaw_mae_deg": anchor_zero,
                     "pitch_mae_deg": anchor_zero,
+                    "posture_pitch_mae_deg": anchor_zero,
                     "fire_accuracy": anchor_zero,
                     "fire_positive_probability": anchor_zero,
                     "fire_negative_probability": anchor_zero,
@@ -1602,6 +1658,7 @@ def train(cfg: dict):
                         {key: value[b] for key, value in aim_anchor_targets.items()},
                         aim_anchor_fire_class_weights,
                         look_weight=aim_anchor_look_weight,
+                        posture_weight=aim_anchor_posture_weight,
                         fire_weight=aim_anchor_fire_weight,
                     )
                 aim_anchor_component = aim_anchor_coef * aim_anchor_metrics["inner"]
@@ -1728,9 +1785,13 @@ def train(cfg: dict):
                             aim_anchor_metrics["inner"].detach(),
                             aim_anchor_component.detach(),
                             aim_anchor_metrics["look"].detach(),
+                            aim_anchor_metrics["posture"].detach(),
                             aim_anchor_metrics["fire"].detach(),
                             aim_anchor_metrics["yaw_mae_deg"].detach(),
                             aim_anchor_metrics["pitch_mae_deg"].detach(),
+                            aim_anchor_metrics[
+                                "posture_pitch_mae_deg"
+                            ].detach(),
                             aim_anchor_metrics["fire_accuracy"].detach(),
                             aim_anchor_metrics[
                                 "fire_positive_probability"
@@ -1783,6 +1844,7 @@ def train(cfg: dict):
                         params_post,
                         act_post,
                         fire_allowed=fire_allowed_chunked[start_i:end_i],
+                        obs=obs_post,
                     )
                     log_ratio_post = (
                         log_prob_post.reshape(-1)
@@ -1949,9 +2011,11 @@ def train(cfg: dict):
                 "aim_anchor_inner_loss",
                 "aim_anchor_weighted_loss",
                 "aim_anchor_look_loss",
+                "aim_anchor_posture_loss",
                 "aim_anchor_fire_loss",
                 "aim_anchor_yaw_mae_deg",
                 "aim_anchor_pitch_mae_deg",
+                "aim_anchor_posture_pitch_mae_deg",
                 "aim_anchor_fire_accuracy",
                 "aim_anchor_fire_positive_probability",
                 "aim_anchor_fire_negative_probability",
@@ -2107,10 +2171,16 @@ def train(cfg: dict):
                 ("enemy_visible_any", "targeting/visible_any_rate"),
                 ("enemy_visible_count", "targeting/visible_count_mean"),
                 ("enemy_visible_nearest", "targeting/visible_nearest_mean"),
+                ("enemy_visible_exposure_sum", "targeting/exposure_sum_mean"),
+                ("enemy_visible_exposure_max", "targeting/exposure_max_mean"),
                 ("aim_aligned", "targeting/spatial_aligned_rate"),
                 ("aim_yaw_error", "targeting/yaw_error_mean"),
                 ("aim_pitch_error", "targeting/pitch_error_mean"),
                 ("aim_tracking_quality", "targeting/tracking_quality_mean"),
+                ("target_hit_event", "targeting/hit_event_rate"),
+                ("target_hit_streak", "targeting/hit_streak_mean"),
+                ("target_repeat_hit_event", "targeting/repeat_hit_event_rate"),
+                ("target_kill_event", "targeting/kill_event_rate"),
                 ("fire_aligned", "targeting/aligned_fire_rate"),
                 ("fire_unseen", "targeting/unseen_fire_rate"),
                 ("fire_unaligned", "targeting/unaligned_fire_rate"),
@@ -2133,12 +2203,17 @@ def train(cfg: dict):
                 ("hook_correction_success", "hook/correction_success_rate"),
                 ("hook_correction_timeout", "hook/correction_timeout_rate"),
                 ("hook_correction_heat", "hook/target_heat_mean"),
+                ("thermal_target_tracks", "lattice/thermal_track_count_mean"),
+                ("thermal_target_heat", "lattice/thermal_heat_mean"),
+                ("thermal_target_age", "lattice/thermal_age_ticks_mean"),
             ):
                 writer.add_scalar(tag, rollout_behavior[key] / denom, total_env_steps)
             visible_denom = max(1.0, rollout_behavior["enemy_visible_any"])
             for key, tag in (
                 ("enemy_visible_count", "targeting/visible_count_when_visible_mean"),
                 ("enemy_visible_nearest", "targeting/visible_nearest_when_visible_mean"),
+                ("enemy_visible_exposure_sum", "targeting/exposure_sum_when_visible_mean"),
+                ("enemy_visible_exposure_max", "targeting/exposure_max_when_visible_mean"),
                 ("aim_yaw_error", "targeting/yaw_error_when_visible_mean"),
                 ("aim_pitch_error", "targeting/pitch_error_when_visible_mean"),
                 ("aim_tracking_quality", "targeting/tracking_quality_when_visible_mean"),

@@ -1,6 +1,19 @@
 # Network-client telemetry audit — 2026-07-14
 
-## Verdict
+## Superseding prototype result
+
+The follow-up review and implementation are recorded in
+`TARGET-THERMAL-LATTICE-PROTOTYPE-2026-07-14.md`. The original verdict below
+correctly established that targets were present, but the richer audit found
+four quality blockers: origin-to-origin target geometry, absolute world target
+velocity, incorrect local-to-world lattice deposits, and incomplete
+continuous-action provenance. The shape-compatible prototype corrects them.
+The `engagement_anchor_v3` step-4,063,488 checkpoint was stopped and rejected
+after reaching 100% down-look and 70.5% backward commands; only the immutable
+step-4,055,296 policy pin is eligible for the next lineage, with a new
+optimizer and reset dynamic lattice.
+
+## Original verdict
 
 The 219-feature network-client observation is sufficient for the current
 prototype to learn ordinary target acquisition, alignment, firing, locomotion,
@@ -10,10 +23,10 @@ fire-gate permission, and damage events. No missing target channel explains the
 current inherited policy's backward/downward behavior.
 
 The representation is not complete for high-skill combat. Stable target
-identity remains debug-only, entity velocity is world-space while relative
-position is view-local, and the 16 navigation rays are horizontal. Those are
-follow-up improvements for target continuity, projectile leading, and vertical
-clearance; they do not block the basic engagement prototype.
+identity remains debug-only and the 16 navigation rays are horizontal. Local
+relative velocity and a best actionable damage point are now implemented;
+Connection/life-epoch identity is now implemented for thermal tracks;
+projectile leading and vertical clearance remain follow-up improvements.
 
 ## Audited channels
 
@@ -62,4 +75,3 @@ Before promoting a checkpoint, require a seasonal window with all of:
 - zero failed network rounds, echo timeouts, or stale-policy admission;
 - a successful stock/generated transition and a played v6 map with its lethal
   guard and lighting contract loaded.
-

@@ -17,6 +17,10 @@ from harness.teacher_protocol import (
 )
 
 
+def test_target_solution_teacher_semantics_are_versioned():
+    assert ML_TEACHER_VERSION == 2
+
+
 def _packet(*, source=ML_CONTROL_LEGACY_BOT, yaw=12.0):
     values = list(struct.unpack(OBS_FMT, bytes(OBS_SIZE)))
     values[0:3] = [ML_OBS_MAGIC, 77, 2]
