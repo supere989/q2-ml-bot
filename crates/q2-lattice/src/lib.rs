@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 pub mod atlas;
+pub mod dynstate;
 
 const CHANNELS: usize = 5;
 const OUTPUTS: usize = 4;
