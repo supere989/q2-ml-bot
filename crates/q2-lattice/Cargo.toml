@@ -20,3 +20,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 zstd = "0.13"
+
+[[bin]]
+name = "q2-atlas-pack"
+path = "src/bin/q2_atlas_pack.rs"
