@@ -135,7 +135,7 @@ class VoxelSpatialReward:
     backward_movement_penalty: float = 0.010
     slow_movement_penalty: float = 0.012
     overspeed_penalty: float = 0.008
-    horizon_pitch_limit: float = 30.0
+    horizon_pitch_limit: float = 15.0
     horizon_pitch_penalty: float = 0.006
     jump_cost: float = 0.006
     slow_jump_penalty: float = 0.014
@@ -342,7 +342,7 @@ class VoxelSpatialReward:
             backward_movement_penalty=_env_float("R_MOVE_BACKWARD", 0.010),
             slow_movement_penalty=_env_float("R_MOVE_SLOW", 0.012),
             overspeed_penalty=_env_float("R_MOVE_OVERSPEED", 0.008),
-            horizon_pitch_limit=_env_float("Q2_HORIZON_PITCH_LIMIT", 30.0),
+            horizon_pitch_limit=_env_float("Q2_HORIZON_PITCH_LIMIT", 15.0),
             horizon_pitch_penalty=_env_float("R_HORIZON_PITCH", 0.006),
             jump_cost=_env_float("R_JUMP_COST", 0.006),
             slow_jump_penalty=_env_float("R_JUMP_SLOW", 0.014),

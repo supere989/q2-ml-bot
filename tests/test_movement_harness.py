@@ -98,10 +98,11 @@ def test_backpedaling_is_not_rewarded_as_forward_traversal():
 def test_no_target_downlook_gets_bounded_horizon_penalty():
     reward = VoxelSpatialReward()
     level = reward.movement_context(_movement_obs(speed=300, pitch=0.0))
-    down = reward.movement_context(_movement_obs(speed=300, pitch=60.0))
+    down = reward.movement_context(_movement_obs(speed=300, pitch=25.0))
 
     assert level["horizon_pitch_penalty"] == 0.0
-    assert down["view_pitch_abs"] == 60.0
+    assert reward.horizon_pitch_limit == 15.0
+    assert down["view_pitch_abs"] == 25.0
     assert 0.0 < down["horizon_pitch_penalty"] <= reward.horizon_pitch_penalty
     assert down["movement_discipline"] < level["movement_discipline"]
 

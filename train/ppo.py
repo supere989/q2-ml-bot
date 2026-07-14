@@ -398,6 +398,7 @@ def _explained_variance(prediction: torch.Tensor, target: torch.Tensor) -> torch
 # Observation layout after entities: rays[16*4], hook zones[4*8], audio[5],
 # yaw, pitch. Extended observations are appended later and do not shift this.
 _AIM_PITCH_OBS_INDEX = ENT_OFF + ENT_CNT * ENT_DIM + 16 * 4 + 4 * 8 + 5 + 1
+_POSTURE_DOWNLOOK_DEG = 15.0
 
 
 def _wrap_degrees_tensor(angle: torch.Tensor) -> torch.Tensor:
@@ -1207,7 +1208,9 @@ def train(cfg: dict):
                 rollout_view_pitch += float(view_pitch.sum())
                 rollout_view_pitch_abs += float(np.abs(view_pitch).sum())
                 # Quake pitch is positive when looking down.
-                rollout_downlook_frames += int((view_pitch > 30.0).sum())
+                rollout_downlook_frames += int(
+                    (view_pitch > _POSTURE_DOWNLOOK_DEG).sum()
+                )
 
             if target_fire_gate:
                 rollout_fire_gate_samples += int(fire_allowed_np.size)
