@@ -106,9 +106,11 @@ def _write_config(
         'set mapqueue ""',
         "set map_random 0",
         # Real clients own all player slots.  No 3ZB2 or in-process ML bot may
-        # be auto-created by the public network-native lane.
+        # be auto-created by the public network-native lane, and ordinary
+        # clients must not be able to add legacy bots through Lithium's menu.
         "set autospawn 0",
         'set botlist ""',
+        "set allow_client_bot_controls 0",
         f"set maxclients {args.maxclients}",
         "set ml_enabled 0",
         "set ml_bot_slot 99",

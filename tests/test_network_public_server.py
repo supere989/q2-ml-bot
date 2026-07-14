@@ -70,6 +70,7 @@ def test_secret_config_is_0600_and_enables_conduit_before_map(tmp_path):
     assert mode == 0o600
     assert "set autospawn 0" in text
     assert 'set botlist ""' in text
+    assert "set allow_client_bot_controls 0" in text
     assert "set maxclients 6" in text
     assert "set ml_enabled 0" in text
     assert "set ml_client_telemetry 1" in text
