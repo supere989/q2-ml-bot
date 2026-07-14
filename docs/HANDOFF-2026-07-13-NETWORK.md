@@ -52,6 +52,12 @@ restart resumes all three at 4,030,720; short post-checkpoint segments made
 before the target gate and lattice-hook correction were archived and are not
 resume candidates.
 
+The first validated post-fix save is `policy_04038912.pt` with matching
+optimizer and lattice files. The collector drained 68 real-time packets after
+that save and admitted update 17 normally, with no restart or stale transition.
+ONNX export is non-fatal but currently skipped because the WSL training Python
+environment does not have the `onnx` package installed.
+
 The current clean TensorBoard segment is
 `ppo_public_network_live_v1_1784009343`. Its first six updates ran at about 18
 steps/sec with zero failed rounds or echo timeouts. Movement stayed between
@@ -166,9 +172,8 @@ normal Quake source address/port against the conduit datagram.
   heated hook-zone landing. Treat zero target acquisition/hook progress as an
   active quality blocker until generated-map/contact evidence changes it; do
   not infer success from loss or transport health.
-- Confirm the next periodic checkpoint crosses its catch-up boundary without
-  a process restart; the direct four-client checkpoint-pause reproduction has
-  already passed.
+- Restore the optional `onnx` Python package before an inference promotion if
+  a fresh ONNX artifact is required; PPO/checkpoint training is unaffected.
 - At the first automatic stock/generated map transition, confirm
   `network_client/map_epoch_resyncs` increments once, echo timeouts remain
   zero, and training continues.

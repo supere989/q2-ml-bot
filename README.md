@@ -8,8 +8,9 @@ private per-client conduit supplies authoritative 219-feature observations to
 PPO on WSL. It warm-started at 4,008,192 steps from
 `movement_reset_v2/policy_04008192.pt`; two of six slots remain available for
 humans. The old in-process ONNX runtime is archived/rollback-only. Transport
-and action admission are proven. The active restart resumes the clean
-4,030,720-step policy/optimizer/lattice checkpoint with a target-aligned fire
+and action admission are proven. The fixed run started from the clean
+4,030,720-step policy/optimizer/lattice checkpoint and produced its first
+validated post-fix checkpoint at 4,038,912 steps, with a target-aligned fire
 gate, bounded target-acquisition reward, escalating same-target hit credit,
 automatic network-client respawn, attested generated-map lattice sidecars, and
 lattice-directed hook corrections. Combat quality remains below the

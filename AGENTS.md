@@ -162,8 +162,9 @@ backup/visibility only, not a compute migration.
 
 **Active public run (updated 2026-07-13):** WSL tmux `q2_public_train` runs
 four normal Yamagi clients at live 10 Hz pacing from the pinned checkout under
-`~/q2-network-client-staging-20260713`. It resumes policy, optimizer, and
-lattice from `public_network_live_v1` step 4,030,720 with `Q2_EXT_OBS=1`, the
+`~/q2-network-client-staging-20260713`. The fixed run started from the clean
+`public_network_live_v1` policy/optimizer/lattice at step 4,030,720; its first
+validated post-fix checkpoint is step 4,038,912. It uses `Q2_EXT_OBS=1`, the
 Rust lattice extension, deterministic seed `7132026`, two PPO epochs, batch
 256, and `aim_anchor_coef=0`. TensorBoard watches only the current
 `ppo_public_network_live_v1_*` segment. The previous movement run and every
