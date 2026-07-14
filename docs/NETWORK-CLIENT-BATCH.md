@@ -76,6 +76,15 @@ pair therefore never enters the rollout buffer. The client conduit preserves
 its route sequence across this between-level lifecycle; a sequence rollback is
 still rejected as stale traffic.
 
+The same rule applies after a real-time pause such as PT/ONNX/lattice
+checkpoint export. Before dispatch, every local harness socket is drained
+without blocking. If any newer telemetry was queued, the action (which was
+computed from the pre-pause observation) is not sent. The collector returns a
+zero-reward `realtime_catchup_resync=True`, `trainable_transition=False`
+boundary from the newest observations; PPO resets its recurrent state and
+recomputes the action. This prevents both a rejected-echo crash and the more
+subtle admission of a temporally stale policy decision.
+
 Accepted info dictionaries contain:
 
 - `batch_round_id`, `policy_version`, and `action_tick`
@@ -95,7 +104,8 @@ wire packet carries the action tick but does not carry policy version.
 transitions, stale-policy rejections, stale/mismatched authoritative echoes,
 timeouts, authoritative-echo acceptance rate, and maximum within-round server
 frame span. `network_client/map_epoch_resyncs` counts the intentionally
-discarded map-boundary rounds.
+discarded map-boundary rounds. `realtime_catchup_resyncs` and
+`preflight_packets_drained` expose pauses caught before dispatch.
 
 ## Client filesystem and process isolation
 

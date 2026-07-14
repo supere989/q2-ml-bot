@@ -1035,6 +1035,8 @@ def train(cfg: dict):
                             "map-epoch round"
                         )
                     target_maps = set()
+                    preflight_packets_drained = 0
+                    map_epoch_resync = False
                     for si, results in step_results:
                         base = si * n_ml
                         for bi, (o, _r, _term, _trunc, info) in enumerate(results):
@@ -1042,6 +1044,12 @@ def train(cfg: dict):
                             obs_np[vi] = o
                             hx_list[vi] = policy.init_hidden(1, device)
                             target_maps.add(str(info.get("map", "unknown")))
+                            preflight_packets_drained += int(
+                                info.get("preflight_packets_drained", 0)
+                            )
+                            map_epoch_resync |= bool(
+                                info.get("map_epoch_resync", False)
+                            )
                             ep_rewards[vi] = 0.0
                             ep_base_rewards[vi] = 0.0
                             ep_spatial_rewards[vi] = 0.0
@@ -1049,8 +1057,10 @@ def train(cfg: dict):
                             ep_deaths[vi] = 0.0
                             ep_lengths[vi] = 0
                     print(
-                        "Network client map epoch resynchronized: "
-                        + ", ".join(sorted(target_maps))
+                        "Network client synchronization boundary: "
+                        f"kind={'map-epoch' if map_epoch_resync else 'realtime-catchup'} "
+                        f"maps={','.join(sorted(target_maps))} "
+                        f"drained={preflight_packets_drained}"
                     )
                     continue
 
