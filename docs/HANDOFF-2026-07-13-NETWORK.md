@@ -17,14 +17,17 @@ the aim, reward, movement, and first lattice investigations.
   `/home/raymond/q2-ml-bot/runs`; that directory contains only the current
   `ppo_public_network_live_v1_*` run.
 - The separate teacher server remains active on VPS loopback UDP 28001. The
-  WSL map farm remains the source of generated `mllive_*` maps.
+  WSL map farm remains the source of generated `mllive_*` maps. The live queue
+  holds two ready bundles and the teacher queue four, all using generator v5
+  and the complete bundle-v2 lattice/lighting contract.
 
 ## Exact source/runtime state
 
-- `q2-ml-bot`, branch `feature/rust-lattice`: `429a8e3` (pushed).
-- `q2-lithium-3zb2`, branch `ml-wip-20260611`: `0712a224` (pushed).
+- `q2-ml-bot`, branch `feature/rust-lattice`: implementation through
+  `200d28d` (pushed; this handoff update follows it).
+- `q2-lithium-3zb2`, branch `ml-wip-20260611`: `fa1c749` (pushed).
   Deployed `game.so` SHA-256 is
-  `a0396183ff3fa5738de40e58e73e628ce33cd300d93e2ad8177b80f15045a8b1`.
+  `b90e8efa03f8b50ae556293fbc4d35ca6f151bd4da2d80d56da4a15c95e85c30`.
 - `supere989/yquake2`, branch `feature/ml-client-harness`: `0382c0c0`
   (pushed). The staged WSL binary SHA-256 is
   `fdd996a5880b589fff6f0046e5739705213a7dc980d9dd5a5423d30128fa0e3b`.
@@ -41,11 +44,20 @@ The public trainer initially warm-started from
 steps with the matching 42,639-cell lattice. It uses four clients, 128-step
 rollouts, two PPO epochs, batch 256, LR `1e-5`, `vf_coef=0.1`, entropy
 `0.005`, auxiliary coefficient `0.01`, lattice-direction coefficient `0.02`,
-stateful policy, `Q2_EXT_OBS=1`, and live `timescale=1` pacing. Its first
-complete network checkpoint is `policy_04014336.pt` with the matching
-optimizer and lattice under
-`training-data/checkpoints/public_network_live_v1`; the active supervised
-restart resumed all three at 4,014,336.
+stateful policy, `Q2_EXT_OBS=1`, and live `timescale=1` pacing. The clean
+targeting/hook restart point is `policy_04030720.pt` with the matching optimizer
+and 43,845-cell lattice under
+`training-data/checkpoints/public_network_live_v1`. The active supervised
+restart resumes all three at 4,030,720; short post-checkpoint segments made
+before the target gate and lattice-hook correction were archived and are not
+resume candidates.
+
+The current clean TensorBoard segment is
+`ppo_public_network_live_v1_1784009343`. Its first six updates ran at about 18
+steps/sec with zero failed rounds or echo timeouts. Movement stayed between
+99 and 148 units/sec instead of collapsing after deaths. TensorBoard watches
+only this run; the failed/preflight segments are archived beneath the staging
+tree.
 
 The previous movement run was stopped only after that checkpoint was written.
 Its log, TensorBoard event, policy, lattice, ONNX, and checksums are archived
@@ -54,10 +66,17 @@ under:
 `/home/raymond/q2-network-client-staging-20260713/archive/movement_reset_v2-20260713T2115-pdt`
 
 The canonical movement checkpoint directory remains in place because it is
-the new run's warm-start source and the trainer rollback point. The VPS
-rollback module, unit, config, firewall, and old launcher are under:
+the new run's warm-start source and the trainer rollback point. The original
+VPS network-cutover rollback is under:
 
 `/home/q2mlbot/staging/network-client-57d4190-20260714/rollback`
+
+Later targeted rollback artifacts are under
+`/home/q2mlbot/staging/network-client-controls-20260714`,
+`network-targeting-20260714`, and `lattice-hook-cd4395f`. The ML sound,
+respawn, and map-bundle-v2 deployments have rollback copies under
+`ml-pain-sound-8c2a5d9`, `ml-respawn-fa1c749`, and
+`map-bundle-v2-200d28d`, respectively.
 
 ## Admission and validation evidence
 
@@ -65,10 +84,13 @@ rollback module, unit, config, firewall, and old launcher are under:
   vectors and 64/64 accepted transitions with zero echo timeouts.
 - The map-lifecycle canary crossed `q2dm1 -> q2dm3 -> q2dm1` with two clients,
   preserved monotonic route sequences, surfaced a zero-reward nontrainable
-  boundary, and resumed collection by server frame 5 on each map.
-- The first live PPO update admitted 512 transitions in 128 complete rounds,
-  with zero failed rounds/timeouts. TensorBoard exposed 112 scalar tags,
-  including `network_client/*` provenance/admission counters.
+  boundary, and resumed collection by server frame 5 on each map. Commit
+  `f930daf` also recognizes live intermission telemetry before stale-echo
+  exhaustion, preserving the same fail-closed admission rule.
+- The targeting/hook restart admitted 512 transitions in 128 complete rounds
+  at about 18 steps/sec with no failed round or process restart. TensorBoard
+  exposes 132 scalar tags, including target-gate/acquisition and lattice-hook
+  correction metrics.
 - Initial live throughput is about 18 environment steps/sec at normal public
   pacing. This is expected to be below the retired 56 steps/sec `timescale=8`
   local simulation.
@@ -81,6 +103,44 @@ rollback module, unit, config, firewall, and old launcher are under:
   dispatch, and resumed admitted transitions with zero timeouts. The active
   run logs this under `realtime_catchup_resyncs` and
   `preflight_packets_drained`.
+- Python masks fire unless sampled look ends within 12 degrees yaw / 14 degrees
+  pitch of a visible enemy. C independently requires a live hostile,
+  damageable, unprotected LOS target within 14/16 degrees and echoes a
+  suppression bit; PPO replaces the stored action and removes the exact sampled
+  fire log-probability when that last-moment shield triggers.
+- Target alignment has a 0.02 rising-edge reward with a 20-frame cooldown.
+  Same-target damaging hits within 30 frames add offense credit from 0.25x to
+  a 1.5x cap and reset on switch, timeout, or death.
+- Hook has no positive usage-rate reward. It selects reachable hook-zone
+  landings that advance toward opportunity/readiness heat and pays only bounded
+  new-best correction progress plus one arrival bonus. The no-op, blind, idle
+  release, and overspeed costs remain.
+- The zero-speed/action-state failure was a respawn deadlock, not missing
+  registration or dead usercmd transport. The old run accepted full rounds and
+  echoed about 88% forward intent, but the target gate also removed Quake's
+  death-screen attack button. `fa1c749` injects only the lifecycle respawn
+  input after recording the policy echo. A live proof showed repeated
+  `Lattice-* melted` deaths followed by continued episodes and 123--148
+  units/sec through updates 3--6; the old run was at exactly zero by update 3.
+- Generator v5 rejects overlapping slab/roof/platform pairs with 56--95 units
+  of free player-admitting headroom, and every spawn needs a clear 96-unit
+  column plus one supported 96-unit escape route. A 21-map matrix (seven styles
+  times seeds 1/7/42) had zero unsafe sandwiches, blocked columns, or trapped
+  starts.
+- Lighting v2 requires 98% direct floor coverage, minimum counted value 650,
+  world ambient 180, 900-value overhead sources, and a dedicated 850-value
+  internal source in each enterable room-like zone. The first real WSL
+  BSP/VIS/qrad build had 24 floor regions, 30 floor sources, 33/33 interior
+  sources, and a valid 1,381,476-byte lightdata lump below the 2 MiB limit.
+- Farm bundle v2 carries and verifies four artifacts: BSP, hook zones, lattice
+  priors, and routes/item timing. The WSL mirror publishes all files before the
+  queue item becomes visible; the public consumer installs the same attested
+  set atomically. A direct preload of `mllive_14732349` loaded seven prior
+  cells, 49 route nodes, and the item-timing table from its verified manifest.
+- Connected ML pain sounds now use explicit stock male samples; human clients
+  keep model-sexed sounds and legacy disconnected 3ZB2 bots remain silent.
+  This bypasses Yamagi's entity-state sexed lookup, so no client update or
+  warning suppression is required.
 
 ## Security boundary
 
@@ -101,10 +161,11 @@ normal Quake source address/port against the conduit datagram.
   the active trainer uses the established tmux fallback. Do not assume it will
   restart after a WSL reboot until the user bus or a system-level unit is
   repaired.
-- The first few live updates were finite and advancing, but early public
-  scores were negative from deaths/suicides and no combat kill had yet been
-  observed. This is a quality signal to monitor, not a transport failure:
-  transitions, action echoes, movement, and telemetry were all active.
+- The first target/hook updates on stock `q2dm7` were finite and advancing, but
+  contact remains sparse and the map exposes no eligible
+  heated hook-zone landing. Treat zero target acquisition/hook progress as an
+  active quality blocker until generated-map/contact evidence changes it; do
+  not infer success from loss or transport health.
 - Confirm the next periodic checkpoint crosses its catch-up boundary without
   a process restart; the direct four-client checkpoint-pause reproduction has
   already passed.
@@ -126,4 +187,7 @@ ssh valheim-server 'systemctl is-active q2mlbot.service \
 ```
 
 Do not restart or replace the live `game.so` merely to inspect it. Use the
-staged canary runtime and disjoint ports for subsequent C changes.
+staged canary runtime and disjoint ports for subsequent C changes. Never print
+the telemetry cvar or full ML-client command lines: the prototype client still
+receives the shared secret as a cvar argument. Rotate both mode-0600 env copies
+and restart the server/clients if that value is exposed.

@@ -26,8 +26,17 @@ and current findings.
 VPS because it disturbs 10 Hz frame pacing. WSL runs the enabled user service
 `q2-map-farm.service`, bound only to its Tailscale address at
 `http://100.86.206.50:32510`, and maintains two checksum-attested compiled
-map bundles. Production uses `--map_farm_url` to pull and atomically install
-them. `/health` reports queue depth/build state. If WSL is unavailable, the
+map bundles. Generator v5 rejects player-admitting 56--95-unit gaps between
+overlapping horizontal surfaces, requires a clear 96-unit spawn column and
+escape path, and gives each enterable room-like zone a dedicated internal
+light. Spawn-clear floor regions require at least 98% direct coverage from
+tagged lights of value 650 or higher. The validator recomputes the contract
+from emitted brushes/entities and checks compiled BSP lightdata. Bundle v2
+atomically carries BSP, hook zones, lattice priors, routes/item timing, and an
+installed checksum manifest; the trainer reads sidecars from
+`~/q2-rollout/runtime/baseq2/maps`. Production uses `--map_farm_url` to pull
+and install the same bundle. `/health` reports queue depth/build state. If WSL
+is unavailable, the
 live server keeps its current/armed map and retries; never restore local VPS
 compilation as an automatic fallback. The worker's ignored `q2tool` asset is
 copied into `~/q2-rollout/q2-ml-bot/maps/q2tools/` from the canonical WSL tree.
@@ -51,21 +60,22 @@ the active player count is six. WSL's `q2-teacher-receiver.service` writes atomi
 `~/q2-rollout/live-3zb2/teacher_batches`. The dedicated receiver and map-farm
 services are enabled user units on WSL.
 
-The public `q2mlbot.service` uses `maxclients=6` and four ML bots in slots 2-5,
-leaving slots 0-1 for two human players.
+The public `q2mlbot.service` uses `maxclients=6`; four network ML clients leave
+two slots available for human players. Do not assume fixed slot numbers because
+normal engine registration assigns whichever client slots are free.
 
-**Network-native client harness prototype (added 2026-07-13):** a separate
+**Network-native client harness primary trainer (promoted 2026-07-13):** a separate
 Yamagi checkout at `/home/raymondj/q2-ml-client`, pushed to
 `supere989/yquake2` branch `feature/ml-client-harness`, now runs policies as
 real protocol-34 player connections. `game.so` supplies privileged state
 through a default-off, token-authenticated UDP conduit routed by the client's
 `ml_client_id`; each client receives only its own `ml_obs_t`. Python support
 is in `harness/client_{protocol,env}.py`; design and cutover gates are in
-`docs/NETWORK-CLIENT-HARNESS.md`. An isolated two-client proof passed on one
-q2ded and reconstructed the existing 219-feature lattice vector. This is not
-yet the primary trainer: do not enable the conduit on production or replace the
-active WSL runtime until batched collection, action-version rejection,
-observation/reward parity, density, and seasonal gates pass.
+`docs/NETWORK-CLIENT-HARNESS.md`. The conduit is now enabled only on the public
+VPS/Tailscale lane, and four headless clients plus PPO run from the pinned WSL
+staging checkout. Synchronous collection, action/policy-version admission,
+stale rejection, map-epoch recovery, and deterministic checks passed. This is
+the primary trainer; the old in-process public ONNX runtime is rollback-only.
 
 ## Training Topology
 
@@ -150,30 +160,37 @@ backup/visibility only, not a compute migration.
   via the wsl-tunnel service above); events in `~/q2-ml-bot/runs/`.
 - Headless `q2ded` servers on ports 27910+, configs `ml_server_*.cfg`.
 
-**Active runtime (updated 2026-07-11):** the reward/terminal-fixed runtime was
-promoted to the canonical `~/q2_lithium_merge` path. The active `q2_ppo`
-migration uses that runtime, `Q2_EXT_OBS=1`, and disjoint port bases
-33400/33500. Do not replace its `lithium/game.so` while this run is active:
-servers reload it on round/map restart, so a copy silently changes reward
-semantics mid-run. The pre-fix runtime is retained only for forensic rollback
-at `~/q2_lithium_merge_DEPRECATED_pre_fixed_20260711`; never launch training
-or evaluation from it. Production remains separate and was not touched.
+**Active public run (updated 2026-07-13):** WSL tmux `q2_public_train` runs
+four normal Yamagi clients at live 10 Hz pacing from the pinned checkout under
+`~/q2-network-client-staging-20260713`. It resumes policy, optimizer, and
+lattice from `public_network_live_v1` step 4,030,720 with `Q2_EXT_OBS=1`, the
+Rust lattice extension, deterministic seed `7132026`, two PPO epochs, batch
+256, and `aim_anchor_coef=0`. TensorBoard watches only the current
+`ppo_public_network_live_v1_*` segment. The previous movement run and every
+discarded live segment are archived; never merge those later updates into the
+clean resume point.
 
-**Fresh movement run (started 2026-07-13):** WSL tmux `q2_ppo` runs
-`movement_reset_v2` from newly initialized weights (no `--resume`) against the
-16-map `mlmove_*.bsp` pool. Those maps have eight validated DM spawns. The run
-uses the Rust lattice extension, deterministic seed/game-seed `7132026`, 12
-servers × 8 bots, and writes only to `checkpoints/movement_reset_v2`,
-`observed_heat/movement_reset_v2`, and `runs/ppo_movement_reset_v2_*`. The
-pre-reset checkpoint/event/heat trees and trainer log were moved intact to
-`~/q2-ml-bot/archive/20260713-pre-movement-reset/`. Its locomotion contract is
-220–360 units/s with explicit slow-jump and hook-overspeed penalties; watch the
-new `movement/*`, `behavior/jump_*`, and `behavior/hook_overspeed_rate` tags.
-Do not resume or merge an archived policy into this run.
-The short `movement_reset_v1` false start was archived after telemetry exposed
-that generic `hook_action > 0` reward was paying protocol class 2, which is a
-C-side no-op. V2 rewards only class-1 hook fire, penalizes class 2, and rewards
-class-3 release specifically while overspeed.
+The server engagement gate must not own the death-screen lifecycle. Registered
+ML clients receive an internal attack button after their one-second death delay
+so Quake can respawn them, while the recorded policy echo remains the gated
+combat action. The 2026-07-13 proof held 123--148 units/s through updates 3--6,
+where the broken run fell to zero after every client died.
+
+Network fire is hard-masked unless sampled look ends within 12/14 degrees of
+an authoritative visible enemy; the C server independently enforces a looser
+14/16-degree shield and reports suppression for exact PPO reconciliation.
+Target acquisition receives a bounded edge reward, and repeated hits on the
+same target receive escalating offense credit until death/switch/timeout.
+
+Hook is not a positive usage-rate objective. A live hook-zone landing must
+advance toward positive lattice heat, and correction starts only for required
+traversal, stuck/slow movement, or escape pressure. It pays bounded new-best
+progress plus one arrival reward; blind/no-op/idle/overspeed costs remain.
+Lithium's attached hook overwrites the complete velocity at
+`hook_pullspeed=1700`, which can look like low gravity even though normal maps
+reset to `sv_gravity=800`. Do not attempt to tune the old Python-emitted
+`hook_gravity_comp`, `hook_min_lift`, `hook_pullscale`, or
+`hook_pullspeed_max` cvars: the C hook never implemented them.
 
 **Reproducible ablations (added 2026-07-11):** use all three controls together:
 `--seed N --game_seed N --deterministic 1`, and keep `Q2_ML_ASYNC=0`.

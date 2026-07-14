@@ -8,8 +8,12 @@ private per-client conduit supplies authoritative 219-feature observations to
 PPO on WSL. It warm-started at 4,008,192 steps from
 `movement_reset_v2/policy_04008192.pt`; two of six slots remain available for
 humans. The old in-process ONNX runtime is archived/rollback-only. Transport
-and action admission are proven; combat quality remains below the promotion
-target and must be judged by the seasonal soak, not loss convergence.
+and action admission are proven. The active restart resumes the clean
+4,030,720-step policy/optimizer/lattice checkpoint with a target-aligned fire
+gate, bounded target-acquisition reward, escalating same-target hit credit,
+automatic network-client respawn, attested generated-map lattice sidecars, and
+lattice-directed hook corrections. Combat quality remains below the
+promotion target and must be judged by the seasonal soak, not loss convergence.
 **See `docs/HANDOFF-2026-07-13-NETWORK.md` for the exact active topology,
 commits, rollback locations, validation evidence, and next checks.**
 
@@ -373,10 +377,10 @@ conservatively modify actions.
 ## Spatial Reward Shaping
 
 `harness/spatial.py` adds a training-side voxel reward without changing the C
-wire protocol or checkpoint shape. It rewards entering new position voxels,
-visible tactical engagement ranges, and proximity to required hook zones, while
-lightly penalizing stagnation. Generated-map objective/danger priors and live
-route/item readiness feed the existing 24-dimensional memory tail. The trainer
+wire protocol or checkpoint shape. It rewards entering new position voxels and
+visible tactical engagement ranges while lightly penalizing stagnation.
+Generated-map objective/danger priors and live route/item readiness feed the
+existing 24-dimensional memory tail. The trainer
 checkpoints learned cells alongside the policy and explicitly supervises
 movement along the pull vectors outside visible combat.
 The implementation contract and isolated real-engine smoke results are in
@@ -405,12 +409,32 @@ The live and teacher map farms additionally maintain a 50% arena-style quota
 in each ready queue (one of two public bundles and two of four teacher
 bundles), while the remaining capacity preserves the original style family.
 
-Hook telemetry distinguishes fire, release, and the reserved class-2 no-op.
-Only hook fire can earn contextual traversal/combat reward; the no-op is
-penalized, and releasing an active hook while overspeed is rewarded. This
-prevents a categorical policy from collecting “hook” reward without issuing a
-C-side hook command. `behavior/hook_action_rate` is the boolean aggregate;
-the split rates are the authoritative action breakdown.
+Generator v5 treats lighting and movement clearance as promotion contracts.
+It rejects overlapping horizontal surfaces with a player-admitting 56--95-unit
+gap, requires each spawn to have a clear 96-unit column and supported escape
+path, raises direct floor-light coverage to 98%, and assigns every enterable
+room, hallway, corner pocket, building, and safe under-platform space its own
+internal light. Map-farm bundle v2 delivers the compiled BSP together with
+hook zones, lattice priors, routes/item timing, and a checksum manifest; the
+trainer fails closed on missing or corrupt farm sidecars. See
+`docs/MAP-LIGHTING-GEOMETRY-CONTRACT.md` for the exact thresholds.
+
+Hook telemetry distinguishes fire, release, and the reserved class-2 no-op,
+but hook use is no longer a positive rate/value objective. A correction can
+start only for required traversal, stuck/slow movement, or escape pressure,
+and only when a live hook-zone landing advances toward a positive heated
+lattice cell. One fixed correction pays bounded new-best displacement plus one
+arrival bonus; replaying the same ground cannot farm reward. Blind fire, the
+class-2 no-op, idle release, and overspeed retain their costs. TensorBoard's
+`behavior/hook_action_rate` remains diagnostic only; authoritative progress is
+under `hook/target_*`, `hook/progress_*`, and `hook/correction_*`.
+
+The live server still uses Lithium's real `hook_pullspeed 1700` actuator. In
+the current C implementation an attached hook replaces the player's complete
+velocity every frame, so it can look like low gravity even though maps without
+a gravity key reset to normal `sv_gravity 800`. The former
+`hook_gravity_comp`, `hook_min_lift`, `hook_pullscale`, and
+`hook_pullspeed_max` config lines were inert and are no longer emitted.
 
 Prototype smoke test and checkpoint regression gate:
 
