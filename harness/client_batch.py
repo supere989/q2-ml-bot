@@ -86,6 +86,7 @@ class BatchMetrics:
     echo_timeouts: int
     map_epoch_resyncs: int
     realtime_catchup_resyncs: int
+    look_clamp_resyncs: int
     preflight_packets_drained: int
     max_observed_frame_span: int
     fire_gate_suppressions: int
@@ -109,6 +110,7 @@ class BatchMetrics:
             f"{prefix}/echo_timeouts": self.echo_timeouts,
             f"{prefix}/map_epoch_resyncs": self.map_epoch_resyncs,
             f"{prefix}/realtime_catchup_resyncs": self.realtime_catchup_resyncs,
+            f"{prefix}/look_clamp_resyncs": self.look_clamp_resyncs,
             f"{prefix}/preflight_packets_drained": self.preflight_packets_drained,
             f"{prefix}/max_observed_frame_span": self.max_observed_frame_span,
             f"{prefix}/fire_gate_suppressions": self.fire_gate_suppressions,
@@ -152,6 +154,16 @@ class _MatchedEcho:
 @dataclass(frozen=True)
 class _MapEpoch:
     telemetry: ClientTelemetry
+    stale_echoes: int
+    mismatched_echoes: int
+
+
+@dataclass(frozen=True)
+class _LookClamp:
+    """Causal action whose pitch was clipped by a newer live view state."""
+
+    telemetry: ClientTelemetry
+    echo_tick: int
     stale_echoes: int
     mismatched_echoes: int
 
@@ -214,6 +226,7 @@ class Q2NetworkClientBatch:
         self._echo_timeouts = 0
         self._map_epoch_resyncs = 0
         self._realtime_catchup_resyncs = 0
+        self._look_clamp_resyncs = 0
         self._preflight_packets_drained = 0
         self._max_observed_frame_span = 0
         self._fire_gate_suppressions = 0
@@ -266,10 +279,12 @@ class Q2NetworkClientBatch:
             abs(float(debug[4]) - expected_forward) <= self.movement_tolerance
             and abs(float(debug[5]) - expected_right) <= self.movement_tolerance
         )
-        look_matches = (
+        yaw_matches = (
             abs(float(debug[6]) - float(dispatch.action.look_yaw))
             <= self.look_tolerance
-            and abs(float(debug[7]) - float(dispatch.action.look_pitch))
+        )
+        pitch_matches = (
+            abs(float(debug[7]) - float(dispatch.action.look_pitch))
             <= self.look_tolerance
         )
         echoed_fire = bool(int(debug[9]))
@@ -288,10 +303,46 @@ class Q2NetworkClientBatch:
             and int(debug[10]) == int(dispatch.action.hook)
             and int(debug[3]) == int(dispatch.action.weapon)
         )
+        # The public server continues running between policy inference and
+        # dispatch. A death/respawn or intervening frame can move pitch closer
+        # to Quake's hard +/-89 degree bound after the sampled action used its
+        # observation-time bound. Admit no transition in that case: a matching
+        # same-tick generation proves causality, and the bound-facing echo
+        # proves engine clipping rather than arbitrary action corruption.
+        observed_pitch = float(telemetry.observation.pitch)
+        expected_pitch = float(dispatch.action.look_pitch)
+        actual_pitch = float(debug[7])
+        pitch_clamped = (
+            echo_tick == dispatch.action_tick
+            and not pitch_matches
+            and (
+                (
+                    expected_pitch < -self.look_tolerance
+                    and observed_pitch <= -89.0 + self.look_tolerance
+                    and actual_pitch <= self.look_tolerance
+                    and abs(actual_pitch) <= abs(expected_pitch) + self.look_tolerance
+                )
+                or (
+                    expected_pitch > self.look_tolerance
+                    and observed_pitch >= 89.0 - self.look_tolerance
+                    and actual_pitch >= -self.look_tolerance
+                    and abs(actual_pitch) <= abs(expected_pitch) + self.look_tolerance
+                )
+            )
+        )
+        if (
+            pitch_clamped
+            and movement_matches
+            and yaw_matches
+            and button_matches
+            and reliable_command_matches
+        ):
+            return "clamped", echo_tick
         return (
             "matched" if (
                 movement_matches
-                and look_matches
+                and yaw_matches
+                and pitch_matches
                 and button_matches
                 and reliable_command_matches
             )
@@ -303,7 +354,7 @@ class Q2NetworkClientBatch:
         env: Q2NetworkClientEnv,
         dispatch: ClientActionDispatch,
         deadline: float,
-    ) -> _MatchedEcho | _MapEpoch:
+    ) -> _MatchedEcho | _MapEpoch | _LookClamp:
         sequence = dispatch.after_sequence
         stale_echoes = 0
         mismatched_echoes = 0
@@ -375,6 +426,13 @@ class Q2NetworkClientBatch:
                     getattr(observation, "terminal_reason", terminal_reason)
                 )
             state, echo_tick = self._echo_state(telemetry, dispatch)
+            if state == "clamped":
+                return _LookClamp(
+                    telemetry=telemetry,
+                    echo_tick=echo_tick,
+                    stale_echoes=stale_echoes,
+                    mismatched_echoes=mismatched_echoes,
+                )
             if state == "matched":
                 replacements = dict(reward_sums)
                 replacements.update(
@@ -408,7 +466,7 @@ class Q2NetworkClientBatch:
 
     @staticmethod
     def _result_rejections(
-        result: _MatchedEcho | _MapEpoch | None,
+        result: _MatchedEcho | _MapEpoch | _LookClamp | None,
     ) -> tuple[int, int]:
         if result is None:
             return 0, 0
@@ -594,6 +652,10 @@ class Q2NetworkClientBatch:
         *,
         round_id: int,
         policy_version: int,
+        action_dispatched: bool = False,
+        tags: tuple[BatchActionTag, ...] | None = None,
+        rejections: Sequence[tuple[int, int]] | None = None,
+        look_clamp_resync: bool = False,
     ) -> BatchRound:
         map_changed = any(drain.map_changed for drain in drains)
         intermission = any(
@@ -627,27 +689,31 @@ class Q2NetworkClientBatch:
             env.initial_result(sample, vector=self.vector)
             for env, sample in zip(self.envs, samples)
         ]
-        tags = tuple(
-            BatchActionTag(
-                round_id=round_id,
-                policy_version=policy_version,
-                client_index=index,
-                client_id=drain.latest.client_id,
-                client_slot=drain.latest.client_slot,
-                action_tick=drain.previous.server_frame,
+        if tags is None:
+            tags = tuple(
+                BatchActionTag(
+                    round_id=round_id,
+                    policy_version=policy_version,
+                    client_index=index,
+                    client_id=drain.latest.client_id,
+                    client_slot=drain.latest.client_slot,
+                    action_tick=drain.previous.server_frame,
+                )
+                for index, drain in enumerate(drains)
             )
-            for index, drain in enumerate(drains)
-        )
+        if rejections is None:
+            rejections = [(0, 0)] * len(drains)
         infos = []
-        for initial, tag, sample, drain in zip(
-            initial_results, tags, samples, drains
+        for initial, tag, sample, drain, rejection in zip(
+            initial_results, tags, samples, drains, rejections
         ):
+            stale, mismatched = rejection
             info = dict(initial[1])
             info.update({
                 "batch_round_id": tag.round_id,
                 "policy_version": tag.policy_version,
                 "action_tick": tag.action_tick,
-                "action_dispatched": False,
+                "action_dispatched": action_dispatched,
                 "authoritative_echo_tick": int(
                     sample.observation.action_debug[0]
                 ),
@@ -655,6 +721,7 @@ class Q2NetworkClientBatch:
                 "authoritative_echo_stale": True,
                 "trainable_transition": False,
                 "realtime_catchup_resync": True,
+                "look_clamp_resync": look_clamp_resync,
                 "preflight_packets_drained": drain.packet_count,
                 "preflight_from_frame": drain.previous.server_frame,
                 "preflight_to_frame": sample.server_frame,
@@ -665,8 +732,8 @@ class Q2NetworkClientBatch:
                 "terminal_reason": (
                     ML_TERMINAL_INTERMISSION if map_boundary else 0
                 ),
-                "stale_echoes_rejected": 0,
-                "mismatched_echoes_rejected": 0,
+                "stale_echoes_rejected": stale,
+                "mismatched_echoes_rejected": mismatched,
             })
             infos.append(info)
 
@@ -678,6 +745,7 @@ class Q2NetworkClientBatch:
         drained_count = sum(drain.packet_count for drain in drains)
         self._preflight_packets_drained += drained_count
         self._realtime_catchup_resyncs += 1
+        self._look_clamp_resyncs += int(look_clamp_resync)
         return BatchRound(
             round_id=round_id,
             policy_version=policy_version,
@@ -769,7 +837,9 @@ class Q2NetworkClientBatch:
                 self._executor.submit(self._collect_echo, env, dispatch, deadline)
                 for env, dispatch in zip(self.envs, dispatches)
             ]
-            echo_results: list[_MatchedEcho | _MapEpoch | None] = [None] * len(
+            echo_results: list[
+                _MatchedEcho | _MapEpoch | _LookClamp | None
+            ] = [None] * len(
                 futures
             )
             errors: list[AuthoritativeEchoError] = []
@@ -837,6 +907,27 @@ class Q2NetworkClientBatch:
                     ),
                     timed_out=any(error.timed_out for error in errors),
                 ) from errors[0]
+
+            look_clamps = [
+                result for result in echo_results
+                if isinstance(result, _LookClamp)
+            ]
+            if look_clamps:
+                boundary_drains = [
+                    env.drain_latest_telemetry() for env in self.envs
+                ]
+                return self._preflight_boundary(
+                    boundary_drains,
+                    round_id=round_id,
+                    policy_version=version,
+                    action_dispatched=True,
+                    tags=tags,
+                    rejections=[
+                        self._result_rejections(result)
+                        for result in echo_results
+                    ],
+                    look_clamp_resync=True,
+                )
 
             accepted = [
                 result
@@ -926,6 +1017,7 @@ class Q2NetworkClientBatch:
             echo_timeouts=self._echo_timeouts,
             map_epoch_resyncs=self._map_epoch_resyncs,
             realtime_catchup_resyncs=self._realtime_catchup_resyncs,
+            look_clamp_resyncs=self._look_clamp_resyncs,
             preflight_packets_drained=self._preflight_packets_drained,
             max_observed_frame_span=self._max_observed_frame_span,
             fire_gate_suppressions=self._fire_gate_suppressions,

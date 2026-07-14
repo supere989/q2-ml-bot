@@ -50,6 +50,7 @@ def _telemetry(
     damage_dealt=0.0,
     map_name="q2dm1",
     gate_flags=0,
+    pitch=0.0,
 ):
     debug = np.zeros(12, dtype=np.float32)
     debug[0] = echo_tick
@@ -72,6 +73,7 @@ def _telemetry(
             else (1 if terminal else 0)
         ),
         reward_damage_dealt=damage_dealt,
+        pitch=pitch,
     )
     return ClientTelemetry(
         sequence=sequence,
@@ -337,6 +339,45 @@ def test_same_tick_echo_rejects_stale_action_generation():
             batch.collect_round(
                 [Action(look_yaw=5.5, look_pitch=-3.25)], policy_version=8
             )
+    finally:
+        batch.close()
+
+
+def test_same_tick_engine_pitch_clamp_returns_nontrainable_resync():
+    events = []
+    generation_flags = ML_ACTION_GENERATION_VALID | (
+        (10 % 6) << ML_ACTION_GENERATION_SHIFT
+    )
+    env = _FakeEnv(
+        "client-a",
+        0,
+        [
+            _telemetry(
+                "client-a", 0, 2, 11, echo_tick=10, accepted=1,
+                look_yaw=-16.48, look_pitch=-15.59, pitch=-89.0,
+                forward=-0.03, right=0.71, jump=True, hook=1, weapon=7,
+                gate_flags=generation_flags,
+            )
+        ],
+        events,
+    )
+    batch = Q2NetworkClientBatch([env], round_timeout=1.0)
+    try:
+        batch.reset()
+        result = batch.collect_round(
+            [Action(
+                move_forward=-0.03, move_right=0.71,
+                look_yaw=-16.48, look_pitch=-26.85,
+                jump=True, hook=1, weapon=7,
+            )],
+            policy_version=8,
+        )
+        assert result.infos[0]["look_clamp_resync"] is True
+        assert result.infos[0]["trainable_transition"] is False
+        assert result.infos[0]["action_dispatched"] is True
+        assert batch.metrics.look_clamp_resyncs == 1
+        assert batch.metrics.failed_rounds == 0
+        assert batch.metrics.transitions_accepted == 0
     finally:
         batch.close()
 
