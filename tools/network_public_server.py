@@ -179,7 +179,7 @@ def _build_command(
     config: Path,
 ) -> list[str]:
     del q2_root  # retained in the signature to make the launch boundary clear
-    return [
+    command = [
         "stdbuf",
         "-oL",
         "-eL",
@@ -187,15 +187,18 @@ def _build_command(
         "+set",
         "game",
         "lithium",
-        "+set",
-        "ip",
-        os.environ.get("Q2_BIND_IP", ""),
+    ]
+    bind_ip = os.environ.get("Q2_BIND_IP", "").strip()
+    if bind_ip:
+        command.extend(["+set", "ip", bind_ip])
+    command.extend([
         "+set",
         "port",
         str(args.port),
         "+exec",
         config.name,
-    ]
+    ])
+    return command
 
 
 def _server_command(proc: subprocess.Popen, command: str) -> None:

@@ -92,6 +92,7 @@ def test_q2ded_command_never_contains_secret(tmp_path, monkeypatch):
     assert SECRET not in " ".join(command)
     assert command[-2:] == ["+exec", config.name]
     assert command[command.index("port") + 1] == "28000"
+    assert "ip" not in command
 
 
 def test_service_uses_protected_environment_file_and_network_launcher():
