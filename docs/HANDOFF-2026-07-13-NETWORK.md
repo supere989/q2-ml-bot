@@ -81,6 +81,9 @@ segment enables the recurrent aim anchor at a conservative coefficient 0.02
 with one complete 512-sample minibatch. Its first update logged 65.63% visible
 alive frames, finite look/fire losses, and 3.52% fire-gate permission; those are
 pipeline proofs, not yet a combat-quality promotion.
+The run subsequently wrote its first complete matching policy/optimizer/lattice
+checkpoint at step 4,063,488; ONNX remains optional and unavailable in this
+Python environment.
 
 The previous `public_network_live_v1` segment crossed the real
 `mllive_33336964 -> q2dm5` transition after `ff3ad84`, incremented the map epoch

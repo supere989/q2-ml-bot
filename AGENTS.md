@@ -173,6 +173,10 @@ only the current `ppo_public_network_engagement_anchor_v3_*` segment. The previo
 discarded live segment are archived; never merge those later updates into the
 clean resume point.
 
+The first complete checkpoint produced by this exact true-view/dense-posture/
+anchor configuration is policy/optimizer/lattice step 4,063,488 under
+`training-data/checkpoints/public_network_engagement_anchor_v3`.
+
 Do not point `Q2_RESUME_DIR` at the rolling checkpoint directory: `--resume`
 always chooses its latest lexicographic triple. The active run instead reads
 the three-file pin under
