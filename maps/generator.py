@@ -46,6 +46,12 @@ SPAWN_ESCAPE_STEP = 16
 JUMP_H      = 50           # max jump height (units)
 HOOK_MIN    = 150          # minimum useful hook distance
 HOOK_MAX    = 580          # maximum hook range
+HOOK_EYE_Z  = 22           # hook trace starts at player origin + view height
+HOOK_RELEASE_TICK_MSEC = 100
+HOOK_RELEASE_TICKS = tuple(range(1, 7))
+MAX_HOOK_SOURCES_PER_GEOMETRY = 2
+MAX_HOOK_CANDIDATES_V2 = 512
+MAX_RUNTIME_HOOK_ZONES = 256  # must match ml_bridge.c MAX_HOOK_ZONES
 DM_SPAWN_COUNT = 8         # headroom for six-player live matches
 MIN_SPAWN_SEPARATION = 384 # minimum 2D spacing for generated DM spawns
 SPAWN_EDGE_MARGIN = 96     # keep starts away from room edges/sky walls
@@ -159,6 +165,18 @@ class HookZone:
     anchor:  Tuple[float,float,float]
     landing: Tuple[float,float,float]
     distance: float
+    flags: int
+
+
+@dataclass(frozen=True)
+class HookClaimCandidateV2:
+    """Unproven source-bound hook schedule for compiled-world replay."""
+
+    source: Tuple[float, float, float]
+    anchor: Tuple[float, float, float]
+    landing: Tuple[float, float, float]
+    release_after_ticks: int
+    distance_milliunits: int
     flags: int
 
 
@@ -555,6 +573,7 @@ class MapGenerator:
         self.rooms: List[Room] = []
         self.connections: List[Connection] = []
         self.hook_zones: List[HookZone] = []
+        self.hook_claim_candidates_v2: List[Tuple[str, HookClaimCandidateV2]] = []
         self.spawn_points: List[Tuple[int, int, int]] = []
         self.spawn_blockers: List[SolidBox] = []
         self.light_occluders: List[SolidBox] = []
@@ -1245,14 +1264,6 @@ class MapGenerator:
                 ))
                 self._loot_sites.append(("platform", cx, cy, fz + 24))
                 self._loot_sites.append(("tower", cx, cy, fz + height + 48))
-                if HOOK_MIN <= height <= HOOK_MAX:
-                    self.hook_zones.append(HookZone(
-                        anchor=(float(cx), float(cy), float(fz + height)),
-                        landing=(float(cx), float(cy),
-                                 float(fz + height + PLAYER_H + 4)),
-                        distance=float(height),
-                        flags=HOOK_WALL,
-                    ))
                 self.large_building_count += 1
                 break
 
@@ -1351,13 +1362,6 @@ class MapGenerator:
         cx_t = tx + TOWER_BASE // 2
         cy_t = ty + TOWER_BASE // 2
         w.add_entity("item_quad", {"origin": f"{cx_t} {cy_t} {top + 24}"})
-        if HOOK_MIN <= (top - fz) <= HOOK_MAX:
-            self.hook_zones.append(HookZone(
-                anchor=(float(cx_t), float(cy_t), float(top)),
-                landing=(float(cx_t), float(cy_t), float(top + PLAYER_H + 4)),
-                distance=float(top - fz),
-                flags=HOOK_WALL | HOOK_REQUIRED,
-            ))
         self.objectives.append({
             "item": "item_quad", "x": cx_t, "y": cy_t, "z": top + 24,
             "guard": "tower", "height": top - fz, "value": 1.0,
@@ -1394,13 +1398,6 @@ class MapGenerator:
                 # weapon repulsion diversifies nearby towers instead of every
                 # top getting an identical power-weapon + armour pair.
                 self._loot_sites.append(("tower", cx_t, cy_t, top + 24))
-                if HOOK_MIN <= th <= HOOK_MAX:
-                    self.hook_zones.append(HookZone(
-                        anchor=(float(cx_t), float(cy_t), float(top)),
-                        landing=(float(cx_t), float(cy_t), float(top + PLAYER_H + 4)),
-                        distance=float(th),
-                        flags=HOOK_WALL | HOOK_REQUIRED,
-                    ))
                 self.tower_count += 1
 
     def _emit_lane_walls(self):
@@ -2398,60 +2395,167 @@ class MapGenerator:
 
     # ----- hook zone annotation -----
 
+    @staticmethod
+    def _hook_milliunits(point: Tuple[float, float, float]) -> Tuple[int, int, int]:
+        return tuple(round(axis * 1000.0) for axis in point)
+
+    @staticmethod
+    def _hook_l1_index(point: Tuple[float, float, float]) -> Tuple[int, int, int]:
+        # The Atlas origin is snapped to a multiple of 256, so equality in this
+        # origin-free 16u index is identical to equality in the final L1 index.
+        return tuple(math.floor(axis / 16.0) for axis in point)
+
+    @classmethod
+    def _hook_distance_milliunits(
+        cls,
+        source: Tuple[float, float, float],
+        anchor: Tuple[float, float, float],
+    ) -> int:
+        source_milliunits = cls._hook_milliunits(source)
+        anchor_milliunits = cls._hook_milliunits(anchor)
+        eye_milliunits = (
+            source_milliunits[0],
+            source_milliunits[1],
+            source_milliunits[2] + HOOK_EYE_Z * 1000,
+        )
+        return round(math.sqrt(sum(
+            (anchor_milliunits[axis] - eye_milliunits[axis]) ** 2
+            for axis in range(3)
+        )))
+
+    def _authored_floor_origins(self) -> List[Tuple[float, float, float]]:
+        """Return deterministic clear-at-source player origins for proposals.
+
+        These are generator facts only. The compiled preflight must prove the
+        corresponding standing support, reachability, trace, and trajectory.
+        """
+
+        origins = {
+            (float(sample[0]), float(sample[1]), float(region.floor_z - PLAYER_MINS_Z))
+            for region in self.light_regions
+            for sample in region.samples
+        }
+        origins.update(tuple(float(axis) for axis in spawn) for spawn in self.spawn_points)
+        return sorted(origins, key=lambda point: (point[2], point[1], point[0]))
+
+    def _real_ceiling_anchor(
+        self, landing: Tuple[float, float, float]
+    ) -> Optional[Tuple[float, float, float]]:
+        """Return the first real ceiling face above a standing floor origin.
+
+        A platform or roof below the room ceiling blocks the proposal instead
+        of being relabeled as a ceiling. This prevents both the former phantom
+        `cz-WALL_T` anchor and underside-to-top contradictions.
+        """
+
+        x, y, z = landing
+        overhead = [
+            surface for surface in self.horizontal_surfaces
+            if surface.box.x0 < x < surface.box.x1
+            and surface.box.y0 < y < surface.box.y1
+            and surface.box.z0 > z + PLAYER_MAXS_Z
+        ]
+        if not overhead:
+            return None
+        first = min(
+            overhead,
+            key=lambda surface: (
+                surface.box.z0,
+                surface.box.z1,
+                surface.kind,
+                surface.surface_id,
+            ),
+        )
+        if first.kind not in {"ceiling", "light_panel"}:
+            return None
+        return (float(x), float(y), float(first.box.z0))
+
     def _annotate_hook_zones(self):
-        """
-        For each room+platform combination, identify hook anchor points:
-          1. Ceiling above open floor  → HOOK_CEILING
-          2. Platform ceiling above floor gap → HOOK_CEILING | HOOK_REQUIRED
-             (gap is defined as platform height > JUMP_H from floor)
-        """
-        for room in self.rooms:
-            xc = room.wx + room.w // 2
-            yc = room.wy + room.d // 2
-            fz = room.floor_z
-            cz = room.ceil_z
-            room_h = cz - fz
+        """Publish source-bound v2 proposals, never traversal authority.
 
-            # Ceiling anchor for the main room floor
-            anchor_z = cz - WALL_T
-            if HOOK_MIN <= anchor_z - fz <= HOOK_MAX:
-                self.hook_zones.append(HookZone(
-                    anchor=(float(xc), float(yc), float(anchor_z)),
-                    landing=(float(xc), float(yc), float(fz + PLAYER_H)),
-                    distance=float(anchor_z - fz),
-                    flags=HOOK_CEILING,
+        The pool is deliberately overcomplete. A compiled-world preflight must
+        replay one exact source/release schedule, materialize the first six
+        proven geometries, and reject the map when six cannot be proved.
+        """
+
+        self.hook_zones = []
+        self.hook_claim_candidates_v2 = []
+        source_origins = self._authored_floor_origins()
+        grouped: dict[
+            Tuple[Tuple[float, float, float], Tuple[float, float, float], int],
+            List[HookClaimCandidateV2],
+        ] = {}
+
+        for region in sorted(
+            self.light_regions,
+            key=lambda value: (value.floor_z, value.bounds, value.region_id),
+        ):
+            for sample in sorted(region.samples):
+                landing = (
+                    float(sample[0]),
+                    float(sample[1]),
+                    float(region.floor_z - PLAYER_MINS_Z),
+                )
+                anchor = self._real_ceiling_anchor(landing)
+                if anchor is None:
+                    continue
+                sources = []
+                for source in source_origins:
+                    if self._hook_l1_index(source) == self._hook_l1_index(landing):
+                        continue
+                    distance_milliunits = self._hook_distance_milliunits(source, anchor)
+                    if not HOOK_MIN * 1000 <= distance_milliunits <= HOOK_MAX * 1000:
+                        continue
+                    sources.append((distance_milliunits, source))
+                sources.sort(key=lambda value: (
+                    value[0], value[1][2], value[1][1], value[1][0]
                 ))
+                candidates = []
+                for distance_milliunits, source in sources[
+                    :MAX_HOOK_SOURCES_PER_GEOMETRY
+                ]:
+                    for release_after_ticks in HOOK_RELEASE_TICKS:
+                        candidates.append(HookClaimCandidateV2(
+                            source=source,
+                            anchor=anchor,
+                            landing=landing,
+                            release_after_ticks=release_after_ticks,
+                            distance_milliunits=distance_milliunits,
+                            flags=HOOK_CEILING,
+                        ))
+                if candidates:
+                    grouped[(anchor, landing, HOOK_CEILING)] = candidates
 
-            # Platform ceiling anchors
-            for p in room.platforms:
-                px = (p['x0'] + p['x1']) // 2
-                py = (p['y0'] + p['y1']) // 2
-                pz = p['z']
-                dist_from_floor = pz - fz
-
-                # Anchor on underside of platform
-                under_z = pz
-                if HOOK_MIN <= dist_from_floor <= HOOK_MAX:
-                    flags = HOOK_CEILING
-                    if dist_from_floor > JUMP_H + 16:
-                        flags |= HOOK_REQUIRED  # can't reach by jumping
-                    self.hook_zones.append(HookZone(
-                        anchor=(float(px), float(py), float(under_z)),
-                        landing=(float(px), float(py), float(pz + PLAYER_H + 4)),
-                        distance=float(dist_from_floor),
-                        flags=flags,
-                    ))
-
-                # Anchor on main ceiling above platform top
-                above_z = cz - WALL_T
-                dist_from_plat = above_z - (pz + p['thick'])
-                if HOOK_MIN <= dist_from_plat <= HOOK_MAX:
-                    self.hook_zones.append(HookZone(
-                        anchor=(float(px), float(py), float(above_z)),
-                        landing=(float(px), float(py), float(pz + p['thick'] + PLAYER_H)),
-                        distance=float(dist_from_plat),
-                        flags=HOOK_CEILING,
-                    ))
+        for geometry in sorted(grouped, key=lambda value: (
+            value[0][2], value[0][1], value[0][0],
+            value[1][2], value[1][1], value[1][0], value[2],
+        )):
+            if len(self.hook_zones) >= MAX_RUNTIME_HOOK_ZONES:
+                break
+            candidates = sorted(grouped[geometry], key=lambda candidate: (
+                candidate.distance_milliunits,
+                candidate.source[2], candidate.source[1], candidate.source[0],
+                candidate.release_after_ticks,
+            ))
+            remaining = MAX_HOOK_CANDIDATES_V2 - len(self.hook_claim_candidates_v2)
+            if remaining <= 0:
+                break
+            candidates = candidates[:remaining]
+            if not candidates:
+                continue
+            geometry_ordinal = len(self.hook_zones)
+            for candidate_ordinal, candidate in enumerate(candidates):
+                claim_id = (
+                    f"hook:{geometry_ordinal:04d}:candidate:{candidate_ordinal:04d}"
+                )
+                self.hook_claim_candidates_v2.append((claim_id, candidate))
+            projection = candidates[0]
+            self.hook_zones.append(HookZone(
+                anchor=projection.anchor,
+                landing=projection.landing,
+                distance=projection.distance_milliunits / 1000.0,
+                flags=projection.flags,
+            ))
 
     # ----- skybox (prevents leaks) -----
 
@@ -2605,6 +2709,7 @@ class MapGenerator:
             "connections": len(self.connections),
             "platforms": sum(len(r.platforms) for r in self.rooms),
             "hook_zones": len(self.hook_zones),
+            "hook_claim_candidates_v2_count": len(self.hook_claim_candidates_v2),
             "hook_required": sum(1 for z in self.hook_zones if z.flags & HOOK_REQUIRED),
             "arenas": sum(1 for r in self.rooms if r.kind == 'arena'),
             "kill_planes": 1 if self.rooms else 0,
@@ -2711,6 +2816,28 @@ class MapGenerator:
             ],
         }
 
+    def hook_claim_candidates_v2_manifest(self) -> dict:
+        """Return non-admissible proposals for exact compiled-world replay."""
+
+        return {
+            "schema": "q2-hook-claim-candidates-v2",
+            "tick_msec": HOOK_RELEASE_TICK_MSEC,
+            "status": "unproven",
+            "bundle_admissible": False,
+            "records": [
+                {
+                    "claim_id": claim_id,
+                    "source_milliunits": list(self._hook_milliunits(candidate.source)),
+                    "anchor_milliunits": list(self._hook_milliunits(candidate.anchor)),
+                    "landing_milliunits": list(self._hook_milliunits(candidate.landing)),
+                    "release_after_ticks": candidate.release_after_ticks,
+                    "distance_milliunits": candidate.distance_milliunits,
+                    "flags": candidate.flags,
+                }
+                for claim_id, candidate in self.hook_claim_candidates_v2
+            ],
+        }
+
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -2742,6 +2869,7 @@ def generate_map(name: str, seed: Optional[int], out_dir: Path, grid_n: int = 5,
         **gen.stats(),
         "lighting": gen.lighting_manifest(),
         "safety": gen.safety_manifest(),
+        "hook_claim_candidates_v2": gen.hook_claim_candidates_v2_manifest(),
     }
     meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
@@ -2775,9 +2903,12 @@ def generate_map(name: str, seed: Optional[int], out_dir: Path, grid_n: int = 5,
     (out_dir / f"{name}.routes.json").write_text(
         json.dumps(route_graph, indent=1) + "\n")
 
-    # Sidecar format: simple text, one zone per line, easy to parse in C
+    # Runtime-compatible projection: simple text, one unique geometry per line.
+    # This raw generator output is not bundle-admissible. Compiled preflight
+    # replaces it with exactly six proven rows before canonical claim binding.
     # anchor_x anchor_y anchor_z  landing_x landing_y landing_z  distance  flags
-    lines = ["# q2-ml-bot hook zones — one per line"]
+    lines = ["# q2-ml-bot hook zones — unproven generator projection"]
+    lines.append("# bundle_admissible: false; compiled preflight must materialize final rows")
     lines.append(f"# generated: {name}  zones: {len(zones)}")
     lines.append("# anchor.x anchor.y anchor.z  landing.x landing.y landing.z  distance  flags")
     for z in zones:
