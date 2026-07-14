@@ -21,7 +21,7 @@ the aim, reward, movement, and first lattice investigations.
 
 ## Exact source/runtime state
 
-- `q2-ml-bot`, branch `feature/rust-lattice`: `0ff67da` (pushed).
+- `q2-ml-bot`, branch `feature/rust-lattice`: `429a8e3` (pushed).
 - `q2-lithium-3zb2`, branch `ml-wip-20260611`: `0712a224` (pushed).
   Deployed `game.so` SHA-256 is
   `a0396183ff3fa5738de40e58e73e628ce33cd300d93e2ad8177b80f15045a8b1`.
@@ -36,12 +36,16 @@ the aim, reward, movement, and first lattice investigations.
 
 ## Training start and rollback
 
-The public trainer warm-started from
+The public trainer initially warm-started from
 `checkpoints/movement_reset_v2/policy_04008192.pt` at 4,008,192 environment
 steps with the matching 42,639-cell lattice. It uses four clients, 128-step
 rollouts, two PPO epochs, batch 256, LR `1e-5`, `vf_coef=0.1`, entropy
 `0.005`, auxiliary coefficient `0.01`, lattice-direction coefficient `0.02`,
-stateful policy, `Q2_EXT_OBS=1`, and live `timescale=1` pacing.
+stateful policy, `Q2_EXT_OBS=1`, and live `timescale=1` pacing. Its first
+complete network checkpoint is `policy_04014336.pt` with the matching
+optimizer and lattice under
+`training-data/checkpoints/public_network_live_v1`; the active supervised
+restart resumed all three at 4,014,336.
 
 The previous movement run was stopped only after that checkpoint was written.
 Its log, TensorBoard event, policy, lattice, ONNX, and checksums are archived
@@ -68,6 +72,15 @@ rollback module, unit, config, firewall, and old launcher are under:
 - Initial live throughput is about 18 environment steps/sec at normal public
   pacing. This is expected to be below the retired 56 steps/sec `timescale=8`
   local simulation.
+- The first PT/optimizer/lattice/ONNX export exposed a real-time backlog: the
+  fail-closed collector rejected the next action after more than 16 queued
+  frames. No stale transition entered PPO. Commit `2d70b8c` added a
+  nonblocking pre-dispatch drain; any catch-up now returns a zero-reward,
+  nontrainable boundary so PPO recomputes the action from fresh state. A live
+  four-client reproduction paused four seconds, drained 171 packets without
+  dispatch, and resumed admitted transitions with zero timeouts. The active
+  run logs this under `realtime_catchup_resyncs` and
+  `preflight_packets_drained`.
 
 ## Security boundary
 
@@ -92,8 +105,9 @@ normal Quake source address/port against the conduit datagram.
   scores were negative from deaths/suicides and no combat kill had yet been
   observed. This is a quality signal to monitor, not a transport failure:
   transitions, action echoes, movement, and telemetry were all active.
-- Confirm the first new policy/optimizer/lattice checkpoint appears under
-  `training-data/checkpoints/public_network_live_v1`.
+- Confirm the next periodic checkpoint crosses its catch-up boundary without
+  a process restart; the direct four-client checkpoint-pause reproduction has
+  already passed.
 - At the first automatic stock/generated map transition, confirm
   `network_client/map_epoch_resyncs` increments once, echo timeouts remain
   zero, and training continues.
