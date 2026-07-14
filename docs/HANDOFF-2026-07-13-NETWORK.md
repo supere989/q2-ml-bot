@@ -6,18 +6,30 @@
 > step-4,063,488 anchor checkpoint described below is quality-invalid and must
 > not be resumed.
 
-> **2026-07-14 fresh-policy cutover:** the subsequent
+> **2026-07-14 historical fresh-policy cutover:** the subsequent
 > `public_network_thermal_target_v1` warm-start also reproduced 100% down-look
 > and about 66% backward commands despite healthy exact-target telemetry and
-> action echoes, so it was archived. The active run is now
+> action echoes, so it was archived. Its replacement at that time was
 > `public_network_thermal_fresh_v1`, starting at step zero with a fresh model,
 > optimizer, and lattice. It uses seed `7142026`, LR `1e-4`, batch 512, two
 > epochs, look/posture anchor `0.1`, fire-anchor weight zero, and the hard
-> exact-point fire gate. TensorBoard watches only
-> `training-data/runs/current_public_network_thermal_fresh_v1`; the trainer and
-> TensorBoard tmux sessions are `q2_ppo` and `q2_tb`. The mode-0600 WSL client
+> exact-point fire gate. Its TensorBoard root was
+> `training-data/runs/current_public_network_thermal_fresh_v1` and is now
+> archived. The trainer and TensorBoard tmux session names remain
+> `q2_ppo` and `q2_tb`. The mode-0600 WSL client
 > credential is `/home/raymond/q2-rollout/public-client-telemetry.env` and is
 > intentionally not the rollout-worker token.
+
+> **2026-07-14 BC canary cutover:** the fresh-policy line is now archived at
+> its last complete step 49,152. The active run is
+> `public_network_thermal_bc_live_v2`, a 100k/32-epoch distilled-backbone clone
+> of that policy with its matching 398-cell/four-client lattice. PPO reset only
+> the optimizer and now uses LR `1e-5`, anchor `0.02`, and fire-anchor weight
+> zero. TensorBoard watches only
+> `training-data/runs/current_public_network_thermal_bc_live_v2`. Its first
+> 16,384 generated-map transitions produced 49 hits, 15 repeat hits, and two
+> kills with no transport failures. The generated-map gate passed; the
+> stock-map gate remains open.
 
 This supersedes the runtime/process sections of
 `HANDOFF-2026-07-11.md`. The older document remains the historical record for
@@ -34,7 +46,7 @@ live evidence, sufficiency verdict, and remaining representation gaps.
   clients plus PPO in tmux session `q2_ppo`. These are ordinary
   protocol-34 player connections, not in-process bot entities.
 - Two of the public server's six client slots remain available for humans.
-- TensorBoard tmux `q2_tb` watches only the current fresh-policy event root
+- TensorBoard tmux `q2_tb` watches only the current BC-canary event root
   under the staging tree.
 - The separate teacher server remains active on VPS loopback UDP 28001. The
   WSL map farm remains the source of generated `mllive_*` maps. The live queue
@@ -44,15 +56,15 @@ live evidence, sufficiency verdict, and remaining representation gaps.
 ## Exact source/runtime state
 
 - `q2-ml-bot`, branch `feature/rust-lattice`: implementation through
-  `fb85aa7` (pushed; this documentation commit follows it).
-- `q2-lithium-3zb2`, branch `ml-wip-20260611`: `f49caee` (pushed).
+  `2c29ce7` (pushed; this documentation commit follows it).
+- `q2-lithium-3zb2`, branch `ml-wip-20260611`: `3555263` (pushed).
   Deployed `game.so` SHA-256 is
-  `f81ca42f000c0263cab44cabe2cb61881b485af31d584c04cfe7d850339ee2c8`
+  `d265c6da3ae92d8d3e71f71284701c60f8c3187b9b20971f2fe96d4f23144467`
   in both public and teacher runtimes. Rollback artifacts are under
   `/home/q2mlbot/staging/ml-view-angle-f49caee-20260714/rollback`.
-- `supere989/yquake2`, branch `feature/ml-client-harness`: `0382c0c0`
+- `supere989/yquake2`, branch `feature/ml-client-harness`: `200d777f`
   (pushed). The staged WSL binary SHA-256 is
-  `fdd996a5880b589fff6f0046e5739705213a7dc980d9dd5a5423d30128fa0e3b`.
+  `d509739817e491641fc8d191989af67bc4b411ec4e0e431ce8b89641257b8f27`.
 - WSL staged source/runtime root:
   `/home/raymond/q2-network-client-staging-20260713`.
 - The shared conduit secret is intentionally absent from git. The VPS copy is

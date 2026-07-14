@@ -170,12 +170,22 @@ formerly eligible immutable step-4,055,296 policy with a fresh optimizer and
 lattice, but reproduced 100% down-look and about 66% backward commands. It is
 also rejected and archived under the staging tree.
 
-The active `public_network_thermal_fresh_v1` lineage starts from a genuinely
-fresh policy at step zero. It uses `Q2_EXT_OBS=1`, the Rust persistent lattice,
-deterministic seed `7142026`, two PPO epochs, one full 512-sample recurrent
-minibatch, LR `1e-4`, a bootstrap `aim_anchor_coef=0.1`,
-`aim_anchor_fire_weight=0`, and `--reset_lattice 1`. Do not add `--resume` or
-`Q2_RESUME_DIR`. Exact target vectors mean
+The fresh `public_network_thermal_fresh_v1` experiment is stopped and archived.
+It repaired posture and forward motion, but its step-49,152 zero-state holdout
+still measured 39.6-degree yaw and 16.9-degree pitch MAE. The active
+`public_network_thermal_bc_live_v2` lineage starts from a 100k-sample,
+32-epoch distilled-backbone clone of that exact step. It passed the fixed
+holdout at 2.23-degree yaw, 1.69-degree pitch, 30.0% post-command alignment,
+92.7% aligned-fire precision, zero hidden fire, and 0.0041 movement drift.
+Head-only and 20k/8-epoch clones did not learn the geometry; do not promote
+them merely because their loss converged.
+
+The active run uses `Q2_EXT_OBS=1`, the Rust persistent lattice, deterministic
+seed `7142026`, two PPO epochs, one full 512-sample recurrent minibatch, LR
+`1e-5`, `aim_anchor_coef=0.02`, `aim_anchor_fire_weight=0`, and
+`--reset_optimizer 1`. It resumes the matching 398-cell/four-client
+`lattice_00049152.json.gz`; do not reset that lattice or point the resume path
+at the archived fresh directory. Exact target vectors mean
 eye-to-chest-first damage points clear from eye and common muzzle; entity
 velocity is local relative velocity. Exposure magnitude is exact; positive is
 fire-actionable and negative is shooter-protected tracking. A separate
@@ -185,12 +195,19 @@ pre-transform-fix deposits; rebuild it from attested map sidecars. See
 `docs/TARGET-THERMAL-LATTICE-PROTOTYPE-2026-07-14.md`.
 
 The active trainer is tmux `q2_ppo`; TensorBoard tmux `q2_tb` watches only
-`training-data/runs/current_public_network_thermal_fresh_v1`. The public
+`training-data/runs/current_public_network_thermal_bc_live_v2`. The public
 client-telemetry credential is durably mirrored on WSL, mode 0600, at
 `/home/raymond/q2-rollout/public-client-telemetry.env`. It is intentionally
 different from `Q2_ROLLOUT_TOKEN`; sourcing the rollout-worker secret for the
 public client conduit causes registration timeouts. Never print either value
 or full client command lines.
+
+The first 16,384 live generated-map transitions after the BC cutover had 1,539
+aligned frames, 1,117 aligned shots, 49 hit events, 15 repeat-hit events, two
+kills, 4.2% down-look, and zero failed rounds or echo timeouts. Forward
+commands were 53.0% versus 33.3% backward. The generated-map prototype gate is
+passed, but this is not a promotion. Require the same causal ladder on a
+stock-map season before declaring combat quality.
 
 The first fresh process correctly failed closed when all four conduits went
 silent before emitting a map-boundary packet during an uncached generated-map

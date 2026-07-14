@@ -24,14 +24,18 @@ command, the full local/world basis round-trips within 1e-3, and the live fresh
 run subsequently reached 8.1/4.2-degree conditional yaw/pitch error plus an
 aligned hit. The conduit and thermal/fire role separation are not the fault.
 
-That warm-start is also rejected and archived. The active
-`public_network_thermal_fresh_v1` lineage starts from a fresh model at step
-zero. By step 1,536 it recorded 0% down-look, -4.18 degrees mean view pitch,
-42.6% backward versus 48.4% forward commands, 7.4% hook use, and no transport
-failures/timeouts. Visible contact was sparse on stock `q2dm7`, so the
-telemetry is sufficient to train the bot, but combat sufficiency is not yet a
-promotion: alignment, admitted fire, hits, repeat hits, and kills must become
-nonzero in that causal order across both stock and generated maps.
+That warm-start is also rejected and archived. The subsequent fully fresh
+`public_network_thermal_fresh_v1` run proved that posture and movement could
+recover, but its step-49,152 deterministic holdout remained at 39.6-degree yaw
+and 16.9-degree pitch error. The active `public_network_thermal_bc_live_v2`
+canary is a distilled-backbone clone of that step with its matching lattice.
+Its holdout measures 2.23/1.69-degree yaw/pitch error, 30.0% post-command
+alignment, 92.7% aligned-fire precision, zero hidden fire, and 0.0041 movement
+drift. In the first 16,384 live generated-map transitions it produced 1,539
+aligned frames, 1,117 aligned shots, 49 hit events, 15 repeat-hit events, and
+two kills with 4.2% down-look and no transport errors. This is direct evidence
+that the telemetry is sufficient to train target engagement. The generated
+season passed; a stock-map season is still required before promotion.
 
 ## Original verdict
 
@@ -56,7 +60,7 @@ projectile leading and vertical clearance remain follow-up improvements.
 | true yaw/pitch | yes | explicit posture tags | fixed in C `f49caee`; never use the one-third rendered model pitch |
 | up to eight client entities | yes | count tags | live mean was about 4.8 hostile entities/frame |
 | relative position, health, hostile, visible | yes | visibility and conditional aim tags | live visible-contact rate reached 54--66% on `mllive_44987431` |
-| entity velocity | yes | no dedicated tag | populated, but still world-space rather than view-local |
+| entity velocity | yes | no dedicated tag | target minus shooter velocity in the same full-view local basis as the aim point |
 | geometry rays | yes | indirect | 16 horizontal distance rays; no vertical clearance rays |
 | hook anchors/landings/flags | yes | detailed hook tags | sidecar-attested and active on generated maps |
 | audio direction/age/alert | yes | fire/audio shaping | one global sound source, not source-identified |

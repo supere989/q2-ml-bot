@@ -3,21 +3,19 @@
 ML-based bot engine for Quake 2 (Lithium II + 3ZB2 base).
 
 **Status:** The network-native target/thermal-lattice prototype is training on
-the live public server. A fully fresh policy lineage,
-`public_network_thermal_fresh_v1`, replaced the rejected warm-start canary on
-2026-07-14. It uses four ordinary headless clients, the Rust persistent
-lattice, a per-client transient thermal overlay, and exact damage-point aim.
+the live public server as `public_network_thermal_bc_live_v2`. It uses four
+ordinary headless clients, the Rust persistent lattice, a per-client transient
+thermal overlay, and exact damage-point aim.
 Four headless Yamagi clients connect as ordinary protocol-34 players while a
 private per-client conduit supplies authoritative 219-feature observations to
-PPO on WSL. It warm-started at 4,008,192 steps from
-`movement_reset_v2/policy_04008192.pt`; two of six slots remain available for
-humans. The old in-process ONNX runtime is archived/rollback-only. Transport
-and action admission are proven. The rejected
+PPO on WSL; two of six slots remain available for humans. The old in-process
+ONNX runtime is archived/rollback-only. Transport and action admission are
+proven. The rejected
 `public_network_engagement_anchor_v3` descendant reached 100% down-look and
 70.5% backward commands at step 4,063,488 and must not be resumed. The clean
-policy source remains the immutable 4,055,296 snapshot; its old dynamic lattice
-must be reset because it contains pre-transform-fix deposits. The replacement
-prototype adds a target-aligned fire
+fresh-policy experiment is archived as the rollback lineage; the active
+warm-start was cloned from its complete step-49,152 policy and matching
+398-cell/four-client lattice. The replacement prototype adds a target-aligned fire
 gate, bounded target-acquisition reward, escalating same-target hit credit,
 automatic network-client respawn, attested generated-map lattice sidecars, and
 lattice-directed hook corrections. A persistent map-epoch barrier now holds
@@ -30,17 +28,19 @@ now consumes chest-first actionable target labels in one full 512-sample
 minibatch. It also supplies exposure-weighted, per-client transient target heat
 through correctly transformed world voxels, dual eye/muzzle-clear damage
 points, generation-counted target tracks, and exact full-action PPO provenance.
-The warm-start replacement also reproduced the inherited failure (100%
-down-look and about 66% backward commands) despite healthy target telemetry,
-so it was archived. The active lineage starts at step zero with a fresh model,
-fresh optimizer, and reset lattice. Its bootstrap uses LR `1e-4`, a temporary
-look/posture anchor coefficient of `0.1`, no supervised fire-head pressure,
-and the exact-point fire gate. Across the first clean 10,240-transition
-generated-map window, mean down-look was 10.3% instead of 100%, forward
-commands slightly exceeded backward commands, and the exact engagement ladder
-produced 275 aligned frames, 132 admitted shots, and its first hit. No unseen
-or unaligned shot was admitted. Repeat hits and kills are still zero, so
-combat quality requires a stock/generated seasonal gate.
+The fully fresh run fixed posture and forward motion but its zero-state holdout
+still measured 39.6-degree yaw and 16.9-degree pitch error. A frozen-head clone
+could not decode the target geometry. The accepted 100k-sample/32-epoch
+distilled-backbone warm-start measures 2.23-degree yaw, 1.69-degree pitch,
+30.0% post-command alignment, 92.7% aligned-fire precision, zero hidden fire,
+and 0.0041 movement drift. PPO resumed it with a fresh optimizer, LR `1e-5`,
+look/posture anchor `0.02`, fire-anchor weight zero, and the exact-point hard
+fire gate. In its first 16,384 live generated-map transitions, down-look was
+4.2%, forward commands were 53.0% versus 33.3% backward, and the causal ladder
+produced 1,539 aligned frames, 1,117 aligned shots, 49 hit events, 15 repeat-hit
+events, and two kills with zero transport failures or echo timeouts. The
+generated-map prototype gate has passed; a matching stock-map season remains
+required for promotion.
 Combat quality remains below the promotion target and must be
 judged by a fresh seasonal soak, not loss convergence.
 **See `docs/HANDOFF-2026-07-13-NETWORK.md` for the exact active topology,
@@ -85,7 +85,7 @@ and current known issues) lives at `docs/architecture-map.svg`.
 | session_memory | 24 | per-voxel-cell lattice: engagement/threat/opportunity/self-fire scores + nearest-signal pull vectors + survivability projection (win_margin, effective-HP, DPS-share) — see `harness/spatial.py` |
 
 `OBS_DIM = 185 + 24 + (10 if Q2_EXT_OBS else 0)`. The active public trainer
-and its `policy_04008192.pt` warm start use `Q2_EXT_OBS=1` → 219 dims. Loading
+and its `policy_00049152.pt` warm start use `Q2_EXT_OBS=1` → 219 dims. Loading
 that checkpoint with the variable unset fails at the encoder with a ten-input
 shape mismatch; see `harness/protocol.py` and the handoff gotcha.
 

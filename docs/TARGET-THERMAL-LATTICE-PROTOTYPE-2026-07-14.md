@@ -139,11 +139,11 @@ exposure, and authoritative action echoes remained healthy. That canary is
 rejected; optimizer/lattice reset was not enough because it did not reset the
 actor and recurrent weights.
 
-The active migration therefore uses a genuinely fresh policy, optimizer, and
-dynamic lattice under `public_network_thermal_fresh_v1`. It keeps the
-512-sample recurrent minibatch and two epochs, raises LR from the warm-start
-`1e-5` to `1e-4`, and temporarily raises the look/posture anchor to `0.1` while
-setting `aim_anchor_fire_weight=0`. The hard exact-point fire gate remains the
+The first corrective migration therefore used a genuinely fresh policy,
+optimizer, and dynamic lattice under `public_network_thermal_fresh_v1`. It kept the
+512-sample recurrent minibatch and two epochs, raised LR from the warm-start
+`1e-5` to `1e-4`, and temporarily raised the look/posture anchor to `0.1` while
+setting `aim_anchor_fire_weight=0`. The hard exact-point fire gate remained the
 only fire permission; the fresh categorical fire head can learn from admitted
 aligned contact without repeating the earlier combined-anchor pressure.
 
@@ -162,6 +162,24 @@ telemetry-gap resync, sends no further actions while the gap is pending, and
 hands off to the existing map-epoch barrier when telemetry returns.
 Partial-client timeouts remain fatal. The failed event segment is archived and
 TensorBoard contains only the clean replacement process.
+
+The fresh run fixed locomotion/posture but not the learned target decoder. At
+step 49,152 its deterministic 10k holdout still measured 39.6-degree yaw,
+16.9-degree pitch, and only 3.8% post-command alignment. Head-only cloning and
+a 20k/8-epoch backbone smoke reproduced the known low-capacity result. The
+100k/32-epoch distilled-backbone candidate from the same immutable step passed
+at 2.23-degree yaw, 1.69-degree pitch, 30.0% post-command alignment, 92.7%
+aligned-fire precision, zero hidden fire, and 0.0041 movement drift. It became
+the live `public_network_thermal_bc_live_v2` canary with the matching
+398-cell/four-client lattice, a reset optimizer, LR `1e-5`, and the weaker
+look-only anchor coefficient `0.02`.
+
+The first 16,384 generated-map transitions after cutover completed the live
+ladder through kills: 1,539 aligned frames, 1,117 aligned shots, 49 hit events,
+15 repeat-hit events, and two kills. Down-look was 4.2%; forward commands were
+53.0% versus 33.3% backward; failed rounds, echo timeouts, and telemetry-gap
+resyncs were all zero. The generated-map prototype gate is passed; the
+stock-map season remains open.
 
 An external review raised a possible pitch double-rotation because the entity
 vector is already expressed in the full `v_angle` basis. The reconstruction is
