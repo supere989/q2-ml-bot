@@ -37,6 +37,24 @@ class ClientActionDispatch:
     action: Action
 
 
+@dataclass(frozen=True)
+class ClientTelemetryDrain:
+    """Newest valid telemetry found without waiting on the harness socket."""
+
+    previous: ClientTelemetry
+    latest: ClientTelemetry
+    packet_count: int
+    map_names: tuple[str, ...]
+
+    @property
+    def advanced(self) -> bool:
+        return self.packet_count > 0
+
+    @property
+    def map_changed(self) -> bool:
+        return any(name != self.previous.map_name for name in self.map_names)
+
+
 def authoritative_reward(obs) -> float:
     """Reward channels emitted by game.so for this exact client_id."""
     return (
@@ -222,6 +240,47 @@ class Q2NetworkClientEnv:
     ) -> ClientTelemetry:
         """Receive the next routed packet after an explicitly known sequence."""
         return self._receive(after_sequence=after_sequence, timeout=timeout)
+
+    def drain_latest_telemetry(self) -> ClientTelemetryDrain:
+        """Drain queued routed packets without blocking and retain the newest."""
+        if self._socket is None or self._last is None:
+            raise RuntimeError("call start() before draining telemetry")
+        if self._process is not None and self._process.poll() is not None:
+            output = self._process.stdout.read() if self._process.stdout else ""
+            raise RuntimeError(
+                f"network client exited with {self._process.returncode}:\n"
+                f"{output[-4000:]}"
+            )
+        previous = self._last
+        latest = previous
+        packet_count = 0
+        map_names = []
+        previous_timeout = self._socket.gettimeout()
+        self._socket.setblocking(False)
+        try:
+            while True:
+                try:
+                    data, address = self._socket.recvfrom(65535)
+                except (BlockingIOError, socket.timeout):
+                    break
+                telemetry = parse_client_telemetry(data)
+                if telemetry is None or telemetry.client_id != self.client_id:
+                    continue
+                if telemetry.sequence <= latest.sequence:
+                    continue
+                latest = telemetry
+                packet_count += 1
+                map_names.append(telemetry.map_name)
+                self._client_address = address
+        finally:
+            self._socket.settimeout(previous_timeout)
+        self._last = latest
+        return ClientTelemetryDrain(
+            previous=previous,
+            latest=latest,
+            packet_count=packet_count,
+            map_names=tuple(map_names),
+        )
 
     @staticmethod
     def _base_info(current: ClientTelemetry) -> dict:

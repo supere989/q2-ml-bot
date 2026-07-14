@@ -18,7 +18,11 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 
-from .client_env import ClientActionDispatch, Q2NetworkClientEnv
+from .client_env import (
+    ClientActionDispatch,
+    ClientTelemetryDrain,
+    Q2NetworkClientEnv,
+)
 from .client_protocol import ClientTelemetry
 from .protocol import Action
 
@@ -71,6 +75,8 @@ class BatchMetrics:
     mismatched_echoes_rejected: int
     echo_timeouts: int
     map_epoch_resyncs: int
+    realtime_catchup_resyncs: int
+    preflight_packets_drained: int
     max_observed_frame_span: int
 
     def as_dict(self, prefix: str = "network_client") -> dict[str, int | float]:
@@ -91,6 +97,8 @@ class BatchMetrics:
             ),
             f"{prefix}/echo_timeouts": self.echo_timeouts,
             f"{prefix}/map_epoch_resyncs": self.map_epoch_resyncs,
+            f"{prefix}/realtime_catchup_resyncs": self.realtime_catchup_resyncs,
+            f"{prefix}/preflight_packets_drained": self.preflight_packets_drained,
             f"{prefix}/max_observed_frame_span": self.max_observed_frame_span,
             f"{prefix}/authoritative_echo_accept_rate": (
                 self.transitions_accepted / attempted if attempted else 1.0
@@ -189,6 +197,8 @@ class Q2NetworkClientBatch:
         self._mismatched_echoes_rejected = 0
         self._echo_timeouts = 0
         self._map_epoch_resyncs = 0
+        self._realtime_catchup_resyncs = 0
+        self._preflight_packets_drained = 0
         self._max_observed_frame_span = 0
 
     @staticmethod
@@ -359,11 +369,143 @@ class Q2NetworkClientBatch:
             if telemetry.map_name == target_map:
                 return telemetry
 
+    def _resync_preflight_map(
+        self,
+        env: Q2NetworkClientEnv,
+        current: ClientTelemetry,
+        target_map: str,
+        deadline: float,
+    ) -> ClientTelemetry:
+        if current.map_name == target_map:
+            return current
+        sequence = current.sequence
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"preflight map resync timed out for {current.client_id}"
+                )
+            telemetry = env.receive_telemetry(
+                after_sequence=sequence,
+                timeout=remaining,
+            )
+            sequence = telemetry.sequence
+            if telemetry.map_name == target_map:
+                return telemetry
+
     @staticmethod
     def _collate_observations(values: Sequence[Any], vector: bool):
         if vector:
             return np.stack(values, axis=0)
         return tuple(values)
+
+    def _preflight_boundary(
+        self,
+        drains: Sequence[ClientTelemetryDrain],
+        *,
+        round_id: int,
+        policy_version: int,
+    ) -> BatchRound:
+        map_changed = any(drain.map_changed for drain in drains)
+        samples = [drain.latest for drain in drains]
+        target_map = samples[0].map_name
+        if map_changed:
+            changed_targets = {
+                drain.latest.map_name for drain in drains if drain.map_changed
+            }
+            if len(changed_targets) != 1:
+                self._failed_rounds += 1
+                raise AuthoritativeEchoError(
+                    "preflight crossed multiple map epochs: "
+                    + ", ".join(sorted(changed_targets))
+                )
+            target_map = next(iter(changed_targets))
+            deadline = time.monotonic() + self.round_timeout
+            futures = [
+                self._executor.submit(
+                    self._resync_preflight_map,
+                    env,
+                    sample,
+                    target_map,
+                    deadline,
+                )
+                for env, sample in zip(self.envs, samples)
+            ]
+            try:
+                samples = [future.result() for future in futures]
+            except TimeoutError as error:
+                self._failed_rounds += 1
+                self._echo_timeouts += 1
+                raise AuthoritativeEchoError(
+                    "preflight map epoch resync timed out", timed_out=True
+                ) from error
+
+        initial_results = [
+            env.initial_result(sample, vector=self.vector)
+            for env, sample in zip(self.envs, samples)
+        ]
+        tags = tuple(
+            BatchActionTag(
+                round_id=round_id,
+                policy_version=policy_version,
+                client_index=index,
+                client_id=drain.latest.client_id,
+                client_slot=drain.latest.client_slot,
+                action_tick=drain.previous.server_frame,
+            )
+            for index, drain in enumerate(drains)
+        )
+        infos = []
+        for initial, tag, sample, drain in zip(
+            initial_results, tags, samples, drains
+        ):
+            info = dict(initial[1])
+            info.update({
+                "batch_round_id": tag.round_id,
+                "policy_version": tag.policy_version,
+                "action_tick": tag.action_tick,
+                "action_dispatched": False,
+                "authoritative_echo_tick": int(
+                    sample.observation.action_debug[0]
+                ),
+                "authoritative_echo_valid": False,
+                "authoritative_echo_stale": True,
+                "trainable_transition": False,
+                "realtime_catchup_resync": True,
+                "preflight_packets_drained": drain.packet_count,
+                "preflight_from_frame": drain.previous.server_frame,
+                "preflight_to_frame": sample.server_frame,
+                "map_epoch_resync": map_changed,
+                "map_epoch_from": drain.previous.map_name,
+                "map_epoch_target": target_map,
+                "terminal_reason": 2 if map_changed else 0,
+                "stale_echoes_rejected": 0,
+                "mismatched_echoes_rejected": 0,
+            })
+            infos.append(info)
+
+        frame_values = [sample.server_frame for sample in samples]
+        self._max_observed_frame_span = max(
+            self._max_observed_frame_span,
+            max(frame_values) - min(frame_values),
+        )
+        drained_count = sum(drain.packet_count for drain in drains)
+        self._preflight_packets_drained += drained_count
+        self._realtime_catchup_resyncs += 1
+        if map_changed:
+            self._map_epoch_resyncs += 1
+        return BatchRound(
+            round_id=round_id,
+            policy_version=policy_version,
+            observations=self._collate_observations(
+                [initial[0] for initial in initial_results], self.vector
+            ),
+            rewards=np.zeros(len(self.envs), dtype=np.float32),
+            terminated=np.ones(len(self.envs), dtype=np.bool_),
+            truncated=np.zeros(len(self.envs), dtype=np.bool_),
+            infos=tuple(infos),
+            tags=tags,
+        )
 
     def reset(self):
         """Start all clients concurrently and return their initial observations."""
@@ -414,6 +556,17 @@ class Q2NetworkClientBatch:
             round_id = self._next_round_id
             self._next_round_id += 1
             self._latest_policy_version = version
+            drain_futures = [
+                self._executor.submit(env.drain_latest_telemetry)
+                for env in self.envs
+            ]
+            drains = [future.result() for future in drain_futures]
+            if any(drain.advanced for drain in drains):
+                return self._preflight_boundary(
+                    drains,
+                    round_id=round_id,
+                    policy_version=version,
+                )
             dispatches = [
                 env.dispatch_action(action)
                 for env, action in zip(self.envs, actions)
@@ -630,6 +783,8 @@ class Q2NetworkClientBatch:
             mismatched_echoes_rejected=self._mismatched_echoes_rejected,
             echo_timeouts=self._echo_timeouts,
             map_epoch_resyncs=self._map_epoch_resyncs,
+            realtime_catchup_resyncs=self._realtime_catchup_resyncs,
+            preflight_packets_drained=self._preflight_packets_drained,
             max_observed_frame_span=self._max_observed_frame_span,
         )
 
@@ -747,17 +902,20 @@ class Q2NetworkClientMultiEnv:
             truncated = bool(round_result.truncated[index])
             info = dict(round_result.infos[index])
             map_epoch_resync = bool(info.get("map_epoch_resync", False))
-            if map_epoch_resync:
+            synchronization_boundary = bool(
+                info.get("realtime_catchup_resync", False)
+            ) or map_epoch_resync
+            if synchronization_boundary:
                 self._ep_steps[index] = 0
             else:
                 self._ep_steps[index] += 1
             if (
-                not map_epoch_resync
+                not synchronization_boundary
                 and not terminated
                 and self._ep_steps[index] >= self.max_ep_steps
             ):
                 truncated = True
-            if (terminated or truncated) and not map_epoch_resync:
+            if (terminated or truncated) and not synchronization_boundary:
                 outcome_bonus, outcome_info = self._spatial_rewards[
                     index
                 ].finalize_episode(

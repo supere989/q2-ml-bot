@@ -9,7 +9,7 @@ from harness.client_batch import (
     Q2NetworkClientMultiEnv,
     StalePolicyVersionError,
 )
-from harness.client_env import ClientActionDispatch
+from harness.client_env import ClientActionDispatch, ClientTelemetryDrain
 from harness.client_env import Q2NetworkClientEnv
 from harness.client_protocol import ClientTelemetry
 from harness.protocol import Action
@@ -64,7 +64,7 @@ def _telemetry(
 
 
 class _FakeEnv:
-    def __init__(self, client_id, slot, script, events):
+    def __init__(self, client_id, slot, script, events, *, preflight=()):
         self.client_id = client_id
         self.slot = slot
         self.script = list(script)
@@ -74,6 +74,7 @@ class _FakeEnv:
         self.last_action = None
         self.transition_sample = None
         self.initial_maps = []
+        self.preflight = list(preflight)
 
     def start(self):
         self._last = _telemetry(self.client_id, self.slot, 1, 10)
@@ -94,6 +95,21 @@ class _FakeEnv:
             action_tick=self._last.server_frame,
             map_name=self._last.map_name,
             action=action,
+        )
+
+    def drain_latest_telemetry(self):
+        previous = self._last
+        if not self.preflight:
+            return ClientTelemetryDrain(previous, previous, 0, ())
+        drained = self.preflight
+        self.preflight = []
+        latest = drained[-1]
+        self._last = latest
+        return ClientTelemetryDrain(
+            previous=previous,
+            latest=latest,
+            packet_count=len(drained),
+            map_names=tuple(sample.map_name for sample in drained),
         )
 
     def receive_telemetry(self, *, after_sequence, timeout=None):
@@ -217,6 +233,95 @@ def test_failed_echo_round_never_returns_a_trainable_transition():
         batch.close()
 
 
+def test_preflight_drains_large_backlog_without_dispatching_stale_action():
+    events = []
+    backlog_a = [
+        _telemetry("client-a", 0, sequence, frame)
+        for sequence, frame in zip(range(2, 22), range(11, 31))
+    ]
+    backlog_b = [
+        _telemetry("client-b", 1, sequence, frame)
+        for sequence, frame in zip(range(2, 19), range(11, 28))
+    ]
+    env_a = _FakeEnv(
+        "client-a",
+        0,
+        [_telemetry(
+            "client-a", 0, 22, 31, echo_tick=31, accepted=1, forward=0.3
+        )],
+        events,
+        preflight=backlog_a,
+    )
+    env_b = _FakeEnv(
+        "client-b",
+        1,
+        [_telemetry(
+            "client-b", 1, 19, 28, echo_tick=28, accepted=1, forward=0.3
+        )],
+        events,
+        preflight=backlog_b,
+    )
+    batch = Q2NetworkClientBatch([env_a, env_b], round_timeout=1.0)
+    try:
+        batch.reset()
+        boundary = batch.collect_round(
+            [Action(move_forward=0.3), Action(move_forward=0.3)],
+            policy_version=60,
+        )
+        assert not any(event[0] == "dispatch" for event in events)
+        assert boundary.rewards.tolist() == [0.0, 0.0]
+        assert boundary.terminated.tolist() == [True, True]
+        assert all(not info["trainable_transition"] for info in boundary.infos)
+        assert all(info["realtime_catchup_resync"] for info in boundary.infos)
+        assert all(not info["map_epoch_resync"] for info in boundary.infos)
+        assert boundary.observations[:, 0].tolist() == [30.0, 27.0]
+        metrics = batch.metrics
+        assert metrics.realtime_catchup_resyncs == 1
+        assert metrics.preflight_packets_drained == 37
+        assert metrics.actions_dispatched == 0
+
+        accepted = batch.collect_round(
+            [Action(move_forward=0.3), Action(move_forward=0.3)],
+            policy_version=60,
+        )
+        assert [tag.action_tick for tag in accepted.tags] == [30, 27]
+        assert all(info["trainable_transition"] for info in accepted.infos)
+        assert batch.metrics.actions_dispatched == 2
+    finally:
+        batch.close()
+
+
+def test_preflight_map_change_resyncs_before_any_action_dispatch():
+    events = []
+    env_a = _FakeEnv(
+        "client-a",
+        0,
+        [],
+        events,
+        preflight=[_telemetry("client-a", 0, 2, 1, map_name="q2dm2")],
+    )
+    env_b = _FakeEnv(
+        "client-b",
+        1,
+        [_telemetry("client-b", 1, 2, 1, map_name="q2dm2")],
+        events,
+    )
+    batch = Q2NetworkClientBatch([env_a, env_b], round_timeout=1.0)
+    try:
+        batch.reset()
+        boundary = batch.collect_round(
+            [Action(), Action()], policy_version=61
+        )
+        assert not any(event[0] == "dispatch" for event in events)
+        assert all(info["map_epoch_resync"] for info in boundary.infos)
+        assert all(info["map_epoch_target"] == "q2dm2" for info in boundary.infos)
+        assert all(not info["trainable_transition"] for info in boundary.infos)
+        assert batch.metrics.map_epoch_resyncs == 1
+        assert batch.metrics.preflight_packets_drained == 1
+    finally:
+        batch.close()
+
+
 def test_map_epoch_resyncs_every_client_and_returns_nontrainable_boundary():
     events = []
     env_a = _FakeEnv(
@@ -332,6 +437,34 @@ def test_multi_env_does_not_finalize_spatial_outcome_for_map_resync():
         assert info["trainable_transition"] is False
         assert adapter.active_map == "q2dm2"
         assert adapter._spatial_rewards[0].finalized == 0
+    finally:
+        adapter.close()
+
+
+def test_multi_env_does_not_finalize_same_map_realtime_catchup():
+    events = []
+    env = _FakeEnv(
+        "client-a",
+        0,
+        [],
+        events,
+        preflight=[_telemetry("client-a", 0, 2, 11)],
+    )
+    adapter = Q2NetworkClientMultiEnv([env], initial_policy_version=5)
+    try:
+        adapter.reset_all()
+        results = adapter.step_all(
+            [np.zeros(8, dtype=np.float32)], policy_version=5
+        )
+        _observation, reward, terminated, truncated, info = results[0]
+        assert reward == 0.0
+        assert terminated
+        assert not truncated
+        assert info["realtime_catchup_resync"] is True
+        assert info["map_epoch_resync"] is False
+        assert info["trainable_transition"] is False
+        assert adapter._spatial_rewards[0].finalized == 0
+        assert not any(event[0] == "dispatch" for event in events)
     finally:
         adapter.close()
 
