@@ -24,6 +24,24 @@ def _policy(version=1, payload=b"policy-one", runtime_digest=""):
     )
 
 
+def test_behavior_schema_carries_engagement_and_posture_audit():
+    required = {
+        "level_aim_movement_reward",
+        "entity_count",
+        "enemy_count",
+        "enemy_visible_any",
+        "enemy_visible_count",
+        "aim_yaw_error",
+        "aim_pitch_error",
+        "aim_tracking_quality",
+        "damage_dealt",
+        "damage_taken",
+        "kills",
+        "deaths",
+    }
+    assert required.issubset(PPO_BEHAVIOR_METRIC_KEYS)
+
+
 def test_policy_and_batch_round_trip_are_deterministic_and_pickle_free():
     policy = _policy()
     assert PolicyArtifact.decode(policy.encode()) == policy

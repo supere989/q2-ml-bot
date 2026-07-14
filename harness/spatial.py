@@ -137,6 +137,8 @@ class VoxelSpatialReward:
     overspeed_penalty: float = 0.008
     horizon_pitch_limit: float = 15.0
     horizon_pitch_penalty: float = 0.006
+    level_aim_movement_reward: float = 0.012
+    level_aim_min_speed: float = 96.0
     jump_cost: float = 0.006
     slow_jump_penalty: float = 0.014
     hook_overspeed_penalty: float = 0.012
@@ -344,6 +346,8 @@ class VoxelSpatialReward:
             overspeed_penalty=_env_float("R_MOVE_OVERSPEED", 0.008),
             horizon_pitch_limit=_env_float("Q2_HORIZON_PITCH_LIMIT", 15.0),
             horizon_pitch_penalty=_env_float("R_HORIZON_PITCH", 0.006),
+            level_aim_movement_reward=_env_float("R_MOVE_LEVEL_AIM", 0.012),
+            level_aim_min_speed=_env_float("Q2_LEVEL_AIM_MIN_SPEED", 96.0),
             jump_cost=_env_float("R_JUMP_COST", 0.006),
             slow_jump_penalty=_env_float("R_JUMP_SLOW", 0.014),
             hook_overspeed_penalty=_env_float("R_HOOK_OVERSPEED", 0.012),
@@ -966,6 +970,12 @@ class VoxelSpatialReward:
         navigation_bonus = max(0.0, float(bonus))
 
         fire_context = self.fire_context(obs)
+        entity_count = max(
+            0, min(int(obs.entity_count), int(obs.entities.shape[0]))
+        )
+        enemy_count = sum(
+            1 for ent in obs.entities[:entity_count] if ent[7] > 0.5
+        )
         visible_count = int(fire_context["enemy_visible_count"])
         nearest_visible = float(fire_context["enemy_visible_nearest"])
         aim_aligned = bool(fire_context["aim_aligned"])
@@ -1303,6 +1313,8 @@ class VoxelSpatialReward:
             "voxel_cell_z": float(cell[2]),
             "visible_enemy": float(tactical_engagement),
             "combat_navigation_suppressed": float(navigation_suppressed),
+            "entity_count": float(entity_count),
+            "enemy_count": float(enemy_count),
             "enemy_visible_any": float(visible_count > 0),
             "enemy_visible_count": float(visible_count),
             "enemy_visible_nearest": float(nearest_visible if visible_count > 0 else 0.0),
@@ -1381,6 +1393,9 @@ class VoxelSpatialReward:
             "view_pitch_abs": float(movement["view_pitch_abs"]),
             "horizon_pitch_penalty": float(
                 movement["horizon_pitch_penalty"]
+            ),
+            "level_aim_movement_reward": float(
+                movement["level_aim_movement_reward"]
             ),
             "movement_nominal": float(nominal_speed),
             "movement_slow": float(slow_movement),
@@ -2369,6 +2384,28 @@ class VoxelSpatialReward:
             horizon_penalty = self.horizon_pitch_penalty * excess
             delta -= horizon_penalty
 
+        # Make level posture an active traversal objective. Only genuine
+        # forward travel with no visible target can collect this reward;
+        # backward moonwalking cannot, and target-visible vertical aim stays
+        # unconstrained for combat across elevations.
+        level_aim_reward = 0.0
+        if (
+            visible_count == 0
+            and forward_intent >= self.movement_intent_min
+            and horizontal_speed >= self.level_aim_min_speed
+            and horizontal_speed <= self.nominal_speed_max
+        ):
+            level_quality = max(
+                0.0,
+                1.0 - view_pitch_abs / max(1.0, self.horizon_pitch_limit),
+            )
+            level_aim_reward = (
+                self.level_aim_movement_reward
+                * forward_intent
+                * level_quality
+            )
+            delta += level_aim_reward
+
         jump_slow = jump_action and (slow_movement or not wants_movement)
         if jump_action:
             delta -= self.jump_cost
@@ -2381,6 +2418,7 @@ class VoxelSpatialReward:
             "backward_intent": float(backward_intent),
             "view_pitch_abs": float(view_pitch_abs),
             "horizon_pitch_penalty": float(horizon_penalty),
+            "level_aim_movement_reward": float(level_aim_reward),
             "movement_nominal": float(nominal_speed),
             "movement_slow": float(slow_movement),
             "movement_overspeed": float(overspeed),

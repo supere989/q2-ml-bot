@@ -107,6 +107,26 @@ def test_no_target_downlook_gets_bounded_horizon_penalty():
     assert down["movement_discipline"] < level["movement_discipline"]
 
 
+def test_level_aim_reward_requires_forward_travel_and_level_posture():
+    reward = VoxelSpatialReward()
+    level = reward.movement_context(
+        _movement_obs(speed=180, forward=1.0, pitch=0.0)
+    )
+    down = reward.movement_context(
+        _movement_obs(speed=180, forward=1.0, pitch=25.0)
+    )
+    backward = reward.movement_context(
+        _movement_obs(speed=180, forward=-1.0, pitch=0.0)
+    )
+
+    assert level["level_aim_movement_reward"] == pytest.approx(
+        reward.level_aim_movement_reward
+    )
+    assert down["level_aim_movement_reward"] == 0.0
+    assert backward["level_aim_movement_reward"] == 0.0
+    assert level["movement_discipline"] > down["movement_discipline"]
+
+
 def test_slow_jump_and_hook_overspeed_inputs_are_detected():
     reward = VoxelSpatialReward()
     slow_jump = reward.movement_context(_movement_obs(speed=40, jump=1))
@@ -115,6 +135,7 @@ def test_slow_jump_and_hook_overspeed_inputs_are_detected():
     assert slow_jump["jump_slow"] == 1.0
     assert slow_jump["movement_discipline"] < -reward.jump_cost
     assert fast["movement_overspeed"] == 1.0
+    assert fast["level_aim_movement_reward"] == 0.0
     assert fast["movement_discipline"] < 0.0
 
 
