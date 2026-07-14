@@ -29,11 +29,12 @@ flags
 ```
 
 `source_milliunits` is a proposed exact standing Pmove origin selected from
-authored floor-clear samples. `landing_milliunits` is the proposed first
-grounded Pmove origin and is therefore 24 units above its authored support,
-not 56 units above it. `anchor_milliunits` lies on the first real ceiling or
-ceiling-light-panel face above the landing. A platform or roof below that face
-suppresses the proposal; it is never relabeled as a ceiling.
+authored floor-clear samples. `landing_milliunits` is a desired,
+support-aligned landing proposal and is therefore 24 units above its authored
+support, not 56 units above it. It is not final trajectory evidence.
+`anchor_milliunits` lies on the first real ceiling or ceiling-light-panel face
+above the landing. A platform or roof below that face suppresses the proposal;
+it is never relabeled as a ceiling.
 
 `distance_milliunits` is the rounded Euclidean distance from
 `source + (0,0,22)` to the anchor, in milliunits. `release_after_ticks` selects
@@ -54,10 +55,12 @@ or install path. Keeping the prefix only preserves the existing loader and
 policy observation shape; it does not authorize a hook edge.
 
 After BSP compilation, exact preflight must replay candidates through the
-pinned CM, hook-law, and Pmove authorities, group results by runtime geometry,
-and materialize exactly the first six proven geometries in stable order. If
-six cannot be proved, the map is rejected. Only that materialized sidecar is
-eligible for the final source/static pass, canonical claim hash binding, cold
-independent analyzer replay, and eventual bundle admission. There is no
-generator fallback, fabricated claim, source-metadata acceptance, or relaxed
-verification path.
+pinned CM, hook-law, and Pmove authorities, take the first post-release
+grounded Pmove frame, and replace the proposed landing with that frame's exact
+fixed-point origin. It then groups results by runtime geometry and materializes
+exactly the first six proven geometries in stable order. If six cannot be
+proved, the map is rejected. Only those measured final records and that
+materialized sidecar are eligible for the final source/static pass, canonical
+claim hash binding, cold independent analyzer replay, and eventual bundle
+admission. There is no generator fallback, fabricated claim, source-metadata
+acceptance, or relaxed verification path.

@@ -170,7 +170,7 @@ class HookZone:
 
 @dataclass(frozen=True)
 class HookClaimCandidateV2:
-    """Unproven source-bound hook schedule for compiled-world replay."""
+    """Unproven source-bound hook schedule with a desired landing proposal."""
 
     source: Tuple[float, float, float]
     anchor: Tuple[float, float, float]
