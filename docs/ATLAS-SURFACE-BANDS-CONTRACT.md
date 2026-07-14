@@ -33,6 +33,24 @@ a time, through depth five. It never issues an exhaustive 16-cubed chunk or
 candidate group; the only cross-group structure contains cells that will be
 materialized. This prevents a map-wide multi-million-cell occupancy set.
 
+The B2 analyzer supplies one exact hull-bottom floor candidate per admitted L1
+node. Adjacent L1 samples are four L0 cells apart, so their depth-five occupied
+bands overlap. At a stance-corridor boundary it supplies wall and ceiling
+candidates from the exact admitted `NavNode.position` plus standing/crouched
+hull extents, spaced no farther than 16 world units over each face. Only chunks
+that own an explicit corridor candidate are authorized; an inward band crosses
+a chunk boundary only when the adjacent chunk independently owns a candidate.
+This is the complete surface scope for the admitted sampled corridor; it is not
+a claim that an entire coarse L1 cube is free space.
+
+The analyzer executes one canonical owner-chunk group at a time without a
+map-wide response cache. Before the first request it conservatively sums each
+group's Manhattan-depth-five occupancy union plus six possible surface traces
+per candidate. A separate 16,000,000-request planning cap rejects pathological
+scope while the unchanged 2,000,000-request collision-oracle cap fails closed
+on actual requests. Logical and physical counts are both recorded and are equal
+in the no-cross-group-cache implementation.
+
 `SurfaceBandResult.request_counts` records the exact occupancy and surface
 trace request counts. These counts include exact surface traces that return no
 hit but never include requests suppressed by candidate or expansion overlap.
@@ -56,9 +74,11 @@ Occupancy is `startsolid || allsolid` from a stationary 4-unit cube trace
 batches and deterministic `(z,y,x)` order.
 
 An occupied cell is a surface seed only when a face neighbor is CM-clear and a
-point trace from that clear neighbor into the cell returns a hit. Plane normal
-and surface metadata come only from that hit trace; occupancy responses never
-confer `sky`, `slick`, `warp`, or `nodraw`.
+sweep of the same 4-unit cube from that clear canonical neighbor to the occupied
+canonical center returns a hit. This preserves the occupancy volume at
+boundary-aligned, sloped, and corner contacts where a center-point trace may
+remain clear. Plane normal and surface metadata come only from that hit trace;
+occupancy responses never confer `sky`, `slick`, `warp`, or `nodraw`.
 
 Classification uses the exact hit-plane normal:
 

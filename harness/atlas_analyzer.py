@@ -21,11 +21,28 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import zstandard
 
+from .atlas_entity_semantics import (
+    Aabb,
+    Authority,
+    L0BudgetState,
+    L0PlaneKind,
+    entity_angles,
+    ordered_property,
+    rotating_mover_semantics,
+    sliding_mover_semantics,
+    train_topology,
+    trigger_hurt_semantics,
+)
+from .atlas_surface_bands import (
+    FixedInlineModelPose,
+    Model0Pose,
+    SurfaceBandChunk,
+    SurfaceCandidateGroup,
+    discover_scoped_surface_bands,
+)
 from .ibsp38 import BspMetadata, EntityMetadata, parse_ibsp38
 from .generated_claim_probes import (
     GeneratedClaimProbeError,
-    _trigger_contact_bounds,
-    _trigger_hurt_runtime_bounds,
     analyze_non_hook_claims,
 )
 from .hook_claims_v2 import (
@@ -146,6 +163,8 @@ class AnalyzerLimits:
     flood_source_batch: int = 128
     max_visibility_pairs: int = 16_384
     max_pmove_sources: int = 2_048
+    max_surface_candidate_cells: int = 250_000
+    max_surface_request_upper_bound: int = 16_000_000
     full_cold_timeout_seconds: float = 300.0
 
 
@@ -1006,6 +1025,256 @@ def _admissions(
     return output
 
 
+@dataclass(frozen=True)
+class _SurfaceCandidateScope:
+    """Caller-complete sparse candidates around reachable L1 corridors."""
+
+    groups: tuple[SurfaceCandidateGroup, ...]
+    authorized_chunks: tuple[tuple[int, int, int], ...]
+    boundary_l1: tuple[tuple[int, int, int], ...]
+    candidate_cells: int
+
+
+def _zyx(key: Sequence[int]) -> tuple[int, int, int]:
+    return int(key[2]), int(key[1]), int(key[0])
+
+
+def _l0_chunk_key(cell: Sequence[int]) -> tuple[int, int, int]:
+    return tuple(int(value) // 16 for value in cell)  # type: ignore[return-value]
+
+
+def _surface_candidate_scope(
+    nodes: Mapping[tuple[int, int, int], NavNode],
+    origin: tuple[int, int, int],
+) -> _SurfaceCandidateScope:
+    """Derive surfaces only from the reachable L1 player-origin corridor.
+
+    Every admitted node contributes its exact sampled origin/hull-bottom.  L1
+    samples are one 16-unit cell (four L0 cells) apart while an evidenced band
+    expands through five additional L0 cells, so neighboring floor bands
+    overlap instead of requiring a 4x4 rescan of each L1 cell.  At a stance
+    boundary, wall/ceiling seeds are spaced by at most 16 units over the exact
+    node-position hull faces.  No chunk or map AABB is scanned.
+    """
+
+    candidates: set[tuple[int, int, int]] = set()
+    boundary_l1: set[tuple[int, int, int]] = set()
+
+    def compatible_neighbor(
+        key: tuple[int, int, int], dx: int, dy: int, node: NavNode,
+    ) -> bool:
+        for dz in (-1, 0, 1):
+            neighbor = nodes.get((key[0] + dx, key[1] + dy, key[2] + dz))
+            if neighbor is not None and (
+                (node.standing_clear and neighbor.standing_clear)
+                or (node.crouched_clear and neighbor.crouched_clear)
+            ):
+                return True
+        return False
+
+    for key in sorted(nodes, key=_zyx):
+        node = nodes[key]
+        floor_point = (
+            node.position[0], node.position[1],
+            node.position[2] - 24.0 - 1e-6,
+        )
+        candidates.add(_grid_index(floor_point, origin, 4))
+
+        missing = [
+            (dx, dy) for dx, dy in ((0, -1), (-1, 0), (1, 0), (0, 1))
+            if not compatible_neighbor(key, dx, dy, node)
+        ]
+        if not missing and node.standing_clear:
+            continue
+        boundary_l1.add(key)
+
+        hull_top = 32.0 if node.standing_clear else 4.0
+        vertical_offsets = list(range(-18, round(hull_top) + 1, 16))
+        if not vertical_offsets or vertical_offsets[-1] < hull_top - 2.0:
+            vertical_offsets.append(round(hull_top - 2.0))
+        for dx, dy in missing:
+            if dx:
+                x = node.position[0] + dx * 18.0
+                for z_offset in vertical_offsets:
+                    candidates.add(_grid_index(
+                        (x, node.position[1], node.position[2] + z_offset),
+                        origin, 4,
+                    ))
+            else:
+                y = node.position[1] + dy * 18.0
+                for z_offset in vertical_offsets:
+                    candidates.add(_grid_index(
+                        (node.position[0], y, node.position[2] + z_offset),
+                        origin, 4,
+                    ))
+
+        ceiling_heights = [hull_top + 2.0]
+        if not node.standing_clear:
+            ceiling_heights.extend(float(value) for value in range(10, 33, 8))
+        for height in ceiling_heights:
+            for x_offset in (-8.0, 8.0):
+                for y_offset in (-8.0, 8.0):
+                    candidates.add(_grid_index(
+                        (node.position[0] + x_offset,
+                         node.position[1] + y_offset,
+                         node.position[2] + height),
+                        origin, 4,
+                    ))
+
+    by_chunk: dict[tuple[int, int, int], set[tuple[int, int, int]]] = defaultdict(set)
+    for cell in candidates:
+        by_chunk[_l0_chunk_key(cell)].add(cell)
+    groups = tuple(
+        SurfaceCandidateGroup(chunk, tuple(sorted(cells, key=_zyx)))
+        for chunk, cells in sorted(by_chunk.items(), key=lambda item: _zyx(item[0]))
+    )
+
+    # Retention is restricted to chunks that own an explicit reachable-
+    # corridor candidate. The inward band may cross a chunk boundary only when
+    # the adjacent chunk independently contains a floor/wall/ceiling candidate;
+    # exterior witness-only chunks are never allocated prospectively.
+    authorized = set(by_chunk)
+
+    return _SurfaceCandidateScope(
+        groups=groups,
+        authorized_chunks=tuple(sorted(authorized, key=_zyx)),
+        boundary_l1=tuple(sorted(boundary_l1, key=_zyx)),
+        candidate_cells=len(candidates),
+    )
+
+
+def _surface_request_upper_bound(
+    groups: Sequence[SurfaceCandidateGroup],
+) -> int:
+    """Bound scoped discovery requests before the first oracle write.
+
+    Occupancy can reach only Manhattan distance five from an input candidate;
+    each candidate can create at most six clear-neighbor surface traces. The
+    prospective bound deliberately sums each owner group's union, matching the
+    group-local execution cache. That is conservative and keeps preflight memory
+    proportional to one 64-unit chunk instead of materializing a map-wide
+    multi-million-tuple set.
+    """
+
+    offsets = tuple(
+        (dx, dy, dz)
+        for dz in range(-5, 6)
+        for dy in range(-5, 6)
+        for dx in range(-5, 6)
+        if abs(dx) + abs(dy) + abs(dz) <= 5
+    )
+    total = 0
+    for group in groups:
+        cells = set(group.cells)
+        occupancy = {
+            (cell[0] + dx, cell[1] + dy, cell[2] + dz)
+            for cell in cells
+            for dx, dy, dz in offsets
+        }
+        total += len(occupancy) + 6 * len(cells)
+    return total
+
+
+@dataclass(frozen=True)
+class _ScopedSurfaceExecution:
+    chunks: tuple[SurfaceBandChunk, ...]
+    budget_state: L0BudgetState
+    occupancy_requests: int
+    surface_requests: int
+    physical_requests: int
+
+
+def _discover_surface_groups_incrementally(
+    *,
+    groups: Sequence[SurfaceCandidateGroup],
+    origin: tuple[int, int, int],
+    pose: Model0Pose | FixedInlineModelPose,
+    budget_state: L0BudgetState,
+    cm: OracleProcess,
+) -> _ScopedSurfaceExecution:
+    """Admit one owner chunk at a time, retaining only evidenced chunks.
+
+    Candidate chunks may exceed the final 1200-chunk budget because an empty
+    or clear candidate does not allocate L0.  Each group prospectively admits
+    its one possible owner chunk before issuing requests; cumulative state is
+    carried into the next group.  This preserves fail-closed accounting without
+    reserving thousands of empty candidate chunks up front.
+    """
+
+    state = budget_state
+    chunks: list[SurfaceBandChunk] = []
+    occupancy_requests = 0
+    surface_requests = 0
+    for group in groups:
+        discovered = discover_scoped_surface_bands(
+            candidate_groups=(group,),
+            reachable_chunks=(group.chunk,),
+            boundary_chunk=None,
+            atlas_origin=tuple(float(value) for value in origin),
+            collision_mask=MASK_PLAYERSOLID,
+            pose=pose,
+            budget_state=state,
+            oracle=cm.call,
+            batch_size=cm.limits.oracle_batch,
+        )
+        if not discovered.is_exact or discovered.value is None:
+            raise AtlasAnalysisError(
+                discovered.reason or "scoped surface collision evidence is unknown"
+            )
+        result = discovered.value
+        if not result.accepted:
+            raise AtlasAnalysisError(result.rejection)
+        state = result.budget_state
+        chunks.extend(result.chunks)
+        occupancy_requests += result.request_counts.occupancy
+        surface_requests += result.request_counts.surface
+    return _ScopedSurfaceExecution(
+        chunks=tuple(chunks),
+        budget_state=state,
+        occupancy_requests=occupancy_requests,
+        surface_requests=surface_requests,
+        physical_requests=occupancy_requests + surface_requests,
+    )
+
+
+def _aabb_candidate_groups(
+    bounds: Aabb,
+    origin: tuple[int, int, int],
+    retained_chunks: set[tuple[int, int, int]],
+    *,
+    max_cells: int = 250_000,
+) -> tuple[SurfaceCandidateGroup, ...]:
+    """Enumerate a fixed-pose AABB only where corridor retention permits it."""
+
+    lower = _grid_index(bounds.mins, origin, 4)
+    upper = _grid_index(
+        tuple(math.nextafter(value, -math.inf) for value in bounds.maxs), origin, 4
+    )
+    by_chunk: dict[tuple[int, int, int], list[tuple[int, int, int]]] = {}
+    count = 0
+    for chunk in sorted(retained_chunks, key=_zyx):
+        chunk_low = tuple(value * 16 for value in chunk)
+        chunk_high = tuple(value + 15 for value in chunk_low)
+        clipped_low = tuple(max(lower[axis], chunk_low[axis]) for axis in range(3))
+        clipped_high = tuple(min(upper[axis], chunk_high[axis]) for axis in range(3))
+        if any(clipped_high[axis] < clipped_low[axis] for axis in range(3)):
+            continue
+        cells = by_chunk.setdefault(chunk, [])
+        for z in range(clipped_low[2], clipped_high[2] + 1):
+            for y in range(clipped_low[1], clipped_high[1] + 1):
+                for x in range(clipped_low[0], clipped_high[0] + 1):
+                    count += 1
+                    if count > max_cells:
+                        raise AtlasAnalysisError(
+                            "fixed inline-model surface scope exceeds bounded sparse fill"
+                        )
+                    cells.append((x, y, z))
+    return tuple(
+        SurfaceCandidateGroup(chunk, tuple(cells))
+        for chunk, cells in sorted(by_chunk.items(), key=lambda item: _zyx(item[0]))
+    )
+
+
 def _l0_chunks(
     nodes: Mapping[tuple[int, int, int], NavNode],
     spawns: Sequence[tuple[int, tuple[float, float, float]]],
@@ -1015,9 +1284,36 @@ def _l0_chunks(
     metadata: BspMetadata | None = None,
     admitted_hooks: Sequence[Mapping[str, Any]] = (),
     semantic_summary: dict[str, int] | None = None,
+    surface_summary: dict[str, Any] | None = None,
+    budget_state: L0BudgetState | None = None,
 ) -> list[dict]:
     chunks: dict[tuple[int, int, int], dict[str, Any]] = {}
     semantic_cells: dict[str, set[tuple[int, int, int]]] = defaultdict(set)
+    budget = budget_state or L0BudgetState()
+    accounted_bits = {
+        (chunk.key, plane) for chunk in budget.chunks for plane in chunk.bitplanes
+    }
+    accounted_scalars = {
+        (chunk.key, plane) for chunk in budget.chunks for plane in chunk.scalar_planes
+    }
+
+    def admit_bitplane(chunk: tuple[int, int, int], plane: str) -> None:
+        """Reserve one immutable bitplane before its first material allocation."""
+
+        nonlocal budget
+        account = (chunk, plane)
+        if account in accounted_bits:
+            return
+        reservation_result = budget.reserve(chunk, L0PlaneKind.BIT, plane)
+        if not reservation_result.is_exact or reservation_result.value is None:
+            raise AtlasAnalysisError(
+                reservation_result.reason or "L0 bitplane budget authority is unknown"
+            )
+        reservation = reservation_result.value
+        if not reservation.accepted:
+            raise AtlasAnalysisError(reservation.rejection)
+        budget = reservation.state
+        accounted_bits.add(account)
 
     def item_for(l0: tuple[int, int, int]) -> tuple[dict[str, Any], int]:
         chunk = tuple(value // 16 for value in l0)
@@ -1027,6 +1323,9 @@ def _l0_chunks(
         return item, linear
 
     def set_index(l0: tuple[int, int, int], plane: str) -> None:
+        chunk = _l0_chunk_key(l0)
+        admit_bitplane(chunk, plane)
+        # Allocation is deliberately after the cumulative prospective check.
         item, linear = item_for(l0)
         item["bits"][plane].add(linear)
 
@@ -1034,9 +1333,24 @@ def _l0_chunks(
         set_index(_grid_index(point, origin, 4), plane)
 
     def set_scalar(point: Sequence[float], plane: str, value: int) -> None:
+        nonlocal budget
         if not 0 < value <= 255:
             return
-        item, linear = item_for(_grid_index(point, origin, 4))
+        l0 = _grid_index(point, origin, 4)
+        chunk = _l0_chunk_key(l0)
+        account = (chunk, plane)
+        if account not in accounted_scalars:
+            reservation_result = budget.reserve(chunk, L0PlaneKind.SCALAR, plane)
+            if not reservation_result.is_exact or reservation_result.value is None:
+                raise AtlasAnalysisError(
+                    reservation_result.reason or "L0 scalar-plane budget authority is unknown"
+                )
+            reservation = reservation_result.value
+            if not reservation.accepted:
+                raise AtlasAnalysisError(reservation.rejection)
+            budget = reservation.state
+            accounted_scalars.add(account)
+        item, linear = item_for(l0)
         values = item["scalars"].setdefault(plane, {})
         values[linear] = max(value, values.get(linear, 0))
 
@@ -1052,20 +1366,6 @@ def _l0_chunks(
         # Bounds are half-open.  Subtract an epsilon so an exact upper grid
         # plane does not materialize a neighboring cell.
         upper = _grid_index(tuple(value - 1e-6 for value in maxs), origin, 4)
-        fill_indices(lower, upper, plane, scalar=scalar, semantic=semantic)
-
-    def fill_inclusive_milliunit_bounds(
-        bounds: Sequence[int], plane: str,
-        *, scalar: tuple[str, int] | None = None,
-        semantic: str | None = None,
-    ) -> None:
-        """Retain all L0 cells intersected by an inclusive linked AABB."""
-        lower = _grid_index(
-            tuple(bounds[axis] / 1000.0 for axis in range(3)), origin, 4
-        )
-        upper = _grid_index(
-            tuple(bounds[axis + 3] / 1000.0 for axis in range(3)), origin, 4
-        )
         fill_indices(lower, upper, plane, scalar=scalar, semantic=semantic)
 
     def fill_indices(
@@ -1089,46 +1389,77 @@ def _l0_chunks(
                         point = _center(index, origin, 4)
                         set_scalar(point, scalar[0], scalar[1])
 
-    def expanded_bounds(
-        mins: Sequence[float], maxs: Sequence[float],
-        hull_mins: Sequence[float], hull_maxs: Sequence[float],
-    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-        return (
-            tuple(mins[axis] - hull_maxs[axis] for axis in range(3)),
-            tuple(maxs[axis] - hull_mins[axis] for axis in range(3)),
+    surface_scope = _surface_candidate_scope(nodes, origin)
+    if surface_summary is not None:
+        surface_summary.update({
+            "schema": "q2-atlas-scoped-surfaces-v1",
+            "model0_candidate_cells": surface_scope.candidate_cells,
+            "model0_request_upper_bound": 0,
+            "model0_authorized_chunks": len(surface_scope.authorized_chunks),
+            "model0_boundary_l1_cells": len(surface_scope.boundary_l1),
+            "model0_materialized_chunks": 0,
+            "model0_materialized_cells": 0,
+            "model0_occupancy_requests": 0,
+            "model0_surface_requests": 0,
+            "model0_physical_requests": 0,
+            "inline_fixed_pose_count": 0,
+            "inline_candidate_cells": 0,
+            "inline_request_upper_bound": 0,
+            "inline_materialized_cells": 0,
+            "inline_occupancy_requests": 0,
+            "inline_surface_requests": 0,
+            "inline_physical_requests": 0,
+            "inline_models": [],
+        })
+    if cm is not None and surface_scope.groups:
+        request_upper_bound = _surface_request_upper_bound(surface_scope.groups)
+        if surface_scope.candidate_cells > cm.limits.max_surface_candidate_cells:
+            raise AtlasAnalysisError(
+                f"model-0 scoped surface candidates {surface_scope.candidate_cells} "
+                f"exceed bound {cm.limits.max_surface_candidate_cells}"
+            )
+        if request_upper_bound > cm.limits.max_surface_request_upper_bound:
+            raise AtlasAnalysisError(
+                f"model-0 scoped surface request upper bound {request_upper_bound} "
+                f"exceeds planning bound {cm.limits.max_surface_request_upper_bound}"
+            )
+        surface_result = _discover_surface_groups_incrementally(
+            groups=surface_scope.groups,
+            origin=origin,
+            pose=Model0Pose(),
+            budget_state=budget,
+            cm=cm,
         )
+        budget = surface_result.budget_state
+        accounted_bits.update(
+            (chunk.key, plane)
+            for chunk in budget.chunks for plane in chunk.bitplanes
+        )
+        material_planes = (
+            (SURF_SKY, "sky"), (SURF_SLICK, "slick"),
+            (SURF_WARP, "warp"), (SURF_NODRAW, "nodraw"),
+        )
+        for surface_chunk in surface_result.chunks:
+            for cell in surface_chunk.cells:
+                set_index(cell.index, "solid")
+                for flag, plane in material_planes:
+                    if cell.surface_flags & flag:
+                        set_index(cell.index, plane)
+        if surface_summary is not None:
+            surface_summary.update({
+                "model0_request_upper_bound": request_upper_bound,
+                "model0_materialized_chunks": len(surface_result.chunks),
+                "model0_materialized_cells": sum(
+                    len(chunk.cells) for chunk in surface_result.chunks
+                ),
+                "model0_occupancy_requests": surface_result.occupancy_requests,
+                "model0_surface_requests": surface_result.surface_requests,
+                "model0_physical_requests": surface_result.physical_requests,
+            })
 
-    # Retain the exact narrow-band facts already established during the L1
-    # flood.  Full open floors remain L1-only; L0 records boundary surfaces.
-    boundary_keys: set[tuple[int, int, int]] = set()
-    for key, node in nodes.items():
-        boundary = False
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            neighbors = [
-                candidate for dz in (-1, 0, 1)
-                if (candidate := nodes.get((key[0] + dx, key[1] + dy, key[2] + dz)))
-                is not None
-            ]
-            if not neighbors or all(
-                neighbor.standing_clear != node.standing_clear
-                or neighbor.crouched_clear != node.crouched_clear
-                or neighbor.contents != node.contents
-                for neighbor in neighbors
-            ):
-                boundary = True
-                break
-        if boundary:
-            boundary_keys.add(key)
-            set_bit((node.position[0], node.position[1], node.position[2] - 25), "solid")
-        surface_point = (node.position[0], node.position[1], node.position[2] - 25)
-        if node.floor_surface_flags & SURF_SKY:
-            set_bit(surface_point, "sky")
-        if node.floor_surface_flags & SURF_SLICK:
-            set_bit(surface_point, "slick")
-        if node.floor_surface_flags & SURF_WARP:
-            set_bit(surface_point, "warp")
-        if node.floor_surface_flags & SURF_NODRAW:
-            set_bit(surface_point, "nodraw")
+    # Contents stored on L1 nodes came from current-map CM point-contents
+    # calls. They remain exact facts, separate from collision surface bands.
+    for node in nodes.values():
         if node.contents & CONTENTS_WATER:
             set_bit(node.position, "water")
         if node.contents & CONTENTS_SLIME:
@@ -1146,7 +1477,7 @@ def _l0_chunks(
         # Challenge every 4-unit player-origin sample inside each reachable
         # L1 column.  This records hull-expanded forbidden origins and raw
         # contents without ever allocating dense world-AABB free space.
-        retained_keys = set(boundary_keys)
+        retained_keys = set(surface_scope.boundary_l1)
         retained_keys.update(
             key for key, node in nodes.items()
             if node.contents & (
@@ -1260,140 +1591,372 @@ def _l0_chunks(
 
     if metadata is not None:
         entities = {entity.index: entity for entity in metadata.entities}
-        path_corners = {
-            entity.value("targetname"): entity
-            for entity in metadata.entities
-            if entity.classname == "path_corner" and entity.value("targetname")
-        }
+        retained_chunks = set(surface_scope.authorized_chunks)
+
+        def translated(bounds: Aabb, translation: Sequence[float]) -> Aabb:
+            return Aabb(
+                tuple(bounds.mins[axis] + translation[axis] for axis in range(3)),
+                tuple(bounds.maxs[axis] + translation[axis] for axis in range(3)),
+            )  # type: ignore[arg-type]
+
+        def exact_origin(entity: EntityMetadata) -> tuple[float, float, float] | None:
+            raw = ordered_property(entity.properties, "origin")
+            if raw is None:
+                return (0.0, 0.0, 0.0)
+            pieces = raw.split()
+            if len(pieces) != 3:
+                return None
+            try:
+                value = tuple(float(piece) for piece in pieces)
+            except ValueError:
+                return None
+            return value if all(math.isfinite(axis) for axis in value) else None  # type: ignore[return-value]
+
+        def fill_inclusive_aabb(
+            bounds: Aabb, plane: str,
+            *, scalar: tuple[str, int] | None = None,
+            semantic: str | None = None,
+        ) -> None:
+            fill_indices(
+                _grid_index(bounds.mins, origin, 4),
+                _grid_index(bounds.maxs, origin, 4),
+                plane, scalar=scalar, semantic=semantic,
+            )
+
+        def fill_potential_envelope(bounds: Aabb, semantic: str) -> None:
+            """Stream a conservative dynamic envelope through retained chunks.
+
+            This is not fixed-surface discovery and must not use that path's
+            candidate-cell planning cap. First compute only the small per-chunk
+            clipped ranges, then cumulatively admit both immutable L0 planes for
+            every affected chunk before allocating any cell set. Materialize
+            local linear indices directly so a large train envelope never builds
+            an intermediate list of global cell tuples.
+            """
+
+            lower = _grid_index(bounds.mins, origin, 4)
+            upper = _grid_index(
+                tuple(math.nextafter(value, -math.inf) for value in bounds.maxs),
+                origin, 4,
+            )
+            clips: list[
+                tuple[
+                    tuple[int, int, int],
+                    tuple[int, int, int],
+                    tuple[int, int, int],
+                ]
+            ] = []
+            cell_count = 0
+            for chunk in sorted(retained_chunks, key=_zyx):
+                chunk_low = tuple(value * 16 for value in chunk)
+                chunk_high = tuple(value + 15 for value in chunk_low)
+                clipped_low = tuple(
+                    max(lower[axis], chunk_low[axis]) for axis in range(3)
+                )
+                clipped_high = tuple(
+                    min(upper[axis], chunk_high[axis]) for axis in range(3)
+                )
+                if any(
+                    clipped_high[axis] < clipped_low[axis] for axis in range(3)
+                ):
+                    continue
+                cell_count += math.prod(
+                    clipped_high[axis] - clipped_low[axis] + 1
+                    for axis in range(3)
+                )
+                if cell_count > 2_000_000:
+                    raise AtlasAnalysisError(
+                        "L0 mover envelope exceeds bounded sparse fill"
+                    )
+                clips.append((chunk, clipped_low, clipped_high))
+
+            for chunk, _clipped_low, _clipped_high in clips:
+                admit_bitplane(chunk, "mover_swept_envelope")
+                admit_bitplane(chunk, "unknown")
+
+            for chunk, clipped_low, clipped_high in clips:
+                item = chunks.setdefault(
+                    chunk,
+                    {"key": list(chunk), "bits": defaultdict(set), "scalars": {}},
+                )
+                mover_cells = item["bits"]["mover_swept_envelope"]
+                unknown_cells = item["bits"]["unknown"]
+                for z in range(clipped_low[2], clipped_high[2] + 1):
+                    local_z = z % 16
+                    for y in range(clipped_low[1], clipped_high[1] + 1):
+                        local_y = y % 16
+                        row = 16 * local_y + 256 * local_z
+                        for x in range(clipped_low[0], clipped_high[0] + 1):
+                            linear = x % 16 + row
+                            mover_cells.add(linear)
+                            unknown_cells.add(linear)
+
+        def record_inline_unknown(
+            entity: EntityMetadata, model_index: int, reason: str,
+        ) -> None:
+            if surface_summary is not None:
+                surface_summary["inline_models"].append({
+                    "entity_index": entity.index,
+                    "model_index": model_index,
+                    "classname": entity.classname,
+                    "authority": "unknown",
+                    "reason": reason,
+                })
+
+        def discover_fixed_pose(
+            entity: EntityMetadata,
+            model_index: int,
+            headnode: int,
+            bounds: Aabb,
+            pose_origin: tuple[float, float, float],
+            pose_angles: tuple[float, float, float],
+        ) -> None:
+            nonlocal budget
+            if cm is None:
+                record_inline_unknown(entity, model_index, "collision oracle absent")
+                return
+            groups = _aabb_candidate_groups(bounds, origin, retained_chunks)
+            if not groups:
+                record_inline_unknown(
+                    entity, model_index, "fixed pose is outside retained reachable corridor"
+                )
+                return
+            request_upper_bound = _surface_request_upper_bound(groups)
+            candidate_count = sum(len(group.cells) for group in groups)
+            if candidate_count > cm.limits.max_surface_candidate_cells:
+                raise AtlasAnalysisError(
+                    f"entity {entity.index} fixed-pose candidates {candidate_count} "
+                    f"exceed bound {cm.limits.max_surface_candidate_cells}"
+                )
+            if request_upper_bound > cm.limits.max_surface_request_upper_bound:
+                raise AtlasAnalysisError(
+                    f"entity {entity.index} fixed-pose surface request upper bound "
+                    f"{request_upper_bound} exceeds planning bound "
+                    f"{cm.limits.max_surface_request_upper_bound}"
+                )
+            result = _discover_surface_groups_incrementally(
+                groups=groups,
+                origin=origin,
+                pose=FixedInlineModelPose(
+                    model_index=model_index, headnode=headnode,
+                    origin=pose_origin, angles=pose_angles,
+                ),
+                budget_state=budget,
+                cm=cm,
+            )
+            budget = result.budget_state
+            accounted_bits.update(
+                (chunk.key, plane)
+                for chunk in budget.chunks for plane in chunk.bitplanes
+            )
+            material_planes = (
+                (SURF_SKY, "sky"), (SURF_SLICK, "slick"),
+                (SURF_WARP, "warp"), (SURF_NODRAW, "nodraw"),
+            )
+            for surface_chunk in result.chunks:
+                for cell in surface_chunk.cells:
+                    set_index(cell.index, "mover_reference_solid")
+                    for flag, plane in material_planes:
+                        if cell.surface_flags & flag:
+                            set_index(cell.index, plane)
+            if surface_summary is not None:
+                surface_summary["inline_fixed_pose_count"] += 1
+                surface_summary["inline_candidate_cells"] += sum(
+                    len(group.cells) for group in groups
+                )
+                surface_summary["inline_request_upper_bound"] += request_upper_bound
+                surface_summary["inline_materialized_cells"] += sum(
+                    len(chunk.cells) for chunk in result.chunks
+                )
+                surface_summary["inline_occupancy_requests"] += result.occupancy_requests
+                surface_summary["inline_surface_requests"] += result.surface_requests
+                surface_summary["inline_physical_requests"] += result.physical_requests
+                surface_summary["inline_models"].append({
+                    "entity_index": entity.index,
+                    "model_index": model_index,
+                    "classname": entity.classname,
+                    "authority": "exact-fixed-transformed-cm",
+                    "candidate_cells": sum(len(group.cells) for group in groups),
+                    "materialized_cells": sum(len(chunk.cells) for chunk in result.chunks),
+                    "occupancy_requests": result.occupancy_requests,
+                    "surface_requests": result.surface_requests,
+                    "physical_requests": result.physical_requests,
+                })
+
         for record in metadata.entity_catalog.brush_submodels:
             entity = entities[int(record["entity_index"])]
-            model = metadata.models[int(record["model_index"])]
-            mins, maxs = model.mins, model.maxs
-            classname = entity.classname
-            if classname == "trigger_hurt":
-                try:
-                    spawnflags = int(entity.value("spawnflags") or "0", 10)
-                except ValueError as error:
-                    raise AtlasAnalysisError(
-                        f"entity {entity.index} has invalid spawnflags"
-                    ) from error
-                raw, linked, standing = _trigger_hurt_runtime_bounds(
-                    model, _origin(entity) if entity.value("origin") else (0.0, 0.0, 0.0)
-                )
-                del raw
-                crouched = _trigger_contact_bounds(
-                    linked, CROUCHED_MINS, CROUCHED_MAXS
-                )
-                if spawnflags & (1 | 2):
-                    fill_inclusive_milliunit_bounds(
-                        linked, "unknown", semantic="hurt_potential"
-                    )
-                    fill_inclusive_milliunit_bounds(
-                        standing, "unknown", semantic="hurt_potential"
-                    )
-                    fill_inclusive_milliunit_bounds(
-                        crouched, "unknown", semantic="hurt_potential"
-                    )
-                else:
-                    fill_inclusive_milliunit_bounds(
-                        linked, "hurt", scalar=("hazard_severity", 255)
-                    )
-                    fill_inclusive_milliunit_bounds(
-                        standing, "standing_forbidden_origin",
-                        scalar=("hazard_severity", 255), semantic="hurt_expanded",
-                    )
-                    fill_inclusive_milliunit_bounds(
-                        crouched, "crouched_forbidden_origin",
-                        scalar=("hazard_severity", 255), semantic="hurt_expanded",
-                    )
-            elif classname in {"trigger_push", "trigger_gravity"}:
-                fill_bounds(mins, maxs, "push_or_gravity")
-            elif "teleport" in classname:
-                fill_bounds(mins, maxs, "teleport_trigger")
-            elif classname == "func_areaportal":
-                fill_bounds(mins, maxs, "areaportal")
+            model_index = int(record["model_index"])
+            model = metadata.models[model_index]
+            raw_bounds = Aabb(model.mins, model.maxs)
+            cmodel_bounds = Aabb(
+                tuple(value - 1.0 for value in model.mins),
+                tuple(value + 1.0 for value in model.maxs),
+            )  # type: ignore[arg-type]
+            classname = entity.classname.casefold()
 
-            if not classname.startswith("func_") or classname == "func_areaportal":
-                continue
-            fill_bounds(mins, maxs, "mover_reference_solid")
-            swept_mins = list(mins)
-            swept_maxs = list(maxs)
-            size = [maxs[axis] - mins[axis] for axis in range(3)]
-            displacement = [0.0, 0.0, 0.0]
-            if classname == "func_train":
-                positions: list[tuple[float, float, float]] = []
-                seen: set[str] = set()
-                target = entity.value("target")
-                closed = False
-                while target and target not in seen and len(seen) <= len(path_corners):
-                    seen.add(target)
-                    corner = path_corners.get(target)
-                    if corner is None:
-                        break
-                    positions.append(_origin(corner))
-                    target = corner.value("target")
-                if target and positions and target == entity.value("target"):
-                    positions.append(positions[0])
-                    closed = True
-                if not positions:
-                    set_bit(model.origin, "unknown")
-                    mark_semantic(model.origin, "mover_train_unknown")
-                    continue
-                if len(positions) == 1:
-                    positions.append(positions[0])
-                for source, target_position in zip(positions, positions[1:]):
-                    segment_mins = [min(source[axis], target_position[axis]) for axis in range(3)]
-                    segment_maxs = [
-                        max(source[axis], target_position[axis]) + size[axis]
-                        for axis in range(3)
-                    ]
-                    fill_bounds(
-                        segment_mins, segment_maxs, "mover_swept_envelope",
-                        scalar=("hazard_severity", 192), semantic="crush",
+            if classname == "trigger_hurt":
+                hurt_result = trigger_hurt_semantics(entity, model.mins, model.maxs)
+                if not hurt_result.is_exact or hurt_result.value is None:
+                    raise AtlasAnalysisError(
+                        hurt_result.reason or f"entity {entity.index} hurt semantics are unknown"
                     )
-                if not closed:
-                    mark_semantic(positions[-1], "mover_train_open_path")
-                continue
-            if classname in {"func_door", "func_button", "func_water"}:
-                angle = float(entity.value("angle", "0") or 0)
-                if angle == -1:
-                    direction = (0.0, 0.0, 1.0)
-                elif angle == -2:
-                    direction = (0.0, 0.0, -1.0)
+                hurt = hurt_result.value
+                runtime_standing = hurt.runtime_standing_forbidden_origins
+                runtime_crouched = hurt.runtime_crouched_forbidden_origins
+                if (
+                    runtime_standing.authority is Authority.EXACT
+                    and runtime_crouched.authority is Authority.EXACT
+                ):
+                    if runtime_standing.value is not None:
+                        fill_inclusive_aabb(
+                            hurt.linked_touch_bounds, "hurt",
+                            scalar=("hazard_severity", 255),
+                        )
+                        fill_inclusive_aabb(
+                            runtime_standing.value, "standing_forbidden_origin",
+                            scalar=("hazard_severity", 255), semantic="hurt_expanded",
+                        )
+                        if runtime_crouched.value is not None:
+                            fill_inclusive_aabb(
+                                runtime_crouched.value, "crouched_forbidden_origin",
+                                scalar=("hazard_severity", 255), semantic="hurt_expanded",
+                            )
                 else:
-                    radians = math.radians(angle)
-                    direction = (math.cos(radians), math.sin(radians), 0.0)
-                default_lip = 4.0 if classname == "func_button" else 8.0
-                lip = float(entity.value("lip", str(default_lip)) or default_lip)
-                distance = max(0.0, abs(sum(direction[axis] * size[axis] for axis in range(3))) - lip)
-                displacement = [direction[axis] * distance for axis in range(3)]
-            elif classname == "func_plat":
-                lip = float(entity.value("lip", "8") or 8)
-                height = float(entity.value("height", "0") or 0)
-                displacement[2] = -(height if height else max(0.0, size[2] - lip))
-            elif classname in {"func_rotating", "func_door_rotating"}:
-                center = model.origin
-                radius = max(
-                    math.sqrt(sum((corner[axis] - center[axis]) ** 2 for axis in range(3)))
-                    for corner in (
-                        (mins[0], mins[1], mins[2]), (mins[0], mins[1], maxs[2]),
-                        (mins[0], maxs[1], mins[2]), (mins[0], maxs[1], maxs[2]),
-                        (maxs[0], mins[1], mins[2]), (maxs[0], mins[1], maxs[2]),
-                        (maxs[0], maxs[1], mins[2]), (maxs[0], maxs[1], maxs[2]),
+                    fill_inclusive_aabb(
+                        hurt.linked_touch_bounds, "unknown", semantic="hurt_potential"
                     )
+                    fill_inclusive_aabb(
+                        hurt.standing_forbidden_origins, "unknown",
+                        semantic="hurt_potential",
+                    )
+                    fill_inclusive_aabb(
+                        hurt.crouched_forbidden_origins, "unknown",
+                        semantic="hurt_potential",
+                    )
+                continue
+            if classname in {"trigger_push", "trigger_gravity"}:
+                fill_bounds(raw_bounds.mins, raw_bounds.maxs, "push_or_gravity")
+                continue
+            if "teleport" in classname:
+                fill_bounds(raw_bounds.mins, raw_bounds.maxs, "teleport_trigger")
+                continue
+            if classname == "func_areaportal":
+                fill_bounds(raw_bounds.mins, raw_bounds.maxs, "areaportal")
+                continue
+            if not classname.startswith("func_"):
+                continue
+
+            if classname in {"func_door", "func_button", "func_water"}:
+                semantics_result = sliding_mover_semantics(
+                    entity, cmodel_bounds.mins, cmodel_bounds.maxs
                 )
-                swept_mins = [center[axis] - radius for axis in range(3)]
-                swept_maxs = [center[axis] + radius for axis in range(3)]
-            for axis in range(3):
-                swept_mins[axis] = min(swept_mins[axis], mins[axis] + displacement[axis])
-                swept_maxs[axis] = max(swept_maxs[axis], maxs[axis] + displacement[axis])
-            if classname not in {"func_wall", "func_object", "func_explosive"}:
-                fill_bounds(
-                    swept_mins, swept_maxs, "mover_swept_envelope",
-                    scalar=("hazard_severity", 192), semantic="crush",
+                if not semantics_result.is_exact or semantics_result.value is None:
+                    record_inline_unknown(entity, model_index, semantics_result.reason)
+                    continue
+                semantics = semantics_result.value
+                discover_fixed_pose(
+                    entity, model_index, model.headnode,
+                    semantics.reference_pose.bounds,
+                    semantics.current_origin, (0.0, 0.0, 0.0),
                 )
-            else:
-                fill_bounds(swept_mins, swept_maxs, "mover_swept_envelope")
+                fill_potential_envelope(
+                    semantics.potential_envelope.bounds, "mover_dynamic_unknown"
+                )
+                continue
+
+            if classname in {"func_rotating", "func_door_rotating"}:
+                semantics_result = rotating_mover_semantics(
+                    entity, cmodel_bounds.mins, cmodel_bounds.maxs
+                )
+                if not semantics_result.is_exact or semantics_result.value is None:
+                    record_inline_unknown(entity, model_index, semantics_result.reason)
+                    continue
+                semantics = semantics_result.value
+                discover_fixed_pose(
+                    entity, model_index, model.headnode,
+                    semantics.reference_pose.bounds,
+                    semantics.origin, semantics.current_angles,
+                )
+                fill_potential_envelope(
+                    semantics.potential_envelope.bounds, "mover_dynamic_unknown"
+                )
+                continue
+
+            if classname == "func_train":
+                topology_result = train_topology(
+                    entity, metadata.entities, cmodel_bounds.mins
+                )
+                topology = topology_result.value
+                positions: list[tuple[float, float, float]] = []
+                if topology is not None:
+                    for group in topology.groups:
+                        for candidate in group.eligible:
+                            if candidate.train_origin.is_exact and candidate.train_origin.value is not None:
+                                positions.append(candidate.train_origin.value)
+                    first = topology.group(topology.initial_target) if topology.initial_target else None
+                    if (
+                        topology_result.is_exact and first is not None
+                        and len(first.eligible) == 1
+                        and first.eligible[0].train_origin.is_exact
+                        and first.eligible[0].train_origin.value is not None
+                    ):
+                        first_origin = first.eligible[0].train_origin.value
+                        discover_fixed_pose(
+                            entity, model_index, model.headnode,
+                            translated(cmodel_bounds, first_origin),
+                            first_origin, (0.0, 0.0, 0.0),
+                        )
+                    else:
+                        record_inline_unknown(
+                            entity, model_index,
+                            topology_result.reason or "train initial target is unresolved",
+                        )
+                else:
+                    record_inline_unknown(entity, model_index, topology_result.reason)
+                # Every eligible target position is conservative Unknown. Do
+                # not fill the union AABB between positions: topology proves
+                # candidate poses, not traversal through every intervening
+                # point (teleport corners make that distinction observable).
+                for position in sorted(
+                    set(positions), key=lambda value: (value[2], value[1], value[0])
+                ):
+                    fill_potential_envelope(
+                        translated(cmodel_bounds, position),
+                        "mover_dynamic_unknown",
+                    )
+                continue
+
+            if classname in {"func_wall", "func_object", "func_explosive"}:
+                pose_origin = exact_origin(entity)
+                angles_result = entity_angles(entity.properties)
+                if (
+                    pose_origin is None or not angles_result.is_exact
+                    or angles_result.value is None
+                    or angles_result.value != (0.0, 0.0, 0.0)
+                ):
+                    record_inline_unknown(
+                        entity, model_index,
+                        "fixed brush pose has malformed or nonzero unsupported angles",
+                    )
+                    continue
+                discover_fixed_pose(
+                    entity, model_index, model.headnode,
+                    translated(cmodel_bounds, pose_origin),
+                    pose_origin, angles_result.value,
+                )
+                continue
+
+            # No pure law currently proves func_plat or other mover endpoints.
+            # Retain only a conservative potential envelope and Unknown bit;
+            # never turn it into a surface or traversal edge.
+            pose_origin = exact_origin(entity)
+            if pose_origin is not None:
+                fill_potential_envelope(
+                    translated(cmodel_bounds, pose_origin), "mover_dynamic_unknown"
+                )
+            record_inline_unknown(
+                entity, model_index, f"no exact fixed-pose law for {classname}"
+            )
 
     # Hook-specific L0 cells are derived only from the exact records replayed
     # in this analyzer process. No caller-supplied coordinates are accepted.
@@ -1424,6 +1987,27 @@ def _l0_chunks(
         # upper chunk at an exact 64-unit boundary.
         for z in range(0, 96, 4):
             set_bit((spawn[0], spawn[1], spawn[2] + z), "spawn_column")
+    if len(chunks) != len(budget.chunks):
+        raise AtlasAnalysisError("L0 materialization differs from prospective chunk accounting")
+    for account in budget.chunks:
+        item = chunks.get(account.key)
+        if item is None:
+            raise AtlasAnalysisError("L0 budget retained a chunk with no materialized cells")
+        if set(item["bits"]) != set(account.bitplanes):
+            raise AtlasAnalysisError(
+                f"L0 bitplane accounting differs for chunk {account.key}"
+            )
+        if set(item["scalars"]) != set(account.scalar_planes):
+            raise AtlasAnalysisError(
+                f"L0 scalar-plane accounting differs for chunk {account.key}"
+            )
+    if surface_summary is not None:
+        surface_summary.update({
+            "l0_accounted_chunks": len(budget.chunks),
+            "l0_accounted_bytes": budget.encoded_bytes,
+            "l0_max_chunks": budget.max_chunks,
+            "l0_max_bytes": budget.max_bytes,
+        })
     output = []
     for key in sorted(chunks, key=lambda item: (item[2], item[1], item[0])):
         item = chunks[key]
@@ -1444,6 +2028,13 @@ def _l0_chunks(
         semantic_summary.update({
             name: len(cells) for name, cells in sorted(semantic_cells.items())
         })
+        # Dynamic mover envelopes have a dedicated immutable bitplane, so its
+        # exact union count does not require a second map-wide tuple set.
+        mover_count = sum(
+            len(item["bits"].get("mover_swept_envelope", ())) for item in output
+        )
+        if mover_count:
+            semantic_summary["mover_dynamic_unknown"] = mover_count
     return output
 
 
@@ -2555,10 +3146,12 @@ def analyze_map(
                     },
                 }
             l0_semantics: dict[str, int] = {}
+            surface_evidence: dict[str, Any] = {}
             l0_chunks = _l0_chunks(
                 nodes, player_spawns, origin, cm=cm, metadata=metadata,
                 admitted_hooks=compiled_hooks["edges"],
                 semantic_summary=l0_semantics,
+                surface_summary=surface_evidence,
             )
             l0_plane_counts: dict[str, int] = defaultdict(int)
             for chunk in l0_chunks:
@@ -2667,6 +3260,8 @@ def analyze_map(
     }
     analyzer_inputs = [
         Path(__file__),
+        Path(__file__).resolve().with_name("atlas_entity_semantics.py"),
+        Path(__file__).resolve().with_name("atlas_surface_bands.py"),
         Path(__file__).resolve().with_name("generated_claim_probes.py"),
         Path(__file__).resolve().parents[1] / "tools/atlas_cold_worker.py",
         Path(__file__).resolve().parents[1] / "crates/q2-lattice/src/bin/q2_atlas_pack.rs",
@@ -2686,8 +3281,8 @@ def analyze_map(
         "L0 is a reachable surface/hazard/spawn narrow band, never dense free-space fill",
         "areaportal summaries use declared map-static state only",
         "hook authority is admitted only for explicit source-bound exact replays",
-        "inline mover transforms remain confidence-tagged metadata and are not static corridors",
-        "mover envelopes are L0 occupancy; no mover traversal edge is emitted without state evidence",
+        "inline mover surfaces require exact transformed CM evidence at a fixed declared pose",
+        "dynamic mover envelopes remain Unknown and no mover traversal edge is emitted without state evidence",
     ])
     atlas_manifest_path = base.with_suffix(".atlas.manifest.json")
     generator_source = Path(__file__).resolve().parents[1] / "maps/generator.py"
@@ -2800,6 +3395,8 @@ def analyze_map(
             "spawns": spawn_records,
             "hazards": compiled_non_hook["hazards"],
             "hazard_claims": compiled_non_hook["hazard_claims"],
+            "surfaces": surface_evidence,
+            "entity_l0_semantics": l0_semantics,
             "lighting": compiled_non_hook["lighting"],
             "hooks": compiled_hooks,
             "route_claims": compiled_non_hook["route_claims"],
@@ -2828,6 +3425,22 @@ def analyze_map(
         "performance": {
             "cm_requests": oracle_manifest["collision"]["requests"],
             "pmove_requests": 0 if oracle_manifest["pmove"] is None else oracle_manifest["pmove"]["requests"],
+            "surface_occupancy_requests": (
+                surface_evidence["model0_occupancy_requests"]
+                + surface_evidence["inline_occupancy_requests"]
+            ),
+            "surface_hit_requests": (
+                surface_evidence["model0_surface_requests"]
+                + surface_evidence["inline_surface_requests"]
+            ),
+            "surface_physical_cm_requests": (
+                surface_evidence["model0_physical_requests"]
+                + surface_evidence["inline_physical_requests"]
+            ),
+            "surface_request_upper_bound": (
+                surface_evidence["model0_request_upper_bound"]
+                + surface_evidence["inline_request_upper_bound"]
+            ),
         },
     }
     if independent_cold:

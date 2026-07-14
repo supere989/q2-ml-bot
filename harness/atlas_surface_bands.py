@@ -436,13 +436,18 @@ def _surface_request(
         f"{clear_cell[0]}:{clear_cell[1]}:{clear_cell[2]}:"
         f"{solid_cell[0]}:{solid_cell[1]}:{solid_cell[2]}"
     )
+    # Occupancy authority is the stationary 4u cube at the canonical L0 cell
+    # center, not a point at that center. Sweep that same cube from the proven
+    # clear face-neighbor to the occupied end pose: CM must then return the
+    # separating hit even when a point trace to the occupied cell center would
+    # remain fractionally clear at a boundary, slope, or corner.
     return _trace_request(
         plan,
         identifier,
         _cell_center(plan, clear_cell),
         _cell_center(plan, solid_cell),
-        (0.0, 0.0, 0.0),
-        (0.0, 0.0, 0.0),
+        (-2.0, -2.0, -2.0),
+        (2.0, 2.0, 2.0),
     )
 
 

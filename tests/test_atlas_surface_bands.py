@@ -311,6 +311,29 @@ def test_scoped_targeted_inward_expansion_keeps_six_cells_not_seventh() -> None:
     assert result.value.request_counts.occupancy < 16**3
 
 
+def test_scoped_surface_witness_sweeps_the_authoritative_cube_to_occupied_center() -> None:
+    """Boundary/corner occupancy must not fall back to a center-point trace."""
+
+    oracle = AnalyticOracle(lambda cell: cell[0] < 0, (0.6, 0.0, 0.8))
+    result = _scoped(
+        [SurfaceCandidateGroup((-1, 0, 0), ((-1, 0, 0),))],
+        [(-1, 0, 0)],
+        oracle,
+    )
+    assert result.is_exact and result.value is not None and result.value.accepted
+    witness_requests = [
+        request for request in oracle.requests if request["start"] != request["end"]
+    ]
+    assert len(witness_requests) == 1
+    assert witness_requests[0]["start"] == [2.0, 2.0, 2.0]
+    assert witness_requests[0]["end"] == [-2.0, 2.0, 2.0]
+    assert witness_requests[0]["mins"] == [-2.0, -2.0, -2.0]
+    assert witness_requests[0]["maxs"] == [2.0, 2.0, 2.0]
+    # The sloped normal returned by the separating swept-volume hit remains
+    # exact classification evidence.
+    assert result.value.chunks[0].cells[0].classifications == (SurfaceClass.FLOOR,)
+
+
 def test_scoped_overlapping_candidates_and_groups_deduplicate_requests() -> None:
     oracle = AnalyticOracle(lambda cell: cell[0] < 0, (1.0, 0.0, 0.0))
     result = _scoped(
@@ -328,7 +351,7 @@ def test_scoped_overlapping_candidates_and_groups_deduplicate_requests() -> None
     surface_ids = [
         request["id"]
         for request in oracle.requests
-        if request["mins"] == [0.0, 0.0, 0.0]
+        if request["start"] != request["end"]
     ]
     assert len(surface_ids) == len(set(surface_ids)) == 2
 

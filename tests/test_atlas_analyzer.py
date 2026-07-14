@@ -24,6 +24,8 @@ from harness.atlas_analyzer import (
     _l0_chunks,
     _process_tree_rss_bytes,
     _run_measured_process,
+    _surface_candidate_scope,
+    _surface_request_upper_bound,
     analyze_map,
     sha256_file,
 )
@@ -168,7 +170,7 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
     )
 
 
-def test_l0_omits_open_floor_interior_but_keeps_required_bands() -> None:
+def test_l0_without_cm_never_invents_floor_or_boundary_surfaces() -> None:
     nodes = {}
     for y in range(48):
         for x in range(48):
@@ -185,13 +187,197 @@ def test_l0_omits_open_floor_interior_but_keeps_required_bands() -> None:
     chunks = _l0_chunks(nodes, [(1, (400.0, 400.0, 24.0))], (0, 0, 0))
     by_key = {tuple(chunk["key"]): chunk["bits"] for chunk in chunks}
 
-    # A fully surrounded ordinary floor chunk has no L0 allocation: L1 owns
-    # its support fact. Boundary rows still retain a solid surface band.
+    # Exact L1 contents remain available, but support metadata alone cannot
+    # invent a solid surface or surface-material plane.
     assert (4, 4, -1) not in by_key
-    assert any("solid" in planes for planes in by_key.values())
+    assert all("solid" not in planes for planes in by_key.values())
     assert any("lava" in planes for planes in by_key.values())
     assert any("playerclip" in planes for planes in by_key.values())
     assert any("spawn_column" in planes for planes in by_key.values())
+
+
+def test_surface_scope_uses_exact_node_hull_points_and_bounded_overlap() -> None:
+    nodes = {
+        (0, 0, 0): NavNode(
+            (0, 0, 0), (7.25, 9.5, 24.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        ),
+        (1, 0, 0): NavNode(
+            (1, 0, 0), (23.25, 9.5, 24.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        ),
+    }
+    scope = _surface_candidate_scope(nodes, (0, 0, 0))
+    candidates = {cell for group in scope.groups for cell in group.cells}
+    left_floor = (1, 2, -1)
+    right_floor = (5, 2, -1)
+    assert left_floor in candidates and right_floor in candidates
+    # Adjacent L1 samples are four L0 cells apart; a depth-five occupied band
+    # from either exact sample covers the intervening floor cells.
+    assert right_floor[0] - left_floor[0] == 4 <= 5
+    assert _surface_request_upper_bound(scope.groups) < 50_000
+    assert scope.candidate_cells < 256
+
+
+class _ExactFloorCm:
+    def __init__(self) -> None:
+        self.requests = 0
+        self.seen = []
+        self.limits = AnalyzerLimits(max_oracle_requests=100_000)
+
+    def call(self, requests):
+        self.requests += len(requests)
+        self.seen.extend(requests)
+        output = []
+        for request in requests:
+            stationary_surface_cube = (
+                request.get("mins") == [-2.0, -2.0, -2.0]
+                and request.get("maxs") == [2.0, 2.0, 2.0]
+                and request.get("start") == request.get("end")
+            )
+            start = request.get("start", [0.0, 0.0, 0.0])
+            end = request.get("end", start)
+            occupied = stationary_surface_cube and float(start[2]) < 0.0
+            surface_hit = (
+                request.get("mins") == [-2.0, -2.0, -2.0]
+                and request.get("maxs") == [2.0, 2.0, 2.0]
+                and start != end
+                and float(start[2]) >= 0.0 and float(end[2]) < 0.0
+            )
+            record = {
+                "ok": True, "id": request["id"], "op": request["op"],
+                "startsolid": occupied, "allsolid": occupied,
+                "fraction": 0.5 if surface_hit else (0.0 if occupied else 1.0),
+                "endpos": list(end), "contents": 0,
+                "plane": {"normal": [0.0, 0.0, 1.0], "dist": 0.0,
+                          "type": 0, "signbits": 0},
+                "surface": {"name": "floor", "flags": 0, "value": 0},
+            }
+            output.append(record)
+        return output
+
+
+def test_l0_model0_surfaces_require_and_preserve_exact_scoped_cm_evidence() -> None:
+    node = NavNode(
+        (0, 0, 0), (8.0, 8.0, 24.0), True, True, True, 0,
+        (0.0, 0.0, 1.0),
+    )
+    cm = _ExactFloorCm()
+    surfaces = {}
+    chunks = _l0_chunks(
+        {(0, 0, 0): node}, [], (0, 0, 0), cm=cm,
+        surface_summary=surfaces,
+    )
+    assert any("solid" in chunk["bits"] for chunk in chunks)
+    assert surfaces["model0_candidate_cells"] > 0
+    assert surfaces["model0_occupancy_requests"] > 0
+    assert surfaces["model0_surface_requests"] > 0
+    assert surfaces["model0_physical_requests"] <= (
+        surfaces["model0_occupancy_requests"] + surfaces["model0_surface_requests"]
+    )
+    assert surfaces["l0_accounted_chunks"] == len(chunks)
+
+
+def test_inline_mover_uses_fixed_transformed_cm_and_unknown_dynamic_envelope() -> None:
+    door = EntityMetadata(
+        index=1,
+        classname="func_door",
+        properties=(("model", "*1"), ("angle", "0"), ("lip", "8")),
+    )
+    metadata = SimpleNamespace(
+        entities=(door,),
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0), headnode=0),
+            SimpleNamespace(
+                mins=(16.0, -8.0, 0.0), maxs=(24.0, 8.0, 16.0),
+                origin=(0.0, 0.0, 0.0), headnode=17,
+            ),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 1, "model_index": 1},
+        )),
+    )
+    node = NavNode(
+        (0, 0, 0), (8.0, 8.0, 24.0), True, True, True, 0,
+        (0.0, 0.0, 1.0),
+    )
+    cm = _ExactFloorCm()
+    surfaces = {}
+    semantics = {}
+    chunks = _l0_chunks(
+        {(0, 0, 0): node}, [], (0, 0, 0), cm=cm, metadata=metadata,
+        surface_summary=surfaces, semantic_summary=semantics,
+    )
+    transformed = [request for request in cm.seen if request["op"] == "transformed_box_trace"]
+    assert transformed
+    assert all(request["headnode"] == 17 for request in transformed)
+    assert all(request["origin"] == [0.0, 0.0, 0.0] for request in transformed)
+    assert all(request["angles"] == [0.0, 0.0, 0.0] for request in transformed)
+    assert all("model_index" not in request for request in transformed)
+    planes = {name for chunk in chunks for name in chunk["bits"]}
+    assert "mover_reference_solid" in planes
+    assert {"mover_swept_envelope", "unknown"} <= planes
+    assert semantics["mover_dynamic_unknown"] > 0
+    assert surfaces["inline_fixed_pose_count"] == 1
+    assert surfaces["inline_models"][0]["authority"] == "exact-fixed-transformed-cm"
+
+
+def test_train_marks_candidate_poses_unknown_without_guessing_between_them() -> None:
+    train = EntityMetadata(
+        index=1,
+        classname="func_train",
+        properties=(("model", "*1"), ("target", "A")),
+    )
+    path_a = EntityMetadata(
+        index=2,
+        classname="path_corner",
+        properties=(("targetname", "A"), ("target", "B"), ("origin", "0 0 0")),
+    )
+    path_b = EntityMetadata(
+        index=3,
+        classname="path_corner",
+        properties=(("targetname", "B"), ("origin", "192 0 0")),
+    )
+    metadata = SimpleNamespace(
+        entities=(train, path_a, path_b),
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0), headnode=0),
+            SimpleNamespace(
+                mins=(0.0, 0.0, 0.0), maxs=(8.0, 8.0, 8.0),
+                origin=(0.0, 0.0, 0.0), headnode=17,
+            ),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 1, "model_index": 1},
+        )),
+    )
+    nodes = {
+        (index, 0, 0): NavNode(
+            (index, 0, 0), (x, 8.0, 24.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        )
+        for index, x in ((0, 8.0), (6, 104.0), (12, 200.0))
+    }
+    semantics = {}
+    chunks = _l0_chunks(
+        nodes, [], (0, 0, 0), cm=_ExactFloorCm(), metadata=metadata,
+        surface_summary={}, semantic_summary=semantics,
+    )
+
+    def marked(cell: tuple[int, int, int], plane: str) -> bool:
+        chunk_key = tuple(value // 16 for value in cell)
+        local = tuple(value % 16 for value in cell)
+        linear = local[0] + 16 * local[1] + 256 * local[2]
+        return any(
+            tuple(chunk["key"]) == chunk_key
+            and linear in chunk["bits"].get(plane, ())
+            for chunk in chunks
+        )
+
+    assert marked((0, 0, 0), "mover_swept_envelope")
+    assert marked((48, 0, 0), "mover_swept_envelope")
+    assert not marked((26, 0, 0), "mover_swept_envelope")
+    assert semantics["mover_dynamic_unknown"] > 0
 
 
 def test_python_l0_names_match_frozen_rust_packer_schema() -> None:
@@ -212,9 +398,12 @@ def test_atlas_channels_enumerate_exact_frozen_l0_schema() -> None:
     assert all(channel["persistence"] == "map-static" for channel in l0)
 
 
-@pytest.mark.parametrize("spawnflags,stateful", [("0", False), ("1", True), ("2", True)])
+@pytest.mark.parametrize(
+    "spawnflags,state",
+    [("0", "active"), ("1", "off"), ("2", "toggle"), ("3", "toggle")],
+)
 def test_l0_trigger_hurt_uses_runtime_linked_contact_bounds(
-    spawnflags: str, stateful: bool,
+    spawnflags: str, state: str,
 ) -> None:
     trigger = EntityMetadata(
         index=1,
@@ -245,16 +434,20 @@ def test_l0_trigger_hurt_uses_runtime_linked_contact_bounds(
             counts[name] = counts.get(name, 0) + len(cells)
         for name, cells in chunk["scalars"].items():
             scalar_counts[name] = scalar_counts.get(name, 0) + len(cells)
-    if stateful:
+    if state == "toggle":
         assert counts == {"unknown": 13_520}
         assert scalar_counts == {}
         assert semantics == {"hurt_potential": 13_520}
-    else:
+    elif state == "active":
         assert counts["hurt"] == 1_944
         assert counts["standing_forbidden_origin"] == 13_520
         assert counts["crouched_forbidden_origin"] == 8_788
         assert scalar_counts["hazard_severity"] == 13_520
         assert semantics == {"hurt_expanded": 13_520}
+    else:
+        assert counts == {}
+        assert scalar_counts == {}
+        assert semantics == {}
 
 
 def test_process_tree_rss_rejects_unreadable_root() -> None:
