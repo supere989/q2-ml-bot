@@ -36,6 +36,7 @@ PLAYER_XY_HALF = 16        # Quake II player bbox half-width
 PLAYER_MINS_Z = -24        # origin-relative standing bbox bottom
 PLAYER_MAXS_Z = 32         # origin-relative standing bbox top
 PLAYER_DIAMETER = PLAYER_XY_HALF * 2
+PMOVE_FIXED_QUANTUM = 0.125  # pmove_state_t origin is stored in eighth-units
 # A 56u Quake II standing hull can enter a gap that is still too cramped for
 # reliable movement, steps, knockback, and spawn recovery.  Horizontal slab
 # gaps therefore need 40u of motion margin above the standing hull.
@@ -2431,11 +2432,18 @@ class MapGenerator:
         """
 
         origins = {
-            (float(sample[0]), float(sample[1]), float(region.floor_z - PLAYER_MINS_Z))
+            (
+                float(sample[0]),
+                float(sample[1]),
+                float(region.floor_z - PLAYER_MINS_Z) + PMOVE_FIXED_QUANTUM,
+            )
             for region in self.light_regions
             for sample in region.samples
         }
-        origins.update(tuple(float(axis) for axis in spawn) for spawn in self.spawn_points)
+        origins.update(
+            (float(x), float(y), float(z) + PMOVE_FIXED_QUANTUM)
+            for x, y, z in self.spawn_points
+        )
         return sorted(origins, key=lambda point: (point[2], point[1], point[0]))
 
     def _real_ceiling_anchor(

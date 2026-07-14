@@ -8,6 +8,7 @@ from maps.generator import (
     HOOK_CEILING,
     HOOK_EYE_Z,
     MAX_HOOK_CANDIDATES_V2,
+    PMOVE_FIXED_QUANTUM,
     PLAYER_MINS_Z,
     HorizontalSurface,
     MapGenerator,
@@ -124,6 +125,10 @@ def test_generated_hook_candidate_schema_order_and_distance_are_stable(tmp_path)
         assert record["distance_milliunits"] == expected_distance
         assert record["landing_milliunits"][2] in {
             (region["floor_z"] - PLAYER_MINS_Z) * 1000
+            for region in first_meta["lighting"]["regions"]
+        }
+        assert record["source_milliunits"][2] in {
+            round((region["floor_z"] - PLAYER_MINS_Z + PMOVE_FIXED_QUANTUM) * 1000)
             for region in first_meta["lighting"]["regions"]
         }
         assert record["flags"] == HOOK_CEILING

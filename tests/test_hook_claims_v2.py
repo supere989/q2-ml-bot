@@ -26,7 +26,7 @@ from harness.hook_claims_v2 import (
 
 
 def _record(index: int = 0) -> dict:
-    source = [index * 32_000, 0, 24_000]
+    source = [index * 32_000, 0, 24_125]
     anchor = [source[0] + 16_000, 0, 200_000]
     eye = [source[0], source[1], source[2] + 22_000]
     return {
@@ -69,9 +69,11 @@ class _ExactCm:
                     "endpos": list(request["end"]),
                 })
             elif request["id"].endswith("source-support"):
+                support = list(source)
+                support[2] -= 0.09375
                 output.append({
                     "startsolid": False, "allsolid": False, "fraction": 0.01,
-                    "endpos": source, "plane": {"normal": [0.0, 0.0, 1.0]},
+                    "endpos": support, "plane": {"normal": [0.0, 0.0, 1.0]},
                 })
             else:
                 output.append({
@@ -93,9 +95,16 @@ class _ExactPmove:
         self.record = record
         self.required_release_ticks = required_release_ticks
         self.pull_count = 0
+        self.identity = {"parameters": {"gravity": 800, "airaccelerate": 0.0}}
 
     def call(self, requests):
         request = requests[0]
+        if request["id"].endswith(":source-ground"):
+            assert request["gravity"] == self.identity["parameters"]["gravity"]
+            assert request["airaccelerate"] == self.identity["parameters"]["airaccelerate"]
+            fixed = [round(value * 8) for value in request["origin"]]
+            frame = _frame(fixed, True)
+            return [{"frames": [frame], "final": frame}]
         if ":pmove:" in request["id"]:
             self.pull_count += 1
             frame = _frame([self.pull_count * 8, 0, 200 + self.pull_count], False)
@@ -130,6 +139,35 @@ def test_exact_replay_uses_first_grounded_fixed_origin_and_seals_trace() -> None
     assert validate_trace(trace, "trace") == trace
 
 
+def test_anchor_materializes_the_exact_cm_contact_and_distance() -> None:
+    record = _record()
+
+    class ContactCm(_ExactCm):
+        def call(self, requests):
+            output = super().call(requests)
+            for request, response in zip(requests, output):
+                if request["id"].endswith(":anchor"):
+                    response["endpos"][0] -= 0.04346
+                    response["endpos"][2] -= 0.03125
+            return output
+
+    measured, reason, trace = _replay_hook_record_exact(
+        ContactCm(record), _ExactPmove(record), _ExactHook(), record,
+        request_prefix="test-hook", atlas_origin=(0, 0, 0),
+        expected_landing=True,
+    )
+    assert reason is None and measured is not None and trace is not None
+    assert measured["anchor_milliunits"] == [15_957, 0, 199_969]
+    eye = [
+        measured["source_milliunits"][0], measured["source_milliunits"][1],
+        measured["source_milliunits"][2] + 22_000,
+    ]
+    assert measured["distance_milliunits"] == round(math.sqrt(sum(
+        (measured["anchor_milliunits"][axis] - eye[axis]) ** 2
+        for axis in range(3)
+    )))
+
+
 def test_source_and_release_tick_tampering_reject() -> None:
     source_tamper = _record()
     source_tamper["source_milliunits"][0] += 125
@@ -148,6 +186,41 @@ def test_source_and_release_tick_tampering_reject() -> None:
     release_tamper["release_after_ticks"] = 3
     measured, reason, _ = _replay(release_tamper)
     assert measured is None and reason == "measured_landing_outside_desired_l1"
+
+
+def test_source_requires_exact_cm_quantization_and_pmove_grounding() -> None:
+    record = _record()
+
+    class BadSupport(_ExactCm):
+        def call(self, requests):
+            output = super().call(requests)
+            for request, response in zip(requests, output):
+                if request["id"].endswith("source-support"):
+                    response["endpos"][2] -= 0.125
+            return output
+
+    measured, reason, _ = _replay_hook_record_exact(
+        BadSupport(record), _ExactPmove(record), _ExactHook(), record,
+        request_prefix="test-hook", atlas_origin=(0, 0, 0),
+        expected_landing=True,
+    )
+    assert measured is None and reason == "source_not_exactly_supported"
+
+    class BadGround(_ExactPmove):
+        def call(self, requests):
+            if requests[0]["id"].endswith(":source-ground"):
+                fixed = [round(value * 8) for value in requests[0]["origin"]]
+                fixed[2] += 1
+                frame = _frame(fixed, False)
+                return [{"frames": [frame], "final": frame}]
+            return super().call(requests)
+
+    measured, reason, _ = _replay_hook_record_exact(
+        _ExactCm(record), BadGround(record), _ExactHook(), record,
+        request_prefix="test-hook", atlas_origin=(0, 0, 0),
+        expected_landing=True,
+    )
+    assert measured is None and reason == "source_not_pmove_grounded"
 
 
 def test_desired_l1_and_exact_measured_landing_tampering_reject() -> None:

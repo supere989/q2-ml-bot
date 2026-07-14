@@ -2563,6 +2563,17 @@ def _pmove_fixed(frame: Mapping[str, Any], label: str) -> tuple[int, int, int]:
     return tuple(value)  # type: ignore[return-value]
 
 
+def _ceil_pmove_fixed(point: Sequence[Any], label: str) -> tuple[int, int, int]:
+    """Return the first eighth-unit origin not below a CM contact point."""
+
+    if len(point) != 3 or any(
+        isinstance(axis, bool) or not isinstance(axis, (int, float))
+        or not math.isfinite(axis) for axis in point
+    ):
+        raise AtlasAnalysisError(f"{label} is not a finite vec3")
+    return tuple(math.ceil(float(axis) * 8.0) for axis in point)  # type: ignore[return-value]
+
+
 def _replay_hook_record_exact(
     cm: OracleProcess,
     pmove: OracleProcess,
@@ -2585,6 +2596,23 @@ def _replay_hook_record_exact(
         record = validate_hook_record_v2(dict(record_value), request_prefix)
     except HookClaimsV2Error as error:
         raise AtlasAnalysisError(str(error)) from error
+    pmove_identity = getattr(pmove, "identity", None)
+    pmove_parameters = (
+        pmove_identity.get("parameters")
+        if isinstance(pmove_identity, Mapping) else None
+    )
+    if not isinstance(pmove_parameters, Mapping):
+        raise AtlasAnalysisError("hook replay lacks Pmove identity parameters")
+    pmove_gravity = pmove_parameters.get("gravity")
+    pmove_airaccelerate = pmove_parameters.get("airaccelerate")
+    if (
+        isinstance(pmove_gravity, bool) or not isinstance(pmove_gravity, int)
+        or pmove_gravity < 0
+        or isinstance(pmove_airaccelerate, bool)
+        or not isinstance(pmove_airaccelerate, (int, float))
+        or not math.isfinite(pmove_airaccelerate)
+    ):
+        raise AtlasAnalysisError("hook replay Pmove parameters are invalid")
     source_mu = record["source_milliunits"]
     anchor_mu = record["anchor_milliunits"]
     desired_landing_mu = record["landing_milliunits"]
@@ -2608,6 +2636,8 @@ def _replay_hook_record_exact(
         _hook_trace_request(f"{request_prefix}:anchor", source, anchor),
     ])
     support_plane = source_support.get("plane")
+    support_end = source_support.get("endpos")
+    source_fixed = tuple(value // 125 for value in source_mu)
     if source_clear.get("startsolid") is True or source_clear.get("allsolid") is True:
         return None, "source_hull_blocked", None
     if (
@@ -2618,14 +2648,39 @@ def _replay_hook_record_exact(
         or not isinstance(support_plane.get("normal"), list)
         or len(support_plane["normal"]) != 3
         or float(support_plane["normal"][2]) < 0.7
-        or _milliunits(source_support.get("endpos", []), "hook source support")
-        != source_mu
+        or not isinstance(support_end, list)
+        or _ceil_pmove_fixed(support_end, "hook source support") != source_fixed
     ):
         return None, "source_not_exactly_supported", None
-    if not _hook_trace_admits(anchor_trace, anchor) or _milliunits(
-        anchor_trace.get("endpos", []), "hook anchor trace"
-    ) != anchor_mu:
+    if not _hook_trace_admits(anchor_trace, anchor):
         return None, "anchor_not_exactly_attachable", None
+    measured_anchor_mu = _milliunits(
+        anchor_trace.get("endpos", []), "hook anchor trace"
+    )
+    measured_anchor = tuple(value / 1000.0 for value in measured_anchor_mu)
+
+    source_ground = pmove.call([{
+        "id": f"{request_prefix}:source-ground",
+        "op": "simulate",
+        "origin": list(source),
+        "velocity": [0.0, 0.0, 0.0],
+        "pm_type": 0,
+        "pm_flags": 0,
+        "pm_time": 0,
+        "gravity": pmove_gravity,
+        "airaccelerate": float(pmove_airaccelerate),
+        "snapinitial": False,
+        "commands": [{"msec": 100, "angles": [0, 0, 0]}],
+    }])[0]
+    source_frames = source_ground.get("frames")
+    if (
+        not isinstance(source_frames, list)
+        or len(source_frames) != 1
+        or not isinstance(source_frames[0], Mapping)
+        or source_frames[0].get("grounded") is not True
+        or _pmove_fixed(source_frames[0], "hook source Pmove frame") != source_fixed
+    ):
+        return None, "source_not_pmove_grounded", None
 
     touch = hook_process.call({
         "id": f"{request_prefix}:touch",
@@ -2641,7 +2696,10 @@ def _replay_hook_record_exact(
 
     current_origin = source
     current_velocity = (0.0, 0.0, 0.0)
-    current_state = {"pm_type": 0, "pm_flags": 4, "pm_time": 0, "gravity": 800}
+    current_state = {
+        "pm_type": 0, "pm_flags": 4, "pm_time": 0,
+        "gravity": pmove_gravity,
+    }
     previous_grounded = True
     trajectory_fixed: list[list[int]] = []
     for tick in range(record["release_after_ticks"]):
@@ -2649,7 +2707,7 @@ def _replay_hook_record_exact(
             "id": f"{request_prefix}:pull:{tick:02d}",
             "op": "pull",
             "owner_origin": list(current_origin),
-            "hook_origin": list(anchor),
+            "hook_origin": list(measured_anchor),
             "enemy_is_client": False,
             "prior_velocity": list(current_velocity),
         })
@@ -2663,6 +2721,7 @@ def _replay_hook_record_exact(
             "op": "simulate",
             "origin": list(current_origin),
             "velocity": velocity,
+            "airaccelerate": float(pmove_airaccelerate),
             **current_state,
             "snapinitial": False,
             "commands": [{"msec": 100, "angles": [0, 0, 0]}],
@@ -2691,6 +2750,7 @@ def _replay_hook_record_exact(
         "op": "simulate",
         "origin": list(current_origin),
         "velocity": list(current_velocity),
+        "airaccelerate": float(pmove_airaccelerate),
         **current_state,
         "snapinitial": False,
         "commands": [
@@ -2728,7 +2788,12 @@ def _replay_hook_record_exact(
     if expected_landing and measured_landing_mu != desired_landing_mu:
         return None, "measured_landing_fixed_mismatch", None
     measured = dict(record)
+    measured["anchor_milliunits"] = measured_anchor_mu
     measured["landing_milliunits"] = measured_landing_mu
+    eye_mu = [source_mu[0], source_mu[1], source_mu[2] + 22_000]
+    measured["distance_milliunits"] = round(math.sqrt(sum(
+        (measured_anchor_mu[axis] - eye_mu[axis]) ** 2 for axis in range(3)
+    )))
     first_grounded_frame_index = len(trajectory_fixed) - 1
     trace = {
         "claim_id": measured["claim_id"],

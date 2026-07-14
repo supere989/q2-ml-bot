@@ -29,7 +29,12 @@ flags
 ```
 
 `source_milliunits` is a proposed exact standing Pmove origin selected from
-authored floor-clear samples. Candidate `landing_milliunits` is only a desired
+authored floor-clear samples. The generator places it at the first eighth-unit
+origin above the authored support plane. Compiled preflight requires the pinned
+CM support endpoint to ceil to that exact fixed origin, requires a stationary
+hull to be clear there, and executes a zero-input Pmove under the admitted
+gravity/air-acceleration identity; that frame must remain at the same fixed
+origin and report grounded. Candidate `landing_milliunits` is only a desired
 landing-region representative, 24 units above its authored support rather than
 56 units above it. It is not evidence that Pmove lands at that coordinate. The
 materializer requires the measured first post-release false-to-true grounded
@@ -38,6 +43,13 @@ measured 1/8-unit Pmove origin. `anchor_milliunits` lies on the first real
 ceiling or ceiling-light-panel face above the desired landing. A platform or
 roof below that face suppresses the proposal; it is never relabeled as a
 ceiling.
+
+The proposed `anchor_milliunits` names the authored face. CM traces terminate
+at the engine's exact collision impact, including its collision epsilon. The
+materializer replaces the proposal with that measured impact in integer
+milliunits, recomputes the source-bound distance, and the independent analyzer
+must reproduce the same measured anchor. It never treats authored face
+coordinates as the collision endpoint.
 
 `distance_milliunits` is the rounded Euclidean distance from
 `source + (0,0,22)` to the anchor, in milliunits. `release_after_ticks` selects
