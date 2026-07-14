@@ -3,6 +3,7 @@
   "batch": "B1",
   "status": "green",
   "recorded_at": "2026-07-14T12:27:41-07:00",
+  "amended_at": "2026-07-14T14:49:00-07:00",
   "owner_directive": {
     "replacement": "one-way",
     "legacy_model_lineages": "retired",
@@ -15,7 +16,7 @@
   },
   "integration_heads": {
     "q2-ml-bot": "45ae6665fd1ca4cc8893cfee264b156e199543c7",
-    "q2-ml-client": "9d6b4117237cb8e89f1d837a3b451e3a97b29162",
+    "q2-ml-client": "af8ccf77c45c4380709db9697e7a78b8df750a66",
     "q2-lithium-3zb2": "950be00ee5c9a4ca4c37834b1b60262090a997be"
   },
   "integrated_work": {
@@ -39,6 +40,11 @@
       "agent_commit": "120a05f47a75388355214abd0c87a3d0a662d91e",
       "integration_commit": "9d6b4117"
     },
+    "transformed_inline_collision": {
+      "agent_commit": "e682f7aba25e31c9fe65e78287513f93b5f62f14",
+      "integration_commit": "af8ccf77",
+      "reason": "B2 audit rejected parser-AABB approximations for posed inline brush models"
+    },
     "hook_oracle": {
       "agent_commit": "7fe7bc2346ba8b47c51724b0a8ae9263c9c7a106",
       "integration_commit": "47839ad"
@@ -55,16 +61,26 @@
     "stock_pak_sha256": "678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad",
     "hook_parity_attestation": {
       "path": "/home/raymondj/multires-artifacts/atlas-v1/B1/hook-parity-pullspeed-1700.json",
-      "sha256": "616a97289c7a2c282940a4d4a804462a7dd940b16e009f0bc8098acddf290866",
+      "sha256": "bdb3796a18a03ab683f88d0bc51cb85766044f7d0c44dbf8ebf02c6fd88b43e4",
       "schema": "q2-hook-parity-attestation-v1",
       "passed": true,
       "case_count": 8,
       "hook_pullspeed": 1700,
       "hook_physics_identity": "cc196ac3aa76a312c72b3f23b1d5d75c264d5404098638d91c70c82eab461861",
-      "collision_fixture_identity": "d8ed6a1e5e85f1f18dc91a4b7c3d77184f077677ddf0de0fb36c48dca6b1c7c5",
-      "pmove_fixture_identity": "7eb6b2c3c5311797f7d9497f397aa272201c57d78cf5fa8604075a7d5640b1ca",
+      "collision_fixture_identity": "ba396ea846914960ecae6d1acc7c10236ebe8e5430a09355236e0f80bad6296e",
+      "pmove_fixture_identity": "fbd1bd734182db0a1a237e46b1e43cb79b12a1f57603d2be840e545421d0667f",
       "fixture_bsp_sha256": "ed6c3ae52dffce93b932756486fdaea3992f6a8ce68dddf2fbfd4281e4515b3f",
-      "vector_results_sha256": "e983d1fc5f661c4c5b39b85a1724d240309559f793535ebf741b522fe5c495f8"
+      "vector_results_sha256": "4b17187149fe1f60a8b63d3bd4ccd43c360a26a53bae2db69ea2f42b89412a0a"
+    },
+    "transformed_inline_collision": {
+      "oracle_tool_identity": "50fd0df0a296c54d0060dc2406977b1c78f9392ea1643e010f6759622557cfdf",
+      "oracle_source_closure_sha256": "4dafccb901b0f46b7dbfa5ea5cbf1844de5cd63b84be298ef20162a359b68383",
+      "cm_oracle_sha256": "781edaee1b9317766dbf831ad5edc8b5fdebe696969ca1efe0e54e2f3e5c7d1e",
+      "pmove_oracle_sha256": "66b481e924ec3d0a5e4eaf5458dd34cfe3c0927d5b7650455bceb368666718e4",
+      "operations": [
+        "transformed_point_contents",
+        "transformed_box_trace"
+      ]
     }
   },
   "physics_source_sha256": {
@@ -97,7 +113,7 @@
       "deterministic_reports_matched": true
     },
     "client_oracles": {
-      "passed": 10,
+      "passed": 12,
       "q2ded_clean_build_passed": true
     },
     "hook_contract": {
@@ -117,7 +133,7 @@
     "canonical_reencode_blocks_same_count_artifact_substitution": true
   },
   "limitations_carried_to_B2": [
-    "Collision authority is map-static model 0; transformed inline movers and live entities require explicit downstream handling.",
+    "Fixed poses of inline brush models are collision-authoritative through bounded transformed CM operations; dynamic pusher/rider timing still requires an explicit server-timed replay before mover traversal can be admitted.",
     "External .ent fixups are disabled.",
     "Closed/open areaportal golden coverage remains to be added by the analyzer batch.",
     "Hook parity stores a canonical evidence digest; full raw vector evidence remains producer-side."
