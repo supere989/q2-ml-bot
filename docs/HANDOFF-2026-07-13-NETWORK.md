@@ -3,6 +3,8 @@
 This supersedes the runtime/process sections of
 `HANDOFF-2026-07-11.md`. The older document remains the historical record for
 the aim, reward, movement, and first lattice investigations.
+See `TELEMETRY-AUDIT-2026-07-14.md` for the complete channel inventory,
+live evidence, sufficiency verdict, and remaining representation gaps.
 
 ## Active topology
 

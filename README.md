@@ -24,6 +24,8 @@ Combat quality remains below the promotion
 target and must be judged by the seasonal soak, not loss convergence.
 **See `docs/HANDOFF-2026-07-13-NETWORK.md` for the exact active topology,
 commits, rollback locations, validation evidence, and next checks.**
+The channel-by-channel sufficiency review is in
+`docs/TELEMETRY-AUDIT-2026-07-14.md`.
 
 ## Architecture
 
