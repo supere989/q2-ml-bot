@@ -106,6 +106,10 @@ timeouts, authoritative-echo acceptance rate, and maximum within-round server
 frame span. `network_client/map_epoch_resyncs` counts the intentionally
 discarded map-boundary rounds. `realtime_catchup_resyncs` and
 `preflight_packets_drained` expose pauses caught before dispatch.
+`telemetry_gap_resyncs` counts the narrower case where every conduit times out
+together before any intermission/new-map packet is visible. That whole batch
+is discarded and dispatch remains held until telemetry resumes; a partial
+timeout is still a failed round rather than an inferred map download.
 
 ## Client filesystem and process isolation
 

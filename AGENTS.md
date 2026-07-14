@@ -192,6 +192,15 @@ different from `Q2_ROLLOUT_TOKEN`; sourcing the rollout-worker secret for the
 public client conduit causes registration timeouts. Never print either value
 or full client command lines.
 
+The first fresh process correctly failed closed when all four conduits went
+silent before emitting a map-boundary packet during an uncached generated-map
+download. Python now classifies only a whole-batch timeout as a nontrainable
+`telemetry_gap_resync`, holds dispatch while the conduit is silent, and then
+enters the ordinary map-epoch barrier when packets resume. A partial-client
+timeout remains fatal. TensorBoard exposes
+`network_client/telemetry_gap_resyncs`; do not turn arbitrary one-client echo
+timeouts into map boundaries.
+
 The public client conduit is wire version 4. Its protocol-34 impulse and five
 unused button bits carry a modulo-192 action generation plus hook/weapon
 request; the server strips the private button bits before gameplay. Same-frame

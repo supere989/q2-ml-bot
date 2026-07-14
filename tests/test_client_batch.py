@@ -786,6 +786,99 @@ def test_map_download_pause_and_staggered_clients_never_dispatch_actions():
         batch.close()
 
 
+def test_synchronized_pre_boundary_gap_waits_without_dispatch_or_failure():
+    events = []
+    envs = [
+        _FakeEnv(f"client-{slot}", slot, [], events)
+        for slot in range(4)
+    ]
+    batch = Q2NetworkClientBatch(
+        envs, round_timeout=0.01, max_rejected_echoes=0
+    )
+    try:
+        batch.reset()
+
+        # Some generated-map downloads silence every conduit before the first
+        # intermission/new-map packet. The dispatched round is discarded, but
+        # this synchronized gap is not a corrupt partial action round.
+        gap = batch.collect_round(
+            [Action(move_forward=0.4)] * 4, policy_version=90
+        )
+        assert all(info["telemetry_gap_resync"] for info in gap.infos)
+        assert all(not info["trainable_transition"] for info in gap.infos)
+        assert sum(event[0] == "dispatch" for event in events) == 4
+        assert batch.metrics.telemetry_gap_resyncs == 1
+        assert batch.metrics.echo_timeouts == 0
+        assert batch.metrics.failed_rounds == 0
+
+        paused = batch.collect_round(
+            [Action(move_forward=0.4)] * 4, policy_version=91
+        )
+        assert all(info["telemetry_gap_resync"] for info in paused.infos)
+        assert sum(event[0] == "dispatch" for event in events) == 4
+
+        for env in envs:
+            env.script.append(_telemetry(
+                env.client_id, env.slot, 2, 1, map_name="mllive_uncached"
+            ))
+        changed = batch.collect_round(
+            [Action(move_forward=0.4)] * 4, policy_version=92
+        )
+        assert all(info["map_epoch_resync"] for info in changed.infos)
+        assert all(not info["map_epoch_pending"] for info in changed.infos)
+        assert sum(event[0] == "dispatch" for event in events) == 4
+
+        for env in envs:
+            env.script.append(_telemetry(
+                env.client_id,
+                env.slot,
+                3,
+                2,
+                echo_tick=2,
+                accepted=1,
+                action_generation=1,
+                forward=0.4,
+                map_name="mllive_uncached",
+            ))
+        accepted = batch.collect_round(
+            [Action(move_forward=0.4)] * 4, policy_version=93
+        )
+        assert all(info["trainable_transition"] for info in accepted.infos)
+        assert sum(event[0] == "dispatch" for event in events) == 8
+        assert batch.metrics.transitions_accepted == 4
+        assert batch.metrics.map_epoch_resyncs == 1
+    finally:
+        batch.close()
+
+
+def test_partial_multi_client_timeout_remains_a_failed_round():
+    events = []
+    env_a = _FakeEnv(
+        "client-a",
+        0,
+        [_telemetry(
+            "client-a", 0, 2, 11, echo_tick=11, accepted=1, forward=0.4
+        )],
+        events,
+    )
+    env_b = _FakeEnv("client-b", 1, [], events)
+    batch = Q2NetworkClientBatch(
+        [env_a, env_b], round_timeout=0.01, max_rejected_echoes=0
+    )
+    try:
+        batch.reset()
+        with pytest.raises(AuthoritativeEchoError):
+            batch.collect_round(
+                [Action(move_forward=0.4)] * 2, policy_version=94
+            )
+        assert batch.metrics.failed_rounds == 1
+        assert batch.metrics.echo_timeouts == 1
+        assert batch.metrics.telemetry_gap_resyncs == 0
+        assert batch.metrics.transitions_accepted == 0
+    finally:
+        batch.close()
+
+
 def test_multi_env_adapter_matches_trainer_surface_and_tags_policy():
     events = []
     env = _FakeEnv(

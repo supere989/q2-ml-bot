@@ -15,9 +15,14 @@ optimizer and reset lattice. It received actionable target data on up to 54.5%
 of accepted transitions and maintained 97.5--99.2% authoritative action
 acceptance with zero failed rounds or echo timeouts, but still returned to
 100% down-look and about 66% backward commands on a generated map. Claude,
-Agy, Grok, and the local code audit agreed this was an inherited
-action/recurrent prior plus weak corrective leverage, not a coordinate,
-conduit, or thermal/fire-role defect.
+Grok, and the local code audit attributed this to an inherited
+action/recurrent prior plus weak corrective leverage. Agy independently raised
+a possible pitch double-rotation, but the Quake-basis algebra and executable
+tests reject it: a world-horizontal target observed at +10 degrees pitch has
+local `(cos(p), 0, sin(p))` coordinates and correctly produces a -10-degree
+command, the full local/world basis round-trips within 1e-3, and the live fresh
+run subsequently reached 8.1/4.2-degree conditional yaw/pitch error plus an
+aligned hit. The conduit and thermal/fire role separation are not the fault.
 
 That warm-start is also rejected and archived. The active
 `public_network_thermal_fresh_v1` lineage starts from a fresh model at step

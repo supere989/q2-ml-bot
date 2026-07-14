@@ -35,11 +35,12 @@ down-look and about 66% backward commands) despite healthy target telemetry,
 so it was archived. The active lineage starts at step zero with a fresh model,
 fresh optimizer, and reset lattice. Its bootstrap uses LR `1e-4`, a temporary
 look/posture anchor coefficient of `0.1`, no supervised fire-head pressure,
-and the exact-point fire gate. In its first 1,536 accepted transitions,
-down-look fell to 0%, mean view pitch was -4.18 degrees, backward commands fell
-to 42.6% versus 48.4% forward commands, and hook use fell to 7.4%. Target
-contact was sparse on stock `q2dm7`, so combat quality still requires a
-stock/generated seasonal gate.
+and the exact-point fire gate. Across the first clean 10,240-transition
+generated-map window, mean down-look was 10.3% instead of 100%, forward
+commands slightly exceeded backward commands, and the exact engagement ladder
+produced 275 aligned frames, 132 admitted shots, and its first hit. No unseen
+or unaligned shot was admitted. Repeat hits and kills are still zero, so
+combat quality requires a stock/generated seasonal gate.
 Combat quality remains below the promotion target and must be
 judged by a fresh seasonal soak, not loss convergence.
 **See `docs/HANDOFF-2026-07-13-NETWORK.md` for the exact active topology,

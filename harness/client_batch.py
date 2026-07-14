@@ -84,6 +84,7 @@ class BatchMetrics:
     mismatched_echoes_rejected: int
     echo_timeouts: int
     map_epoch_resyncs: int
+    telemetry_gap_resyncs: int
     realtime_catchup_resyncs: int
     action_state_resyncs: int
     preflight_packets_drained: int
@@ -108,6 +109,7 @@ class BatchMetrics:
             ),
             f"{prefix}/echo_timeouts": self.echo_timeouts,
             f"{prefix}/map_epoch_resyncs": self.map_epoch_resyncs,
+            f"{prefix}/telemetry_gap_resyncs": self.telemetry_gap_resyncs,
             f"{prefix}/realtime_catchup_resyncs": self.realtime_catchup_resyncs,
             f"{prefix}/action_state_resyncs": self.action_state_resyncs,
             f"{prefix}/preflight_packets_drained": self.preflight_packets_drained,
@@ -224,6 +226,7 @@ class Q2NetworkClientBatch:
         self._mismatched_echoes_rejected = 0
         self._echo_timeouts = 0
         self._map_epoch_resyncs = 0
+        self._telemetry_gap_resyncs = 0
         self._realtime_catchup_resyncs = 0
         self._action_state_resyncs = 0
         self._preflight_packets_drained = 0
@@ -233,6 +236,11 @@ class Q2NetworkClientBatch:
         # boundary is observed, do not dispatch again until every client is
         # on the same playable map after this source epoch.
         self._map_epoch_source: str | None = None
+        # A generated-map download may silence every conduit before any client
+        # emits the intermission/new-map packet that normally starts the map
+        # barrier. Treat only a whole-batch timeout as this fail-closed gap;
+        # partial timeouts remain fatal transport failures.
+        self._telemetry_gap_pending = False
 
     @staticmethod
     def _policy_version(value: int) -> int:
@@ -484,6 +492,67 @@ class Q2NetworkClientBatch:
             if latest.map_name != source_map and not self._is_intermission(latest):
                 return latest
 
+    def _wait_for_telemetry_progress(
+        self,
+        env: Q2NetworkClientEnv,
+        current: ClientTelemetry,
+        deadline: float,
+    ) -> ClientTelemetryDrain:
+        """Wait once for a conduit to resume, preserving drain provenance."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return ClientTelemetryDrain(current, current, 0, ())
+        try:
+            first = env.receive_telemetry(
+                after_sequence=current.sequence,
+                timeout=remaining,
+            )
+        except TimeoutError:
+            return ClientTelemetryDrain(current, current, 0, ())
+        extra = env.drain_latest_telemetry()
+        latest = extra.latest
+        names = (first.map_name,) + extra.map_names
+        return ClientTelemetryDrain(
+            previous=current,
+            latest=latest,
+            packet_count=1 + extra.packet_count,
+            map_names=names,
+        )
+
+    def _poll_telemetry_gap(
+        self,
+        drains: Sequence[ClientTelemetryDrain],
+        *,
+        round_id: int,
+        policy_version: int,
+    ) -> BatchRound:
+        """Hold dispatch while a synchronized conduit/download gap persists."""
+        samples = list(drains)
+        if not any(drain.advanced for drain in samples):
+            deadline = time.monotonic() + self.round_timeout
+            futures = [
+                self._executor.submit(
+                    self._wait_for_telemetry_progress,
+                    env,
+                    drain.latest,
+                    deadline,
+                )
+                for env, drain in zip(self.envs, samples)
+            ]
+            samples = [future.result() for future in futures]
+        map_boundary_seen = any(
+            drain.map_changed or self._is_intermission(drain.latest)
+            for drain in samples
+        )
+        if all(drain.advanced for drain in samples) or map_boundary_seen:
+            self._telemetry_gap_pending = False
+        return self._preflight_boundary(
+            samples,
+            round_id=round_id,
+            policy_version=policy_version,
+            telemetry_gap_resync=True,
+        )
+
     def _begin_map_epoch(self, source_map: str) -> None:
         if self._map_epoch_source is None:
             self._map_epoch_source = source_map
@@ -634,6 +703,7 @@ class Q2NetworkClientBatch:
         tags: tuple[BatchActionTag, ...] | None = None,
         rejections: Sequence[tuple[int, int]] | None = None,
         action_state_resync: bool = False,
+        telemetry_gap_resync: bool = False,
     ) -> BatchRound:
         map_changed = any(drain.map_changed for drain in drains)
         intermission = any(
@@ -652,12 +722,18 @@ class Q2NetworkClientBatch:
                     "preflight crossed multiple source maps: "
                     + ", ".join(sorted(source_maps))
                 )
+            # The explicit map-epoch barrier now owns synchronization; do not
+            # leave the earlier pre-boundary gap latched after it completes.
+            self._telemetry_gap_pending = False
             self._begin_map_epoch(next(iter(source_maps)))
             return self._pending_map_boundary(
                 drains,
                 round_id=round_id,
                 policy_version=policy_version,
                 poll=False,
+                tags=tags,
+                action_dispatched=action_dispatched,
+                rejections=rejections,
             )
 
         samples = [drain.latest for drain in drains]
@@ -700,6 +776,7 @@ class Q2NetworkClientBatch:
                 "trainable_transition": False,
                 "realtime_catchup_resync": True,
                 "action_state_resync": action_state_resync,
+                "telemetry_gap_resync": telemetry_gap_resync,
                 "preflight_packets_drained": drain.packet_count,
                 "preflight_from_frame": drain.previous.server_frame,
                 "preflight_to_frame": sample.server_frame,
@@ -798,6 +875,12 @@ class Q2NetworkClientBatch:
                     policy_version=version,
                     poll=True,
                 )
+            if self._telemetry_gap_pending:
+                return self._poll_telemetry_gap(
+                    drains,
+                    round_id=round_id,
+                    policy_version=version,
+                )
             if any(drain.advanced for drain in drains):
                 return self._preflight_boundary(
                     drains,
@@ -827,6 +910,13 @@ class Q2NetworkClientBatch:
                 except AuthoritativeEchoError as error:
                     errors.append(error)
 
+            synchronized_gap = (
+                len(self.envs) > 1
+                and len(errors) == len(self.envs)
+                and all(error.timed_out for error in errors)
+                and all(result is None for result in echo_results)
+            )
+
             for result in echo_results:
                 stale, mismatched = self._result_rejections(result)
                 self._stale_echoes_rejected += stale
@@ -834,7 +924,8 @@ class Q2NetworkClientBatch:
             for error in errors:
                 self._stale_echoes_rejected += error.stale_echoes
                 self._mismatched_echoes_rejected += error.mismatched_echoes
-                self._echo_timeouts += int(error.timed_out)
+                if not synchronized_gap:
+                    self._echo_timeouts += int(error.timed_out)
 
             tags = tuple(
                 BatchActionTag(
@@ -873,6 +964,25 @@ class Q2NetworkClientBatch:
                         self._result_rejections(result)
                         for result in echo_results
                     ],
+                )
+
+            if synchronized_gap:
+                self._telemetry_gap_pending = True
+                self._telemetry_gap_resyncs += 1
+                boundary_drains = [
+                    env.drain_latest_telemetry() for env in self.envs
+                ]
+                return self._preflight_boundary(
+                    boundary_drains,
+                    round_id=round_id,
+                    policy_version=version,
+                    action_dispatched=True,
+                    tags=tags,
+                    rejections=[
+                        (error.stale_echoes, error.mismatched_echoes)
+                        for error in errors
+                    ],
+                    telemetry_gap_resync=True,
                 )
 
             if errors:
@@ -994,6 +1104,7 @@ class Q2NetworkClientBatch:
             mismatched_echoes_rejected=self._mismatched_echoes_rejected,
             echo_timeouts=self._echo_timeouts,
             map_epoch_resyncs=self._map_epoch_resyncs,
+            telemetry_gap_resyncs=self._telemetry_gap_resyncs,
             realtime_catchup_resyncs=self._realtime_catchup_resyncs,
             action_state_resyncs=self._action_state_resyncs,
             preflight_packets_drained=self._preflight_packets_drained,

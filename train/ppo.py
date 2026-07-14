@@ -1197,6 +1197,7 @@ def train(cfg: dict):
                     target_maps = set()
                     preflight_packets_drained = 0
                     map_epoch_resync = False
+                    telemetry_gap_resync = False
                     for si, results in step_results:
                         base = si * n_ml
                         for bi, (o, _r, _term, _trunc, info) in enumerate(results):
@@ -1210,15 +1211,23 @@ def train(cfg: dict):
                             map_epoch_resync |= bool(
                                 info.get("map_epoch_resync", False)
                             )
+                            telemetry_gap_resync |= bool(
+                                info.get("telemetry_gap_resync", False)
+                            )
                             ep_rewards[vi] = 0.0
                             ep_base_rewards[vi] = 0.0
                             ep_spatial_rewards[vi] = 0.0
                             ep_kills[vi] = 0.0
                             ep_deaths[vi] = 0.0
                             ep_lengths[vi] = 0
+                    boundary_kind = (
+                        "map-epoch" if map_epoch_resync else
+                        "telemetry-gap" if telemetry_gap_resync else
+                        "realtime-catchup"
+                    )
                     print(
                         "Network client synchronization boundary: "
-                        f"kind={'map-epoch' if map_epoch_resync else 'realtime-catchup'} "
+                        f"kind={boundary_kind} "
                         f"maps={','.join(sorted(target_maps))} "
                         f"drained={preflight_packets_drained}"
                     )

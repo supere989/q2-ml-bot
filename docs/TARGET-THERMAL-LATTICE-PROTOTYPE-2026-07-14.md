@@ -153,6 +153,26 @@ visible pitch-anchor MAE, and zero transport failures/timeouts. Stock `q2dm7`
 had sparse visible contact, so these are posture/transport proofs, not a combat
 promotion. Every run must keep its own checkpoint and TensorBoard directory.
 
+That first fresh process later failed closed at the first uncached
+stock-to-generated transition: all four conduits went silent before any client
+delivered the intermission/new-map packet that starts the normal persistent
+barrier. This exposed a pre-boundary download gap, not action corruption. The
+collector now treats only a synchronized whole-batch timeout as a nontrainable
+telemetry-gap resync, sends no further actions while the gap is pending, and
+hands off to the existing map-epoch barrier when telemetry returns.
+Partial-client timeouts remain fatal. The failed event segment is archived and
+TensorBoard contains only the clean replacement process.
+
+An external review raised a possible pitch double-rotation because the entity
+vector is already expressed in the full `v_angle` basis. The reconstruction is
+intentional: it removes the current pitch to recover yaw-horizontal forward
+and world up, computes the target's absolute Quake pitch, then subtracts the
+current pitch to obtain the executable Euler delta. Eight focused executable
+tests cover nonzero pitch, Quake-right sign, post-command fire alignment, and
+the local/world round trip. The live generated-map segment additionally
+reached 8.1-degree yaw error, 4.2-degree pitch error, an aligned shot, and a hit;
+a gross sign or double-rotation defect is therefore rejected.
+
 ## Prototype gates
 
 - C clean build and all Python tests pass in the WSL PyTorch environment.
