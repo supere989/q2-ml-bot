@@ -7,6 +7,15 @@ import struct
 
 import pytest
 
+from harness.hook_claims_v2 import (
+    canonical_json as hook_canonical_json,
+    load_candidates,
+    render_runtime_sidecar,
+    runtime_records_sha256,
+    sha256_bytes,
+    validate_materialization,
+    validation_trace_sha256,
+)
 from maps.generator import generate_map
 from tools.generator_claim_validator import (
     ClaimValidationError,
@@ -42,6 +51,74 @@ def _write_compiled_bsp(map_path: Path) -> Path:
     return bsp_path
 
 
+def _fake_materialize(map_path: Path) -> None:
+    """Create structurally valid proof fixtures; physics is tested elsewhere."""
+    stem = map_path.with_suffix("")
+    meta_path = stem.with_suffix(".meta.json")
+    runtime_path = stem.with_suffix(".json")
+    bsp_path = stem.with_suffix(".bsp")
+    candidates, candidate_digest, meta_digest = load_candidates(meta_path)
+    source_projection_digest = file_sha256(runtime_path)
+    selected = []
+    geometries = set()
+    for record in candidates["records"]:
+        geometry = (
+            tuple(record["anchor_milliunits"]),
+            tuple(record["landing_milliunits"]), record["flags"],
+        )
+        if geometry in geometries:
+            continue
+        geometries.add(geometry)
+        selected.append(record)
+        if len(selected) == 6:
+            break
+    assert len(selected) == 6
+    traces = []
+    for record in selected:
+        frames = [[value // 125 for value in record["landing_milliunits"]]]
+        traces.append({
+            "claim_id": record["claim_id"],
+            "origin_fixed_frames": frames,
+            "first_grounded_frame_index": 0,
+            "sha256": validation_trace_sha256(record["claim_id"], frames, 0),
+        })
+    document = validate_materialization({
+        "schema": "q2-hook-claim-materialization-v2",
+        "map": map_path.stem, "passed": True,
+        "bsp": {"sha256": file_sha256(bsp_path), "size_bytes": bsp_path.stat().st_size},
+        "candidates": {
+            "meta_sha256": meta_digest, "records_sha256": candidate_digest,
+            "record_count": len(candidates["records"]),
+        },
+        "source_projection_sha256": source_projection_digest,
+        "runtime_records_sha256": runtime_records_sha256(selected),
+        "selected_records": selected,
+        "validation_traces": traces,
+        "oracles": {
+            name: {
+                "executable_sha256": str(index + 1) * 64,
+                "tool_identity": str(index + 2) * 64,
+                "physics_identity": str(index + 3) * 64,
+                "requests": 1,
+            }
+            for index, name in enumerate(("collision", "pmove", "hook"))
+        } | {"hook_parity_attestation_sha256": "4" * 64},
+        "replay": {
+            "analyzer": "q2-hook-claim-materializer",
+            "analyzer_version": "b2-c-v2",
+            "verifier": "q2-atlas-analyzer-exact-hook-replay",
+            "verifier_version": "b2-a-v2",
+        },
+        "request_count": 3,
+    })
+    payload = hook_canonical_json(document) + b"\n"
+    digest = sha256_bytes(payload)
+    Path(f"{stem}.hook-materialization.json").write_bytes(payload)
+    runtime_path.write_bytes(render_runtime_sidecar(
+        map_path.stem, file_sha256(bsp_path), digest, selected,
+    ))
+
+
 def _route_results(claims: dict) -> list[dict]:
     costs = {}
     for route in claims["routes"]:
@@ -68,6 +145,13 @@ def _route_results(claims: dict) -> list[dict]:
 
 def _analysis(map_path: Path, claims: dict) -> dict:
     meta = json.loads(map_path.with_suffix(".meta.json").read_text())
+    hook_materialization = json.loads(
+        Path(f"{map_path.with_suffix('')}.hook-materialization.json").read_text()
+    )
+    hook_traces = {
+        trace["claim_id"]: trace
+        for trace in hook_materialization["validation_traces"]
+    }
     gate = json.loads((ROOT / "docs/multires/B1-GATE.json").read_text())
     physics = gate["artifacts"]["hook_parity_attestation"][
         "hook_physics_identity"
@@ -148,7 +232,19 @@ def _analysis(map_path: Path, claims: dict) -> dict:
                         "claim_id": claim["claim_id"],
                         "source_l1": [index, 0, 0],
                         "target_l1": [index + 1, 0, 0],
+                        "source_milliunits": claim["source_milliunits"],
                         "anchor_milliunits": claim["anchor_milliunits"],
+                        "landing_milliunits": claim["landing_milliunits"],
+                        "release_after_ticks": claim["release_after_ticks"],
+                        "distance_milliunits": claim["distance_milliunits"],
+                        "flags": claim["flags"],
+                        "trajectory_origin_fixed": hook_traces[claim["claim_id"]][
+                            "origin_fixed_frames"
+                        ],
+                        "trajectory_sha256": hook_traces[claim["claim_id"]]["sha256"],
+                        "first_grounded_frame_index": hook_traces[claim["claim_id"]][
+                            "first_grounded_frame_index"
+                        ],
                         "landing_l1": [index + 1, 0, 0],
                         "physics_identity": physics,
                         "evidence": 1,
@@ -168,6 +264,7 @@ def generated(tmp_path: Path) -> tuple[Path, dict, Path]:
         "claim_fixture", 42, tmp_path, style="arena_vertical"
     )
     _write_compiled_bsp(map_path)
+    _fake_materialize(map_path)
     claims = build_generator_claims(map_path)
     analysis_path = tmp_path / "claim_fixture.analysis.manifest.json"
     analysis_path.write_bytes(canonical_bytes(_analysis(map_path, claims)))
@@ -195,6 +292,10 @@ def test_generator_claims_are_canonical_and_byte_deterministic(tmp_path: Path):
     second.mkdir()
     map_a, _ = generate_map("same", 7142026, first, style="arena_lanes")
     map_b, _ = generate_map("same", 7142026, second, style="arena_lanes")
+    _write_compiled_bsp(map_a)
+    _write_compiled_bsp(map_b)
+    _fake_materialize(map_a)
+    _fake_materialize(map_b)
 
     claims_a = build_generator_claims(map_a)
     claims_b = build_generator_claims(map_b)
@@ -318,6 +419,14 @@ def test_claim_and_compiled_records_reject_unknown_fields(generated):
     with pytest.raises(ClaimValidationError, match="extra"):
         validate_generator_claims(changed)
 
+    changed = deepcopy(claims)
+    extra = deepcopy(changed["spawns"][-1])
+    extra["claim_id"] = "spawn:9999"
+    extra["origin_milliunits"][0] += 1_000_000
+    changed["spawns"].append(extra)
+    with pytest.raises(ClaimValidationError, match="exactly eight spawns"):
+        validate_generator_claims(changed)
+
     _mutate_analysis(
         analysis_path,
         lambda value: value["compiled_world"]["spawns"][0].update(
@@ -355,7 +464,7 @@ def test_stock_analysis_does_not_apply_generator_v6_criteria(generated):
 
 def test_contract_schemas_forbid_unknown_top_level_fields():
     claims_schema = json.loads(
-        (ROOT / "schemas/q2-generator-claims-v1.schema.json").read_text()
+        (ROOT / "schemas/q2-generator-claims-v2.schema.json").read_text()
     )
     report_schema = json.loads(
         (ROOT / "schemas/q2-generator-claim-validation-v1.schema.json").read_text()
@@ -366,6 +475,10 @@ def test_contract_schemas_forbid_unknown_top_level_fields():
 
 def test_prepare_campaign_is_canonical_and_requires_exact_count(tmp_path: Path):
     map_path, _ = generate_map("campaign", 7, tmp_path, style="open")
+    unmaterialized = prepare_claims([map_path], expected_count=1)
+    assert unmaterialized["passed"] is False
+    _write_compiled_bsp(map_path)
+    _fake_materialize(map_path)
     first = prepare_claims([map_path], expected_count=1)
     first_bytes = canonical_bytes(first)
     second = prepare_claims([map_path], expected_count=1)
@@ -376,3 +489,32 @@ def test_prepare_campaign_is_canonical_and_requires_exact_count(tmp_path: Path):
     wrong_count = prepare_claims([map_path], expected_count=2)
     assert wrong_count["passed"] is False
     assert wrong_count["failures"] == ["map count 1 != required 2"]
+
+
+@pytest.mark.parametrize("mutation", ["bsp", "meta", "candidate", "materialization"])
+def test_materialization_source_mutation_rejects_before_claim_publish(
+    tmp_path: Path, mutation: str,
+) -> None:
+    map_path, _ = generate_map("bound", 17, tmp_path, style="arena_vertical")
+    bsp_path = _write_compiled_bsp(map_path)
+    _fake_materialize(map_path)
+    stem = map_path.with_suffix("")
+    if mutation == "bsp":
+        bsp_path.write_bytes(bsp_path.read_bytes() + b"tamper")
+    elif mutation in {"meta", "candidate"}:
+        meta_path = stem.with_suffix(".meta.json")
+        metadata = json.loads(meta_path.read_text())
+        if mutation == "meta":
+            metadata["tampered_after_materialization"] = True
+        else:
+            metadata["hook_claim_candidates_v2"]["records"][0][
+                "release_after_ticks"
+            ] += 1
+        meta_path.write_bytes(canonical_bytes(metadata))
+    else:
+        materialization_path = Path(f"{stem}.hook-materialization.json")
+        materialization = json.loads(materialization_path.read_text())
+        materialization["request_count"] += 1
+        materialization_path.write_bytes(canonical_bytes(materialization))
+    with pytest.raises(ClaimValidationError):
+        build_generator_claims(map_path)

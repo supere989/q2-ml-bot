@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import select
+import signal
 import shutil
 import struct
 import subprocess
@@ -21,12 +22,25 @@ from typing import Any, Iterable, Mapping, Sequence
 import zstandard
 
 from .ibsp38 import BspMetadata, EntityMetadata, parse_ibsp38
+from .generated_claim_probes import (
+    GeneratedClaimProbeError,
+    _trigger_contact_bounds,
+    _trigger_hurt_runtime_bounds,
+    analyze_non_hook_claims,
+)
+from .hook_claims_v2 import (
+    HookClaimsV2Error,
+    validate_materialization as validate_hook_materialization_v2,
+    validate_record as validate_hook_record_v2,
+    validation_trace_sha256,
+)
 
 
 SCHEMA = "q2-atlas-analysis-v1"
 BUILD_PLAN_SCHEMA = "q2-atlas-build-plan-v1"
 EVIDENCE_CM_TRACE_V1 = 1
 EVIDENCE_PMOVE_V1 = 2
+EVIDENCE_HOOK_LAW_V1 = 4
 VALIDATION_VERSION = 1
 MASK_PLAYERSOLID = 33_619_971
 MASK_SHOT = 100_663_299
@@ -341,6 +355,110 @@ class OracleProcess:
             self.close()
 
 
+class HookOracleProcess:
+    """Persistent, identity-pinned interface to the attested pure hook law."""
+
+    PARAMETERS = {
+        "hook_speed": 900,
+        "hook_pullspeed": 1700,
+        "hook_sky": False,
+        "hook_maxtime": 5,
+    }
+
+    def __init__(
+        self,
+        binary: Path,
+        expected_physics_identity: str,
+        limits: AnalyzerLimits,
+    ) -> None:
+        self.binary = binary.resolve()
+        self.expected_physics_identity = expected_physics_identity
+        self.limits = limits
+        self.requests = 0
+        self.process = subprocess.Popen(
+            [str(self.binary)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        if self.process.stdin is None or self.process.stdout is None:
+            raise AtlasAnalysisError("failed to open hook oracle pipes")
+        identity = self.call({"id": "identity", "op": "identity"})
+        if identity.get("op") != "identity":
+            raise AtlasAnalysisError("hook identity operation mismatch")
+        self.identity = identity
+
+    def call(self, request: Mapping[str, Any]) -> dict:
+        self.requests += 1
+        if self.requests > self.limits.max_oracle_requests:
+            raise AtlasAnalysisError("hook oracle request budget exceeded")
+        payload = {**self.PARAMETERS, **dict(request)}
+        assert self.process.stdin is not None and self.process.stdout is not None
+        try:
+            self.process.stdin.write(canonical_json(payload) + b"\n")
+            self.process.stdin.flush()
+        except BrokenPipeError as error:
+            raise AtlasAnalysisError("hook oracle pipe closed") from error
+        deadline = time.monotonic() + self.limits.oracle_batch_timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._kill()
+                raise AtlasAnalysisError("hook oracle request timed out")
+            ready, _, _ = select.select([self.process.stdout.fileno()], [], [], remaining)
+            if ready:
+                raw = self.process.stdout.readline()
+                break
+        if not raw:
+            detail = b"" if self.process.stderr is None else self.process.stderr.read(4096)
+            raise AtlasAnalysisError(
+                f"hook oracle exited early: {detail.decode(errors='replace')}"
+            )
+        try:
+            record = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AtlasAnalysisError("hook oracle emitted invalid JSON") from error
+        if record.get("ok") is not True or record.get("id") != request.get("id"):
+            raise AtlasAnalysisError(
+                f"hook oracle rejected {request.get('op')}: {record.get('error')}"
+            )
+        if record.get("schema") != "q2-hook-oracle-v1":
+            raise AtlasAnalysisError("hook oracle schema mismatch")
+        if record.get("physics_identity") != self.expected_physics_identity:
+            raise AtlasAnalysisError("hook oracle physics identity mismatch")
+        return record
+
+    def _kill(self) -> None:
+        if self.process.poll() is None:
+            self.process.kill()
+
+    def close(self) -> None:
+        if self.process.stdin is not None:
+            self.process.stdin.close()
+        try:
+            self.process.wait(timeout=self.limits.process_exit_timeout_seconds)
+        except subprocess.TimeoutExpired:
+            self._kill()
+            self.process.wait()
+        if self.process.returncode:
+            detail = b"" if self.process.stderr is None else self.process.stderr.read(4096)
+            raise AtlasAnalysisError(
+                f"hook oracle exited {self.process.returncode}: "
+                f"{detail.decode(errors='replace')}"
+            )
+
+    def __enter__(self) -> "HookOracleProcess":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        if exc is not None:
+            self._kill()
+            self.process.wait()
+        else:
+            self.close()
+
+
 @dataclass
 class NavNode:
     index: tuple[int, int, int]
@@ -568,10 +686,19 @@ def _build_navigation(
     spawns: Sequence[tuple[int, tuple[float, float, float]]],
     origin: tuple[int, int, int],
     limits: AnalyzerLimits,
+    candidate_points: Sequence[tuple[float, float, float]] = (),
 ) -> tuple[dict[tuple[int, int, int], NavNode], list[dict], dict[int, tuple[int, int, int]]]:
-    seed_points = [point for _, point in spawns]
+    seeds = [
+        (entity_ordinal, point, True) for entity_ordinal, point in spawns
+    ] + [
+        (None, point, False) for point in candidate_points
+    ]
+    seed_points = [point for _, point, _ in seeds]
     seed_support = cm.call([
-        _box_request(f"seed-floor:{ordinal}", point, (point[0], point[1], point[2] - 64),
+        _box_request(
+            f"seed-floor:{ordinal}",
+            (point[0], point[1], point[2] + 32),
+            (point[0], point[1], point[2] - 96),
                      STANDING_MINS, STANDING_MAXS)
         for ordinal, point in enumerate(seed_points)
     ])
@@ -590,7 +717,7 @@ def _build_navigation(
     queue: deque[tuple[int, int, int]] = deque()
     spawn_indices: dict[int, tuple[int, int, int]] = {}
     probe_ordinal = 0
-    for ordinal, ((entity_ordinal, _), point) in enumerate(zip(spawns, grounded)):
+    for ordinal, ((entity_ordinal, _, is_spawn), point) in enumerate(zip(seeds, grounded)):
         if point is None:
             continue
         stand, crouch, contents = probes[probe_ordinal * 3:probe_ordinal * 3 + 3]
@@ -611,7 +738,8 @@ def _build_navigation(
         )
         nodes.setdefault(key, node)
         queue.append(key)
-        spawn_indices[entity_ordinal] = key
+        if is_spawn and entity_ordinal is not None:
+            spawn_indices[entity_ordinal] = key
     if len(spawn_indices) < 2:
         raise AtlasAnalysisError("fewer than two oracle-clear deathmatch spawns")
 
@@ -776,6 +904,8 @@ def _admissions(
     provenance_sha256: str,
     cm: OracleProcess,
     pmove: OracleProcess | None,
+    hook: HookOracleProcess | None = None,
+    hook_attestation: Path | None = None,
 ) -> dict:
     def tool(binary: Path, identity: dict) -> dict:
         return {
@@ -813,6 +943,66 @@ def _admissions(
         }
         movement["contract_sha256"] = sha256_bytes(_rust_struct_json(movement))
         output["pmove_oracle"] = movement
+    if hook is not None:
+        if pmove is None or hook_attestation is None:
+            raise AtlasAnalysisError("hook admission lacks Pmove or parity attestation")
+        attestation = json.loads(hook_attestation.read_bytes())
+        identity = hook.identity
+        parameters = identity["parameters"]
+        source = identity["source"]
+        fixture = attestation["fixture"]
+        binaries = attestation["binaries"]
+        evidence = attestation["evidence"]
+        identities = attestation["identities"]
+        parity = {
+            "name": "q2-hook-q2ded-parity",
+            "schema": "q2-hook-parity-v1",
+            "version": 1,
+            "passed": attestation["passed"],
+            "case_count": evidence["case_count"],
+            "fixture_bsp_sha256": fixture["bsp_sha256"],
+            "fixture_provenance_sha256": sha256_bytes(canonical_json(fixture)),
+            "fixture_collision_physics_identity_sha256": identities["collision"]["physics_identity"],
+            "fixture_pmove_physics_identity_sha256": identities["pmove"]["physics_identity"],
+            "hook_physics_identity_sha256": identities["hook"]["physics_identity"],
+            "collision_tool_sha256": binaries["cm_oracle_sha256"],
+            "pmove_tool_sha256": binaries["pmove_oracle_sha256"],
+            "hook_tool_sha256": binaries["hook_oracle_sha256"],
+            "q2ded_sha256": binaries["q2ded_sha256"],
+            "game_module_sha256": binaries["probe_game_module_sha256"],
+            "transcript_sha256": evidence["vector_results_sha256"],
+        }
+        parity["attestation_sha256"] = sha256_bytes(_rust_struct_json(parity))
+        hook_tool = {
+            "name": "q2-hook-oracle",
+            "schema": "q2-hook-oracle-v1",
+            "version": 1,
+            "executable_sha256": sha256_file(hook.binary),
+            "physics_identity_sha256": identity["physics_identity"],
+        }
+        hook_source = {
+            "shared_c_sha256": source["shared_c_sha256"],
+            "shared_h_sha256": source["shared_h_sha256"],
+            "integration_sha256": source["integration_sha256"],
+            "math_sha256": source["math_sha256"],
+            "build_contract": source["build_contract"],
+        }
+        hook_parameters = {
+            "hook_speed_f32_bits": struct.unpack("<I", struct.pack("<f", parameters["hook_speed"]))[0],
+            "hook_pullspeed_f32_bits": struct.unpack("<I", struct.pack("<f", parameters["hook_pullspeed"]))[0],
+            "hook_sky": parameters["hook_sky"],
+            "hook_maxtime_f32_bits": struct.unpack("<I", struct.pack("<f", parameters["hook_maxtime"]))[0],
+            "full_velocity_overwrite": parameters["full_velocity_overwrite"],
+        }
+        hook_record = {
+            "tool": hook_tool,
+            "bsp": bsp,
+            "parameters": hook_parameters,
+            "source": hook_source,
+            "parity": parity,
+        }
+        hook_record["contract_sha256"] = sha256_bytes(_rust_struct_json(hook_record))
+        output["hook_oracle"] = hook_record
     return output
 
 
@@ -823,7 +1013,7 @@ def _l0_chunks(
     *,
     cm: OracleProcess | None = None,
     metadata: BspMetadata | None = None,
-    evidenced_l0_points: Mapping[str, Sequence[Sequence[float]]] | None = None,
+    admitted_hooks: Sequence[Mapping[str, Any]] = (),
     semantic_summary: dict[str, int] | None = None,
 ) -> list[dict]:
     chunks: dict[tuple[int, int, int], dict[str, Any]] = {}
@@ -862,6 +1052,27 @@ def _l0_chunks(
         # Bounds are half-open.  Subtract an epsilon so an exact upper grid
         # plane does not materialize a neighboring cell.
         upper = _grid_index(tuple(value - 1e-6 for value in maxs), origin, 4)
+        fill_indices(lower, upper, plane, scalar=scalar, semantic=semantic)
+
+    def fill_inclusive_milliunit_bounds(
+        bounds: Sequence[int], plane: str,
+        *, scalar: tuple[str, int] | None = None,
+        semantic: str | None = None,
+    ) -> None:
+        """Retain all L0 cells intersected by an inclusive linked AABB."""
+        lower = _grid_index(
+            tuple(bounds[axis] / 1000.0 for axis in range(3)), origin, 4
+        )
+        upper = _grid_index(
+            tuple(bounds[axis + 3] / 1000.0 for axis in range(3)), origin, 4
+        )
+        fill_indices(lower, upper, plane, scalar=scalar, semantic=semantic)
+
+    def fill_indices(
+        lower: Sequence[int], upper: Sequence[int], plane: str,
+        *, scalar: tuple[str, int] | None = None,
+        semantic: str | None = None,
+    ) -> None:
         if any(upper[axis] < lower[axis] for axis in range(3)):
             return
         cell_count = math.prod(upper[axis] - lower[axis] + 1 for axis in range(3))
@@ -1060,15 +1271,41 @@ def _l0_chunks(
             mins, maxs = model.mins, model.maxs
             classname = entity.classname
             if classname == "trigger_hurt":
-                fill_bounds(mins, maxs, "hurt", scalar=("hazard_severity", 255))
-                standing = expanded_bounds(mins, maxs, STANDING_MINS, STANDING_MAXS)
-                crouched = expanded_bounds(mins, maxs, CROUCHED_MINS, CROUCHED_MAXS)
-                fill_bounds(
-                    *standing, "standing_forbidden_origin",
-                    scalar=("hazard_severity", 255), semantic="hurt_expanded",
+                try:
+                    spawnflags = int(entity.value("spawnflags") or "0", 10)
+                except ValueError as error:
+                    raise AtlasAnalysisError(
+                        f"entity {entity.index} has invalid spawnflags"
+                    ) from error
+                raw, linked, standing = _trigger_hurt_runtime_bounds(
+                    model, _origin(entity) if entity.value("origin") else (0.0, 0.0, 0.0)
                 )
-                fill_bounds(*standing, "standing_forbidden_origin")
-                fill_bounds(*crouched, "crouched_forbidden_origin")
+                del raw
+                crouched = _trigger_contact_bounds(
+                    linked, CROUCHED_MINS, CROUCHED_MAXS
+                )
+                if spawnflags & (1 | 2):
+                    fill_inclusive_milliunit_bounds(
+                        linked, "unknown", semantic="hurt_potential"
+                    )
+                    fill_inclusive_milliunit_bounds(
+                        standing, "unknown", semantic="hurt_potential"
+                    )
+                    fill_inclusive_milliunit_bounds(
+                        crouched, "unknown", semantic="hurt_potential"
+                    )
+                else:
+                    fill_inclusive_milliunit_bounds(
+                        linked, "hurt", scalar=("hazard_severity", 255)
+                    )
+                    fill_inclusive_milliunit_bounds(
+                        standing, "standing_forbidden_origin",
+                        scalar=("hazard_severity", 255), semantic="hurt_expanded",
+                    )
+                    fill_inclusive_milliunit_bounds(
+                        crouched, "crouched_forbidden_origin",
+                        scalar=("hazard_severity", 255), semantic="hurt_expanded",
+                    )
             elif classname in {"trigger_push", "trigger_gravity"}:
                 fill_bounds(mins, maxs, "push_or_gravity")
             elif "teleport" in classname:
@@ -1158,19 +1395,28 @@ def _l0_chunks(
             else:
                 fill_bounds(swept_mins, swept_maxs, "mover_swept_envelope")
 
-    # Generated-map glue may inject only already-admitted hook evidence here;
-    # the stock analyzer never promotes a CM surface guess to hook authority.
-    if evidenced_l0_points:
-        if set(evidenced_l0_points) - {"hookable_surface", "hook_corridor"}:
-            raise AtlasAnalysisError("unsupported externally evidenced L0 plane")
-        for plane, points in evidenced_l0_points.items():
-            for point in points:
-                if len(point) != 3 or any(
-                    isinstance(value, bool) or not isinstance(value, (int, float))
-                    or not math.isfinite(value) for value in point
-                ):
-                    raise AtlasAnalysisError(f"invalid evidenced {plane} L0 point")
-                set_bit(point, plane)
+    # Hook-specific L0 cells are derived only from the exact records replayed
+    # in this analyzer process. No caller-supplied coordinates are accepted.
+    for hook in admitted_hooks:
+        anchor = _world_milliunits(
+            hook.get("anchor_milliunits", []), "admitted hook anchor"
+        )
+        set_bit(anchor, "hookable_surface")
+        fixed_frames = hook.get("trajectory_origin_fixed")
+        trace_sha256 = hook.get("trajectory_sha256")
+        if not isinstance(fixed_frames, list) or not fixed_frames:
+            raise AtlasAnalysisError("admitted hook lacks ordered Pmove trajectory")
+        if validation_trace_sha256(
+            str(hook.get("claim_id")), fixed_frames,
+            int(hook.get("first_grounded_frame_index", -1)),
+        ) != trace_sha256:
+            raise AtlasAnalysisError("admitted hook Pmove trajectory digest differs")
+        for fixed in fixed_frames:
+            if not isinstance(fixed, list) or len(fixed) != 3 or any(
+                isinstance(axis, bool) or not isinstance(axis, int) for axis in fixed
+            ):
+                raise AtlasAnalysisError("admitted hook Pmove trajectory frame is invalid")
+            set_bit(tuple(axis / 8.0 for axis in fixed), "hook_corridor")
 
     for _, spawn in spawns:
         # A 96-unit column is the half-open interval [0, 96); sampling the
@@ -1212,11 +1458,136 @@ def _write_binary_json(path: Path, magic: bytes, value: Any) -> dict:
     }
 
 
+def _atlas_channels() -> list[dict[str, Any]]:
+    channels = []
+    for name in sorted(FROZEN_L0_BIT_PLANE_NAMES):
+        channels.append({
+            "store": "Atlas", "level": 0, "name": name,
+            "encoding": "bitplane", "persistence": "map-static",
+        })
+    for name in sorted(FROZEN_L0_SCALAR_PLANE_NAMES):
+        channels.append({
+            "store": "Atlas", "level": 0, "name": name,
+            "encoding": "u8", "persistence": "map-static",
+        })
+    for level in (1, 2, 3):
+        for name, encoding in (
+            ("clearance", "u16"),
+            ("confidence", "u16"),
+            ("contents_flags", "u32-bitset"),
+            ("cost_to_safety", "u32-q8"),
+            ("hazard_severity", "u8"),
+            ("hazard_types", "u16-bitset"),
+            ("stance_passability", "u8-bitset"),
+        ):
+            channels.append({
+                "store": "Atlas", "level": level, "name": name,
+                "encoding": encoding, "persistence": "map-static",
+            })
+    return sorted(channels, key=lambda item: (item["store"], item["level"], item["name"]))
+
+
+def _write_canonical_atlas_manifest(
+    path: Path,
+    *,
+    canonical_map_id: str,
+    metadata: BspMetadata,
+    provenance_sha256: str,
+    origin: tuple[int, int, int],
+    cm_identity: Mapping[str, Any],
+    admissions: Mapping[str, Any],
+    analyzer_sha256: str,
+    generator_sha256: str | None,
+    atlas_name: str,
+    atlas_raw: Path,
+    atlas_zst: Path,
+    pack_result: Mapping[str, Any],
+    limitations: Sequence[str],
+) -> dict[str, Any]:
+    counts = {
+        "l0_chunks": int(pack_result["l0_chunks"]),
+        "l1_nodes": int(pack_result["l1_nodes"]),
+        "l1_edges": int(pack_result["l1_edges"]),
+        "l2_cells": int(pack_result["l2_cells"]),
+        "l3_cells": int(pack_result["l3_cells"]),
+    }
+    model0 = cm_identity["model0"]
+    oracle_records = {"collision_oracle": admissions["collision_oracle"]}
+    if "pmove_oracle" in admissions:
+        oracle_records["pmove_oracle"] = admissions["pmove_oracle"]
+    if "hook_oracle" in admissions:
+        oracle_records["hook_oracle"] = admissions["hook_oracle"]
+    manifest = {
+        "schema_version": 1,
+        "byte_order": "little",
+        "atlas_magic": "Q2ATL001",
+        "specification_sha256": sha256_file(
+            Path(__file__).resolve().parents[1]
+            / "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md"
+        ),
+        "bsp": {
+            "canonical_map_id": canonical_map_id,
+            "sha256": metadata.sha256,
+            "provenance_sha256": provenance_sha256,
+            "size_bytes": metadata.byte_count,
+            "ibsp_version": metadata.version,
+        },
+        "analyzer": {
+            "name": "q2-atlas-analyzer",
+            "version": "b2-a-v2",
+            "sha256": analyzer_sha256,
+        },
+        "oracles": oracle_records,
+        "generator": None if generator_sha256 is None else {
+            "name": "q2-map-generator",
+            "version": "v6",
+            "sha256": generator_sha256,
+        },
+        "grid": {
+            "origin": list(origin),
+            "model0_mins": [round(float(value)) for value in model0["mins"]],
+            "model0_maxs": [round(float(value)) for value in model0["maxs"]],
+            "cell_sizes": [4, 16, 64, 256],
+            "l0_chunk_dimensions": [16, 16, 16],
+        },
+        "player_hulls": [
+            {"name": "standing", "mins": STANDING_MINS, "maxs": STANDING_MAXS},
+            {"name": "crouched", "mins": CROUCHED_MINS, "maxs": CROUCHED_MAXS},
+        ],
+        "channels": _atlas_channels(),
+        "artifacts": {
+            atlas_name: {
+                "media_type": "application/vnd.q2.atlas-v1",
+                "sha256_uncompressed": sha256_file(atlas_raw),
+                "uncompressed_size": atlas_raw.stat().st_size,
+                "compressed_size": atlas_zst.stat().st_size,
+                "counts": dict(sorted(counts.items())),
+            },
+        },
+        "counts": counts,
+        "budgets": {
+            "max_l0_chunks": 1_200,
+            "max_l0_decompressed_bytes": 16 * 1024 * 1024,
+            "max_atlas_decompressed_bytes": 32 * 1024 * 1024,
+            "max_atlas_resident_bytes": 32 * 1024 * 1024,
+            "max_build_rss_bytes": 512 * 1024 * 1024,
+        },
+        "build_peak_rss_bytes": int(pack_result["build_peak_rss_bytes"]),
+        "limitations": sorted(set(limitations)),
+        "confidence_summary": (
+            "Engine-oracle collision and directed movement; map-static Atlas only"
+        ),
+    }
+    path.write_bytes(_rust_struct_json(manifest) + b"\n")
+    return manifest
+
+
 def _process_tree_rss_bytes(root_pid: int) -> int:
     """Sample Linux resident bytes for one process and its live descendants."""
     pending = [root_pid]
     visited: set[int] = set()
     total = 0
+    root_sampled = False
     while pending:
         pid = pending.pop()
         if pid in visited:
@@ -1227,8 +1598,14 @@ def _process_tree_rss_bytes(root_pid: int) -> int:
             children = Path(f"/proc/{pid}/task/{pid}/children").read_text(
                 encoding="ascii"
             )
-        except (FileNotFoundError, ProcessLookupError, PermissionError):
+        except (FileNotFoundError, ProcessLookupError, PermissionError) as error:
+            if pid == root_pid:
+                raise AtlasAnalysisError(
+                    "independent cold analyzer /proc RSS is unreadable"
+                ) from error
             continue
+        if pid == root_pid:
+            root_sampled = True
         for line in status.splitlines():
             if line.startswith("VmRSS:"):
                 words = line.split()
@@ -1236,6 +1613,10 @@ def _process_tree_rss_bytes(root_pid: int) -> int:
                     total += int(words[1]) * 1024
                 break
         pending.extend(int(value) for value in children.split())
+    if not root_sampled:
+        raise AtlasAnalysisError(
+            "independent cold analyzer /proc RSS sample is unavailable"
+        )
     return total
 
 
@@ -1245,14 +1626,30 @@ def _run_measured_process(
     """Run a process while sampling whole-process-tree RSS at 100 Hz."""
     process = subprocess.Popen(
         list(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
     )
     deadline = time.monotonic() + timeout
     peak_rss = 0
+
+    def kill_process_group() -> None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
     while True:
-        peak_rss = max(peak_rss, _process_tree_rss_bytes(process.pid))
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            break
+        try:
+            peak_rss = max(peak_rss, _process_tree_rss_bytes(process.pid))
+        except AtlasAnalysisError:
+            kill_process_group()
+            process.communicate()
+            raise
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            process.kill()
+            kill_process_group()
             stdout, stderr = process.communicate()
             raise AtlasAnalysisError(
                 f"independent cold analyzer timed out: {stderr.strip()}"
@@ -1262,7 +1659,10 @@ def _run_measured_process(
             break
         except subprocess.TimeoutExpired:
             continue
-    peak_rss = max(peak_rss, _process_tree_rss_bytes(process.pid))
+    if peak_rss <= 0:
+        raise AtlasAnalysisError(
+            "independent cold analyzer did not produce a positive RSS sample"
+        )
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr), peak_rss
 
 
@@ -1277,10 +1677,12 @@ def _full_cold_rebuild(
     hook_oracle: Path | None,
     hook_attestation: Path | None,
     packer: Path,
+    verifier: Path,
     limits: AnalyzerLimits,
     generator_claims_sha256: str | None,
     generator_claims: Mapping[str, Any] | None,
-    evidenced_l0_points: Mapping[str, Sequence[Sequence[float]]] | None,
+    generator_safety: Mapping[str, Any] | None,
+    hook_materialization: Mapping[str, Any] | None,
 ) -> dict:
     """Re-run the complete analyzer in a fresh process and compare artifacts."""
     worker = Path(__file__).resolve().parents[1] / "tools/atlas_cold_worker.py"
@@ -1289,6 +1691,7 @@ def _full_cold_rebuild(
     artifact_suffixes = (
         ".atlas.bin", ".atlas.bin.zst", ".navigation.bin.zst",
         ".visibility.bin.zst", ".design-signature.json", ".routes.json",
+        ".atlas.manifest.json",
     )
     with tempfile.TemporaryDirectory(prefix="q2-atlas-full-cold-") as temporary:
         root = Path(temporary)
@@ -1306,13 +1709,15 @@ def _full_cold_rebuild(
                 None if hook_attestation is None else str(hook_attestation.resolve())
             ),
             "packer": str(packer.resolve()),
+            "verifier": str(verifier.resolve()),
             "limits": asdict(limits),
             "generator_claims_sha256": generator_claims_sha256,
             "generator_claims": None if generator_claims is None else dict(generator_claims),
-            "evidenced_l0_points": (
-                None if evidenced_l0_points is None
-                else {name: [list(point) for point in points]
-                      for name, points in evidenced_l0_points.items()}
+            "generator_safety": (
+                None if generator_safety is None else dict(generator_safety)
+            ),
+            "hook_materialization": (
+                None if hook_materialization is None else dict(hook_materialization)
             ),
         }
         specification_path = root / "worker.json"
@@ -1336,15 +1741,64 @@ def _full_cold_rebuild(
         }:
             raise AtlasAnalysisError("independent cold analyzer result contract mismatch")
         digests = {}
+        semantic_digests = {}
         for suffix in artifact_suffixes:
             primary = primary_dir / f"{canonical_map_id}{suffix}"
             cold = cold_dir / f"{canonical_map_id}{suffix}"
             if not primary.is_file() or not cold.is_file():
                 raise AtlasAnalysisError(f"independent cold artifact missing: {suffix}")
-            primary_digest = sha256_file(primary)
-            if primary_digest != sha256_file(cold):
-                raise AtlasAnalysisError(f"independent cold artifact mismatch: {suffix}")
-            digests[suffix] = primary_digest
+            if suffix == ".atlas.manifest.json":
+                primary_manifest = json.loads(primary.read_bytes())
+                cold_manifest = json.loads(cold.read_bytes())
+                if "build_peak_rss_bytes" not in primary_manifest or (
+                    "build_peak_rss_bytes" not in cold_manifest
+                ):
+                    raise AtlasAnalysisError(
+                        "independent cold Atlas manifest lacks operational RSS field"
+                    )
+                primary_manifest.pop("build_peak_rss_bytes")
+                cold_manifest.pop("build_peak_rss_bytes")
+                if primary_manifest != cold_manifest:
+                    raise AtlasAnalysisError(
+                        "independent cold artifact semantic mismatch: " + suffix
+                    )
+                semantic_digests[suffix] = sha256_bytes(canonical_json(primary_manifest))
+            else:
+                primary_digest = sha256_file(primary)
+                if primary_digest != sha256_file(cold):
+                    raise AtlasAnalysisError(
+                        f"independent cold artifact mismatch: {suffix}"
+                    )
+                digests[suffix] = primary_digest
+
+        verifier_summaries = []
+        for directory in (primary_dir, cold_dir):
+            verified = subprocess.run(
+                [
+                    str(verifier),
+                    str(directory / f"{canonical_map_id}.atlas.manifest.json"),
+                    str(directory / f"{canonical_map_id}.atlas.bin"),
+                ],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                timeout=30, check=False,
+            )
+            if verified.returncode:
+                raise AtlasAnalysisError(
+                    "independent cold Atlas verification failed: "
+                    + verified.stderr.strip()
+                )
+            try:
+                summary = json.loads(verified.stdout)
+            except json.JSONDecodeError as error:
+                raise AtlasAnalysisError(
+                    "independent cold Atlas verifier emitted invalid JSON"
+                ) from error
+            if summary.get("passed") is not True:
+                raise AtlasAnalysisError("independent cold Atlas verifier rejected artifact")
+            summary.pop("manifest_sha256", None)
+            verifier_summaries.append(summary)
+        if verifier_summaries[0] != verifier_summaries[1]:
+            raise AtlasAnalysisError("independent cold verifier summaries differ")
     if peak_rss > 512 * 1024 * 1024:
         raise AtlasAnalysisError("independent cold analyzer exceeded 512 MiB peak RSS")
     return {
@@ -1352,6 +1806,9 @@ def _full_cold_rebuild(
         "independent_process_launches": 1,
         "artifact_count": len(artifact_suffixes),
         "artifact_sha256": digests,
+        "artifact_semantic_sha256": semantic_digests,
+        "verifier_sha256": sha256_file(verifier),
+        "verification": verifier_summaries[0],
         "sample_interval_milliseconds": 10,
         "sampled_process_tree_peak_rss_bytes": peak_rss,
         "peak_rss_limit_bytes": 512 * 1024 * 1024,
@@ -1449,6 +1906,411 @@ def validate_design_signature(value: dict) -> None:
             pending.extend(current)
 
 
+def _world_milliunits(value: Sequence[Any], label: str) -> tuple[float, float, float]:
+    if len(value) != 3 or any(isinstance(item, bool) or not isinstance(item, int) for item in value):
+        raise AtlasAnalysisError(f"{label} must be three integer milliunits")
+    return tuple(item / 1000.0 for item in value)  # type: ignore[return-value]
+
+
+def _hook_trace_request(
+    identifier: str,
+    source: Sequence[float],
+    anchor: Sequence[float],
+) -> dict:
+    eye = (source[0], source[1], source[2] + 22.0)
+    delta = tuple(anchor[axis] - eye[axis] for axis in range(3))
+    distance = math.sqrt(sum(axis * axis for axis in delta))
+    if distance <= 0:
+        raise AtlasAnalysisError("hook source eye equals claimed anchor")
+    end = tuple(anchor[axis] + delta[axis] * 8.0 / distance for axis in range(3))
+    return _box_request(identifier, eye, end, [0, 0, 0], [0, 0, 0], MASK_SHOT)
+
+
+def _hook_trace_admits(trace: Mapping[str, Any], anchor: Sequence[float]) -> bool:
+    surface = trace.get("surface")
+    endpos = trace.get("endpos")
+    return bool(
+        trace.get("startsolid") is False
+        and isinstance(trace.get("fraction"), (int, float))
+        and float(trace["fraction"]) < 1.0
+        and isinstance(endpos, list)
+        and len(endpos) == 3
+        and math.dist(tuple(float(axis) for axis in endpos), tuple(anchor)) <= 16.0
+        and isinstance(surface, Mapping)
+        and isinstance(surface.get("flags"), int)
+        and not (int(surface["flags"]) & SURF_SKY)
+        and isinstance(trace.get("contents"), int)
+        and bool(int(trace["contents"]) & CONTENTS_SOLID)
+    )
+
+
+def _milliunits(point: Sequence[Any], label: str) -> list[int]:
+    if len(point) != 3 or any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        or not math.isfinite(value) for value in point
+    ):
+        raise AtlasAnalysisError(f"{label} is not a finite vec3")
+    return [round(float(value) * 1000.0) for value in point]
+
+
+def _pmove_state(frame: Mapping[str, Any], label: str) -> dict[str, int]:
+    state: dict[str, int] = {}
+    for field in ("pm_type", "pm_flags", "pm_time", "gravity"):
+        value = frame.get(field)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise AtlasAnalysisError(f"{label} has invalid {field}")
+        state[field] = value
+    return state
+
+
+def _pmove_fixed(frame: Mapping[str, Any], label: str) -> tuple[int, int, int]:
+    value = frame.get("origin_fixed")
+    if not isinstance(value, list) or len(value) != 3 or any(
+        isinstance(axis, bool) or not isinstance(axis, int) for axis in value
+    ):
+        raise AtlasAnalysisError(f"{label} has invalid origin_fixed")
+    return tuple(value)  # type: ignore[return-value]
+
+
+def _replay_hook_record_exact(
+    cm: OracleProcess,
+    pmove: OracleProcess,
+    hook_process: HookOracleProcess,
+    record_value: Mapping[str, Any],
+    *,
+    request_prefix: str,
+    atlas_origin: tuple[int, int, int],
+    expected_landing: bool,
+) -> tuple[dict[str, Any] | None, str | None, dict[str, Any] | None]:
+    """Replay one exact source/release schedule and return measured landing.
+
+    Candidate desired landing is used only as a same-L1 constraint.  The
+    materialized record receives the first post-release false-to-true grounded
+    Pmove fixed origin.  Independent analysis sets ``expected_landing`` and
+    additionally requires exact fixed-origin equality with the sealed record.
+    """
+
+    try:
+        record = validate_hook_record_v2(dict(record_value), request_prefix)
+    except HookClaimsV2Error as error:
+        raise AtlasAnalysisError(str(error)) from error
+    source_mu = record["source_milliunits"]
+    anchor_mu = record["anchor_milliunits"]
+    desired_landing_mu = record["landing_milliunits"]
+    source = tuple(value / 1000.0 for value in source_mu)
+    anchor = tuple(value / 1000.0 for value in anchor_mu)
+    if _grid_index(source, atlas_origin, 16) == _grid_index(
+        tuple(value / 1000.0 for value in desired_landing_mu), atlas_origin, 16
+    ):
+        return None, "source_and_desired_landing_share_l1", None
+
+    source_clear, source_support, anchor_trace = cm.call([
+        _box_request(
+            f"{request_prefix}:source-clear", source, source,
+            STANDING_MINS, STANDING_MAXS,
+        ),
+        _box_request(
+            f"{request_prefix}:source-support", source,
+            (source[0], source[1], source[2] - 96.0),
+            STANDING_MINS, STANDING_MAXS,
+        ),
+        _hook_trace_request(f"{request_prefix}:anchor", source, anchor),
+    ])
+    support_plane = source_support.get("plane")
+    if source_clear.get("startsolid") is True or source_clear.get("allsolid") is True:
+        return None, "source_hull_blocked", None
+    if (
+        source_support.get("startsolid") is True
+        or not isinstance(source_support.get("fraction"), (int, float))
+        or float(source_support["fraction"]) >= 1.0
+        or not isinstance(support_plane, Mapping)
+        or not isinstance(support_plane.get("normal"), list)
+        or len(support_plane["normal"]) != 3
+        or float(support_plane["normal"][2]) < 0.7
+        or _milliunits(source_support.get("endpos", []), "hook source support")
+        != source_mu
+    ):
+        return None, "source_not_exactly_supported", None
+    if not _hook_trace_admits(anchor_trace, anchor) or _milliunits(
+        anchor_trace.get("endpos", []), "hook anchor trace"
+    ) != anchor_mu:
+        return None, "anchor_not_exactly_attachable", None
+
+    touch = hook_process.call({
+        "id": f"{request_prefix}:touch",
+        "op": "touch",
+        "target_is_owner": False,
+        "owner_has_client": True,
+        "target_is_nonblocking": False,
+        "target_is_flymissile": False,
+        "surface_is_sky": False,
+    })
+    if touch.get("attached") is not True or touch.get("action") != "attach":
+        return None, "hook_touch_rejected", None
+
+    current_origin = source
+    current_velocity = (0.0, 0.0, 0.0)
+    current_state = {"pm_type": 0, "pm_flags": 4, "pm_time": 0, "gravity": 800}
+    previous_grounded = True
+    trajectory_fixed: list[list[int]] = []
+    for tick in range(record["release_after_ticks"]):
+        pull = hook_process.call({
+            "id": f"{request_prefix}:pull:{tick:02d}",
+            "op": "pull",
+            "owner_origin": list(current_origin),
+            "hook_origin": list(anchor),
+            "enemy_is_client": False,
+            "prior_velocity": list(current_velocity),
+        })
+        velocity = pull.get("velocity")
+        if pull.get("full_velocity_overwrite") is not True or not isinstance(
+            velocity, list
+        ) or len(velocity) != 3:
+            raise AtlasAnalysisError("hook pull emitted invalid full velocity overwrite")
+        movement = pmove.call([{
+            "id": f"{request_prefix}:pmove:{tick:02d}",
+            "op": "simulate",
+            "origin": list(current_origin),
+            "velocity": velocity,
+            **current_state,
+            "snapinitial": False,
+            "commands": [{"msec": 100, "angles": [0, 0, 0]}],
+        }])[0]
+        frames = movement.get("frames")
+        if not isinstance(frames, list) or len(frames) != 1 or not isinstance(frames[0], Mapping):
+            raise AtlasAnalysisError("hook pull Pmove response lacks its exact frame")
+        frame = frames[0]
+        fixed = _pmove_fixed(frame, "hook pull Pmove frame")
+        trajectory_fixed.append(list(fixed))
+        current_origin = tuple(axis / 8.0 for axis in fixed)
+        velocity_fixed = frame.get("velocity_fixed")
+        if not isinstance(velocity_fixed, list) or len(velocity_fixed) != 3 or any(
+            isinstance(axis, bool) or not isinstance(axis, int) for axis in velocity_fixed
+        ):
+            raise AtlasAnalysisError("hook pull Pmove frame has invalid velocity_fixed")
+        current_velocity = tuple(axis / 8.0 for axis in velocity_fixed)
+        current_state = _pmove_state(frame, "hook pull Pmove frame")
+        grounded = frame.get("grounded")
+        if not isinstance(grounded, bool):
+            raise AtlasAnalysisError("hook pull Pmove frame has invalid grounded state")
+        previous_grounded = grounded
+
+    release = pmove.call([{
+        "id": f"{request_prefix}:release",
+        "op": "simulate",
+        "origin": list(current_origin),
+        "velocity": list(current_velocity),
+        **current_state,
+        "snapinitial": False,
+        "commands": [
+            {"msec": 100, "angles": [0, 0, 0]}
+            for _ in range(int(HookOracleProcess.PARAMETERS["hook_maxtime"] * 10))
+        ],
+    }])[0]
+    frames = release.get("frames")
+    if not isinstance(frames, list):
+        raise AtlasAnalysisError("hook release Pmove response has no ordered frames")
+    first_grounded_fixed = None
+    for frame_index, frame in enumerate(frames):
+        if not isinstance(frame, Mapping) or not isinstance(frame.get("grounded"), bool):
+            raise AtlasAnalysisError("hook release Pmove frame is malformed")
+        grounded = bool(frame["grounded"])
+        if not previous_grounded and grounded:
+            first_grounded_fixed = _pmove_fixed(
+                frame, f"hook release Pmove frame {frame_index}"
+            )
+            trajectory_fixed.append(list(first_grounded_fixed))
+            break
+        trajectory_fixed.append(list(_pmove_fixed(
+            frame, f"hook release Pmove frame {frame_index}"
+        )))
+        previous_grounded = grounded
+    if first_grounded_fixed is None:
+        return None, "no_post_release_grounded_transition", None
+    measured_landing_mu = [axis * 125 for axis in first_grounded_fixed]
+    measured_landing = tuple(axis / 8.0 for axis in first_grounded_fixed)
+    desired_landing = tuple(value / 1000.0 for value in desired_landing_mu)
+    if _grid_index(measured_landing, atlas_origin, 16) != _grid_index(
+        desired_landing, atlas_origin, 16
+    ):
+        return None, "measured_landing_outside_desired_l1", None
+    if expected_landing and measured_landing_mu != desired_landing_mu:
+        return None, "measured_landing_fixed_mismatch", None
+    measured = dict(record)
+    measured["landing_milliunits"] = measured_landing_mu
+    first_grounded_frame_index = len(trajectory_fixed) - 1
+    trace = {
+        "claim_id": measured["claim_id"],
+        "origin_fixed_frames": trajectory_fixed,
+        "first_grounded_frame_index": first_grounded_frame_index,
+        "sha256": validation_trace_sha256(
+            measured["claim_id"], trajectory_fixed, first_grounded_frame_index
+        ),
+    }
+    return measured, None, trace
+
+
+def _analyze_hook_claims(
+    cm: OracleProcess,
+    pmove: OracleProcess | None,
+    hook_process: HookOracleProcess | None,
+    nodes: Mapping[tuple[int, int, int], NavNode],
+    edges: Sequence[Mapping[str, Any]],
+    spawn_indices: Mapping[int, tuple[int, int, int]],
+    origin: tuple[int, int, int],
+    claims: Mapping[str, Any] | None,
+    hook_admission: Mapping[str, Any],
+    limits: AnalyzerLimits,
+) -> dict:
+    """Independently replay six sealed source-bound hook claims exactly."""
+
+    del limits
+    if claims is None:
+        return {
+            "authority_admitted": hook_admission["authority_admitted"],
+            "omission_reason": hook_admission["omission_reason"],
+            "edges": [],
+        }
+    proposed = claims.get("hook_claims")
+    if not isinstance(proposed, list) or len(proposed) != 6:
+        raise AtlasAnalysisError("generated claims require six exact hook-v2 records")
+    if (
+        hook_admission.get("authority_admitted") is not True
+        or pmove is None
+        or hook_process is None
+    ):
+        raise AtlasAnalysisError("generated hook replay authority is absent")
+
+    adjacency = _directed_adjacency(edges)
+    reachable = set(spawn_indices.values())
+    pending = list(reachable)
+    while pending:
+        current = pending.pop()
+        for neighbor in adjacency.get(current, []):
+            if neighbor not in reachable:
+                reachable.add(neighbor)
+                pending.append(neighbor)
+    accepted = []
+    for index, proposed_record in enumerate(proposed):
+        measured, reason, trace = _replay_hook_record_exact(
+            cm, pmove, hook_process, proposed_record,
+            request_prefix=f"sealed-hook:{index:04d}",
+            atlas_origin=origin,
+            expected_landing=True,
+        )
+        claim_id = proposed_record.get("claim_id", f"hook:{index:04d}")
+        if measured is None:
+            raise AtlasAnalysisError(f"{claim_id} exact hook replay rejected: {reason}")
+        assert trace is not None
+        source = tuple(value / 1000.0 for value in measured["source_milliunits"])
+        landing = tuple(value / 1000.0 for value in measured["landing_milliunits"])
+        source_key = _grid_index(source, origin, 16)
+        target_key = _grid_index(landing, origin, 16)
+        if source_key == target_key:
+            raise AtlasAnalysisError(f"{claim_id} hook edge does not cross L1 cells")
+        source_node = nodes.get(source_key)
+        target_node = nodes.get(target_key)
+        if source_key not in reachable or source_node is None:
+            raise AtlasAnalysisError(f"{claim_id} source is not spawn-reachable without hooks")
+        if target_node is None or not target_node.supported or not (
+            target_node.standing_clear or target_node.crouched_clear
+        ):
+            raise AtlasAnalysisError(f"{claim_id} measured landing has no supported L1")
+        accepted.append({
+            "claim_id": measured["claim_id"],
+            "source_l1": list(source_key),
+            "target_l1": list(target_key),
+            "source_milliunits": measured["source_milliunits"],
+            "anchor_milliunits": measured["anchor_milliunits"],
+            "landing_milliunits": measured["landing_milliunits"],
+            "release_after_ticks": measured["release_after_ticks"],
+            "distance_milliunits": measured["distance_milliunits"],
+            "flags": measured["flags"],
+            "trajectory_origin_fixed": trace["origin_fixed_frames"],
+            "trajectory_sha256": trace["sha256"],
+            "first_grounded_frame_index": trace["first_grounded_frame_index"],
+            "landing_l1": list(target_key),
+            "physics_identity": str(hook_admission["physics_identity"]),
+            "evidence": EVIDENCE_CM_TRACE_V1 | EVIDENCE_PMOVE_V1 | EVIDENCE_HOOK_LAW_V1,
+            "validation_version": VALIDATION_VERSION,
+        })
+    return {
+        "authority_admitted": True,
+        "omission_reason": None,
+        "edges": accepted,
+        "_diagnostic_rejections": [],
+    }
+
+
+def _validate_hook_materialization_binding(
+    value: Mapping[str, Any],
+    *,
+    canonical_map_id: str,
+    generator_claims: Mapping[str, Any],
+    bsp_sha256: str,
+    bsp_size: int,
+    cm_oracle: Path | None,
+    pmove_oracle: Path | None,
+    hook_oracle: Path | None,
+    hook_attestation: Path | None,
+) -> dict[str, Any]:
+    """Bind a valid materialization to claims, BSP, and executable bytes."""
+    try:
+        document = validate_hook_materialization_v2(dict(value))
+    except HookClaimsV2Error as error:
+        raise AtlasAnalysisError(str(error)) from error
+    if generator_claims.get("schema") != "q2-generator-claims-v2":
+        raise AtlasAnalysisError("generated claims schema mismatch")
+    if generator_claims.get("map") != canonical_map_id:
+        raise AtlasAnalysisError("generated claims map identity mismatch")
+    if sha256_bytes(canonical_json(document) + b"\n") != generator_claims[
+        "source_files"
+    ]["hook_materialization_sha256"]:
+        raise AtlasAnalysisError("hook materialization canonical identity differs")
+    if document["map"] != canonical_map_id or (
+        document["selected_records"] != generator_claims["hook_claims"]
+    ):
+        raise AtlasAnalysisError("hook materialization differs from generator claims")
+    if document["bsp"] != {"sha256": bsp_sha256, "size_bytes": bsp_size}:
+        raise AtlasAnalysisError("hook materialization BSP identity differs")
+    if document["candidates"]["meta_sha256"] != generator_claims[
+        "source_files"
+    ]["meta_sha256"]:
+        raise AtlasAnalysisError("hook materialization metadata identity differs")
+    materialized_oracles = document["oracles"]
+    for name, binary in (
+        ("collision", cm_oracle), ("pmove", pmove_oracle), ("hook", hook_oracle),
+    ):
+        if binary is None or sha256_file(binary) != materialized_oracles[name][
+            "executable_sha256"
+        ]:
+            raise AtlasAnalysisError(
+                f"hook materialization {name} executable identity differs"
+            )
+    if hook_attestation is None or sha256_file(hook_attestation) != materialized_oracles[
+        "hook_parity_attestation_sha256"
+    ]:
+        raise AtlasAnalysisError("hook materialization parity identity differs")
+    return document
+
+
+def _validate_materialized_oracle_identities(
+    materialized_oracles: Mapping[str, Any],
+    process_identities: Mapping[str, Mapping[str, Any] | None],
+) -> None:
+    """Reject a live oracle whose reported identity differs from the seal."""
+    for name in ("collision", "pmove", "hook"):
+        identity = process_identities.get(name)
+        expected = materialized_oracles[name]
+        if identity is None or any(
+            identity.get(field) != expected[field]
+            for field in ("tool_identity", "physics_identity")
+        ):
+            raise AtlasAnalysisError(
+                f"hook materialization {name} oracle identity differs"
+            )
+
+
 def analyze_map(
     bsp: Path,
     output_dir: Path,
@@ -1460,10 +2322,12 @@ def analyze_map(
     hook_oracle: Path | None,
     hook_attestation: Path | None,
     packer: Path,
+    verifier: Path | None = None,
     limits: AnalyzerLimits = AnalyzerLimits(),
     generator_claims_sha256: str | None = None,
     generator_claims: Mapping[str, Any] | None = None,
-    evidenced_l0_points: Mapping[str, Sequence[Sequence[float]]] | None = None,
+    generator_safety: Mapping[str, Any] | None = None,
+    hook_materialization: Mapping[str, Any] | None = None,
     independent_cold: bool = True,
 ) -> dict:
     if generator_claims is not None:
@@ -1482,8 +2346,6 @@ def analyze_map(
         raise AtlasAnalysisError(
             "full cold verification requires canonical generator claims content"
         )
-    if evidenced_l0_points and generator_claims is None:
-        raise AtlasAnalysisError("external L0 evidence requires bound generator claims")
     metadata = parse_ibsp38(bsp)
     if metadata.sha256 != provenance.get("bsp_sha256"):
         raise AtlasAnalysisError("BSP/provenance digest mismatch")
@@ -1494,6 +2356,23 @@ def analyze_map(
     ]
     if len(spawns) < 2:
         raise AtlasAnalysisError("map has fewer than two deathmatch spawns")
+    if generator_claims is not None:
+        if generator_safety is None:
+            raise AtlasAnalysisError("generated claims lack safety proposals")
+        if hook_materialization is None:
+            raise AtlasAnalysisError("generated claims lack hook materialization identities")
+        hook_materialization = _validate_hook_materialization_binding(
+            hook_materialization,
+            canonical_map_id=canonical_map_id,
+            generator_claims=generator_claims,
+            bsp_sha256=metadata.sha256,
+            bsp_size=metadata.byte_count,
+            cm_oracle=cm_oracle,
+            pmove_oracle=pmove_oracle,
+            hook_oracle=hook_oracle,
+            hook_attestation=hook_attestation,
+        )
+        materialized_oracles = hook_materialization["oracles"]
     output_dir.mkdir(parents=True, exist_ok=True)
     base = output_dir / canonical_map_id
     # Quake II's spawn lifecycle raises the selected entity origin by nine
@@ -1503,19 +2382,108 @@ def analyze_map(
         (entity_ordinal, (point[0], point[1], point[2] + 9.0))
         for entity_ordinal, point in spawns
     ]
+    claim_seed_points: list[tuple[float, float, float]] = []
+    if generator_claims is not None:
+        for claim in generator_claims["route_claims"]:
+            claim_seed_points.extend([
+                _world_milliunits(
+                    claim["source_milliunits"], f"{claim['claim_id']} source"
+                ),
+                _world_milliunits(
+                    claim["target_milliunits"], f"{claim['claim_id']} target"
+                ),
+            ])
+        for claim in generator_claims["hook_claims"]:
+            claim_seed_points.extend([
+                _world_milliunits(
+                    claim["source_milliunits"], f"{claim['claim_id']} source"
+                ),
+                _world_milliunits(
+                    claim["landing_milliunits"], f"{claim['claim_id']} landing"
+                ),
+            ])
+        claim_seed_points = list(dict.fromkeys(claim_seed_points))
+    hook = _admit_hook(hook_oracle, hook_attestation)
     with OracleProcess(cm_oracle, bsp, "cm", limits) as cm:
         if cm.identity["map_sha256"] != metadata.sha256:
             raise AtlasAnalysisError("collision oracle loaded different BSP bytes")
         origin = _oracle_atlas_origin(metadata, cm.identity)
         pmove_context = OracleProcess(pmove_oracle, bsp, "pmove", limits) if pmove_oracle else None
+        hook_context = None
+        if (
+            generator_claims is not None
+            and hook_oracle is not None
+            and hook["authority_admitted"] is True
+        ):
+            hook_context = HookOracleProcess(
+                hook_oracle, str(hook["physics_identity"]), limits
+            )
         try:
             if pmove_context and pmove_context.identity["map_sha256"] != metadata.sha256:
                 raise AtlasAnalysisError("Pmove oracle loaded different BSP bytes")
+            if hook_materialization is not None:
+                process_identities = {
+                    "collision": cm.identity,
+                    "pmove": None if pmove_context is None else pmove_context.identity,
+                    "hook": None if hook_context is None else hook_context.identity,
+                }
+                _validate_materialized_oracle_identities(
+                    materialized_oracles, process_identities
+                )
             nodes, edges, spawn_indices = _build_navigation(
                 cm, pmove_context, player_spawns, origin, limits,
+                claim_seed_points,
             )
             spawn_reachability = _spawn_reachability(edges, spawn_indices)
             visibility = _visibility(cm, nodes, limits)
+            compiled_hooks = _analyze_hook_claims(
+                cm, pmove_context, hook_context, nodes, edges, spawn_indices, origin,
+                generator_claims, hook, limits,
+            )
+            hook_rejections = compiled_hooks.pop("_diagnostic_rejections", [])
+            if generator_claims is not None:
+                expected_hook_traces = {
+                    trace["claim_id"]: trace
+                    for trace in hook_materialization["validation_traces"]
+                }
+                for edge in compiled_hooks["edges"]:
+                    expected_trace = expected_hook_traces.get(edge["claim_id"])
+                    if expected_trace is None or any(
+                        edge[field] != expected_trace[expected_field]
+                        for field, expected_field in (
+                            ("trajectory_origin_fixed", "origin_fixed_frames"),
+                            ("trajectory_sha256", "sha256"),
+                            ("first_grounded_frame_index", "first_grounded_frame_index"),
+                        )
+                    ):
+                        raise AtlasAnalysisError(
+                            f"{edge['claim_id']} validation trajectory differs from materialization"
+                        )
+                hook_claims_by_id = {
+                    claim["claim_id"]: (index, claim)
+                    for index, claim in enumerate(generator_claims["hook_claims"])
+                }
+                for admitted_edge in compiled_hooks["edges"]:
+                    claim_index, claim = hook_claims_by_id[admitted_edge["claim_id"]]
+                    source_key = tuple(admitted_edge["source_l1"])
+                    target_key = tuple(admitted_edge["target_l1"])
+                    cost = max(1, round(
+                        math.dist(nodes[source_key].position, nodes[target_key].position) * 256
+                    ))
+                    edges.append({
+                        "source": list(source_key),
+                        "target": list(target_key),
+                        "edge_type": "hook",
+                        "stance": "standing",
+                        "flags": int(claim["flags"]),
+                        "blocker": 0,
+                        "cost": cost,
+                        "risk": 0,
+                        "confidence": 65535,
+                        "evidence": admitted_edge["evidence"],
+                        "validation_version": admitted_edge["validation_version"],
+                        "auxiliary": claim_index,
+                    })
             spawn_records = []
             for entity_ordinal, point in spawns:
                 key = spawn_indices.get(entity_ordinal)
@@ -1539,10 +2507,57 @@ def analyze_map(
                     "reachable_spawn_ordinals": reachable,
                     "cost_to_safety_q8": 0 if node else 0xFFFFFFFF,
                 })
+            if generator_claims is not None:
+                try:
+                    compiled_non_hook = analyze_non_hook_claims(
+                        cm, metadata, nodes, edges, origin, spawn_records,
+                        generator_claims, generator_safety,
+                    )
+                except GeneratedClaimProbeError as error:
+                    reasons: dict[str, int] = defaultdict(int)
+                    for rejection in hook_rejections:
+                        reasons[str(rejection["reason"])] += 1
+                    raise AtlasAnalysisError(
+                        f"{error}; accepted_hook_edges={len(compiled_hooks['edges'])}; "
+                        f"accepted_hook_claims={[
+                            edge['claim_id'] for edge in compiled_hooks['edges']
+                        ]}; "
+                        f"hook_rejections={dict(sorted(reasons.items()))}"
+                    ) from error
+            else:
+                raw_hazard_cells = sum(
+                    1 for node in nodes.values()
+                    if node.contents & (CONTENTS_LAVA | CONTENTS_SLIME)
+                )
+                compiled_non_hook = {
+                    "hazards": {
+                        "l0_raw_cells": raw_hazard_cells,
+                        "l0_expanded_cells": 0,
+                        "types": sorted(
+                            ({"lava"} if any(node.contents & CONTENTS_LAVA for node in nodes.values()) else set())
+                            | ({"slime"} if any(node.contents & CONTENTS_SLIME for node in nodes.values()) else set())
+                        ),
+                        "lethal_drop_edges": 0,
+                        "guarded_drop_edges": 0,
+                        "uncontained_drop_edges": 0,
+                    },
+                    "hazard_claims": [],
+                    "route_claims": [],
+                    "lighting": {
+                        "lightdata_bytes": metadata.lightmaps.byte_count,
+                        "lightdata_sha256": metadata.lightmaps.sha256,
+                        "lightmapped_faces": metadata.faces.lightmapped_count,
+                        "spawn_region_count": len({
+                            record["region_id"] for record in spawn_records
+                            if record["region_id"]
+                        }),
+                        "dark_spawn_regions": 0,
+                    },
+                }
             l0_semantics: dict[str, int] = {}
             l0_chunks = _l0_chunks(
                 nodes, player_spawns, origin, cm=cm, metadata=metadata,
-                evidenced_l0_points=evidenced_l0_points,
+                admitted_hooks=compiled_hooks["edges"],
                 semantic_summary=l0_semantics,
             )
             l0_plane_counts: dict[str, int] = defaultdict(int)
@@ -1550,7 +2565,11 @@ def analyze_map(
                 for plane, cells in chunk["bits"].items():
                     l0_plane_counts[plane] += len(cells)
             l0_plane_counts = dict(sorted(l0_plane_counts.items()))
-            admissions = _admissions(metadata.sha256, provenance_sha256, cm, pmove_context)
+            admissions = _admissions(
+                metadata.sha256, provenance_sha256, cm, pmove_context,
+                hook_context if compiled_hooks["edges"] else None,
+                hook_attestation,
+            )
             cm_identity = dict(cm.identity)
             cm_identity.pop("map", None)
             pmove_identity = None if pmove_context is None else dict(pmove_context.identity)
@@ -1567,10 +2586,10 @@ def analyze_map(
                 },
             }
         finally:
+            if hook_context is not None:
+                hook_context.close()
             if pmove_context is not None:
                 pmove_context.close()
-
-    hook = _admit_hook(hook_oracle, hook_attestation)
     plan_nodes = []
     incident = {tuple(edge["source"]) for edge in edges} | {tuple(edge["target"]) for edge in edges}
     for key in sorted(nodes, key=lambda item: (item[2], item[1], item[0])):
@@ -1629,7 +2648,7 @@ def analyze_map(
     design_path.write_bytes(design_bytes)
     routes = {
         "schema": "q2-atlas-routes-v1", "bsp_sha256": metadata.sha256,
-        "route_claims": [], "objective_routes": [],
+        "route_claims": compiled_non_hook["route_claims"], "objective_routes": [],
     }
     routes_path = base.with_suffix(".routes.json")
     routes_bytes = canonical_json(routes) + b"\n"
@@ -1648,19 +2667,95 @@ def analyze_map(
     }
     analyzer_inputs = [
         Path(__file__),
+        Path(__file__).resolve().with_name("generated_claim_probes.py"),
         Path(__file__).resolve().parents[1] / "tools/atlas_cold_worker.py",
         Path(__file__).resolve().parents[1] / "crates/q2-lattice/src/bin/q2_atlas_pack.rs",
+        Path(__file__).resolve().parents[1] / "crates/q2-lattice/src/atlas/admission.rs",
+        Path(__file__).resolve().parents[1] / "crates/q2-lattice/src/atlas/manifest.rs",
+        Path(__file__).resolve().parents[1] / "crates/q2-lattice/src/atlas/storage.rs",
         Path(__file__).resolve().parents[1] / "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md",
     ]
     analyzer_sha256 = sha256_bytes(canonical_json([
-        {"path": path.name, "sha256": sha256_file(path)} for path in analyzer_inputs
+        {
+            "path": str(path.relative_to(Path(__file__).resolve().parents[1])),
+            "sha256": sha256_file(path),
+        }
+        for path in sorted(analyzer_inputs)
     ]))
+    limitations = sorted([
+        "L0 is a reachable surface/hazard/spawn narrow band, never dense free-space fill",
+        "areaportal summaries use declared map-static state only",
+        "hook authority is admitted only for explicit source-bound exact replays",
+        "inline mover transforms remain confidence-tagged metadata and are not static corridors",
+        "mover envelopes are L0 occupancy; no mover traversal edge is emitted without state evidence",
+    ])
+    atlas_manifest_path = base.with_suffix(".atlas.manifest.json")
+    generator_source = Path(__file__).resolve().parents[1] / "maps/generator.py"
+    _write_canonical_atlas_manifest(
+        atlas_manifest_path,
+        canonical_map_id=canonical_map_id,
+        metadata=metadata,
+        provenance_sha256=provenance_sha256,
+        origin=origin,
+        cm_identity=cm_identity,
+        admissions=admissions,
+        analyzer_sha256=analyzer_sha256,
+        generator_sha256=(
+            sha256_file(generator_source) if generator_claims is not None else None
+        ),
+        atlas_name=atlas_raw.name,
+        atlas_raw=atlas_raw,
+        atlas_zst=atlas_zst,
+        pack_result=pack_result,
+        limitations=limitations,
+    )
+    verifier = verifier or packer.with_name("q2-atlas-verify")
+    if not verifier.is_file():
+        raise AtlasAnalysisError(f"Atlas verifier missing: {verifier}")
+    verified = subprocess.run(
+        [str(verifier), str(atlas_manifest_path), str(atlas_raw)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        timeout=30, check=False,
+    )
+    if verified.returncode:
+        raise AtlasAnalysisError(f"Atlas verifier failed: {verified.stderr.strip()}")
+    try:
+        verification = json.loads(verified.stdout)
+    except json.JSONDecodeError as error:
+        raise AtlasAnalysisError("Atlas verifier emitted invalid JSON") from error
+    expected_verification = {
+        "schema": "q2-atlas-verification-v1",
+        "passed": True,
+        "canonical_map_id": canonical_map_id,
+        "bsp_sha256": metadata.sha256,
+        "manifest_sha256": sha256_file(atlas_manifest_path),
+        "artifact_name": atlas_raw.name,
+        "atlas_sha256": sha256_file(atlas_raw),
+        "origin": list(origin),
+        "counts": {
+            "l0_chunks": int(pack_result["l0_chunks"]),
+            "l1_nodes": int(pack_result["l1_nodes"]),
+            "l1_edges": int(pack_result["l1_edges"]),
+            "l2_cells": int(pack_result["l2_cells"]),
+            "l3_cells": int(pack_result["l3_cells"]),
+        },
+        "collision_contract_sha256": admissions["collision_oracle"]["contract_sha256"],
+    }
+    if verification != expected_verification:
+        raise AtlasAnalysisError("Atlas verifier summary differs from analyzer identities")
+    artifacts["atlas_manifest"] = {
+        "path": atlas_manifest_path.name,
+        "sha256": sha256_file(atlas_manifest_path),
+        "uncompressed_bytes": atlas_manifest_path.stat().st_size,
+        "verifier_sha256": sha256_file(verifier),
+        "verification": verification,
+    }
     manifest = {
         "schema": SCHEMA,
         "status": "candidate",
         "deterministic_rebuild": False,
         "confidence": "pending-independent-cold-rebuild",
-        "analyzer_version": "b2-a-v1",
+        "analyzer_version": "b2-a-v2",
         "canonical_map_id": canonical_map_id,
         "bsp": {
             "sha256": metadata.sha256, "bytes": metadata.byte_count, "ibsp_version": metadata.version,
@@ -1682,6 +2777,7 @@ def analyze_map(
             "generator_claims_sha256": generator_claims_sha256,
             "atlas_sha256": pack_result["uncompressed_sha256"],
             "analyzer_sha256": analyzer_sha256,
+            "atlas_manifest_sha256": sha256_file(atlas_manifest_path),
         },
         "oracles": {
             "collision": {
@@ -1702,43 +2798,11 @@ def analyze_map(
         },
         "compiled_world": {
             "spawns": spawn_records,
-            "hazards": {
-                "l0_raw_cells": sum(
-                    l0_plane_counts.get(name, 0) for name in ("lava", "slime", "hurt")
-                ),
-                "l0_expanded_cells": sum(
-                    l0_semantics.get(name, 0)
-                    for name in ("lava_expanded", "slime_expanded", "hurt_expanded")
-                ),
-                "types": [
-                    name for name, present in (
-                        ("lava", l0_plane_counts.get("lava", 0)),
-                        ("slime", l0_plane_counts.get("slime", 0)),
-                        ("hurt", l0_plane_counts.get("hurt", 0)),
-                        ("void", l0_semantics.get("lethal_void", 0)),
-                        ("crush", l0_semantics.get("crush", 0)),
-                    ) if present
-                ],
-                "lethal_drop_edges": l0_semantics.get("lethal_void", 0),
-                "guarded_drop_edges": 0,
-                "uncontained_drop_edges": l0_semantics.get("lethal_void", 0),
-                "semantic_cells": dict(sorted(l0_semantics.items())),
-            },
-            "hazard_claims": [],
-            "lighting": {
-                "lightdata_bytes": metadata.lightmaps.byte_count,
-                "lightdata_sha256": metadata.lightmaps.sha256,
-                "lightmapped_faces": metadata.faces.lightmapped_count,
-                "spawn_region_count": len({record["region_id"] for record in spawn_records if record["region_id"]}),
-                "dark_spawn_regions": [],
-            },
-            "hooks": {
-                "authority_admitted": hook["authority_admitted"],
-                "omission_reason": hook["omission_reason"], "edges": [],
-                "hookable_surface_l0_cells": l0_plane_counts.get("hookable_surface", 0),
-                "hook_corridor_l0_cells": l0_plane_counts.get("hook_corridor", 0),
-            },
-            "route_claims": [],
+            "hazards": compiled_non_hook["hazards"],
+            "hazard_claims": compiled_non_hook["hazard_claims"],
+            "lighting": compiled_non_hook["lighting"],
+            "hooks": compiled_hooks,
+            "route_claims": compiled_non_hook["route_claims"],
         },
         "artifacts": artifacts,
         "counts": {
@@ -1753,15 +2817,14 @@ def analyze_map(
         "l0_plane_counts": l0_plane_counts,
         "confidence_summary": {
             "collision": "exact-engine", "movement": "exact-engine" if pmove_oracle else "omitted",
-            "hook": "attested-but-no-discovered-edge" if hook["authority_admitted"] else "omitted",
+            "hook": (
+                "exact-engine-replayed-edges" if compiled_hooks["edges"]
+                else "attested-no-replayed-edge" if hook["authority_admitted"]
+                else "omitted"
+            ),
             "metadata": "b1-c-validated",
         },
-        "limitations": sorted([
-            "areaportal summaries use declared map-static state only",
-            "hook authority is admitted but stock surface discovery emits no hook edge in B2-A v1",
-            "mover envelopes are L0 occupancy; no mover traversal edge is emitted without state evidence",
-            "L0 is a reachable surface/hazard/spawn narrow band, never dense free-space fill",
-        ]),
+        "limitations": limitations,
         "performance": {
             "cm_requests": oracle_manifest["collision"]["requests"],
             "pmove_requests": 0 if oracle_manifest["pmove"] is None else oracle_manifest["pmove"]["requests"],
@@ -1772,10 +2835,11 @@ def analyze_map(
             bsp, output_dir, canonical_map_id, provenance,
             cm_oracle=cm_oracle, pmove_oracle=pmove_oracle,
             hook_oracle=hook_oracle, hook_attestation=hook_attestation,
-            packer=packer, limits=limits,
+            packer=packer, verifier=verifier, limits=limits,
             generator_claims_sha256=generator_claims_sha256,
             generator_claims=generator_claims,
-            evidenced_l0_points=evidenced_l0_points,
+            generator_safety=generator_safety,
+            hook_materialization=hook_materialization,
         )
         manifest["status"] = "passed"
         manifest["deterministic_rebuild"] = True

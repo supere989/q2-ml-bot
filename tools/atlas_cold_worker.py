@@ -22,9 +22,8 @@ def main() -> int:
     if set(specification) != {
         "schema", "bsp", "output_dir", "canonical_map_id", "provenance",
         "cm_oracle", "pmove_oracle", "hook_oracle", "hook_attestation",
-        "packer", "limits", "generator_claims_sha256",
-        "generator_claims",
-        "evidenced_l0_points",
+        "packer", "verifier", "limits", "generator_claims_sha256",
+        "generator_claims", "generator_safety", "hook_materialization",
     } or specification["schema"] != "q2-atlas-cold-worker-v1":
         raise SystemExit("invalid independent cold analyzer specification")
     optional_path = lambda value: None if value is None else Path(value)
@@ -38,10 +37,12 @@ def main() -> int:
         hook_oracle=optional_path(specification["hook_oracle"]),
         hook_attestation=optional_path(specification["hook_attestation"]),
         packer=Path(specification["packer"]),
+        verifier=Path(specification["verifier"]),
         limits=AnalyzerLimits(**specification["limits"]),
         generator_claims_sha256=specification["generator_claims_sha256"],
         generator_claims=specification["generator_claims"],
-        evidenced_l0_points=specification["evidenced_l0_points"],
+        generator_safety=specification["generator_safety"],
+        hook_materialization=specification["hook_materialization"],
         independent_cold=False,
     )
     result = {

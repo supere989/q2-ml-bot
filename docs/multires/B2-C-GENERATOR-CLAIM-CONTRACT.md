@@ -1,26 +1,33 @@
 # B2-C generated-map compiled-world claim contract
 
 Status: offline prototype contract for B2 integration
-Schemas: `q2-generator-claims-v1`,
+Schemas: `q2-generator-claims-v2`,
 `q2-generator-claim-validation-v1`, and
 `q2-generator-claim-campaign-v1`
 
-Generator v6 `.map`, `.meta.json`, `.lattice.json`, hook-zone, and route
-sidecars are claims to challenge. They are never collision, movement, hazard,
-lighting, or hook authority. The existing source/static validator remains a
-necessary generated-v6 criterion, but its success cannot fill a missing or
-unknown compiled Atlas fact.
+Generator v6 `.map`, `.meta.json`, `.lattice.json`, hook-zone,
+`.hook-materialization.json`, and route sidecars are claims to challenge. They
+are never collision, movement, hazard, lighting, or hook authority. The
+existing source/static validator remains a necessary generated-v6 criterion,
+but its success cannot fill a missing or unknown compiled Atlas fact.
 
 ## Canonical claim input
 
-`tools/generator_claim_validator.py` normalizes the five source files into one
+`tools/generator_claim_validator.py` normalizes the six source files into one
 canonical compact/sorted JSON document with a trailing LF. Its SHA-256 binds:
 
 - all eight source and lattice spawn origins;
 - every lava and generated `trigger_hurt` volume;
-- every published hook anchor, landing, distance, and flag;
+- every materialized source, anchor, measured landing, release schedule,
+  distance, and flag;
 - every route segment endpoint and each route's normalized cost claim; and
-- SHA-256 identities for all five source files.
+- SHA-256 identities for all six source files.
+
+The hook materialization is a separate canonical record. It binds the exact
+BSP and candidate metadata, the original non-admissible projection, six
+selected records and ordered Pmove traces, executable/tool/physics identities,
+and the pinned parity attestation. A final runtime hook sidecar is admissible
+only when its canonical header and eight-field rows match this record exactly.
 
 The legacy room graph can report zero cost between different locations in one
 room. The canonical cost claim therefore uses the greater of the declared
@@ -57,8 +64,10 @@ The generated path requires every criterion below:
    lightmapped faces, the compiled spawn-region count matches the v6 lighting
    contract, and no dark spawn region remains.
 7. Hook authority is admitted under the B1 hook physics identity. Every claim
-   has exactly one evidenced edge with the claimed anchor and a target equal to
-   its legal landing.
+   has exactly one source-bound, spawn-reachable edge whose exact source,
+   anchor, release ticks, first grounded 1/8-unit landing, and ordered Pmove
+   trajectory reproduce the materialization independently. L0 hook corridors
+   contain only those replayed trajectory frames.
 8. Every route segment has positive oracle/validation evidence, exact claimed
    endpoints, finite cost, and compiled connectivity. A route fails cost
    consistency only when its total differs by more than 1024 units **and** by
@@ -79,7 +88,24 @@ metadata.
 
 ## Offline workflow
 
-Prepare claims before analysis:
+Generate and compile the BSP beside its source files first. Then materialize
+the hook candidates under the pinned B1 authorities:
+
+```sh
+python tools/materialize_hook_claims.py \
+  --bsp /isolated/B2/generated/b2claim_0000.bsp \
+  --meta /isolated/B2/generated/b2claim_0000.meta.json \
+  --runtime-sidecar /isolated/B2/generated/b2claim_0000.json \
+  --output-attestation /isolated/B2/generated/b2claim_0000.hook-materialization.json \
+  --cm-oracle /isolated/B1/q2-cm-oracle \
+  --pmove-oracle /isolated/B1/q2-pmove-oracle \
+  --hook-oracle /isolated/B1/q2-hook-oracle \
+  --hook-parity-attestation /isolated/B1/hook-parity-pullspeed-1700.json
+```
+
+Materialization fails closed unless exactly six unique geometries replay. Once
+each compiled map has its canonical attestation and admissible runtime
+sidecar, prepare the v2 claims:
 
 ```sh
 python tools/run_generator_claim_campaign.py \
@@ -88,8 +114,9 @@ python tools/run_generator_claim_campaign.py \
   --output /isolated/B2/claims-prepare.json
 ```
 
-Compile each map beside its source and run the B2-A analyzer with the matching
-`.generator-claims.json`. Do not use `maps/compile.sh` for this gate because it
+Run the B2-A v2 analyzer with the matching `.generator-claims.json`; the normal
+path remains `candidate`/pending until its independent full-cold rebuild and
+verifier replay succeed. Do not use `maps/compile.sh` for this gate because it
 copies BSPs into a runtime map directory. Then validate the compiled campaign:
 
 ```sh

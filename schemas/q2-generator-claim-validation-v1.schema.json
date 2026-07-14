@@ -24,6 +24,7 @@
         "meta_sha256": {"$ref": "#/$defs/sha256"},
         "lattice_sha256": {"$ref": "#/$defs/sha256"},
         "hook_zones_sha256": {"$ref": "#/$defs/sha256"},
+        "hook_materialization_sha256": {"$ref": "#/$defs/sha256"},
         "routes_sha256": {"$ref": "#/$defs/sha256"}
       },
       "additionalProperties": false

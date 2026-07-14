@@ -2,23 +2,32 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import signal
 import struct
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
 from harness.atlas_analyzer import (
+    AtlasAnalysisError,
     AnalyzerLimits,
     CONTENTS_LAVA,
     CONTENTS_PLAYERCLIP,
     FROZEN_L0_BIT_PLANE_NAMES,
     FROZEN_L0_SCALAR_PLANE_NAMES,
     NavNode,
+    _atlas_channels,
+    _analyze_hook_claims,
     _l0_chunks,
+    _process_tree_rss_bytes,
+    _run_measured_process,
     analyze_map,
     sha256_file,
 )
+from harness.ibsp38 import EntityMetadata
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,7 +69,10 @@ def _required_artifacts() -> tuple[Path, Path, Path, Path]:
         pytest.skip("B1 integration artifacts unavailable: " + ", ".join(map(str, missing)))
     packer = ROOT / "target/debug/q2-atlas-pack"
     subprocess.run(
-        ["cargo", "build", "-p", "q2-lattice", "--bin", "q2-atlas-pack"],
+        [
+            "cargo", "build", "-p", "q2-lattice",
+            "--bin", "q2-atlas-pack", "--bin", "q2-atlas-verify",
+        ],
         cwd=ROOT, check=True,
     )
     return cm, pmove, hook, packer
@@ -86,6 +98,17 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
     limits = AnalyzerLimits(
         max_l1_nodes=2_000, max_l1_edges=10_000, max_pmove_sources=32,
     )
+    candidate = analyze_map(
+        bsp, tmp_path / "candidate", "atlas-fixture", provenance,
+        cm_oracle=cm, pmove_oracle=pmove, hook_oracle=hook,
+        hook_attestation=ATTESTATION, packer=packer, limits=limits,
+        independent_cold=False,
+    )
+    assert candidate["status"] == "candidate"
+    assert candidate["deterministic_rebuild"] is False
+    assert candidate["confidence"] == "pending-independent-cold-rebuild"
+    assert candidate["analyzer_version"] == "b2-a-v2"
+    assert candidate["confidence_summary"]["hook"] == "attested-no-replayed-edge"
     outputs = []
     for name in ("first", "second"):
         output = tmp_path / name
@@ -106,26 +129,40 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
     second = sorted(path.name for path in outputs[1].iterdir())
     assert first == second
     for name in first:
-        if name.endswith(".analysis.manifest.json"):
-            continue
-        assert (outputs[0] / name).read_bytes() == (outputs[1] / name).read_bytes(), name
-    manifests = [
-        json.loads((output / "atlas-fixture.analysis.manifest.json").read_bytes())
-        for output in outputs
-    ]
-    for manifest in manifests:
-        atlas = manifest["artifacts"]["atlas"]
-        measured = atlas.pop("build_peak_rss_bytes")
-        assert 0 < measured <= 512 * 1024 * 1024
-        assert atlas["build_peak_rss_measurement"] == "linux_proc_self_status_vmhwm"
-        assert atlas["build_peak_rss_gate_passed"] is True
-        assert atlas["max_build_rss_bytes"] == 512 * 1024 * 1024
-        proof = manifest["performance"]["full_cold_rebuild"]
-        assert proof["artifact_count"] == 6
-        assert 0 < proof["sampled_process_tree_peak_rss_bytes"] <= proof["peak_rss_limit_bytes"]
-        del proof["sampled_process_tree_peak_rss_bytes"]
-    assert manifests[0] == manifests[1]
-    manifest = manifests[0]
+        left = (outputs[0] / name).read_bytes()
+        right = (outputs[1] / name).read_bytes()
+        if name == "atlas-fixture.analysis.manifest.json":
+            left_manifest = json.loads(left)
+            right_manifest = json.loads(right)
+            for manifest in (left_manifest, right_manifest):
+                atlas = manifest["artifacts"]["atlas"]
+                measured = atlas.pop("build_peak_rss_bytes")
+                assert 0 < measured <= 512 * 1024 * 1024
+                assert atlas["build_peak_rss_measurement"] == "linux_proc_self_status_vmhwm"
+                assert atlas["build_peak_rss_gate_passed"] is True
+                assert atlas["max_build_rss_bytes"] == 512 * 1024 * 1024
+                manifest["identity"].pop("atlas_manifest_sha256")
+                atlas_manifest = manifest["artifacts"]["atlas_manifest"]
+                atlas_manifest.pop("sha256")
+                atlas_manifest["verification"].pop("manifest_sha256")
+                proof = manifest["performance"]["full_cold_rebuild"]
+                assert proof["artifact_count"] == 7
+                assert (
+                    0 < proof["sampled_process_tree_peak_rss_bytes"]
+                    <= proof["peak_rss_limit_bytes"]
+                )
+                proof.pop("sampled_process_tree_peak_rss_bytes")
+            assert left_manifest == right_manifest, name
+        elif name == "atlas-fixture.atlas.manifest.json":
+            left_manifest = json.loads(left)
+            right_manifest = json.loads(right)
+            for manifest in (left_manifest, right_manifest):
+                measured = manifest.pop("build_peak_rss_bytes")
+                assert 0 < measured <= 512 * 1024 * 1024
+            assert left_manifest == right_manifest, name
+        else:
+            assert left == right, name
+    manifest = json.loads((outputs[0] / "atlas-fixture.analysis.manifest.json").read_bytes())
     assert manifest["artifacts"]["atlas"]["uncompressed_sha256"] == sha256_file(
         outputs[0] / "atlas-fixture.atlas.bin"
     )
@@ -163,3 +200,118 @@ def test_python_l0_names_match_frozen_rust_packer_schema() -> None:
         assert f'"{name}" => L0BitPlane::' in source
     for name in FROZEN_L0_SCALAR_PLANE_NAMES:
         assert f'"{name}" => L0ScalarPlane::' in source
+
+
+def test_atlas_channels_enumerate_exact_frozen_l0_schema() -> None:
+    l0 = [channel for channel in _atlas_channels() if channel["level"] == 0]
+    bits = {channel["name"] for channel in l0 if channel["encoding"] == "bitplane"}
+    scalars = {channel["name"] for channel in l0 if channel["encoding"] == "u8"}
+    assert bits == FROZEN_L0_BIT_PLANE_NAMES
+    assert scalars == FROZEN_L0_SCALAR_PLANE_NAMES
+    assert len(l0) == len(bits) + len(scalars)
+    assert all(channel["persistence"] == "map-static" for channel in l0)
+
+
+@pytest.mark.parametrize("spawnflags,stateful", [("0", False), ("1", True), ("2", True)])
+def test_l0_trigger_hurt_uses_runtime_linked_contact_bounds(
+    spawnflags: str, stateful: bool,
+) -> None:
+    trigger = EntityMetadata(
+        index=1,
+        classname="trigger_hurt",
+        properties=(
+            ("model", "*1"), ("origin", "0 0 0"),
+            ("spawnflags", spawnflags),
+        ),
+    )
+    metadata = SimpleNamespace(
+        entities=(trigger,),
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0)),
+            SimpleNamespace(mins=(100, 0, 0), maxs=(164, 64, 16)),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 1, "model_index": 1},
+        )),
+    )
+    semantics = {}
+    chunks = _l0_chunks(
+        {}, [], (0, 0, 0), metadata=metadata, semantic_summary=semantics
+    )
+    counts = {}
+    scalar_counts = {}
+    for chunk in chunks:
+        for name, cells in chunk["bits"].items():
+            counts[name] = counts.get(name, 0) + len(cells)
+        for name, cells in chunk["scalars"].items():
+            scalar_counts[name] = scalar_counts.get(name, 0) + len(cells)
+    if stateful:
+        assert counts == {"unknown": 13_520}
+        assert scalar_counts == {}
+        assert semantics == {"hurt_potential": 13_520}
+    else:
+        assert counts["hurt"] == 1_944
+        assert counts["standing_forbidden_origin"] == 13_520
+        assert counts["crouched_forbidden_origin"] == 8_788
+        assert scalar_counts["hazard_severity"] == 13_520
+        assert semantics == {"hurt_expanded": 13_520}
+
+
+def test_process_tree_rss_rejects_unreadable_root() -> None:
+    with pytest.raises(AtlasAnalysisError, match="RSS is unreadable"):
+        _process_tree_rss_bytes(2_147_483_647)
+
+
+def test_measured_process_rejects_zero_peak_rss(monkeypatch) -> None:
+    class _ZeroRssProcess:
+        pid = 12345
+
+        def __init__(self) -> None:
+            self.polls = 0
+
+        def poll(self):
+            self.polls += 1
+            return None if self.polls == 1 else 0
+
+        def communicate(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(["fake"], timeout)
+            return "", ""
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: _ZeroRssProcess())
+    monkeypatch.setattr(
+        "harness.atlas_analyzer._process_tree_rss_bytes", lambda _pid: 0
+    )
+    with pytest.raises(AtlasAnalysisError, match="positive RSS sample"):
+        _run_measured_process(["fake"], timeout=1.0)
+
+
+def test_measured_process_kills_process_group_on_sampler_failure(monkeypatch) -> None:
+    captured = {}
+
+    class _UnreadableProcess:
+        pid = 23456
+
+        def poll(self):
+            return None
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    def fake_popen(*args, **kwargs):
+        captured["start_new_session"] = kwargs.get("start_new_session")
+        return _UnreadableProcess()
+
+    def fail_sample(_pid):
+        raise AtlasAnalysisError("independent cold analyzer /proc RSS is unreadable")
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("harness.atlas_analyzer._process_tree_rss_bytes", fail_sample)
+    monkeypatch.setattr(
+        os, "killpg", lambda pid, sig: captured.update(pid=pid, sig=sig)
+    )
+    with pytest.raises(AtlasAnalysisError, match="RSS is unreadable"):
+        _run_measured_process(["fake"], timeout=1.0)
+    assert captured == {
+        "start_new_session": True, "pid": 23456, "sig": signal.SIGKILL,
+    }

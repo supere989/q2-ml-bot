@@ -28,6 +28,15 @@ from maps.generator import (  # noqa: E402
     MIN_FLOOR_LIGHT_COVERAGE,
     MIN_SPAWN_SEPARATION,
 )
+from harness.hook_claims_v2 import (  # noqa: E402
+    HookClaimsV2Error,
+    load_candidates,
+    load_materialization,
+    runtime_records_sha256,
+    validate_record as validate_hook_record_v2,
+    validate_runtime_sidecar,
+    validation_trace_sha256,
+)
 from tools.validate_maps import (  # noqa: E402
     POINT_RE,
     _origin,
@@ -37,7 +46,7 @@ from tools.validate_maps import (  # noqa: E402
 )
 
 
-CLAIMS_SCHEMA = "q2-generator-claims-v1"
+CLAIMS_SCHEMA = "q2-generator-claims-v2"
 ANALYSIS_SCHEMA = "q2-atlas-analysis-v1"
 REPORT_SCHEMA = "q2-generator-claim-validation-v1"
 ORACLE_STATUS = "oracle"
@@ -365,6 +374,7 @@ def build_generator_claims(map_path: Path) -> dict[str, Any]:
         "meta": stem.with_suffix(".meta.json"),
         "lattice": Path(f"{stem}.lattice.json"),
         "hook_zones": stem.with_suffix(".json"),
+        "hook_materialization": Path(f"{stem}.hook-materialization.json"),
         "routes": Path(f"{stem}.routes.json"),
     }
     missing = [path.name for path in paths.values() if not path.is_file()]
@@ -436,9 +446,47 @@ def build_generator_claims(map_path: Path) -> dict[str, Any]:
         )
     hazards.sort(key=lambda claim: claim["claim_id"])
 
-    hooks = _parse_hook_claims(paths["hook_zones"])
-    if meta.get("hook_zones") != len(hooks):
-        raise ClaimValidationError("metadata and hook sidecar counts differ")
+    runtime_hooks = _parse_hook_claims(paths["hook_zones"])
+    try:
+        materialization, materialization_sha256 = load_materialization(
+            paths["hook_materialization"]
+        )
+        candidates, candidates_sha256, meta_sha256 = load_candidates(paths["meta"])
+    except HookClaimsV2Error as error:
+        raise ClaimValidationError(str(error)) from error
+    bsp_path = stem.with_suffix(".bsp")
+    if not bsp_path.is_file():
+        raise ClaimValidationError("compiled BSP is required before hook materialization")
+    if (
+        materialization["map"] != map_path.stem
+        or materialization["bsp"] != {
+            "sha256": file_sha256(bsp_path), "size_bytes": bsp_path.stat().st_size,
+        }
+        or materialization["candidates"]["meta_sha256"] != meta_sha256
+        or materialization["candidates"]["records_sha256"] != candidates_sha256
+        or materialization["candidates"]["record_count"] != len(candidates["records"])
+    ):
+        raise ClaimValidationError("hook materialization source/BSP identity differs")
+    runtime_text = paths["hook_zones"].read_bytes()
+    hooks = materialization["selected_records"]
+    try:
+        validate_runtime_sidecar(
+            runtime_text, map_id=map_path.stem,
+            bsp_sha256=materialization["bsp"]["sha256"],
+            materialization_sha256=materialization_sha256, records=hooks,
+        )
+    except HookClaimsV2Error as error:
+        raise ClaimValidationError(str(error)) from error
+    if len(runtime_hooks) != len(hooks) or runtime_records_sha256(hooks) != materialization[
+        "runtime_records_sha256"
+    ]:
+        raise ClaimValidationError("runtime hook rows differ from materialized records")
+    for runtime, selected in zip(runtime_hooks, hooks):
+        for field in (
+            "anchor_milliunits", "landing_milliunits", "distance_milliunits", "flags",
+        ):
+            if runtime[field] != selected[field]:
+                raise ClaimValidationError("runtime hook geometry differs from selected v2 record")
     route_claims, route_records = _route_contract(routes)
     claims = {
         "schema": CLAIMS_SCHEMA,
@@ -449,6 +497,7 @@ def build_generator_claims(map_path: Path) -> dict[str, Any]:
             "meta_sha256": file_sha256(paths["meta"]),
             "lattice_sha256": file_sha256(paths["lattice"]),
             "hook_zones_sha256": file_sha256(paths["hook_zones"]),
+            "hook_materialization_sha256": file_sha256(paths["hook_materialization"]),
             "routes_sha256": file_sha256(paths["routes"]),
         },
         "spawns": spawns,
@@ -490,7 +539,7 @@ def validate_generator_claims(value: object) -> dict[str, Any]:
         source_files,
         {
             "map_sha256", "meta_sha256", "lattice_sha256",
-            "hook_zones_sha256", "routes_sha256",
+            "hook_zones_sha256", "hook_materialization_sha256", "routes_sha256",
         },
         "source files",
     )
@@ -499,7 +548,7 @@ def validate_generator_claims(value: object) -> dict[str, Any]:
 
     spawns = _unique_claims(claims["spawns"], "spawns")
     if len(spawns) != DM_SPAWN_COUNT:
-        raise ClaimValidationError("generated claims require eight spawns")
+        raise ClaimValidationError("generated claims require exactly eight spawns")
     for spawn in spawns:
         _exact_keys(spawn, {"claim_id", "origin_milliunits"}, "spawn claim")
         _vec3_int(spawn["origin_milliunits"], "spawn origin")
@@ -519,23 +568,13 @@ def validate_generator_claims(value: object) -> dict[str, Any]:
             raise ClaimValidationError("hazard bounds are not ordered")
 
     hooks = _unique_claims(claims["hook_claims"], "hook claims")
-    if not hooks:
-        raise ClaimValidationError("generated claims require hook claims")
+    if len(hooks) != 6:
+        raise ClaimValidationError("generated claims require exactly six hook-v2 claims")
     for hook in hooks:
-        _exact_keys(
-            hook,
-            {
-                "claim_id", "anchor_milliunits", "landing_milliunits",
-                "distance_milliunits", "flags",
-            },
-            "hook claim",
-        )
-        _vec3_int(hook["anchor_milliunits"], "hook anchor")
-        _vec3_int(hook["landing_milliunits"], "hook landing")
-        _integer(hook["distance_milliunits"], "hook distance", minimum=1)
-        flags = _integer(hook["flags"], "hook flags", minimum=0)
-        if flags > 7:
-            raise ClaimValidationError("hook flags exceed v1 mask")
+        try:
+            validate_hook_record_v2(dict(hook), "hook claim")
+        except HookClaimsV2Error as error:
+            raise ClaimValidationError(str(error)) from error
 
     route_claims = _unique_claims(claims["route_claims"], "route claims")
     if not route_claims:
@@ -878,14 +917,38 @@ def _validate_hooks(
         _exact_keys(
             edge,
             {
-                "claim_id", "source_l1", "target_l1", "anchor_milliunits",
-                "landing_l1", "physics_identity", "evidence",
-                "validation_version",
+                "claim_id", "source_l1", "target_l1", "source_milliunits",
+                "anchor_milliunits", "landing_milliunits",
+                "release_after_ticks", "distance_milliunits", "flags",
+                "trajectory_origin_fixed", "trajectory_sha256",
+                "first_grounded_frame_index",
+                "landing_l1", "physics_identity", "evidence", "validation_version",
             },
             "compiled hook edge",
         )
         if tuple(_vec3_int(edge.get("anchor_milliunits"), "hook edge anchor")) != tuple(claim["anchor_milliunits"]):
             failures.append(f"{claim['claim_id']} anchor differs")
+        for field in ("source_milliunits", "landing_milliunits"):
+            if tuple(_vec3_int(edge.get(field), f"hook edge {field}")) != tuple(claim[field]):
+                failures.append(f"{claim['claim_id']} {field} differs")
+        for field in ("release_after_ticks", "distance_milliunits", "flags"):
+            if _integer(edge.get(field), f"hook edge {field}", minimum=0) != claim[field]:
+                failures.append(f"{claim['claim_id']} {field} differs")
+        frames = _list(edge.get("trajectory_origin_fixed"), "hook trajectory")
+        if not frames:
+            failures.append(f"{claim['claim_id']} has no Pmove trajectory")
+        for frame in frames:
+            _vec3_int(frame, "hook trajectory frame")
+        _digest(edge.get("trajectory_sha256"), "hook trajectory digest")
+        if _integer(
+            edge.get("first_grounded_frame_index"),
+            "hook first grounded frame", minimum=0,
+        ) != len(frames) - 1:
+            failures.append(f"{claim['claim_id']} trajectory does not end grounded")
+        if validation_trace_sha256(
+            claim["claim_id"], frames, len(frames) - 1
+        ) != edge.get("trajectory_sha256"):
+            failures.append(f"{claim['claim_id']} trajectory digest differs")
         if edge.get("physics_identity") != expected_physics:
             failures.append(f"{claim['claim_id']} physics identity differs from B1")
         if _integer(edge.get("evidence"), "hook evidence", minimum=0) <= 0:
@@ -1111,7 +1174,7 @@ def validate_report(value: object) -> dict[str, Any]:
     }
     generated_identities = common_identities | {
         "map_sha256", "meta_sha256", "lattice_sha256",
-        "hook_zones_sha256", "routes_sha256",
+        "hook_zones_sha256", "hook_materialization_sha256", "routes_sha256",
     }
     expected_identities = (
         generated_identities
