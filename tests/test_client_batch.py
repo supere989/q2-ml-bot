@@ -38,6 +38,7 @@ def _telemetry(
     jump=False,
     fire=False,
     terminal=False,
+    terminal_reason=None,
     damage_dealt=0.0,
     map_name="q2dm1",
     gate_flags=0,
@@ -53,7 +54,11 @@ def _telemetry(
     obs = SimpleNamespace(
         action_debug=debug,
         is_terminal=terminal,
-        terminal_reason=1 if terminal else 0,
+        terminal_reason=(
+            int(terminal_reason)
+            if terminal_reason is not None
+            else (1 if terminal else 0)
+        ),
         reward_damage_dealt=damage_dealt,
     )
     return ClientTelemetry(
@@ -412,6 +417,87 @@ def test_map_epoch_resyncs_every_client_and_returns_nontrainable_boundary():
         assert metrics.rounds_accepted == 0
         assert metrics.transitions_accepted == 0
         assert metrics.as_dict()["network_client/map_epoch_resyncs"] == 1
+    finally:
+        batch.close()
+
+
+def test_intermission_before_echo_is_nontrainable_until_new_map_is_active():
+    events = []
+    envs = []
+    for slot in range(4):
+        client_id = f"client-{slot}"
+        envs.append(_FakeEnv(
+            client_id,
+            slot,
+            [
+                # q2ded freezes usercmd application during intermission. The
+                # echo therefore cannot match while telemetry keeps flowing.
+                _telemetry(
+                    client_id,
+                    slot,
+                    2,
+                    11,
+                    echo_tick=10,
+                    accepted=1,
+                    terminal=True,
+                    terminal_reason=2,
+                ),
+                _telemetry(
+                    client_id, slot, 3, 1, map_name="mllive_test"
+                ),
+                _telemetry(
+                    client_id,
+                    slot,
+                    4,
+                    2,
+                    echo_tick=2,
+                    accepted=1,
+                    forward=0.3,
+                    map_name="mllive_test",
+                ),
+            ],
+            events,
+        ))
+    batch = Q2NetworkClientBatch(
+        envs, round_timeout=1.0, max_rejected_echoes=0
+    )
+    try:
+        batch.reset()
+
+        waiting = batch.collect_round(
+            [Action(move_forward=0.3)] * 4, policy_version=70
+        )
+        assert waiting.terminated.tolist() == [True] * 4
+        assert waiting.rewards.tolist() == [0.0] * 4
+        assert all(info["map_epoch_resync"] for info in waiting.infos)
+        assert all(info["map_epoch_pending"] for info in waiting.infos)
+        assert all(
+            info["map_epoch_target"] == "q2dm1" for info in waiting.infos
+        )
+        assert all(not info["trainable_transition"] for info in waiting.infos)
+
+        changed = batch.collect_round(
+            [Action(move_forward=0.3)] * 4, policy_version=71
+        )
+        assert all(info["map_epoch_resync"] for info in changed.infos)
+        assert all(not info["map_epoch_pending"] for info in changed.infos)
+        assert all(
+            info["map_epoch_target"] == "mllive_test"
+            for info in changed.infos
+        )
+        assert all(not info["trainable_transition"] for info in changed.infos)
+
+        accepted = batch.collect_round(
+            [Action(move_forward=0.3)] * 4, policy_version=72
+        )
+        assert all(info["trainable_transition"] for info in accepted.infos)
+        assert accepted.observations[:, 0].tolist() == [2.0] * 4
+        assert batch.metrics.failed_rounds == 0
+        assert batch.metrics.transitions_accepted == 4
+        assert batch.metrics.map_epoch_resyncs == 2
+
+        with pytest.raises(StalePolicyVersionError):
+            batch.collect_round([Action()] * 4, policy_version=71)
     finally:
         batch.close()
 

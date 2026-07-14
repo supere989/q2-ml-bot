@@ -29,6 +29,7 @@ from .protocol import (
     ML_FIRE_GATE_PROTECTED,
     ML_FIRE_GATE_SUPPRESSED,
     ML_FIRE_GATE_TARGET,
+    ML_TERMINAL_INTERMISSION,
 )
 
 
@@ -311,6 +312,20 @@ class Q2NetworkClientBatch:
                     mismatched_echoes=mismatched_echoes,
                 )
             observation = telemetry.observation
+            # During intermission ClientThink intentionally stops applying
+            # usercmds, so action_debug remains on the last playable frame.
+            # Treat that authoritative terminal marker as a map boundary
+            # before the normal stale/mismatch budget can terminate PPO.
+            if (
+                bool(getattr(observation, "is_terminal", False))
+                and int(getattr(observation, "terminal_reason", 0))
+                == ML_TERMINAL_INTERMISSION
+            ):
+                return _MapEpoch(
+                    telemetry=telemetry,
+                    stale_echoes=stale_echoes,
+                    mismatched_echoes=mismatched_echoes,
+                )
             for field in reward_fields:
                 reward_sums[field] += float(getattr(observation, field, 0.0))
             if bool(getattr(observation, "is_terminal", False)):
@@ -423,6 +438,14 @@ class Q2NetworkClientBatch:
         policy_version: int,
     ) -> BatchRound:
         map_changed = any(drain.map_changed for drain in drains)
+        intermission = any(
+            bool(getattr(drain.latest.observation, "is_terminal", False))
+            and int(
+                getattr(drain.latest.observation, "terminal_reason", 0)
+            ) == ML_TERMINAL_INTERMISSION
+            for drain in drains
+        )
+        map_boundary = map_changed or intermission
         samples = [drain.latest for drain in drains]
         target_map = samples[0].map_name
         if map_changed:
@@ -491,10 +514,13 @@ class Q2NetworkClientBatch:
                 "preflight_packets_drained": drain.packet_count,
                 "preflight_from_frame": drain.previous.server_frame,
                 "preflight_to_frame": sample.server_frame,
-                "map_epoch_resync": map_changed,
+                "map_epoch_resync": map_boundary,
+                "map_epoch_pending": intermission and not map_changed,
                 "map_epoch_from": drain.previous.map_name,
                 "map_epoch_target": target_map,
-                "terminal_reason": 2 if map_changed else 0,
+                "terminal_reason": (
+                    ML_TERMINAL_INTERMISSION if map_boundary else 0
+                ),
                 "stale_echoes_rejected": 0,
                 "mismatched_echoes_rejected": 0,
             })
@@ -508,7 +534,7 @@ class Q2NetworkClientBatch:
         drained_count = sum(drain.packet_count for drain in drains)
         self._preflight_packets_drained += drained_count
         self._realtime_catchup_resyncs += 1
-        if map_changed:
+        if map_boundary:
             self._map_epoch_resyncs += 1
         return BatchRound(
             round_id=round_id,
@@ -628,16 +654,30 @@ class Q2NetworkClientBatch:
                 result for result in echo_results if isinstance(result, _MapEpoch)
             ]
             if map_epochs:
-                target_maps = {
-                    result.telemetry.map_name for result in map_epochs
+                changed_targets = {
+                    result.telemetry.map_name
+                    for result, dispatch in zip(echo_results, dispatches)
+                    if isinstance(result, _MapEpoch)
+                    and result.telemetry.map_name != dispatch.map_name
                 }
-                if len(target_maps) != 1:
+                if len(changed_targets) > 1:
                     self._failed_rounds += 1
                     raise AuthoritativeEchoError(
                         "clients crossed multiple map epochs in one batch: "
-                        + ", ".join(sorted(target_maps))
+                        + ", ".join(sorted(changed_targets))
                     )
-                target_map = next(iter(target_maps))
+                if changed_targets:
+                    target_map = next(iter(changed_targets))
+                else:
+                    source_maps = {dispatch.map_name for dispatch in dispatches}
+                    if len(source_maps) != 1:
+                        self._failed_rounds += 1
+                        raise AuthoritativeEchoError(
+                            "intermission crossed multiple source maps: "
+                            + ", ".join(sorted(source_maps))
+                        )
+                    target_map = next(iter(source_maps))
+                map_epoch_pending = not changed_targets
                 resync_deadline = time.monotonic() + self.round_timeout
                 resync_futures = []
                 for env, dispatch, result in zip(
@@ -693,6 +733,7 @@ class Q2NetworkClientBatch:
                         "authoritative_echo_stale": True,
                         "trainable_transition": False,
                         "map_epoch_resync": True,
+                        "map_epoch_pending": map_epoch_pending,
                         "map_epoch_from": dispatch.map_name,
                         "map_epoch_target": target_map,
                         "terminal_reason": 2,
