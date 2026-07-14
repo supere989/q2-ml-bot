@@ -38,6 +38,7 @@ def _telemetry(
     fire=False,
     terminal=False,
     damage_dealt=0.0,
+    map_name="q2dm1",
 ):
     debug = np.zeros(12, dtype=np.float32)
     debug[0] = echo_tick
@@ -57,7 +58,7 @@ def _telemetry(
         client_slot=slot,
         server_frame=frame,
         client_id=client_id,
-        map_name="q2dm1",
+        map_name=map_name,
         observation=obs,
     )
 
@@ -72,12 +73,14 @@ class _FakeEnv:
         self._last = None
         self.last_action = None
         self.transition_sample = None
+        self.initial_maps = []
 
     def start(self):
         self._last = _telemetry(self.client_id, self.slot, 1, 10)
         return self._last
 
     def initial_result(self, current, *, vector=False):
+        self.initial_maps.append(current.map_name)
         value = np.array([current.server_frame, self.slot], dtype=np.float32)
         return value, {"map": current.map_name, "client_id": self.client_id}
 
@@ -89,6 +92,7 @@ class _FakeEnv:
             client_slot=self.slot,
             after_sequence=self._last.sequence,
             action_tick=self._last.server_frame,
+            map_name=self._last.map_name,
             action=action,
         )
 
@@ -213,6 +217,60 @@ def test_failed_echo_round_never_returns_a_trainable_transition():
         batch.close()
 
 
+def test_map_epoch_resyncs_every_client_and_returns_nontrainable_boundary():
+    events = []
+    env_a = _FakeEnv(
+        "client-a",
+        0,
+        [
+            _telemetry(
+                "client-a", 0, 2, 1, map_name="q2dm2",
+                damage_dealt=99.0, terminal=True,
+            )
+        ],
+        events,
+    )
+    env_b = _FakeEnv(
+        "client-b",
+        1,
+        [
+            _telemetry(
+                "client-b", 1, 2, 11, echo_tick=11, accepted=1,
+                forward=0.2,
+            ),
+            _telemetry(
+                "client-b", 1, 3, 1, map_name="q2dm2",
+                damage_dealt=88.0,
+            ),
+        ],
+        events,
+    )
+    batch = Q2NetworkClientBatch([env_a, env_b], round_timeout=1.0)
+    try:
+        batch.reset()
+        result = batch.collect_round(
+            [Action(move_forward=0.2), Action(move_forward=0.2)],
+            policy_version=50,
+        )
+        assert np.array_equal(result.rewards, np.zeros(2, dtype=np.float32))
+        assert result.terminated.tolist() == [True, True]
+        assert result.truncated.tolist() == [False, False]
+        assert result.observations[:, 0].tolist() == [1.0, 1.0]
+        assert all(info["map_epoch_resync"] for info in result.infos)
+        assert all(not info["trainable_transition"] for info in result.infos)
+        assert all(not info["authoritative_echo_valid"] for info in result.infos)
+        assert {info["map_epoch_target"] for info in result.infos} == {"q2dm2"}
+        assert env_a.initial_maps == ["q2dm1", "q2dm2"]
+        assert env_b.initial_maps == ["q2dm1", "q2dm2"]
+        metrics = batch.metrics
+        assert metrics.map_epoch_resyncs == 1
+        assert metrics.rounds_accepted == 0
+        assert metrics.transitions_accepted == 0
+        assert metrics.as_dict()["network_client/map_epoch_resyncs"] == 1
+    finally:
+        batch.close()
+
+
 def test_multi_env_adapter_matches_trainer_surface_and_tags_policy():
     events = []
     env = _FakeEnv(
@@ -248,6 +306,32 @@ def test_multi_env_adapter_matches_trainer_surface_and_tags_policy():
         assert adapter.active_map == "q2dm1"
         assert adapter._spatial_rewards[0].finalized == 1
         assert adapter.reset_slot(0).shape == (2,)
+    finally:
+        adapter.close()
+
+
+def test_multi_env_does_not_finalize_spatial_outcome_for_map_resync():
+    events = []
+    env = _FakeEnv(
+        "client-a",
+        0,
+        [_telemetry("client-a", 0, 2, 1, map_name="q2dm2", terminal=True)],
+        events,
+    )
+    adapter = Q2NetworkClientMultiEnv([env], initial_policy_version=5)
+    try:
+        adapter.reset_all()
+        results = adapter.step_all(
+            [np.zeros(8, dtype=np.float32)], policy_version=5
+        )
+        _observation, reward, terminated, truncated, info = results[0]
+        assert reward == 0.0
+        assert terminated
+        assert not truncated
+        assert info["map_epoch_resync"] is True
+        assert info["trainable_transition"] is False
+        assert adapter.active_map == "q2dm2"
+        assert adapter._spatial_rewards[0].finalized == 0
     finally:
         adapter.close()
 

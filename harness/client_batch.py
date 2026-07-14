@@ -70,6 +70,7 @@ class BatchMetrics:
     stale_echoes_rejected: int
     mismatched_echoes_rejected: int
     echo_timeouts: int
+    map_epoch_resyncs: int
     max_observed_frame_span: int
 
     def as_dict(self, prefix: str = "network_client") -> dict[str, int | float]:
@@ -89,6 +90,7 @@ class BatchMetrics:
                 self.mismatched_echoes_rejected
             ),
             f"{prefix}/echo_timeouts": self.echo_timeouts,
+            f"{prefix}/map_epoch_resyncs": self.map_epoch_resyncs,
             f"{prefix}/max_observed_frame_span": self.max_observed_frame_span,
             f"{prefix}/authoritative_echo_accept_rate": (
                 self.transitions_accepted / attempted if attempted else 1.0
@@ -123,6 +125,13 @@ class BatchRound:
 class _MatchedEcho:
     telemetry: ClientTelemetry
     echo_tick: int
+    stale_echoes: int
+    mismatched_echoes: int
+
+
+@dataclass(frozen=True)
+class _MapEpoch:
+    telemetry: ClientTelemetry
     stale_echoes: int
     mismatched_echoes: int
 
@@ -179,6 +188,7 @@ class Q2NetworkClientBatch:
         self._stale_echoes_rejected = 0
         self._mismatched_echoes_rejected = 0
         self._echo_timeouts = 0
+        self._map_epoch_resyncs = 0
         self._max_observed_frame_span = 0
 
     @staticmethod
@@ -225,7 +235,7 @@ class Q2NetworkClientBatch:
         env: Q2NetworkClientEnv,
         dispatch: ClientActionDispatch,
         deadline: float,
-    ) -> _MatchedEcho:
+    ) -> _MatchedEcho | _MapEpoch:
         sequence = dispatch.after_sequence
         stale_echoes = 0
         mismatched_echoes = 0
@@ -265,6 +275,15 @@ class Q2NetworkClientBatch:
                     timed_out=True,
                 ) from error
             sequence = telemetry.sequence
+            # A level change resets server_frame, so neither echo tick ordering
+            # nor reward deltas from this packet belong to the dispatched
+            # action's epoch. Hand control back before accumulating either.
+            if telemetry.map_name != dispatch.map_name:
+                return _MapEpoch(
+                    telemetry=telemetry,
+                    stale_echoes=stale_echoes,
+                    mismatched_echoes=mismatched_echoes,
+                )
             observation = telemetry.observation
             for field in reward_fields:
                 reward_sums[field] += float(getattr(observation, field, 0.0))
@@ -304,6 +323,41 @@ class Q2NetworkClientBatch:
             stale_echoes=stale_echoes,
             mismatched_echoes=mismatched_echoes,
         )
+
+    @staticmethod
+    def _result_rejections(
+        result: _MatchedEcho | _MapEpoch | None,
+    ) -> tuple[int, int]:
+        if result is None:
+            return 0, 0
+        return result.stale_echoes, result.mismatched_echoes
+
+    def _resync_to_map(
+        self,
+        env: Q2NetworkClientEnv,
+        dispatch: ClientActionDispatch,
+        current: ClientTelemetry | None,
+        target_map: str,
+        deadline: float,
+    ) -> ClientTelemetry:
+        sequence = dispatch.after_sequence
+        if current is not None:
+            sequence = current.sequence
+            if current.map_name == target_map:
+                return current
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"map epoch resync timed out for {dispatch.client_id}"
+                )
+            telemetry = env.receive_telemetry(
+                after_sequence=sequence,
+                timeout=remaining,
+            )
+            sequence = telemetry.sequence
+            if telemetry.map_name == target_map:
+                return telemetry
 
     @staticmethod
     def _collate_observations(values: Sequence[Any], vector: bool):
@@ -371,38 +425,25 @@ class Q2NetworkClientBatch:
                 self._executor.submit(self._collect_echo, env, dispatch, deadline)
                 for env, dispatch in zip(self.envs, dispatches)
             ]
-            matches: list[_MatchedEcho | None] = [None] * len(futures)
+            echo_results: list[_MatchedEcho | _MapEpoch | None] = [None] * len(
+                futures
+            )
             errors: list[AuthoritativeEchoError] = []
             for index, future in enumerate(futures):
                 try:
-                    matches[index] = future.result()
+                    echo_results[index] = future.result()
                 except AuthoritativeEchoError as error:
                     errors.append(error)
 
-            for match in matches:
-                if match is not None:
-                    self._stale_echoes_rejected += match.stale_echoes
-                    self._mismatched_echoes_rejected += match.mismatched_echoes
+            for result in echo_results:
+                stale, mismatched = self._result_rejections(result)
+                self._stale_echoes_rejected += stale
+                self._mismatched_echoes_rejected += mismatched
             for error in errors:
                 self._stale_echoes_rejected += error.stale_echoes
                 self._mismatched_echoes_rejected += error.mismatched_echoes
                 self._echo_timeouts += int(error.timed_out)
-            if errors:
-                self._failed_rounds += 1
-                raise AuthoritativeEchoError(
-                    f"batch round {round_id} rejected for {len(errors)} client(s)",
-                    stale_echoes=sum(error.stale_echoes for error in errors),
-                    mismatched_echoes=sum(
-                        error.mismatched_echoes for error in errors
-                    ),
-                    timed_out=any(error.timed_out for error in errors),
-                ) from errors[0]
 
-            accepted = [match for match in matches if match is not None]
-            results = [
-                env.transition_result(match.telemetry, vector=self.vector)
-                for env, match in zip(self.envs, accepted)
-            ]
             tags = tuple(
                 BatchActionTag(
                     round_id=round_id,
@@ -414,6 +455,122 @@ class Q2NetworkClientBatch:
                 )
                 for index, dispatch in enumerate(dispatches)
             )
+            map_epochs = [
+                result for result in echo_results if isinstance(result, _MapEpoch)
+            ]
+            if map_epochs:
+                target_maps = {
+                    result.telemetry.map_name for result in map_epochs
+                }
+                if len(target_maps) != 1:
+                    self._failed_rounds += 1
+                    raise AuthoritativeEchoError(
+                        "clients crossed multiple map epochs in one batch: "
+                        + ", ".join(sorted(target_maps))
+                    )
+                target_map = next(iter(target_maps))
+                resync_deadline = time.monotonic() + self.round_timeout
+                resync_futures = []
+                for env, dispatch, result in zip(
+                    self.envs, dispatches, echo_results
+                ):
+                    current = result.telemetry if result is not None else None
+                    resync_futures.append(
+                        self._executor.submit(
+                            self._resync_to_map,
+                            env,
+                            dispatch,
+                            current,
+                            target_map,
+                            resync_deadline,
+                        )
+                    )
+                resynced: list[ClientTelemetry | None] = [None] * len(
+                    resync_futures
+                )
+                resync_errors = []
+                for index, future in enumerate(resync_futures):
+                    try:
+                        resynced[index] = future.result()
+                    except TimeoutError as error:
+                        resync_errors.append(error)
+                if resync_errors:
+                    self._failed_rounds += 1
+                    self._echo_timeouts += len(resync_errors)
+                    raise AuthoritativeEchoError(
+                        f"map epoch resync failed for {len(resync_errors)} client(s)",
+                        timed_out=True,
+                    ) from resync_errors[0]
+
+                samples = [sample for sample in resynced if sample is not None]
+                initial_results = [
+                    env.initial_result(sample, vector=self.vector)
+                    for env, sample in zip(self.envs, samples)
+                ]
+                infos = []
+                for initial, tag, sample, dispatch, result in zip(
+                    initial_results, tags, samples, dispatches, echo_results
+                ):
+                    stale, mismatched = self._result_rejections(result)
+                    info = dict(initial[1])
+                    info.update({
+                        "batch_round_id": tag.round_id,
+                        "policy_version": tag.policy_version,
+                        "action_tick": tag.action_tick,
+                        "authoritative_echo_tick": int(
+                            sample.observation.action_debug[0]
+                        ),
+                        "authoritative_echo_valid": False,
+                        "authoritative_echo_stale": True,
+                        "trainable_transition": False,
+                        "map_epoch_resync": True,
+                        "map_epoch_from": dispatch.map_name,
+                        "map_epoch_target": target_map,
+                        "terminal_reason": 2,
+                        "stale_echoes_rejected": stale,
+                        "mismatched_echoes_rejected": mismatched,
+                    })
+                    infos.append(info)
+
+                frame_values = [sample.server_frame for sample in samples]
+                frame_span = max(frame_values) - min(frame_values)
+                self._max_observed_frame_span = max(
+                    self._max_observed_frame_span, frame_span
+                )
+                self._map_epoch_resyncs += 1
+                return BatchRound(
+                    round_id=round_id,
+                    policy_version=version,
+                    observations=self._collate_observations(
+                        [initial[0] for initial in initial_results], self.vector
+                    ),
+                    rewards=np.zeros(len(self.envs), dtype=np.float32),
+                    terminated=np.ones(len(self.envs), dtype=np.bool_),
+                    truncated=np.zeros(len(self.envs), dtype=np.bool_),
+                    infos=tuple(infos),
+                    tags=tags,
+                )
+
+            if errors:
+                self._failed_rounds += 1
+                raise AuthoritativeEchoError(
+                    f"batch round {round_id} rejected for {len(errors)} client(s)",
+                    stale_echoes=sum(error.stale_echoes for error in errors),
+                    mismatched_echoes=sum(
+                        error.mismatched_echoes for error in errors
+                    ),
+                    timed_out=any(error.timed_out for error in errors),
+                ) from errors[0]
+
+            accepted = [
+                result
+                for result in echo_results
+                if isinstance(result, _MatchedEcho)
+            ]
+            results = [
+                env.transition_result(match.telemetry, vector=self.vector)
+                for env, match in zip(self.envs, accepted)
+            ]
             infos = []
             for result, tag, match in zip(results, tags, accepted):
                 info = dict(result[4])
@@ -472,6 +629,7 @@ class Q2NetworkClientBatch:
             stale_echoes_rejected=self._stale_echoes_rejected,
             mismatched_echoes_rejected=self._mismatched_echoes_rejected,
             echo_timeouts=self._echo_timeouts,
+            map_epoch_resyncs=self._map_epoch_resyncs,
             max_observed_frame_span=self._max_observed_frame_span,
         )
 
@@ -588,10 +746,18 @@ class Q2NetworkClientMultiEnv:
             terminated = bool(round_result.terminated[index])
             truncated = bool(round_result.truncated[index])
             info = dict(round_result.infos[index])
-            self._ep_steps[index] += 1
-            if not terminated and self._ep_steps[index] >= self.max_ep_steps:
+            map_epoch_resync = bool(info.get("map_epoch_resync", False))
+            if map_epoch_resync:
+                self._ep_steps[index] = 0
+            else:
+                self._ep_steps[index] += 1
+            if (
+                not map_epoch_resync
+                and not terminated
+                and self._ep_steps[index] >= self.max_ep_steps
+            ):
                 truncated = True
-            if terminated or truncated:
+            if (terminated or truncated) and not map_epoch_resync:
                 outcome_bonus, outcome_info = self._spatial_rewards[
                     index
                 ].finalize_episode(
