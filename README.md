@@ -17,6 +17,7 @@ next controlled experiment if picking this up fresh.**
 q2_plugin/ml_bridge.{c,h}   C bridge in game.so: packs observations, applies actions
 harness/protocol.py          Python-side struct serialization (must match bridge.h)
 harness/env.py               Gymnasium environment wrapping a q2ded subprocess
+harness/client_env.py        Real protocol-34 client backend + private authoritative telemetry
 harness/spatial.py           Voxel/spatial reward shaping from existing observations ("Voxel Lattice")
 models/policy.py             LSTM actor-critic policy + ONNX export
 train/ppo.py                 PPO training loop (parallel envs, overnight on Vega 10)

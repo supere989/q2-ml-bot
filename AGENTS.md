@@ -54,6 +54,19 @@ services are enabled user units on WSL.
 The public `q2mlbot.service` uses `maxclients=6` and four ML bots in slots 2-5,
 leaving slots 0-1 for two human players.
 
+**Network-native client harness prototype (added 2026-07-13):** a separate
+Yamagi checkout at `/home/raymondj/q2-ml-client`, branch
+`feature/ml-client-harness`, now runs policies as real protocol-34 player
+connections. `game.so` supplies privileged state through a default-off,
+token-authenticated UDP conduit routed by the client's `ml_client_id`; each
+client receives only its own `ml_obs_t`. Python support is in
+`harness/client_{protocol,env}.py`; design and cutover gates are in
+`docs/NETWORK-CLIENT-HARNESS.md`. An isolated two-client proof passed on one
+q2ded and reconstructed the existing 219-feature lattice vector. This is not
+yet the primary trainer: do not enable the conduit on production or replace the
+active WSL runtime until batched collection, action-version rejection,
+observation/reward parity, density, and seasonal gates pass.
+
 ## Training Topology
 
 Training runs on the Windows RTX 2080 box (DESKTOP-KDLBAE7), inside WSL.
