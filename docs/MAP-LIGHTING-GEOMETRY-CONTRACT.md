@@ -1,6 +1,6 @@
 # Generated Map Lighting and Overhead Geometry Contract
 
-Generator v5 makes lighting, overhead clearance, and spawn escape properties
+Generator v6 makes lighting, overhead clearance, spawn escape, and lethal-drop properties
 machine-checkable in both the `.map` source and `.meta.json` sidecar.
 
 ## Player geometry thresholds
@@ -25,6 +25,21 @@ Every deathmatch spawn must have a clear 32-unit-wide column from its floor to
 headroom along at least one 96-unit horizontal escape path, sampled every 16
 units in eight compass directions. `tools/validate_maps.py` recomputes these
 properties from emitted brush AABBs rather than trusting generator counters.
+
+## Lethal-drop containment
+
+The generator computes the exact union boundary of playable base-floor
+rectangles. Every boundary segment whose outside cell is void receives a solid
+16-unit-thick guard brush rising 96 units above that floor. Adjacent floor
+cells do not receive an internal wall, including where separate room rectangles
+overlap into one playable union.
+
+The safety contract is versioned in `.meta.json` and records each lethal edge,
+its side, the required guard AABB, height, and thickness. The validator
+recomputes the contract from floor geometry, checks the worldspawn safety tags,
+and requires an exact emitted guard for every edge. Removing one guard brush,
+shortening it, or moving it away from the void-facing boundary fails static
+promotion.
 
 ## Lighting thresholds
 

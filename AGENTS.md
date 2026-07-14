@@ -26,10 +26,11 @@ and current findings.
 VPS because it disturbs 10 Hz frame pacing. WSL runs the enabled user service
 `q2-map-farm.service`, bound only to its Tailscale address at
 `http://100.86.206.50:32510`, and maintains two checksum-attested compiled
-map bundles. Generator v5 rejects player-admitting 56--95-unit gaps between
+map bundles. Generator v6 rejects player-admitting 56--95-unit gaps between
 overlapping horizontal surfaces, requires a clear 96-unit spawn column and
 escape path, and gives each enterable room-like zone a dedicated internal
-light. Spawn-clear floor regions require at least 98% direct coverage from
+light, and places a solid 96-unit guard wall on every playable floor-union edge
+that faces lethal void. Spawn-clear floor regions require at least 98% direct coverage from
 tagged lights of value 650 or higher. The validator recomputes the contract
 from emitted brushes/entities and checks compiled BSP lightdata. Bundle v2
 atomically carries BSP, hook zones, lattice priors, routes/item timing, and an
@@ -160,16 +161,41 @@ backup/visibility only, not a compute migration.
   via the wsl-tunnel service above); events in `~/q2-ml-bot/runs/`.
 - Headless `q2ded` servers on ports 27910+, configs `ml_server_*.cfg`.
 
-**Active public run (updated 2026-07-13):** WSL tmux `q2_public_train` runs
+**Active public run (updated 2026-07-14):** WSL tmux `q2_public_train` runs
 four normal Yamagi clients at live 10 Hz pacing from the pinned checkout under
-`~/q2-network-client-staging-20260713`. The fixed run started from the clean
-`public_network_live_v1` policy/optimizer/lattice at step 4,030,720; its first
-validated post-fix checkpoint is step 4,038,912. It uses `Q2_EXT_OBS=1`, the
-Rust lattice extension, deterministic seed `7132026`, two PPO epochs, batch
-256, and `aim_anchor_coef=0`. TensorBoard watches only the current
-`ppo_public_network_live_v1_*` segment. The previous movement run and every
+`~/q2-network-client-staging-20260713`. The
+`public_network_engagement_anchor_v3` segment starts from the immutable
+`public_network_live_v1_04055296` policy/optimizer/lattice snapshot at step
+4,055,296. It uses `Q2_EXT_OBS=1`, the
+Rust lattice extension, deterministic seed `7132026`, two PPO epochs, one full
+512-sample recurrent minibatch, and `aim_anchor_coef=0.02`. TensorBoard watches
+only the current `ppo_public_network_engagement_anchor_v3_*` segment. The previous movement run and every
 discarded live segment are archived; never merge those later updates into the
 clean resume point.
+
+Do not point `Q2_RESUME_DIR` at the rolling checkpoint directory: `--resume`
+always chooses its latest lexicographic triple. The active run instead reads
+the three-file pin under
+`training-data/resume/public_network_live_v1_04055296`. Network
+collection enters a persistent map-epoch barrier at intermission: it dispatches
+no actions through BSP download/load, tolerates staggered clients without an
+echo timeout, and clears only when every client reports the same non-intermission
+target map. The first real generated-to-stock transition passed this barrier
+and continued saving checkpoints with zero failed rounds or echo timeouts.
+
+Quake stores the visible player-model pitch in `ent->s.angles[PITCH]` at one
+third of the true view pitch. ML observations and target-local coordinates must
+use `ent->client->v_angle`; C commit `f49caee` fixes that frame mismatch while
+the server fire gate continues to use the same full-resolution view. Python
+commit `f197fba` adds a forward-only level-posture reward plus explicit
+entity/visibility/aim/damage audit tags. Never regress observation packing to
+`s.angles[PITCH]` for normal network clients. Follow-up `fb85aa7` makes the
+level-posture reward dense across the full pitch range while keeping the
+15-degree penalty threshold and visible-target exemption. The true-view audit
+proved 54--66% visible-contact frames on `mllive_44987431`, so the former
+default-off anchor was promoted conservatively at coefficient 0.02. Keep batch
+512 with a positive recurrent anchor; smaller minibatches break hidden-state
+continuity.
 
 The server engagement gate must not own the death-screen lifecycle. Registered
 ML clients receive an internal attack button after their one-second death delay

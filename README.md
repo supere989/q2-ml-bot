@@ -8,13 +8,20 @@ private per-client conduit supplies authoritative 219-feature observations to
 PPO on WSL. It warm-started at 4,008,192 steps from
 `movement_reset_v2/policy_04008192.pt`; two of six slots remain available for
 humans. The old in-process ONNX runtime is archived/rollback-only. Transport
-and action admission are proven. The fixed run started from the clean
-4,030,720-step policy/optimizer/lattice checkpoint and produced its first
-validated post-fix checkpoint at 4,038,912 steps, with a target-aligned fire
+and action admission are proven. The current `public_network_engagement_anchor_v3`
+run starts from an immutable policy/optimizer/lattice snapshot at 4,055,296
+steps, with a target-aligned fire
 gate, bounded target-acquisition reward, escalating same-target hit credit,
 automatic network-client respawn, attested generated-map lattice sidecars, and
-lattice-directed hook corrections. Combat quality remains below the
-promotion target and must be judged by the seasonal soak, not loss convergence.
+lattice-directed hook corrections. A persistent map-epoch barrier now holds
+all actions while clients download/load the next BSP and resumes only after all
+four report the same playable map. The live conduit now uses the client's true
+view angles (Quake's rendered model pitch is intentionally divided by three),
+and TensorBoard records entity visibility, alignment error, damage events,
+signed movement, and posture reward. A conservative 0.02 recurrent aim anchor
+now consumes the verified target labels in one full 512-sample minibatch.
+Combat quality remains below the promotion
+target and must be judged by the seasonal soak, not loss convergence.
 **See `docs/HANDOFF-2026-07-13-NETWORK.md` for the exact active topology,
 commits, rollback locations, validation evidence, and next checks.**
 
@@ -238,11 +245,12 @@ fixed checkpoint). Ordered by what's blocking what.
    recurrent chunks initially showed roughly 34° yaw error. At coefficient
    `0.1`, a seed-5301 canary retained the synthetic gate and improved pooled
    real-q2dm1 post-alignment from 13.45% to about 21.35%, but failed the fixed
-   generated-map gate: 5/129 fell to 2/162. It remains an experimental switch,
-   default `0`; do not extend that checkpoint. If revisiting it, isolate a
-   weaker or look-only anchor and require the same multi-seed fixed-combat gate
-   before any longer PPO run. Leave expensive gradient diagnostics disabled
-   for ordinary training.
+   generated-map gate: 5/129 fell to 2/162. That experiment also consumed the
+   now-fixed one-third model-pitch observation, so it is historical evidence,
+   not a verdict on the corrected target frame. The current true-view run is
+   the isolated weaker retest at coefficient `0.02`; it still requires the same
+   seasonal combat gate before promotion. Leave expensive gradient diagnostics
+   disabled for ordinary training.
 
 3. **[PROTOTYPE 2026-07-11]** Lattice pull signals in the old checkpoint are
    weak, and one is inverted from intent.
@@ -391,7 +399,11 @@ Fresh policies also use a grounded-locomotion curriculum. Their categorical
 heads start jump-off/hook-idle instead of the old uniform 50% jump / 75% hook
 distribution. The spatial reward targets 220–360 units/s when meaningful
 movement is requested, rewards forward traversal inside that window, and
-penalizes slow jumping plus unnecessary hook overspeed. TensorBoard exposes
+penalizes backward travel, slow jumping, and unnecessary hook overspeed. With
+no visible target, forward travel at 96--360 units/s also earns a coupled
+level-aim posture reward that increases continuously toward the horizon; a
+separate down/up-look penalty begins beyond 15 degrees. Backward motion cannot
+collect the reward and target-visible vertical aim is exempt. TensorBoard exposes
 the result under `movement/*`, `behavior/jump_*`, and
 `behavior/hook_overspeed_rate`. Generated maps now carry eight geometry-checked,
 384-unit-separated deathmatch starts, leaving spare starts for six-player live
@@ -410,12 +422,15 @@ The live and teacher map farms additionally maintain a 50% arena-style quota
 in each ready queue (one of two public bundles and two of four teacher
 bundles), while the remaining capacity preserves the original style family.
 
-Generator v5 treats lighting and movement clearance as promotion contracts.
+Generator v6 treats lighting, movement clearance, and lethal-drop containment
+as promotion contracts.
 It rejects overlapping horizontal surfaces with a player-admitting 56--95-unit
 gap, requires each spawn to have a clear 96-unit column and supported escape
 path, raises direct floor-light coverage to 98%, and assigns every enterable
 room, hallway, corner pocket, building, and safe under-platform space its own
-internal light. Map-farm bundle v2 delivers the compiled BSP together with
+internal light. Every union edge of playable base floor that faces void gets a
+solid 96-unit guard wall; the validator independently rejects missing or
+mis-sized guards. Map-farm bundle v2 delivers the compiled BSP together with
 hook zones, lattice priors, routes/item timing, and a checksum manifest; the
 trainer fails closed on missing or corrupt farm sidecars. See
 `docs/MAP-LIGHTING-GEOMETRY-CONTRACT.md` for the exact thresholds.

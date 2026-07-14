@@ -15,19 +15,21 @@ the aim, reward, movement, and first lattice investigations.
 - Two of the public server's six client slots remain available for humans.
 - The existing TensorBoard process still watches
   `/home/raymond/q2-ml-bot/runs`; that directory contains only the current
-  `ppo_public_network_live_v1_*` run.
+  `ppo_public_network_engagement_anchor_v3_*` run.
 - The separate teacher server remains active on VPS loopback UDP 28001. The
   WSL map farm remains the source of generated `mllive_*` maps. The live queue
-  holds two ready bundles and the teacher queue four, all using generator v5
+  holds two ready bundles and the teacher queue four, all using generator v6
   and the complete bundle-v2 lattice/lighting contract.
 
 ## Exact source/runtime state
 
 - `q2-ml-bot`, branch `feature/rust-lattice`: implementation through
-  `200d28d` (pushed; this handoff update follows it).
-- `q2-lithium-3zb2`, branch `ml-wip-20260611`: `fa1c749` (pushed).
+  `fb85aa7` (pushed; this documentation commit follows it).
+- `q2-lithium-3zb2`, branch `ml-wip-20260611`: `f49caee` (pushed).
   Deployed `game.so` SHA-256 is
-  `b90e8efa03f8b50ae556293fbc4d35ca6f151bd4da2d80d56da4a15c95e85c30`.
+  `f81ca42f000c0263cab44cabe2cb61881b485af31d584c04cfe7d850339ee2c8`
+  in both public and teacher runtimes. Rollback artifacts are under
+  `/home/q2mlbot/staging/ml-view-angle-f49caee-20260714/rollback`.
 - `supere989/yquake2`, branch `feature/ml-client-harness`: `0382c0c0`
   (pushed). The staged WSL binary SHA-256 is
   `fdd996a5880b589fff6f0046e5739705213a7dc980d9dd5a5423d30128fa0e3b`.
@@ -45,6 +47,9 @@ steps with the matching 42,639-cell lattice. It uses four clients, 128-step
 rollouts, two PPO epochs, batch 256, LR `1e-5`, `vf_coef=0.1`, entropy
 `0.005`, auxiliary coefficient `0.01`, lattice-direction coefficient `0.02`,
 stateful policy, `Q2_EXT_OBS=1`, and live `timescale=1` pacing. The clean
+engagement-anchor segment retains those settings except for batch 512 and
+`aim_anchor_coef=0.02`, which keep each recurrent rollout intact while using
+the now-verified true-view target labels. The clean
 targeting/hook restart point is `policy_04030720.pt` with the matching optimizer
 and 43,845-cell lattice under
 `training-data/checkpoints/public_network_live_v1`. The active supervised
@@ -52,18 +57,34 @@ restart resumes all three at 4,030,720; short post-checkpoint segments made
 before the target gate and lattice-hook correction were archived and are not
 resume candidates.
 
-The first validated post-fix save is `policy_04038912.pt` with matching
-optimizer and lattice files. The collector drained 68 real-time packets after
-that save and admitted update 17 normally, with no restart or stale transition.
-ONNX export is non-fatal but currently skipped because the WSL training Python
-environment does not have the `onnx` package installed.
+The immutable resume set is `policy_04055296.pt` with matching optimizer and
+lattice files. It is copied alone under
+`training-data/resume/public_network_live_v1_04055296`; do not resume directly
+from the rolling checkpoint directory because `--resume` always selects its
+latest lexicographic policy file. ONNX export is non-fatal but currently skipped
+because the WSL training Python environment does not have `onnx` installed.
 
 The current clean TensorBoard segment is
-`ppo_public_network_live_v1_1784009343`. Its first six updates ran at about 18
-steps/sec with zero failed rounds or echo timeouts. Movement stayed between
-99 and 148 units/sec instead of collapsing after deaths. TensorBoard watches
-only this run; the failed/preflight segments are archived beneath the staging
-tree.
+`ppo_public_network_engagement_anchor_v3_1784015091`, resumed from step
+4,055,296 after the true-view, dense-posture, and telemetry-audit fixes. It runs
+at 17--18 steps/sec. The new
+audit immediately proved that target data is present: mean entity/enemy count
+4.793, a visible enemy on 32.42% of frames, 0.383 visible enemies/frame, nonzero
+fire permission/execution, and 0.03125 damage dealt per accepted step. The same
+update measured the inherited policy's remaining quality problem: 63.67%
+backward commands, only 0.040 tracking quality, and no kills. TensorBoard
+watches only this run; every superseded launch is archived beneath the staging
+tree. Because the audit proved that visible target labels are populated, this
+segment enables the recurrent aim anchor at a conservative coefficient 0.02
+with one complete 512-sample minibatch. Its first update logged 65.63% visible
+alive frames, finite look/fire losses, and 3.52% fire-gate permission; those are
+pipeline proofs, not yet a combat-quality promotion.
+
+The previous `public_network_live_v1` segment crossed the real
+`mllive_33336964 -> q2dm5` transition after `ff3ad84`, incremented the map epoch
+once, admitted no stale transition, continued training, and saved a complete
+4,055,296 policy/optimizer/lattice set. That is the operational proof of the
+persistent download barrier and the source of the immutable resume pin.
 
 The previous movement run was stopped only after that checkpoint was written.
 Its log, TensorBoard event, policy, lattice, ONNX, and checksums are archived
@@ -93,6 +114,15 @@ respawn, and map-bundle-v2 deployments have rollback copies under
   boundary, and resumed collection by server frame 5 on each map. Commit
   `f930daf` also recognizes live intermission telemetry before stale-echo
   exhaustion, preserving the same fail-closed admission rule.
+- The first real stock-to-generated transition showed that one nontrainable
+  intermission boundary was insufficient: the next PPO call could dispatch
+  while clients were still downloading, then exhaust all four echo budgets.
+  No stale sample entered PPO, but the process exited. Commit `ff3ad84` makes
+  the map epoch persistent, sends no actions while it is pending, tolerates a
+  download pause, and requires one common playable target map before clearing.
+  The four-client staggered-arrival regression completes with zero failed
+  rounds and zero echo timeouts; the next automatic live transition remains
+  the operational proof point.
 - The targeting/hook restart admitted 512 transitions in 128 complete rounds
   at about 18 steps/sec with no failed round or process restart. TensorBoard
   exposes 132 scalar tags, including target-gate/acquisition and lattice-hook
@@ -128,11 +158,17 @@ respawn, and map-bundle-v2 deployments have rollback copies under
   input after recording the policy echo. A live proof showed repeated
   `Lattice-* melted` deaths followed by continued episodes and 123--148
   units/sec through updates 3--6; the old run was at exactly zero by update 3.
-- Generator v5 rejects overlapping slab/roof/platform pairs with 56--95 units
+- Generator v6 rejects overlapping slab/roof/platform pairs with 56--95 units
   of free player-admitting headroom, and every spawn needs a clear 96-unit
   column plus one supported 96-unit escape route. A 21-map matrix (seven styles
   times seeds 1/7/42) had zero unsafe sandwiches, blocked columns, or trapped
   starts.
+- Generator v6 also computes the union of playable floor rectangles and emits
+  a solid 96-unit guard wall on every union edge that faces lethal void. The
+  21-map style/seed matrix had 21/21 `lethal_drop_ok`, zero missing guards, and
+  at least 20 guard walls per map. The current public server has armed
+  `mllive_44987431`, a v6 bundle with 26 lethal edges, 26 exact guard walls,
+  100% floor-light coverage, and 45/45 interior lights.
 - Lighting v2 requires 98% direct floor coverage, minimum counted value 650,
   world ambient 180, 900-value overhead sources, and a dedicated 850-value
   internal source in each enterable room-like zone. The first real WSL
@@ -147,6 +183,21 @@ respawn, and map-bundle-v2 deployments have rollback copies under
   keep model-sexed sounds and legacy disconnected 3ZB2 bots remain silent.
   This bypasses Yamagi's entity-state sexed lookup, so no client update or
   warning suppression is required.
+- `ML_PackObs` previously used `ent->s.angles[PITCH]`, which Quake sets to one
+  third of `client->v_angle[PITCH]` solely for the rendered player model. The
+  observation pitch and entity-local basis therefore disagreed with the
+  full-resolution server fire gate. C commit `f49caee` makes pitch, target
+  coordinates, and the gate share `client->v_angle`. Python commit `f197fba`
+  adds a dense forward-only 96--360 units/s level-posture reward that increases
+  continuously toward level, with a separate penalty beyond 15 degrees,
+  plus entity count, enemy visibility, aim error/tracking, fire quality, and
+  damage-event TensorBoard tags. The observation already contains relative
+  enemy position/velocity/health/hostility/visibility, current view, weapon and
+  ammo, damage dealt/taken, kills/deaths, audio, rays, and lattice memory; after
+  the view-frame correction this is sufficient for the engagement prototype.
+  Follow-up `fb85aa7` makes the level reward dense across the full pitch range
+  and adds visibility-conditional aim-error tags so sparse-contact maps no
+  longer dilute the targeting audit.
 
 ## Security boundary
 
@@ -174,9 +225,8 @@ normal Quake source address/port against the conduit datagram.
   not infer success from loss or transport health.
 - Restore the optional `onnx` Python package before an inference promotion if
   a fresh ONNX artifact is required; PPO/checkpoint training is unaffected.
-- At the first automatic stock/generated map transition, confirm
-  `network_client/map_epoch_resyncs` increments once, echo timeouts remain
-  zero, and training continues.
+- At the next automatic `q2dm7 -> mllive_44987431` transition, verify both the
+  already-proven persistent barrier and the first live v6 lethal-guard bundle.
 - Watch movement speed, visible-target engagement, damage, kills/deaths, and
   action rates across the seasonal soak before promoting this checkpoint to
   public inference. Loss convergence alone is not a quality gate.
