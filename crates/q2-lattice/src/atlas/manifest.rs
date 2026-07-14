@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::admission::validate_digest;
 use super::{
     ATLAS_CELL_SIZES, ATLAS_MAGIC, ATLAS_SCHEMA_VERSION, AtlasArtifact, AtlasError, AtlasLevel,
-    AtlasLimits, AtlasOrigin, AtlasResult,
+    AtlasLimits, AtlasOrigin, AtlasResult, OracleAdmissions,
 };
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -16,19 +17,6 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
     }
     output
-}
-
-fn validate_digest(name: &str, digest: &str) -> AtlasResult<()> {
-    if digest.len() != 64
-        || !digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(AtlasError::InvalidFormat(format!(
-            "{name} is not a lowercase SHA-256 digest"
-        )));
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -55,6 +43,7 @@ impl ToolIdentity {
 pub struct BspIdentity {
     pub canonical_map_id: String,
     pub sha256: String,
+    pub provenance_sha256: String,
     pub size_bytes: u64,
     pub ibsp_version: u32,
 }
@@ -171,6 +160,16 @@ impl AtlasCounts {
             l3_cells: artifact.l3.len() as u64,
         }
     }
+
+    pub fn named_counts(self) -> BTreeMap<String, u64> {
+        BTreeMap::from([
+            ("l0_chunks".to_owned(), self.l0_chunks),
+            ("l1_nodes".to_owned(), self.l1_nodes),
+            ("l1_edges".to_owned(), self.l1_edges),
+            ("l2_cells".to_owned(), self.l2_cells),
+            ("l3_cells".to_owned(), self.l3_cells),
+        ])
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -204,9 +203,7 @@ pub struct AtlasManifest {
     pub specification_sha256: String,
     pub bsp: BspIdentity,
     pub analyzer: ToolIdentity,
-    pub collision_oracle: ToolIdentity,
-    pub pmove_oracle: ToolIdentity,
-    pub hook_oracle: ToolIdentity,
+    pub oracles: OracleAdmissions,
     pub generator: Option<ToolIdentity>,
     pub grid: GridManifest,
     pub player_hulls: Vec<HullManifest>,
@@ -275,10 +272,9 @@ impl AtlasManifest {
             ));
         }
         validate_digest("BSP", &self.bsp.sha256)?;
+        validate_digest("BSP provenance", &self.bsp.provenance_sha256)?;
         self.analyzer.validate("analyzer")?;
-        self.collision_oracle.validate("collision oracle")?;
-        self.pmove_oracle.validate("pmove oracle")?;
-        self.hook_oracle.validate("hook oracle")?;
+        self.oracles.admit(&self.bsp)?;
         if let Some(generator) = &self.generator {
             generator.validate("generator")?;
         }
@@ -395,12 +391,44 @@ impl AtlasManifest {
             ))
         })?;
         identity.verify_uncompressed(payload)?;
-        if self.counts != AtlasCounts::from_artifact(artifact) {
+        let encoded = artifact.encode_uncompressed(limits)?;
+        if encoded != payload {
+            return Err(AtlasError::InvalidFormat(
+                "decoded Atlas artifact does not match the attested payload".to_owned(),
+            ));
+        }
+        if artifact.origin.0 != self.grid.origin {
+            return Err(AtlasError::InvalidFormat(
+                "decoded Atlas origin does not match the manifest grid".to_owned(),
+            ));
+        }
+        let admission = self.oracles.admit(&self.bsp)?;
+        artifact.l1.validate(&admission, limits)?;
+        let artifact_counts = AtlasCounts::from_artifact(artifact);
+        if self.counts != artifact_counts {
             return Err(AtlasError::InvalidFormat(
                 "manifest Atlas counts do not match decoded artifact".to_owned(),
             ));
         }
+        if identity.counts != artifact_counts.named_counts() {
+            return Err(AtlasError::InvalidFormat(
+                "artifact-local counts do not match decoded Atlas artifact".to_owned(),
+            ));
+        }
         Ok(())
+    }
+
+    /// Decode and admit an Atlas payload as one operation. Raw Atlas decoding
+    /// is structural only because the canonical manifest is a separate file.
+    pub fn decode_and_verify_atlas_artifact(
+        &self,
+        artifact_name: &str,
+        payload: &[u8],
+        limits: &AtlasLimits,
+    ) -> AtlasResult<AtlasArtifact> {
+        let artifact = AtlasArtifact::decode_uncompressed(payload, limits)?;
+        self.verify_atlas_artifact(artifact_name, payload, &artifact, limits)?;
+        Ok(artifact)
     }
 
     fn canonicalized(&self) -> Self {

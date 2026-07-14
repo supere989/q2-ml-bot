@@ -4,10 +4,16 @@ use std::time::Instant;
 use q2_lattice_rs::atlas::{
     ATLAS_CELL_SIZES, ATLAS_MAGIC, ATLAS_SCHEMA_VERSION, ArtifactManifest, AtlasAggregateCell,
     AtlasArtifact, AtlasCounts, AtlasLevel, AtlasLimits, AtlasManifest, AtlasOrigin, BspIdentity,
-    COST_INFINITY, ChannelManifest, ConservativeChild, CorridorWitness, EdgeInput, EdgeType,
-    GridIndex, GridManifest, HullManifest, L0Address, L0BitPlane, L0Chunk, L0ScalarPlane, L1Graph,
-    L1Node, ManifestBudgets, NodeFlags, SparseL0, Stance, ToolIdentity, aggregate_conservative,
-    decode_zstd_envelope, encode_zstd_envelope, sha256_hex,
+    COLLISION_ORACLE_NAME, COLLISION_ORACLE_SCHEMA, COST_INFINITY, ChannelManifest,
+    CollisionOracleAdmission, CollisionParameters, CollisionSourceClosure, ConservativeChild,
+    CorridorWitness, EdgeInput, EdgeType, GridIndex, GridManifest, HOOK_ORACLE_NAME,
+    HOOK_ORACLE_SCHEMA, HOOK_PARITY_CASES_V1, HOOK_PARITY_NAME, HOOK_PARITY_SCHEMA,
+    HookOracleAdmission, HookParameters, HookParityAttestation, HookSourceClosure, HullManifest,
+    L0Address, L0BitPlane, L0Chunk, L0ScalarPlane, L1Graph, L1Node, MASK_PLAYERSOLID_V1,
+    MASK_SHOT_V1, ManifestBudgets, NodeFlags, ORACLE_SEMANTIC_VERSION, OracleAdmissions,
+    OracleBspBinding, OracleToolIdentity, PMOVE_ORACLE_NAME, PMOVE_ORACLE_SCHEMA,
+    PmoveOracleAdmission, PmoveParameters, PmoveSourceClosure, SparseL0, Stance, ToolIdentity,
+    aggregate_conservative, decode_zstd_envelope, encode_zstd_envelope, sha256_hex,
 };
 
 fn node(index: GridIndex) -> L1Node {
@@ -49,8 +55,132 @@ fn edge(source: GridIndex, target: GridIndex, edge_type: EdgeType) -> EdgeInput 
     }
 }
 
+fn digest(byte: u8) -> String {
+    format!("{byte:02x}").repeat(32)
+}
+
+fn bsp_identity() -> BspIdentity {
+    BspIdentity {
+        canonical_map_id: "fixture".to_owned(),
+        sha256: digest(0xcd),
+        provenance_sha256: digest(0xce),
+        size_bytes: 1024,
+        ibsp_version: 38,
+    }
+}
+
+fn oracle_tool(name: &str, schema: &str, executable: u8, physics: u8) -> OracleToolIdentity {
+    OracleToolIdentity {
+        name: name.to_owned(),
+        schema: schema.to_owned(),
+        version: ORACLE_SEMANTIC_VERSION,
+        executable_sha256: digest(executable),
+        physics_identity_sha256: digest(physics),
+    }
+}
+
+fn oracle_binding(bsp: &BspIdentity) -> OracleBspBinding {
+    OracleBspBinding {
+        sha256: bsp.sha256.clone(),
+        provenance_sha256: bsp.provenance_sha256.clone(),
+    }
+}
+
+fn oracle_admissions(bsp: &BspIdentity, pmove: bool, hook: bool) -> OracleAdmissions {
+    let collision = CollisionOracleAdmission {
+        tool: oracle_tool(COLLISION_ORACLE_NAME, COLLISION_ORACLE_SCHEMA, 0x11, 0x12),
+        bsp: oracle_binding(bsp),
+        parameters: CollisionParameters {
+            mask_playersolid: MASK_PLAYERSOLID_V1,
+            mask_shot: MASK_SHOT_V1,
+        },
+        source: CollisionSourceClosure {
+            collision_sha256: digest(0x13),
+            shared_header_sha256: digest(0x14),
+            shared_source_sha256: digest(0x15),
+            build_contract: "cc-v1 -fno-strict-aliasing".to_owned(),
+        },
+        contract_sha256: String::new(),
+    }
+    .seal();
+    let pmove_admission = pmove.then(|| {
+        PmoveOracleAdmission {
+            tool: oracle_tool(PMOVE_ORACLE_NAME, PMOVE_ORACLE_SCHEMA, 0x21, 0x22),
+            bsp: oracle_binding(bsp),
+            parameters: PmoveParameters {
+                gravity: 800,
+                airaccelerate_f32_bits: 0.0_f32.to_bits(),
+                constants: "stopspeed=100;maxspeed=300;duckspeed=100;accelerate=10;wateraccelerate=10;friction=6;waterfriction=1;waterspeed=400".to_owned(),
+            },
+            source: PmoveSourceClosure {
+                collision_sha256: collision.source.collision_sha256.clone(),
+                pmove_sha256: digest(0x23),
+                shared_header_sha256: collision.source.shared_header_sha256.clone(),
+                shared_source_sha256: collision.source.shared_source_sha256.clone(),
+                build_contract: collision.source.build_contract.clone(),
+            },
+            contract_sha256: String::new(),
+        }
+        .seal()
+    });
+    let hook_admission = hook.then(|| {
+        let pmove = pmove_admission
+            .as_ref()
+            .expect("hook fixture always includes companion pmove");
+        let tool = oracle_tool(HOOK_ORACLE_NAME, HOOK_ORACLE_SCHEMA, 0x31, 0x32);
+        let parity = HookParityAttestation {
+            name: HOOK_PARITY_NAME.to_owned(),
+            schema: HOOK_PARITY_SCHEMA.to_owned(),
+            version: ORACLE_SEMANTIC_VERSION,
+            passed: true,
+            case_count: HOOK_PARITY_CASES_V1,
+            fixture_bsp_sha256: digest(0x33),
+            fixture_provenance_sha256: digest(0x34),
+            fixture_collision_physics_identity_sha256: digest(0x35),
+            fixture_pmove_physics_identity_sha256: digest(0x36),
+            hook_physics_identity_sha256: tool.physics_identity_sha256.clone(),
+            collision_tool_sha256: collision.tool.executable_sha256.clone(),
+            pmove_tool_sha256: pmove.tool.executable_sha256.clone(),
+            hook_tool_sha256: tool.executable_sha256.clone(),
+            q2ded_sha256: digest(0x37),
+            game_module_sha256: digest(0x38),
+            transcript_sha256: digest(0x39),
+            attestation_sha256: String::new(),
+        }
+        .seal();
+        HookOracleAdmission {
+            tool,
+            bsp: oracle_binding(bsp),
+            parameters: HookParameters {
+                hook_speed_f32_bits: 900.0_f32.to_bits(),
+                hook_pullspeed_f32_bits: 700.0_f32.to_bits(),
+                hook_sky: false,
+                hook_maxtime_f32_bits: 5.0_f32.to_bits(),
+                full_velocity_overwrite: true,
+            },
+            source: HookSourceClosure {
+                shared_c_sha256: digest(0x3a),
+                shared_h_sha256: digest(0x3b),
+                integration_sha256: digest(0x3c),
+                math_sha256: digest(0x3d),
+                build_contract: "cc-v1 -fno-strict-aliasing".to_owned(),
+            },
+            parity,
+            contract_sha256: String::new(),
+        }
+        .seal()
+    });
+    OracleAdmissions {
+        collision_oracle: collision,
+        pmove_oracle: pmove_admission,
+        hook_oracle: hook_admission,
+    }
+}
+
 fn artifact(reverse_insert: bool) -> AtlasArtifact {
     let limits = AtlasLimits::default();
+    let bsp = bsp_identity();
+    let admission = oracle_admissions(&bsp, true, true).admit(&bsp).unwrap();
     let mut chunks = SparseL0::new();
     let mut source = vec![GridIndex::new(2, -1, 0), GridIndex::new(-3, 4, -2)];
     if reverse_insert {
@@ -84,7 +214,7 @@ fn artifact(reverse_insert: bool) -> AtlasArtifact {
     AtlasArtifact {
         origin: AtlasOrigin::snapped([-1, 0, 511]).unwrap(),
         l0: chunks,
-        l1: L1Graph::build(nodes, edges, &limits).unwrap(),
+        l1: L1Graph::build(nodes, edges, &admission, &limits).unwrap(),
         l2: vec![AtlasAggregateCell {
             index: GridIndex::new(-1, 0, 0),
             contents_flags: 3,
@@ -228,12 +358,15 @@ fn l0_is_sparse_and_enforces_chunk_and_payload_guards() {
 #[test]
 fn l1_graph_is_deterministic_zyx_csr() {
     let limits = AtlasLimits::default();
+    let bsp = bsp_identity();
+    let admission = oracle_admissions(&bsp, true, false).admit(&bsp).unwrap();
     let a = GridIndex::new(10, 0, -1);
     let b = GridIndex::new(-5, 2, -1);
     let c = GridIndex::new(0, 0, 0);
     let graph = L1Graph::build(
         vec![node(c), node(a), node(b)],
         vec![edge(a, c, EdgeType::Jump), edge(a, b, EdgeType::Walk)],
+        &admission,
         &limits,
     )
     .unwrap();
@@ -251,7 +384,244 @@ fn l1_graph_is_deterministic_zyx_csr() {
     assert_eq!(outgoing[1].edge_type, EdgeType::Jump);
 
     let duplicate = edge(a, b, EdgeType::Walk);
-    assert!(L1Graph::build(vec![node(a), node(b)], vec![duplicate, duplicate], &limits).is_err());
+    assert!(
+        L1Graph::build(
+            vec![node(a), node(b)],
+            vec![duplicate, duplicate],
+            &admission,
+            &limits,
+        )
+        .is_err()
+    );
+}
+
+fn two_node_graph(
+    edge_type: EdgeType,
+    evidence: u16,
+    validation_version: u16,
+    admission: &q2_lattice_rs::atlas::EdgeAdmission,
+) -> Result<L1Graph, q2_lattice_rs::atlas::AtlasError> {
+    let source = GridIndex::new(0, 0, 0);
+    let target = GridIndex::new(1, 0, 0);
+    let mut candidate = edge(source, target, edge_type);
+    candidate.evidence = evidence;
+    candidate.validation_version = validation_version;
+    L1Graph::build(
+        vec![node(source), node(target)],
+        vec![candidate],
+        admission,
+        &AtlasLimits::default(),
+    )
+}
+
+#[test]
+fn graph_trajectory_edges_require_admitted_optional_oracles() {
+    let bsp = bsp_identity();
+    let collision_only = oracle_admissions(&bsp, false, false).admit(&bsp).unwrap();
+    assert!(two_node_graph(EdgeType::Walk, 1, 1, &collision_only).is_ok());
+    assert!(two_node_graph(EdgeType::Jump, 1, 1, &collision_only).is_err());
+    assert!(two_node_graph(EdgeType::ControlledDrop, 1, 1, &collision_only).is_err());
+    assert!(two_node_graph(EdgeType::Hook, 1, 1, &collision_only).is_err());
+
+    let pmove_only = oracle_admissions(&bsp, true, false).admit(&bsp).unwrap();
+    assert!(two_node_graph(EdgeType::Jump, 1, 1, &pmove_only).is_ok());
+    assert!(two_node_graph(EdgeType::ControlledDrop, 1, 1, &pmove_only).is_ok());
+    assert!(two_node_graph(EdgeType::Hook, 1, 1, &pmove_only).is_err());
+
+    let full = oracle_admissions(&bsp, true, true).admit(&bsp).unwrap();
+    assert!(two_node_graph(EdgeType::Hook, 1, 1, &full).is_ok());
+}
+
+#[test]
+fn every_materialized_edge_requires_nonzero_evidence_and_validation_version() {
+    let bsp = bsp_identity();
+    let admission = oracle_admissions(&bsp, true, true).admit(&bsp).unwrap();
+    for edge_type in [
+        EdgeType::Walk,
+        EdgeType::StrafeWalk,
+        EdgeType::Step,
+        EdgeType::Jump,
+        EdgeType::ControlledDrop,
+        EdgeType::CrouchEnter,
+        EdgeType::CrouchHold,
+        EdgeType::CrouchExit,
+        EdgeType::WaterTransition,
+        EdgeType::Mover,
+        EdgeType::Teleporter,
+        EdgeType::Hook,
+    ] {
+        assert!(two_node_graph(edge_type, 0, 1, &admission).is_err());
+        assert!(two_node_graph(edge_type, 1, 0, &admission).is_err());
+        assert!(two_node_graph(edge_type, 1, 1, &admission).is_ok());
+    }
+}
+
+#[test]
+fn oracle_contract_rejects_tool_schema_version_bsp_parameter_and_source_mismatches() {
+    let bsp = bsp_identity();
+    let valid = oracle_admissions(&bsp, true, true);
+    valid.admit(&bsp).unwrap();
+
+    for mutation in 0..3 {
+        let mut candidate = valid.clone();
+        let tool = &mut candidate.collision_oracle.tool;
+        match mutation {
+            0 => tool.name.push_str("-wrong"),
+            1 => tool.schema.push_str("-wrong"),
+            _ => tool.version += 1,
+        }
+        assert!(candidate.admit(&bsp).is_err());
+    }
+    for mutation in 0..3 {
+        let mut candidate = valid.clone();
+        let tool = &mut candidate.pmove_oracle.as_mut().unwrap().tool;
+        match mutation {
+            0 => tool.name.push_str("-wrong"),
+            1 => tool.schema.push_str("-wrong"),
+            _ => tool.version += 1,
+        }
+        assert!(candidate.admit(&bsp).is_err());
+    }
+    for mutation in 0..3 {
+        let mut candidate = valid.clone();
+        let tool = &mut candidate.hook_oracle.as_mut().unwrap().tool;
+        match mutation {
+            0 => tool.name.push_str("-wrong"),
+            1 => tool.schema.push_str("-wrong"),
+            _ => tool.version += 1,
+        }
+        assert!(candidate.admit(&bsp).is_err());
+    }
+
+    let mut wrong_bsp = valid.clone();
+    wrong_bsp.collision_oracle.bsp.sha256 = digest(0xee);
+    assert!(wrong_bsp.admit(&bsp).is_err());
+    let mut wrong_provenance = valid.clone();
+    wrong_provenance
+        .pmove_oracle
+        .as_mut()
+        .unwrap()
+        .bsp
+        .provenance_sha256 = digest(0xef);
+    assert!(wrong_provenance.admit(&bsp).is_err());
+    let mut wrong_hook_bsp = valid.clone();
+    wrong_hook_bsp.hook_oracle.as_mut().unwrap().bsp.sha256 = digest(0xf0);
+    assert!(wrong_hook_bsp.admit(&bsp).is_err());
+
+    let mut wrong_mask = valid.clone();
+    wrong_mask.collision_oracle.parameters.mask_playersolid ^= 1;
+    wrong_mask.collision_oracle = wrong_mask.collision_oracle.seal();
+    assert!(wrong_mask.admit(&bsp).is_err());
+    let mut wrong_parameter_closure = valid.clone();
+    wrong_parameter_closure
+        .pmove_oracle
+        .as_mut()
+        .unwrap()
+        .parameters
+        .gravity = 799;
+    assert!(wrong_parameter_closure.admit(&bsp).is_err());
+    let mut illegal_airaccelerate = valid.clone();
+    let pmove = illegal_airaccelerate.pmove_oracle.take().unwrap();
+    let mut pmove = pmove;
+    pmove.parameters.airaccelerate_f32_bits = (-1.0_f32).to_bits();
+    illegal_airaccelerate.pmove_oracle = Some(pmove.seal());
+    assert!(illegal_airaccelerate.admit(&bsp).is_err());
+    let mut wrong_source_closure = valid.clone();
+    wrong_source_closure
+        .hook_oracle
+        .as_mut()
+        .unwrap()
+        .source
+        .math_sha256 = digest(0xaa);
+    assert!(wrong_source_closure.admit(&bsp).is_err());
+    let mut zero_pullspeed = valid.clone();
+    let hook = zero_pullspeed.hook_oracle.take().unwrap();
+    let mut hook = hook;
+    hook.parameters.hook_pullspeed_f32_bits = 0.0_f32.to_bits();
+    zero_pullspeed.hook_oracle = Some(hook.seal());
+    assert!(zero_pullspeed.admit(&bsp).is_err());
+    let mut wrong_tool_closure = valid.clone();
+    wrong_tool_closure.collision_oracle.tool.executable_sha256 = digest(0xab);
+    assert!(wrong_tool_closure.admit(&bsp).is_err());
+
+    for field in 0..3 {
+        let mut zero_contract = valid.clone();
+        match field {
+            0 => zero_contract.collision_oracle.contract_sha256 = "00".repeat(32),
+            1 => zero_contract.pmove_oracle.as_mut().unwrap().contract_sha256 = "00".repeat(32),
+            _ => zero_contract.hook_oracle.as_mut().unwrap().contract_sha256 = "00".repeat(32),
+        }
+        assert!(zero_contract.admit(&bsp).is_err());
+    }
+
+    let mut wrong_companion_source = valid.clone();
+    let pmove = wrong_companion_source.pmove_oracle.take().unwrap();
+    let mut pmove = pmove;
+    pmove.source.collision_sha256 = digest(0xac);
+    wrong_companion_source.pmove_oracle = Some(pmove.seal());
+    assert!(wrong_companion_source.admit(&bsp).is_err());
+
+    let mut wrong_overwrite_law = valid;
+    let hook = wrong_overwrite_law.hook_oracle.take().unwrap();
+    let mut hook = hook;
+    hook.parameters.full_velocity_overwrite = false;
+    wrong_overwrite_law.hook_oracle = Some(hook.seal());
+    assert!(wrong_overwrite_law.admit(&bsp).is_err());
+}
+
+#[test]
+fn hook_requires_companion_pmove_and_canonical_q2ded_parity() {
+    let bsp = bsp_identity();
+    let valid = oracle_admissions(&bsp, true, true);
+
+    let mut missing_parity = serde_json::to_value(&valid).unwrap();
+    missing_parity["hook_oracle"]
+        .as_object_mut()
+        .unwrap()
+        .remove("parity");
+    assert!(serde_json::from_value::<OracleAdmissions>(missing_parity).is_err());
+
+    let mut missing_pmove = valid.clone();
+    missing_pmove.pmove_oracle = None;
+    assert!(missing_pmove.admit(&bsp).is_err());
+
+    for mutation in 0..5 {
+        let mut candidate = valid.clone();
+        let hook = candidate.hook_oracle.as_mut().unwrap();
+        match mutation {
+            0 => hook.parity.name.push_str("-wrong"),
+            1 => hook.parity.schema.push_str("-wrong"),
+            2 => hook.parity.version += 1,
+            3 => hook.parity.passed = false,
+            _ => hook.parity.case_count -= 1,
+        }
+        hook.parity = hook.parity.clone().seal();
+        *hook = hook.clone().seal();
+        assert!(candidate.admit(&bsp).is_err());
+    }
+
+    let mut stale_attestation = valid.clone();
+    stale_attestation
+        .hook_oracle
+        .as_mut()
+        .unwrap()
+        .parity
+        .transcript_sha256 = digest(0xba);
+    assert!(stale_attestation.admit(&bsp).is_err());
+
+    let mut wrong_tool = valid.clone();
+    let hook = wrong_tool.hook_oracle.as_mut().unwrap();
+    hook.parity.hook_tool_sha256 = digest(0xbb);
+    hook.parity = hook.parity.clone().seal();
+    *hook = hook.clone().seal();
+    assert!(wrong_tool.admit(&bsp).is_err());
+
+    let mut zero_digest = valid;
+    let hook = zero_digest.hook_oracle.as_mut().unwrap();
+    hook.parity.q2ded_sha256 = "00".repeat(32);
+    hook.parity = hook.parity.clone().seal();
+    *hook = hook.clone().seal();
+    assert!(zero_digest.admit(&bsp).is_err());
 }
 
 #[test]
@@ -359,6 +729,19 @@ fn corrupt_oversized_and_mixed_schema_payloads_fail_closed() {
     oversized[56..64].copy_from_slice(&((limits.max_l0_chunks + 1) as u64).to_le_bytes());
     assert!(AtlasArtifact::decode_uncompressed(&oversized, &limits).is_err());
 
+    let l0_bytes = u64::from_le_bytes(valid[96..104].try_into().unwrap()) as usize;
+    let node_bytes = u64::from_le_bytes(valid[104..112].try_into().unwrap()) as usize;
+    let graph_start = 136 + l0_bytes + node_bytes;
+    let offset_count =
+        u64::from_le_bytes(valid[graph_start..graph_start + 8].try_into().unwrap()) as usize;
+    let first_edge = graph_start + 8 + offset_count * 4;
+    let mut zero_evidence = valid.clone();
+    zero_evidence[first_edge + 20..first_edge + 22].copy_from_slice(&0_u16.to_le_bytes());
+    assert!(AtlasArtifact::decode_uncompressed(&zero_evidence, &limits).is_err());
+    let mut zero_validation_version = valid.clone();
+    zero_validation_version[first_edge + 22..first_edge + 24].copy_from_slice(&0_u16.to_le_bytes());
+    assert!(AtlasArtifact::decode_uncompressed(&zero_validation_version, &limits).is_err());
+
     let envelope = encode_zstd_envelope(&valid, &limits).unwrap();
     let mut corrupt_digest = envelope.clone();
     corrupt_digest[32] ^= 0xff;
@@ -384,8 +767,14 @@ fn identity(name: &str, byte: u8) -> ToolIdentity {
 
 fn manifest(payload: &[u8], compressed_size: u64) -> AtlasManifest {
     let limits = AtlasLimits::default();
-    let mut counts = BTreeMap::new();
-    counts.insert("l0_chunks".to_owned(), 2);
+    let bsp = bsp_identity();
+    let counts = AtlasCounts {
+        l0_chunks: 2,
+        l1_nodes: 3,
+        l1_edges: 2,
+        l2_cells: 1,
+        l3_cells: 0,
+    };
     let mut artifacts = BTreeMap::new();
     artifacts.insert(
         "fixture.atlas.bin.zst".to_owned(),
@@ -393,7 +782,7 @@ fn manifest(payload: &[u8], compressed_size: u64) -> AtlasManifest {
             "application/vnd.q2.atlas-v1",
             payload,
             compressed_size,
-            counts,
+            counts.named_counts(),
         ),
     );
     AtlasManifest {
@@ -401,16 +790,9 @@ fn manifest(payload: &[u8], compressed_size: u64) -> AtlasManifest {
         byte_order: "little".to_owned(),
         atlas_magic: String::from_utf8_lossy(ATLAS_MAGIC).into_owned(),
         specification_sha256: "ab".repeat(32),
-        bsp: BspIdentity {
-            canonical_map_id: "fixture".to_owned(),
-            sha256: "cd".repeat(32),
-            size_bytes: 1024,
-            ibsp_version: 38,
-        },
+        bsp: bsp.clone(),
         analyzer: identity("q2-atlas", 1),
-        collision_oracle: identity("q2-cm-oracle", 2),
-        pmove_oracle: identity("q2-pmove-oracle", 3),
-        hook_oracle: identity("q2-hook-oracle", 4),
+        oracles: oracle_admissions(&bsp, true, true),
         generator: None,
         grid: GridManifest {
             origin: [-256, 0, 256],
@@ -448,13 +830,7 @@ fn manifest(payload: &[u8], compressed_size: u64) -> AtlasManifest {
             },
         ],
         artifacts,
-        counts: AtlasCounts {
-            l0_chunks: 2,
-            l1_nodes: 3,
-            l1_edges: 2,
-            l2_cells: 1,
-            l3_cells: 0,
-        },
+        counts,
         budgets: ManifestBudgets::from(&limits),
         build_peak_rss_bytes: 64 * 1024 * 1024,
         limitations: vec!["zero hook edges".to_owned(), "fixture only".to_owned()],
@@ -471,7 +847,7 @@ fn manifest_is_canonical_bound_and_strict() {
     let bytes = source.canonical_json(&limits).unwrap();
     assert_eq!(
         sha256_hex(&bytes),
-        "62a077734880f72b11a77bb424cae8e8a4f24a53afeaacd1687a9b8c6d2c143f"
+        "9cd1970e9abdac3966129f91c0696a5ac01288c525883ff68fb00bccc9fcb60a"
     );
     let restored = AtlasManifest::from_canonical_json(&bytes, &limits).unwrap();
     assert_eq!(restored.channels[0].level, 0);
@@ -483,6 +859,44 @@ fn manifest_is_canonical_bound_and_strict() {
     restored
         .verify_atlas_artifact("fixture.atlas.bin.zst", &payload, &artifact(false), &limits)
         .unwrap();
+    assert_eq!(
+        restored
+            .decode_and_verify_atlas_artifact("fixture.atlas.bin.zst", &payload, &limits)
+            .unwrap(),
+        artifact(false)
+    );
+
+    let mut substitute = artifact(false);
+    let a = GridIndex::new(-1, 0, -2);
+    let b = GridIndex::new(0, 0, -2);
+    let c = GridIndex::new(0, 0, 1);
+    let admission = restored.oracles.admit(&restored.bsp).unwrap();
+    substitute.l1 = L1Graph::build(
+        vec![node(a), node(b), node(c)],
+        vec![edge(a, b, EdgeType::StrafeWalk), edge(a, c, EdgeType::Jump)],
+        &admission,
+        &limits,
+    )
+    .unwrap();
+    assert_eq!(AtlasCounts::from_artifact(&substitute), restored.counts);
+    assert!(
+        restored
+            .verify_atlas_artifact("fixture.atlas.bin.zst", &payload, &substitute, &limits,)
+            .is_err()
+    );
+
+    let mut lying_artifact_counts = restored.clone();
+    lying_artifact_counts
+        .artifacts
+        .get_mut("fixture.atlas.bin.zst")
+        .unwrap()
+        .counts
+        .insert("l1_edges".to_owned(), 999);
+    assert!(
+        lying_artifact_counts
+            .verify_atlas_artifact("fixture.atlas.bin.zst", &payload, &artifact(false), &limits,)
+            .is_err()
+    );
     let mut tampered_payload = payload.clone();
     tampered_payload[136] ^= 1;
     assert!(
@@ -502,7 +916,13 @@ fn manifest_is_canonical_bound_and_strict() {
     mixed.schema_version += 1;
     assert!(mixed.canonical_json(&limits).is_err());
     let mut bad_digest = restored.clone();
-    bad_digest.pmove_oracle.sha256 = "ABC".to_owned();
+    bad_digest
+        .oracles
+        .pmove_oracle
+        .as_mut()
+        .unwrap()
+        .tool
+        .executable_sha256 = "ABC".to_owned();
     assert!(bad_digest.canonical_json(&limits).is_err());
     let mut duplicate_channel = restored.clone();
     duplicate_channel
@@ -517,6 +937,95 @@ fn manifest_is_canonical_bound_and_strict() {
     let mut over_rss = restored;
     over_rss.build_peak_rss_bytes = limits.max_build_rss_bytes + 1;
     assert!(over_rss.canonical_json(&limits).is_err());
+}
+
+#[test]
+fn optional_trajectory_oracles_have_a_canonical_absent_round_trip() {
+    let limits = AtlasLimits::default();
+    let payload = artifact(false).encode_uncompressed(&limits).unwrap();
+    let envelope = encode_zstd_envelope(&payload, &limits).unwrap();
+    let mut collision_only = manifest(&payload, envelope.len() as u64);
+    collision_only.oracles.pmove_oracle = None;
+    collision_only.oracles.hook_oracle = None;
+    let bytes = collision_only.canonical_json(&limits).unwrap();
+    let text = std::str::from_utf8(&bytes).unwrap();
+    assert!(!text.contains("pmove_oracle"));
+    assert!(!text.contains("hook_oracle"));
+    let restored = AtlasManifest::from_canonical_json(&bytes, &limits).unwrap();
+    assert!(restored.oracles.pmove_oracle.is_none());
+    assert!(restored.oracles.hook_oracle.is_none());
+    assert_eq!(restored.canonical_json(&limits).unwrap(), bytes);
+
+    let empty = AtlasArtifact::empty(AtlasOrigin(restored.grid.origin));
+    let empty_payload = empty.encode_uncompressed(&limits).unwrap();
+    let empty_envelope = encode_zstd_envelope(&empty_payload, &limits).unwrap();
+    let mut empty_manifest = restored.clone();
+    empty_manifest.counts = AtlasCounts::from_artifact(&empty);
+    empty_manifest.artifacts.insert(
+        "fixture.atlas.bin.zst".to_owned(),
+        ArtifactManifest::from_uncompressed(
+            "application/vnd.q2.atlas-v1",
+            &empty_payload,
+            empty_envelope.len() as u64,
+            empty_manifest.counts.named_counts(),
+        ),
+    );
+    empty_manifest
+        .verify_atlas_artifact("fixture.atlas.bin.zst", &empty_payload, &empty, &limits)
+        .unwrap();
+
+    let mut explicit_null: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    explicit_null["oracles"]["pmove_oracle"] = serde_json::Value::Null;
+    assert!(
+        AtlasManifest::from_canonical_json(&serde_json::to_vec(&explicit_null).unwrap(), &limits,)
+            .is_err()
+    );
+    let mut explicit_hook_null: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    explicit_hook_null["oracles"]["hook_oracle"] = serde_json::Value::Null;
+    assert!(
+        AtlasManifest::from_canonical_json(
+            &serde_json::to_vec(&explicit_hook_null).unwrap(),
+            &limits,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn collision_oracle_is_mandatory_and_manifest_artifact_verification_rechecks_edges() {
+    let limits = AtlasLimits::default();
+    let decoded_artifact = artifact(false);
+    let payload = decoded_artifact.encode_uncompressed(&limits).unwrap();
+    let envelope = encode_zstd_envelope(&payload, &limits).unwrap();
+    let source = manifest(&payload, envelope.len() as u64);
+    let bytes = source.canonical_json(&limits).unwrap();
+    let mut missing_collision: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    missing_collision["oracles"]
+        .as_object_mut()
+        .unwrap()
+        .remove("collision_oracle");
+    assert!(
+        AtlasManifest::from_canonical_json(
+            &serde_json::to_vec(&missing_collision).unwrap(),
+            &limits,
+        )
+        .is_err()
+    );
+
+    let mut no_trajectory = source;
+    no_trajectory.oracles.pmove_oracle = None;
+    no_trajectory.oracles.hook_oracle = None;
+    no_trajectory.canonical_json(&limits).unwrap();
+    assert!(
+        no_trajectory
+            .verify_atlas_artifact(
+                "fixture.atlas.bin.zst",
+                &payload,
+                &decoded_artifact,
+                &limits,
+            )
+            .is_err()
+    );
 }
 
 #[test]

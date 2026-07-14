@@ -51,3 +51,23 @@ length and digest.
 L0 exposes only `SparseL0::new` plus insertion of a nonempty `L0Chunk`. There
 is no map-AABB or dense-cell constructor. One 16-cubed L0 chunk covers the same
 64-unit cube as one L2 cell.
+
+## Manifest-coupled oracle admission
+
+The binary graph is structurally decoded before its separate canonical
+analysis manifest is available. Admission is complete only after pairing the
+payload with that manifest and calling `verify_atlas_artifact`.
+
+The manifest requires a semantic `q2-cm-oracle` contract bound to the compiled
+BSP SHA-256 and its provenance digest. `q2-pmove-oracle` and `q2-hook-oracle`
+contracts are optional. Jump and controlled-drop edges require an admitted
+Pmove contract. Hook edges require admitted Pmove and hook contracts plus the
+canonical eight-case isolated-q2ded parity attestation. Every materialized edge
+has nonzero evidence and validation version. Missing or mismatched trajectory
+authority omits its edge classes; collision remains mandatory and is never
+approximated from BSP metadata or generator claims.
+
+Parity collision/Pmove physics identities are explicitly fixture-scoped because
+those identities include the synthetic parity BSP digest. The attestation binds
+their exact executable digests to the map-specific admitted tools and binds the
+map-independent hook physics identity directly.

@@ -96,7 +96,7 @@ impl AtlasArtifact {
                 "sparse L0 exceeds chunk/byte budget".to_owned(),
             ));
         }
-        self.l1.validate(limits)?;
+        self.l1.validate_structure(limits)?;
         validate_aggregate_cells(&self.l2, limits.max_l2_cells, "L2")?;
         validate_aggregate_cells(&self.l3, limits.max_l3_cells, "L3")?;
         let resident = self.resident_bytes_estimate();

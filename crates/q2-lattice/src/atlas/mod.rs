@@ -4,6 +4,7 @@
 //! pinned engine oracles. Runtime code reads these records; it does not infer
 //! collision from BSP bytes.
 
+mod admission;
 mod aggregate;
 mod coord;
 mod error;
@@ -12,6 +13,15 @@ mod l0;
 mod manifest;
 mod storage;
 
+pub use admission::{
+    COLLISION_ORACLE_NAME, COLLISION_ORACLE_SCHEMA, CollisionOracleAdmission, CollisionParameters,
+    CollisionSourceClosure, EdgeAdmission, HOOK_ORACLE_NAME, HOOK_ORACLE_SCHEMA,
+    HOOK_PARITY_CASES_V1, HOOK_PARITY_NAME, HOOK_PARITY_SCHEMA, HookOracleAdmission,
+    HookParameters, HookParityAttestation, HookSourceClosure, MASK_PLAYERSOLID_V1, MASK_SHOT_V1,
+    ORACLE_SEMANTIC_VERSION, OracleAdmissions, OracleBspBinding, OracleToolIdentity,
+    PMOVE_ORACLE_NAME, PMOVE_ORACLE_SCHEMA, PmoveOracleAdmission, PmoveParameters,
+    PmoveSourceClosure,
+};
 pub use aggregate::{ConservativeChild, CorridorWitness, StaticAggregate, aggregate_conservative};
 pub use coord::{ATLAS_CELL_SIZES, AtlasLevel, AtlasOrigin, GridIndex, L0Address};
 pub use error::{AtlasError, AtlasResult};

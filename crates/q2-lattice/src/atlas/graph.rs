@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use super::{AtlasError, AtlasLimits, AtlasResult, GridIndex};
+use super::{AtlasError, AtlasLimits, AtlasResult, EdgeAdmission, GridIndex};
 
 pub const COST_INFINITY: u32 = u32::MAX;
 
@@ -204,6 +204,7 @@ impl L1Graph {
     pub fn build(
         mut nodes: Vec<L1Node>,
         edges: Vec<EdgeInput>,
+        admission: &EdgeAdmission,
         limits: &AtlasLimits,
     ) -> AtlasResult<Self> {
         if nodes.len() > limits.max_l1_nodes {
@@ -258,6 +259,12 @@ impl L1Graph {
                     "materialized traversal edge has infinite cost".to_owned(),
                 ));
             }
+            if edge.evidence == 0 || edge.validation_version == 0 {
+                return Err(AtlasError::InvalidFormat(
+                    "materialized traversal edge lacks evidence or validation version".to_owned(),
+                ));
+            }
+            admission.validate_edge_type(edge.edge_type)?;
             adjacency[source as usize].push(EdgeRecord {
                 target,
                 edge_type: edge.edge_type,
@@ -289,7 +296,7 @@ impl L1Graph {
             offsets,
             edges: packed,
         };
-        graph.validate(limits)?;
+        graph.validate(admission, limits)?;
         Ok(graph)
     }
 
@@ -318,7 +325,15 @@ impl L1Graph {
         Some(&self.edges[start..end])
     }
 
-    pub fn validate(&self, limits: &AtlasLimits) -> AtlasResult<()> {
+    pub fn validate(&self, admission: &EdgeAdmission, limits: &AtlasLimits) -> AtlasResult<()> {
+        self.validate_structure(limits)?;
+        for edge in &self.edges {
+            admission.validate_edge_type(edge.edge_type)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_structure(&self, limits: &AtlasLimits) -> AtlasResult<()> {
         if self.nodes.len() > limits.max_l1_nodes || self.edges.len() > limits.max_l1_edges {
             return Err(AtlasError::LimitExceeded(
                 "L1 graph exceeds configured cardinality".to_owned(),
@@ -363,6 +378,14 @@ impl L1Graph {
                 ));
             }
             if outgoing
+                .iter()
+                .any(|edge| edge.evidence == 0 || edge.validation_version == 0)
+            {
+                return Err(AtlasError::InvalidFormat(
+                    "L1 edge lacks evidence or validation version".to_owned(),
+                ));
+            }
+            if outgoing
                 .windows(2)
                 .any(|pair| pair[0].sort_key(&self.nodes) >= pair[1].sort_key(&self.nodes))
             {
@@ -385,7 +408,7 @@ impl L1Graph {
             offsets,
             edges,
         };
-        graph.validate(limits)?;
+        graph.validate_structure(limits)?;
         Ok(graph)
     }
 }
