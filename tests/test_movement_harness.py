@@ -20,19 +20,26 @@ if torch is not None:
     from models.policy import Q2BotPolicy
 
 
-def _movement_obs(*, speed, forward=1.0, right=0.0, jump=0, pitch=0.0):
+def _movement_obs(
+    *, speed, forward=1.0, right=0.0, jump=0, pitch=0.0, visible=False
+):
     self_state = np.zeros(10, dtype=np.float32)
     self_state[3] = speed
     action_debug = np.zeros(12, dtype=np.float32)
     action_debug[4] = forward
     action_debug[5] = right
     action_debug[8] = jump
+    entities = np.zeros((8, 9), dtype=np.float32)
+    entities[0, :3] = (256.0, 0.0, 0.0)
+    entities[0, 6] = 100.0
+    entities[0, 7] = 1.0
+    entities[0, 8] = float(visible)
     return SimpleNamespace(
         self_state=self_state,
         action_debug=action_debug,
         pitch=pitch,
-        entity_count=0,
-        entities=np.zeros((8, 9), dtype=np.float32),
+        entity_count=int(visible),
+        entities=entities,
     )
 
 
@@ -118,12 +125,18 @@ def test_level_aim_reward_requires_forward_travel_and_level_posture():
     backward = reward.movement_context(
         _movement_obs(speed=180, forward=-1.0, pitch=0.0)
     )
+    combat = reward.movement_context(
+        _movement_obs(speed=180, forward=1.0, pitch=0.0, visible=True)
+    )
 
     assert level["level_aim_movement_reward"] == pytest.approx(
         reward.level_aim_movement_reward
     )
-    assert down["level_aim_movement_reward"] == 0.0
+    assert 0.0 < down["level_aim_movement_reward"] < level[
+        "level_aim_movement_reward"
+    ]
     assert backward["level_aim_movement_reward"] == 0.0
+    assert combat["level_aim_movement_reward"] == 0.0
     assert level["movement_discipline"] > down["movement_discipline"]
 
 

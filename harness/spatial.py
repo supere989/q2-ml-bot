@@ -2397,7 +2397,7 @@ class VoxelSpatialReward:
         ):
             level_quality = max(
                 0.0,
-                1.0 - view_pitch_abs / max(1.0, self.horizon_pitch_limit),
+                1.0 - view_pitch_abs / 89.0,
             )
             level_aim_reward = (
                 self.level_aim_movement_reward

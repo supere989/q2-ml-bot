@@ -2135,6 +2135,19 @@ def train(cfg: dict):
                 ("hook_correction_heat", "hook/target_heat_mean"),
             ):
                 writer.add_scalar(tag, rollout_behavior[key] / denom, total_env_steps)
+            visible_denom = max(1.0, rollout_behavior["enemy_visible_any"])
+            for key, tag in (
+                ("enemy_visible_count", "targeting/visible_count_when_visible_mean"),
+                ("enemy_visible_nearest", "targeting/visible_nearest_when_visible_mean"),
+                ("aim_yaw_error", "targeting/yaw_error_when_visible_mean"),
+                ("aim_pitch_error", "targeting/pitch_error_when_visible_mean"),
+                ("aim_tracking_quality", "targeting/tracking_quality_when_visible_mean"),
+            ):
+                writer.add_scalar(
+                    tag,
+                    rollout_behavior[key] / visible_denom,
+                    total_env_steps,
+                )
             writer.add_scalar(
                 "memory/bonus_mean",
                 rollout_behavior["session_memory_bonus"] / denom,
