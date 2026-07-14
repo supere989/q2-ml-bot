@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:q2-ml:q2-generator-claim-campaign-v1",
+  "title": "Deterministic offline generated-map claim campaign v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "phase", "expected_count", "map_count", "pass_count", "passed", "maps", "failures"],
+  "properties": {
+    "schema": {"const": "q2-generator-claim-campaign-v1"},
+    "phase": {"enum": ["prepare_claims", "compiled_validation"]},
+    "expected_count": {"type": "integer", "minimum": 1},
+    "map_count": {"type": "integer", "minimum": 0},
+    "pass_count": {"type": "integer", "minimum": 0},
+    "passed": {"type": "boolean"},
+    "b1_gate_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "maps": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/prepare_row"},
+          {"$ref": "#/$defs/validation_row"}
+        ]
+      }
+    },
+    "failures": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "prepare_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["map", "passed", "generator_claims_sha256", "error"],
+      "properties": {
+        "map": {"type": "string", "minLength": 1},
+        "passed": {"type": "boolean"},
+        "generator_claims_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "error": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]}
+      }
+    },
+    "validation_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["map", "passed", "report_sha256", "bsp_sha256", "atlas_sha256", "generator_claims_sha256", "failures"],
+      "properties": {
+        "map": {"type": "string", "minLength": 1},
+        "passed": {"type": "boolean"},
+        "report_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "bsp_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "atlas_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "generator_claims_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "failures": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}

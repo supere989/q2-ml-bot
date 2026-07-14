@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:q2-ml:q2-generator-claim-validation-v1",
+  "title": "Compiled-world generator claim validation report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "mode", "map", "passed", "identities", "criteria", "failures"],
+  "properties": {
+    "schema": {"const": "q2-generator-claim-validation-v1"},
+    "mode": {"enum": ["generated_v6_promotion", "stock_analysis_quality"]},
+    "map": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
+    "passed": {"type": "boolean"},
+    "identities": {
+      "type": "object",
+      "required": ["b1_gate_sha256", "bsp_sha256", "analysis_sha256", "generator_claims_sha256"],
+      "properties": {
+        "b1_gate_sha256": {"$ref": "#/$defs/sha256"},
+        "bsp_sha256": {"$ref": "#/$defs/sha256"},
+        "analysis_sha256": {"$ref": "#/$defs/sha256"},
+        "generator_claims_sha256": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "map_sha256": {"$ref": "#/$defs/sha256"},
+        "meta_sha256": {"$ref": "#/$defs/sha256"},
+        "lattice_sha256": {"$ref": "#/$defs/sha256"},
+        "hook_zones_sha256": {"$ref": "#/$defs/sha256"},
+        "routes_sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "criteria": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/criterion"}
+    },
+    "failures": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "checked_count", "failures"],
+      "properties": {
+        "passed": {"type": "boolean"},
+        "checked_count": {"type": "integer", "minimum": 0},
+        "failures": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}
