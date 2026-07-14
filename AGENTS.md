@@ -183,8 +183,10 @@ pre-transform-fix deposits; rebuild it from attested map sidecars. See
 
 The public client conduit is wire version 3. Its protocol-34 impulse attestation
 contains a modulo-six action generation plus hook/weapon request. Same-frame
-action echoes are admissible only when that generation matches; C accumulates
-the full look delta across multiple `ClientThink` calls in one server frame.
+action echoes are admissible only when that generation matches; C records the
+latest intended angle relative to the frame's initial view across multiple
+`ClientThink` calls. Never sum those per-call deltas: duplicate held usercmds
+can otherwise multiply one action into hundreds of degrees.
 An otherwise exact same-generation echo clipped at Quake's pitch bound is a
 nontrainable whole-batch resync (`network_client/look_clamp_resyncs`), not a
 PPO transition and not a fatal transport error.

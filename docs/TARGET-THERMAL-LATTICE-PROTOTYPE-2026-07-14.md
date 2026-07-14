@@ -117,8 +117,9 @@ ordinary reliable Quake commands, with their exact policy request carried in
 the otherwise-unused protocol-34 `usercmd.impulse` byte for tick attribution.
 The same byte also carries a modulo-six action generation. A same-server-frame
 echo is admitted only when that generation matches, while multiple
-`ClientThink` calls in the frame accumulate the look delta so a later held
-absolute angle cannot erase it. If live death/respawn timing changes pitch
+`ClientThink` calls record the latest intended angle relative to the frame's
+initial view, so duplicate held usercmds can neither multiply nor erase the
+look decision. If live death/respawn timing changes pitch
 after inference and Quake clips the causal command at its hard 89-degree view
 bound, the whole four-client round becomes a nontrainable resynchronization
 boundary; PPO never stores the requested action as though it executed. Yaw
