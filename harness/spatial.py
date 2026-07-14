@@ -95,15 +95,27 @@ class VoxelSpatialReward:
     aim_alignment_reward: float = 0.02
     aim_yaw_deg: float = 12.0
     aim_pitch_deg: float = 14.0
-    hook_required_reward: float = 0.005
+    # Legacy hook-use rewards are retained as zero-valued constructor/config
+    # compatibility fields only.  Grapple is a high-energy movement actuator,
+    # not a rate objective; the correction fields below are its only positive
+    # shaping.
+    hook_required_reward: float = 0.0
     hook_required_distance: float = 512.0
     hook_cost: float = 0.004
-    hook_enemy_reward: float = 0.01
-    hook_no_ammo_reward: float = 0.035
+    hook_enemy_reward: float = 0.0
+    hook_no_ammo_reward: float = 0.0
     hook_blind_penalty: float = 0.008
     hook_noop_penalty: float = 0.012
-    hook_release_overspeed_reward: float = 0.008
+    hook_release_overspeed_reward: float = 0.0
     hook_release_idle_penalty: float = 0.002
+    hook_correction_progress_reward: float = 0.020
+    hook_correction_complete_reward: float = 0.040
+    hook_correction_min_heat: float = 0.05
+    hook_correction_min_advance: float = 32.0
+    hook_correction_progress_epsilon: float = 4.0
+    hook_correction_arrival_radius: float = 96.0
+    hook_correction_max_anchor_distance: float = 700.0
+    hook_correction_timeout_ticks: int = 40
     hook_melee_distance: float = 768.0
     hook_yaw_deg: float = 18.0
     hook_pitch_deg: float = 22.0
@@ -221,6 +233,20 @@ class VoxelSpatialReward:
     ] = field(default_factory=dict, init=False, repr=False)
     _rust_fallback_reason: str = field(default="", init=False)
     _rust_event_rows_applied: int = field(default=0, init=False)
+    _hook_correction_target: Optional[Tuple[float, float, float]] = field(
+        default=None, init=False, repr=False
+    )
+    _hook_correction_anchor: Optional[Tuple[float, float, float]] = field(
+        default=None, init=False, repr=False
+    )
+    _hook_correction_hot_target: Optional[Tuple[float, float, float]] = field(
+        default=None, init=False, repr=False
+    )
+    _hook_correction_heat: float = field(default=0.0, init=False)
+    _hook_correction_initial_distance: float = field(default=0.0, init=False)
+    _hook_correction_best_distance: float = field(default=0.0, init=False)
+    _hook_correction_started_tick: int = field(default=-1, init=False)
+    _hook_correction_escape: bool = field(default=False, init=False)
     last_visible_count: int = 0
     last_damage_tick: int = -1000000
     last_damage_cell: Optional[Tuple[int, int, int]] = None
@@ -258,17 +284,41 @@ class VoxelSpatialReward:
             aim_alignment_reward=_env_float("R_AIM_ALIGNMENT", 0.02),
             aim_yaw_deg=_env_float("Q2_AIM_YAW_DEG", 12.0),
             aim_pitch_deg=_env_float("Q2_AIM_PITCH_DEG", 14.0),
-            hook_required_reward=_env_float("R_HOOK_REQUIRED_PROXIMITY", 0.005),
+            # Do not honor the old positive hook-use knobs.  A stale runtime
+            # environment must not silently restore hook-rate farming.
+            hook_required_reward=0.0,
             hook_required_distance=_env_float("Q2_HOOK_REQUIRED_DISTANCE", 512.0),
             hook_cost=_env_float("R_HOOK_COST", 0.004),
-            hook_enemy_reward=_env_float("R_HOOK_ENEMY_REWARD", 0.01),
-            hook_no_ammo_reward=_env_float("R_HOOK_NO_AMMO_REWARD", 0.035),
+            hook_enemy_reward=0.0,
+            hook_no_ammo_reward=0.0,
             hook_blind_penalty=_env_float("R_HOOK_BLIND_PENALTY", 0.008),
             hook_noop_penalty=_env_float("R_HOOK_NOOP", 0.012),
-            hook_release_overspeed_reward=_env_float(
-                "R_HOOK_RELEASE_OVERSPEED", 0.008
-            ),
+            hook_release_overspeed_reward=0.0,
             hook_release_idle_penalty=_env_float("R_HOOK_RELEASE_IDLE", 0.002),
+            hook_correction_progress_reward=_env_float(
+                "R_HOOK_CORRECTION_PROGRESS", 0.020
+            ),
+            hook_correction_complete_reward=_env_float(
+                "R_HOOK_CORRECTION_COMPLETE", 0.040
+            ),
+            hook_correction_min_heat=_env_float(
+                "Q2_HOOK_CORRECTION_MIN_HEAT", 0.05
+            ),
+            hook_correction_min_advance=_env_float(
+                "Q2_HOOK_CORRECTION_MIN_ADVANCE", 32.0
+            ),
+            hook_correction_progress_epsilon=_env_float(
+                "Q2_HOOK_CORRECTION_PROGRESS_EPSILON", 4.0
+            ),
+            hook_correction_arrival_radius=_env_float(
+                "Q2_HOOK_CORRECTION_ARRIVAL_RADIUS", 96.0
+            ),
+            hook_correction_max_anchor_distance=_env_float(
+                "Q2_HOOK_CORRECTION_MAX_ANCHOR_DISTANCE", 700.0
+            ),
+            hook_correction_timeout_ticks=_env_int(
+                "Q2_HOOK_CORRECTION_TIMEOUT_TICKS", 40
+            ),
             hook_melee_distance=_env_float("Q2_HOOK_MELEE_DISTANCE", 768.0),
             hook_yaw_deg=_env_float("Q2_HOOK_YAW_DEG", 18.0),
             hook_pitch_deg=_env_float("Q2_HOOK_PITCH_DEG", 22.0),
@@ -396,6 +446,7 @@ class VoxelSpatialReward:
         self.last_visible_count = 0
         self.last_damage_tick = -1000000
         self.last_damage_cell = None
+        self._clear_hook_correction()
         self._reset_episode_state()
         if obs is not None:
             cell = self.cell_for(obs)
@@ -738,6 +789,89 @@ class VoxelSpatialReward:
         size = max(self.voxel_size, 1.0)
         return tuple(int(floor(float(v) / size)) for v in pos)
 
+    def _clear_hook_correction(self) -> None:
+        self._hook_correction_target = None
+        self._hook_correction_anchor = None
+        self._hook_correction_hot_target = None
+        self._hook_correction_heat = 0.0
+        self._hook_correction_initial_distance = 0.0
+        self._hook_correction_best_distance = 0.0
+        self._hook_correction_started_tick = -1
+        self._hook_correction_escape = False
+
+    def _heated_hook_correction(self, obs: Observation) -> Optional[dict]:
+        """Select a reachable hook landing that advances toward lattice heat.
+
+        The opportunity lattice is the destination authority.  Hook zones are
+        the reachability authority: a landing is eligible only when its anchor
+        is in the live observation and that landing makes concrete progress
+        toward the selected heated cell.  This keeps a 1700 u/s grapple pull
+        from becoming ordinary locomotion or an action-rate reward.
+        """
+        direction = self._nearest_memory_signal(obs, "opportunity")
+        heat = float(direction[3])
+        if heat < max(0.0, float(self.hook_correction_min_heat)):
+            return None
+
+        origin = np.asarray(obs.self_state[:3], dtype=np.float32)
+        hot_offset = np.asarray(direction[:3], dtype=np.float32)
+        if float(np.linalg.norm(hot_offset)) <= 1e-6:
+            return None
+        radius = max(float(self.session_memory_search_radius), self.voxel_size)
+        hot_target = origin + hot_offset * radius
+        current_distance = float(np.linalg.norm(hot_target - origin))
+        if current_distance <= max(1.0, float(self.hook_correction_arrival_radius)):
+            return None
+
+        count = max(0, min(
+            int(getattr(obs, "hook_zone_count", 0)),
+            getattr(obs, "hook_zones", np.empty((0, 8))).shape[0],
+        ))
+        best = None
+        max_anchor = max(1.0, float(self.hook_correction_max_anchor_distance))
+        min_advance = max(0.0, float(self.hook_correction_min_advance))
+        for index, zone in enumerate(obs.hook_zones[:count]):
+            anchor = np.asarray(zone[:3], dtype=np.float32)
+            landing = np.asarray(zone[3:6], dtype=np.float32)
+            anchor_distance = float(np.linalg.norm(anchor - origin))
+            if anchor_distance <= 1.0 or anchor_distance > max_anchor:
+                continue
+            landing_distance = float(np.linalg.norm(hot_target - landing))
+            advance = current_distance - landing_distance
+            if advance < min_advance:
+                continue
+            # Prefer the landing that removes the most remaining distance;
+            # heat breaks ties when multiple live zones reach the same area.
+            rank = advance + heat * max(1.0, self.voxel_size)
+            if best is None or rank > best["rank"]:
+                best = {
+                    "rank": float(rank),
+                    "zone_index": int(index),
+                    "anchor": tuple(float(value) for value in anchor),
+                    "landing": tuple(float(value) for value in landing),
+                    "hot_target": tuple(float(value) for value in hot_target),
+                    "heat": heat,
+                    "distance": float(np.linalg.norm(landing - origin)),
+                    "advance": float(advance),
+                    "required": float(int(zone[7]) & HOOK_REQUIRED != 0),
+                }
+        return best
+
+    def _start_hook_correction(
+        self, candidate: dict, obs: Observation, *, escape: bool
+    ) -> None:
+        self._hook_correction_target = candidate["landing"]
+        self._hook_correction_anchor = candidate["anchor"]
+        self._hook_correction_hot_target = candidate["hot_target"]
+        self._hook_correction_heat = float(candidate["heat"])
+        origin = np.asarray(obs.self_state[:3], dtype=np.float32)
+        target = np.asarray(self._hook_correction_target, dtype=np.float32)
+        distance = float(np.linalg.norm(target - origin))
+        self._hook_correction_initial_distance = distance
+        self._hook_correction_best_distance = distance
+        self._hook_correction_started_tick = int(obs.tick)
+        self._hook_correction_escape = bool(escape)
+
     def update(self, obs: Observation) -> Tuple[float, Dict[str, float]]:
         if not self.enabled:
             return 0.0, {"spatial_bonus": 0.0}
@@ -803,8 +937,6 @@ class VoxelSpatialReward:
             bonus += self.aim_alignment_reward
 
         hook_required_near = self._has_required_hook_nearby(obs)
-        if hook_required_near:
-            bonus += self.hook_required_reward
 
         hook_context = self.hook_context(obs)
         hook_action = int(hook_context["hook_action"])
@@ -831,18 +963,94 @@ class VoxelSpatialReward:
         jump_action = bool(movement["jump_action"])
         jump_slow = bool(movement["jump_slow"])
         bonus += movement_delta
+
+        # Grapple is an escape/correction actuator.  Positive reward is based
+        # on one fixed landing target and new best displacement toward it, so
+        # repeatedly issuing hook cannot manufacture reward.  The destination
+        # must be reachable through a live hook zone and advance toward a
+        # positive opportunity/readiness lattice cell.
+        hook_candidate = self._heated_hook_correction(obs)
+        damage_now = max(0.0, float(getattr(obs, "reward_damage_taken", 0.0)))
+        recent_damage = (
+            0 <= int(obs.tick) - int(self.last_damage_tick)
+            <= max(1, int(self.recent_threat_window))
+        )
+        health = float(obs.self_state[6]) if len(obs.self_state) > 6 else 100.0
+        escape_needed = bool(
+            damage_now > 0.0
+            or recent_damage
+            or self.recent_threat_steps > 0
+            or (health <= self.low_health_threshold and visible_count > 0)
+        )
+        correction_needed = bool(
+            stagnated or slow_movement or hook_required_near or escape_needed
+        )
+        hook_correction_available = hook_candidate is not None
+        hook_correction_started = False
+        hook_correction_progress = 0.0
+        hook_correction_progress_delta = 0.0
+        hook_correction_success = False
+        hook_correction_timed_out = False
+        if self._hook_correction_target is not None:
+            hook_correction_report_target = self._hook_correction_target
+            hook_correction_report_anchor = self._hook_correction_anchor
+            hook_correction_report_hot_target = self._hook_correction_hot_target
+            hook_correction_report_heat = self._hook_correction_heat
+            hook_correction_report_escape = self._hook_correction_escape
+        elif hook_candidate is not None:
+            hook_correction_report_target = hook_candidate["landing"]
+            hook_correction_report_anchor = hook_candidate["anchor"]
+            hook_correction_report_hot_target = hook_candidate["hot_target"]
+            hook_correction_report_heat = float(hook_candidate["heat"])
+            hook_correction_report_escape = escape_needed
+        else:
+            hook_correction_report_target = None
+            hook_correction_report_anchor = None
+            hook_correction_report_hot_target = None
+            hook_correction_report_heat = 0.0
+            hook_correction_report_escape = False
+
+        if self._hook_correction_target is not None:
+            elapsed = int(obs.tick) - self._hook_correction_started_tick
+            if elapsed < 0 or elapsed > max(1, self.hook_correction_timeout_ticks):
+                hook_correction_timed_out = True
+                self._clear_hook_correction()
+            else:
+                target = np.asarray(self._hook_correction_target, dtype=np.float32)
+                origin = np.asarray(obs.self_state[:3], dtype=np.float32)
+                distance = float(np.linalg.norm(target - origin))
+                improvement = self._hook_correction_best_distance - distance
+                if improvement >= max(
+                    0.0, float(self.hook_correction_progress_epsilon)
+                ):
+                    self._hook_correction_best_distance = distance
+                    hook_correction_progress = float(improvement)
+                    initial = max(1.0, self._hook_correction_initial_distance)
+                    hook_correction_progress_delta = (
+                        self.hook_correction_progress_reward
+                        * min(1.0, improvement / initial)
+                    )
+                    hook_delta += hook_correction_progress_delta
+                    hook_traversal = True
+                if distance <= max(
+                    1.0, float(self.hook_correction_arrival_radius)
+                ):
+                    hook_correction_success = True
+                    hook_delta += self.hook_correction_complete_reward
+
         if hook_fired:
             hook_delta -= self.hook_cost
-            if hook_required_near and not overspeed:
-                hook_traversal = True
-                hook_delta += self.hook_required_reward
-            if bool(hook_context["hook_enemy_viable"]):
-                hook_enemy = True
-                hook_delta += self.hook_enemy_reward
-                if bool(hook_context["ammo_low"]):
-                    hook_no_ammo_melee = True
-                    hook_delta += self.hook_no_ammo_reward
-            elif not hook_required_near:
+            if (
+                self._hook_correction_target is None
+                and hook_candidate is not None
+                and correction_needed
+                and not hook_correction_success
+            ):
+                self._start_hook_correction(
+                    hook_candidate, obs, escape=escape_needed
+                )
+                hook_correction_started = True
+            elif self._hook_correction_target is None:
                 hook_blind = True
                 hook_delta -= self.hook_blind_penalty
             if overspeed:
@@ -853,11 +1061,19 @@ class VoxelSpatialReward:
             # hook use caused the first movement-reset policy to spam it.
             hook_delta -= self.hook_noop_penalty
         elif hook_released:
-            if overspeed:
+            if self._hook_correction_target is not None:
+                # Release ends this one-shot correction.  It is only positive
+                # if arrival was already measured above; overspeed release is
+                # safe but no longer a farmable reward event.
+                if not hook_correction_success and not overspeed:
+                    hook_delta -= self.hook_release_idle_penalty
+                self._clear_hook_correction()
+            elif overspeed:
                 hook_release_overspeed = True
-                hook_delta += self.hook_release_overspeed_reward
             else:
                 hook_delta -= self.hook_release_idle_penalty
+        if hook_correction_success:
+            self._clear_hook_correction()
         bonus += hook_delta
 
         fired = self._action_fired(obs)
@@ -1045,6 +1261,56 @@ class VoxelSpatialReward:
             "hook_noop_action": float(hook_noop),
             "hook_release_action": float(hook_released),
             "hook_release_overspeed": float(hook_release_overspeed),
+            "hook_correction_available": float(hook_correction_available),
+            "hook_correction_needed": float(correction_needed),
+            "hook_correction_active": float(
+                self._hook_correction_target is not None
+            ),
+            "hook_correction_started": float(hook_correction_started),
+            "hook_correction_escape": float(hook_correction_report_escape),
+            "hook_correction_progress": float(hook_correction_progress),
+            "hook_correction_progress_reward": float(
+                hook_correction_progress_delta
+            ),
+            "hook_correction_success": float(hook_correction_success),
+            "hook_correction_timeout": float(hook_correction_timed_out),
+            "hook_correction_heat": float(hook_correction_report_heat),
+            "hook_correction_target_x": float(
+                hook_correction_report_target[0]
+                if hook_correction_report_target is not None else 0.0
+            ),
+            "hook_correction_target_y": float(
+                hook_correction_report_target[1]
+                if hook_correction_report_target is not None else 0.0
+            ),
+            "hook_correction_target_z": float(
+                hook_correction_report_target[2]
+                if hook_correction_report_target is not None else 0.0
+            ),
+            "hook_correction_anchor_x": float(
+                hook_correction_report_anchor[0]
+                if hook_correction_report_anchor is not None else 0.0
+            ),
+            "hook_correction_anchor_y": float(
+                hook_correction_report_anchor[1]
+                if hook_correction_report_anchor is not None else 0.0
+            ),
+            "hook_correction_anchor_z": float(
+                hook_correction_report_anchor[2]
+                if hook_correction_report_anchor is not None else 0.0
+            ),
+            "hook_correction_hot_x": float(
+                hook_correction_report_hot_target[0]
+                if hook_correction_report_hot_target is not None else 0.0
+            ),
+            "hook_correction_hot_y": float(
+                hook_correction_report_hot_target[1]
+                if hook_correction_report_hot_target is not None else 0.0
+            ),
+            "hook_correction_hot_z": float(
+                hook_correction_report_hot_target[2]
+                if hook_correction_report_hot_target is not None else 0.0
+            ),
             "movement_speed": float(horizontal_speed),
             "movement_intent": float(movement_intent),
             "forward_intent": float(forward_intent),

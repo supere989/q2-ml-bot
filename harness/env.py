@@ -325,11 +325,10 @@ class Q2MultiEnv:
             f"set ml_async {1 if self.ml_async else 0}",
             "set use_hook 1",
             "set hook_speed 1900",
+            # Lithium's live Hook_Service uses hook_pullspeed as a direct
+            # velocity override.  Do not emit the old Python-only pullscale,
+            # gravity-compensation, minimum-lift, or pullspeed-max cvars.
             "set hook_pullspeed 1700",
-            "set hook_pullspeed_max 2000",
-            "set hook_pullscale 0.25",
-            "set hook_gravity_comp 1.0",
-            "set hook_min_lift 180",
             "set hook_maxtime 15.0",
             "set hook_damage 1",
             "set hook_initdamage 10",

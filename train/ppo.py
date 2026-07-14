@@ -2062,6 +2062,16 @@ def train(cfg: dict):
                 ("hook_noop_action", "behavior/hook_noop_rate"),
                 ("hook_release_action", "behavior/hook_release_rate"),
                 ("hook_release_overspeed", "behavior/hook_release_overspeed_rate"),
+                ("hook_correction_available", "hook/target_available_rate"),
+                ("hook_correction_needed", "hook/correction_needed_rate"),
+                ("hook_correction_active", "hook/correction_active_rate"),
+                ("hook_correction_started", "hook/correction_started_rate"),
+                ("hook_correction_escape", "hook/escape_correction_rate"),
+                ("hook_correction_progress", "hook/progress_units_mean"),
+                ("hook_correction_progress_reward", "hook/progress_reward_mean"),
+                ("hook_correction_success", "hook/correction_success_rate"),
+                ("hook_correction_timeout", "hook/correction_timeout_rate"),
+                ("hook_correction_heat", "hook/target_heat_mean"),
             ):
                 writer.add_scalar(tag, rollout_behavior[key] / denom, total_env_steps)
             writer.add_scalar(

@@ -125,11 +125,9 @@ def _write_config(
         "set use_startchasecam 0",
         "set use_hook 1",
         "set hook_speed 1900",
+        # Lithium Hook_Service actually applies this as a direct velocity
+        # override; the former pullscale/gravity/min-lift/max cvars were inert.
         "set hook_pullspeed 1700",
-        "set hook_pullspeed_max 2000",
-        "set hook_pullscale 0.25",
-        "set hook_gravity_comp 1.0",
-        "set hook_min_lift 180",
         "set hook_maxtime 15.0",
         "set hook_damage 1",
         "set hook_initdamage 10",

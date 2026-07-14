@@ -20,7 +20,11 @@ R_KILL          = _w("R_KILL",          1.0)
 R_DAMAGE_TAKEN  = _w("R_DAMAGE_TAKEN",  0.001)
 R_DEATH         = _w("R_DEATH",         0.5)
 R_ITEM          = _w("R_ITEM",          0.1)
-R_HOOK          = _w("R_HOOK",          0.2)
+# Deprecated: the engine channel cannot prove that grapple displacement moved
+# toward an intended destination, so treating it as a rate/value signal made
+# policies spam hook.  Positive hook shaping now lives in
+# VoxelSpatialReward's lattice-target correction contract.
+R_HOOK          = 0.0
 from dataclasses import dataclass, field
 from typing import Optional
 
