@@ -12,6 +12,7 @@ pub const HOOK_ORACLE_SCHEMA: &str = "q2-hook-oracle-v1";
 pub const HOOK_PARITY_NAME: &str = "q2-hook-q2ded-parity";
 pub const HOOK_PARITY_SCHEMA: &str = "q2-hook-parity-v1";
 pub const HOOK_PARITY_CASES_V1: u32 = 8;
+pub const B1_RUNTIME_AUTHORITY_SEAL_SCHEMA: &str = "q2-b1-runtime-authority-seal-v1";
 
 pub const MASK_PLAYERSOLID_V1: u32 = 33_619_971;
 pub const MASK_SHOT_V1: u32 = 100_663_299;
@@ -542,7 +543,124 @@ impl HookOracleAdmission {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct B1NormativeDocuments {
+    pub design_sha256: String,
+    pub plan_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct B1AuthorityExecutables {
+    pub cm_sha256: String,
+    pub pmove_sha256: String,
+    pub hook_sha256: String,
+    pub fall_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct B1AuthorityIdentity {
+    pub tool_identity: String,
+    pub physics_identity: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct B1AuthorityIdentities {
+    pub collision: B1AuthorityIdentity,
+    pub pmove: B1AuthorityIdentity,
+    pub hook: B1AuthorityIdentity,
+    pub fall: B1AuthorityIdentity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct B1RuntimeAuthoritySeal {
+    pub schema: String,
+    pub normative_documents: B1NormativeDocuments,
+    pub hook_parity_attestation_sha256: String,
+    pub fixture_bsp_sha256: String,
+    pub analysis_bsp_sha256: String,
+    pub executables: B1AuthorityExecutables,
+    pub identities: B1AuthorityIdentities,
+}
+
+impl B1RuntimeAuthoritySeal {
+    fn validate(&self, bsp: &BspIdentity, admissions: &OracleAdmissions) -> AtlasResult<()> {
+        if self.schema != B1_RUNTIME_AUTHORITY_SEAL_SCHEMA {
+            return Err(AtlasError::InvalidFormat(
+                "B1 runtime authority seal schema mismatch".to_owned(),
+            ));
+        }
+        for (name, digest) in [
+            ("B1 design", &self.normative_documents.design_sha256),
+            ("B1 plan", &self.normative_documents.plan_sha256),
+            ("B1 hook attestation", &self.hook_parity_attestation_sha256),
+            ("B1 fixture BSP", &self.fixture_bsp_sha256),
+            ("B1 analysis BSP", &self.analysis_bsp_sha256),
+            ("B1 CM executable", &self.executables.cm_sha256),
+            ("B1 Pmove executable", &self.executables.pmove_sha256),
+            ("B1 hook executable", &self.executables.hook_sha256),
+            ("B1 fall executable", &self.executables.fall_sha256),
+            (
+                "B1 collision tool",
+                &self.identities.collision.tool_identity,
+            ),
+            (
+                "B1 collision physics",
+                &self.identities.collision.physics_identity,
+            ),
+            ("B1 Pmove tool", &self.identities.pmove.tool_identity),
+            ("B1 Pmove physics", &self.identities.pmove.physics_identity),
+            ("B1 hook tool", &self.identities.hook.tool_identity),
+            ("B1 hook physics", &self.identities.hook.physics_identity),
+            ("B1 fall tool", &self.identities.fall.tool_identity),
+            ("B1 fall physics", &self.identities.fall.physics_identity),
+        ] {
+            validate_digest(name, digest)?;
+        }
+        if self.analysis_bsp_sha256 != bsp.sha256 {
+            return Err(AtlasError::InvalidFormat(
+                "B1 runtime authority seal is bound to a different BSP".to_owned(),
+            ));
+        }
+        let collision = &admissions.collision_oracle.tool;
+        if self.executables.cm_sha256 != collision.executable_sha256
+            || self.identities.collision.physics_identity != collision.physics_identity_sha256
+        {
+            return Err(AtlasError::InvalidFormat(
+                "B1 collision authority differs from oracle admission".to_owned(),
+            ));
+        }
+        let pmove = admissions.pmove_oracle.as_ref().ok_or_else(|| {
+            AtlasError::InvalidFormat(
+                "B1 runtime authority seal requires Pmove admission".to_owned(),
+            )
+        })?;
+        if self.executables.pmove_sha256 != pmove.tool.executable_sha256
+            || self.identities.pmove.physics_identity != pmove.tool.physics_identity_sha256
+        {
+            return Err(AtlasError::InvalidFormat(
+                "B1 Pmove authority differs from oracle admission".to_owned(),
+            ));
+        }
+        if let Some(hook) = &admissions.hook_oracle {
+            if self.executables.hook_sha256 != hook.tool.executable_sha256
+                || self.identities.hook.physics_identity != hook.tool.physics_identity_sha256
+            {
+                return Err(AtlasError::InvalidFormat(
+                    "B1 hook authority differs from oracle admission".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OracleAdmissions {
+    pub b1_runtime_authority_seal: B1RuntimeAuthoritySeal,
     pub collision_oracle: CollisionOracleAdmission,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pmove_oracle: Option<PmoveOracleAdmission>,
@@ -552,6 +670,7 @@ pub struct OracleAdmissions {
 
 impl OracleAdmissions {
     pub fn admit(&self, bsp: &BspIdentity) -> AtlasResult<EdgeAdmission> {
+        self.b1_runtime_authority_seal.validate(bsp, self)?;
         self.collision_oracle.validate(bsp)?;
         if let Some(pmove) = &self.pmove_oracle {
             pmove.validate(bsp, &self.collision_oracle)?;

@@ -62,11 +62,12 @@ def _replace_entities(path: Path, entities: bytes) -> None:
     path.write_bytes(data)
 
 
-def _required_artifacts() -> tuple[Path, Path, Path, Path]:
+def _required_artifacts() -> tuple[Path, Path, Path, Path, Path]:
     cm = CLIENT / "release/q2-cm-oracle"
     pmove = CLIENT / "release/q2-pmove-oracle"
     hook = LITHIUM / "tools/q2-hook-oracle"
-    missing = [path for path in (cm, pmove, hook, ATTESTATION, FIXTURE_MODULE) if not path.is_file()]
+    fall = LITHIUM / "tools/q2-fall-oracle"
+    missing = [path for path in (cm, pmove, hook, fall, ATTESTATION, FIXTURE_MODULE) if not path.is_file()]
     if missing:
         pytest.skip("B1 integration artifacts unavailable: " + ", ".join(map(str, missing)))
     packer = ROOT / "target/debug/q2-atlas-pack"
@@ -77,11 +78,11 @@ def _required_artifacts() -> tuple[Path, Path, Path, Path]:
         ],
         cwd=ROOT, check=True,
     )
-    return cm, pmove, hook, packer
+    return cm, pmove, hook, fall, packer
 
 
 def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
-    cm, pmove, hook, packer = _required_artifacts()
+    cm, pmove, hook, fall, packer = _required_artifacts()
     bsp = tmp_path / "atlas-fixture.bsp"
     _fixture_writer()(bsp, brushes=[((-128, -128, -128), (128, 128, 0), 1)])
     _replace_entities(
@@ -103,6 +104,7 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
     candidate = analyze_map(
         bsp, tmp_path / "candidate", "atlas-fixture", provenance,
         cm_oracle=cm, pmove_oracle=pmove, hook_oracle=hook,
+        fall_oracle=fall,
         hook_attestation=ATTESTATION, packer=packer, limits=limits,
         independent_cold=False,
     )
@@ -117,6 +119,7 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
         manifest = analyze_map(
             bsp, output, "atlas-fixture", provenance,
             cm_oracle=cm, pmove_oracle=pmove, hook_oracle=hook,
+            fall_oracle=fall,
             hook_attestation=ATTESTATION, packer=packer, limits=limits,
         )
         assert manifest["status"] == "passed"
@@ -154,6 +157,16 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
                     <= proof["peak_rss_limit_bytes"]
                 )
                 proof.pop("sampled_process_tree_peak_rss_bytes")
+                assert proof["artifact_sha256"] == proof["cold_artifact_sha256"]
+                assert (
+                    proof["artifact_semantic_sha256"]
+                    == proof["cold_artifact_semantic_sha256"]
+                )
+                assert 0 < proof.pop("elapsed_milliseconds") <= 300_000
+                assert proof["timeout_limit_milliseconds"] == 300_000
+                performance = manifest["performance"]
+                assert 0 < performance.pop("primary_elapsed_milliseconds") <= 300_000
+                assert performance["primary_timeout_limit_milliseconds"] == 300_000
             assert left_manifest == right_manifest, name
         elif name == "atlas-fixture.atlas.manifest.json":
             left_manifest = json.loads(left)

@@ -87,6 +87,10 @@ def main() -> int:
     parser.add_argument("--client-root", type=Path, default=DEFAULT_CLIENT)
     parser.add_argument("--lithium-root", type=Path, default=DEFAULT_LITHIUM)
     parser.add_argument("--hook-attestation", type=Path, default=DEFAULT_ATTESTATION)
+    parser.add_argument(
+        "--fall-oracle", type=Path,
+        help="exact B1 q2-fall-oracle (defaults beneath --lithium-root)",
+    )
     parser.add_argument("--packer", type=Path)
     parser.add_argument("--verifier", type=Path)
     args = parser.parse_args()
@@ -104,7 +108,11 @@ def main() -> int:
     cm = args.client_root / "release/q2-cm-oracle"
     pmove = args.client_root / "release/q2-pmove-oracle"
     hook = args.lithium_root / "tools/q2-hook-oracle"
-    for path in (cm, pmove, hook, packer, verifier, args.hook_attestation):
+    fall = (
+        args.fall_oracle.resolve() if args.fall_oracle is not None
+        else args.lithium_root / "tools/q2-fall-oracle"
+    )
+    for path in (cm, pmove, hook, fall, packer, verifier, args.hook_attestation):
         if not path.is_file():
             raise AtlasAnalysisError(f"required B1 artifact missing: {path}")
     manifests = []
@@ -123,6 +131,7 @@ def main() -> int:
                 manifests.append(analyze_map(
                     bsp, args.output, map_id, records[map_id], cm_oracle=cm,
                     pmove_oracle=pmove, hook_oracle=hook,
+                    fall_oracle=fall,
                     hook_attestation=args.hook_attestation, packer=packer,
                     verifier=verifier,
                 ))
@@ -155,6 +164,7 @@ def main() -> int:
         manifests.append(analyze_map(
             args.bsp, args.output, args.map_id, record, cm_oracle=cm,
             pmove_oracle=pmove, hook_oracle=hook,
+            fall_oracle=fall,
             hook_attestation=args.hook_attestation, packer=packer,
             verifier=verifier,
             generator_claims_sha256=claims_digest,

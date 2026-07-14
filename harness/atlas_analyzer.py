@@ -1019,6 +1019,7 @@ def _admissions(
     pmove: OracleProcess | None,
     hook: HookOracleProcess | None = None,
     hook_attestation: Path | None = None,
+    b1_runtime_authority_seal: Mapping[str, Any] | None = None,
 ) -> dict:
     def tool(binary: Path, identity: dict) -> dict:
         return {
@@ -1041,7 +1042,12 @@ def _admissions(
         "source": collision_source,
     }
     collision["contract_sha256"] = sha256_bytes(_rust_struct_json(collision))
-    output: dict[str, Any] = {"collision_oracle": collision}
+    if b1_runtime_authority_seal is None:
+        raise AtlasAnalysisError("oracle admissions lack B1 runtime authority seal")
+    output: dict[str, Any] = {
+        "b1_runtime_authority_seal": dict(b1_runtime_authority_seal),
+        "collision_oracle": collision,
+    }
     if pmove is not None:
         parameters = pmove.identity["parameters"]
         pmove_source = {**pmove.identity["source"], "build_contract": build_contract}
@@ -2196,7 +2202,10 @@ def _write_canonical_atlas_manifest(
         "l3_cells": int(pack_result["l3_cells"]),
     }
     model0 = cm_identity["model0"]
-    oracle_records = {"collision_oracle": admissions["collision_oracle"]}
+    oracle_records = {
+        "b1_runtime_authority_seal": admissions["b1_runtime_authority_seal"],
+        "collision_oracle": admissions["collision_oracle"],
+    }
     if "pmove_oracle" in admissions:
         oracle_records["pmove_oracle"] = admissions["pmove_oracle"]
     if "hook_oracle" in admissions:
@@ -2306,8 +2315,9 @@ def _process_tree_rss_bytes(root_pid: int) -> int:
 
 def _run_measured_process(
     command: Sequence[str], *, timeout: float,
-) -> tuple[subprocess.CompletedProcess[str], int]:
+) -> tuple[subprocess.CompletedProcess[str], int, int]:
     """Run a process while sampling whole-process-tree RSS at 100 Hz."""
+    started = time.monotonic()
     process = subprocess.Popen(
         list(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         start_new_session=True,
@@ -2347,7 +2357,14 @@ def _run_measured_process(
         raise AtlasAnalysisError(
             "independent cold analyzer did not produce a positive RSS sample"
         )
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr), peak_rss
+    elapsed_milliseconds = max(
+        1, math.ceil((time.monotonic() - started) * 1000.0)
+    )
+    return (
+        subprocess.CompletedProcess(command, process.returncode, stdout, stderr),
+        peak_rss,
+        elapsed_milliseconds,
+    )
 
 
 def _full_cold_rebuild(
@@ -2359,6 +2376,7 @@ def _full_cold_rebuild(
     cm_oracle: Path,
     pmove_oracle: Path | None,
     hook_oracle: Path | None,
+    fall_oracle: Path | None,
     hook_attestation: Path | None,
     packer: Path,
     verifier: Path,
@@ -2389,6 +2407,7 @@ def _full_cold_rebuild(
             "cm_oracle": str(cm_oracle.resolve()),
             "pmove_oracle": None if pmove_oracle is None else str(pmove_oracle.resolve()),
             "hook_oracle": None if hook_oracle is None else str(hook_oracle.resolve()),
+            "fall_oracle": None if fall_oracle is None else str(fall_oracle.resolve()),
             "hook_attestation": (
                 None if hook_attestation is None else str(hook_attestation.resolve())
             ),
@@ -2406,7 +2425,7 @@ def _full_cold_rebuild(
         }
         specification_path = root / "worker.json"
         specification_path.write_bytes(canonical_json(specification) + b"\n")
-        completed, peak_rss = _run_measured_process(
+        completed, peak_rss, elapsed_milliseconds = _run_measured_process(
             [sys.executable, str(worker), str(specification_path)],
             timeout=limits.full_cold_timeout_seconds,
         )
@@ -2425,7 +2444,9 @@ def _full_cold_rebuild(
         }:
             raise AtlasAnalysisError("independent cold analyzer result contract mismatch")
         digests = {}
+        cold_digests = {}
         semantic_digests = {}
+        cold_semantic_digests = {}
         for suffix in artifact_suffixes:
             primary = primary_dir / f"{canonical_map_id}{suffix}"
             cold = cold_dir / f"{canonical_map_id}{suffix}"
@@ -2442,18 +2463,27 @@ def _full_cold_rebuild(
                     )
                 primary_manifest.pop("build_peak_rss_bytes")
                 cold_manifest.pop("build_peak_rss_bytes")
+                primary_semantic_digest = sha256_bytes(
+                    canonical_json(primary_manifest)
+                )
+                cold_semantic_digest = sha256_bytes(
+                    canonical_json(cold_manifest)
+                )
                 if primary_manifest != cold_manifest:
                     raise AtlasAnalysisError(
                         "independent cold artifact semantic mismatch: " + suffix
                     )
-                semantic_digests[suffix] = sha256_bytes(canonical_json(primary_manifest))
+                semantic_digests[suffix] = primary_semantic_digest
+                cold_semantic_digests[suffix] = cold_semantic_digest
             else:
                 primary_digest = sha256_file(primary)
-                if primary_digest != sha256_file(cold):
+                cold_digest = sha256_file(cold)
+                if primary_digest != cold_digest:
                     raise AtlasAnalysisError(
                         f"independent cold artifact mismatch: {suffix}"
                     )
                 digests[suffix] = primary_digest
+                cold_digests[suffix] = cold_digest
 
         verifier_summaries = []
         for directory in (primary_dir, cold_dir):
@@ -2485,17 +2515,23 @@ def _full_cold_rebuild(
             raise AtlasAnalysisError("independent cold verifier summaries differ")
     if peak_rss > 512 * 1024 * 1024:
         raise AtlasAnalysisError("independent cold analyzer exceeded 512 MiB peak RSS")
+    if elapsed_milliseconds > 300_000:
+        raise AtlasAnalysisError("independent cold analyzer exceeded 300 seconds")
     return {
         "schema": "q2-atlas-full-cold-proof-v1",
         "independent_process_launches": 1,
         "artifact_count": len(artifact_suffixes),
         "artifact_sha256": digests,
         "artifact_semantic_sha256": semantic_digests,
+        "cold_artifact_sha256": cold_digests,
+        "cold_artifact_semantic_sha256": cold_semantic_digests,
         "verifier_sha256": sha256_file(verifier),
         "verification": verifier_summaries[0],
         "sample_interval_milliseconds": 10,
         "sampled_process_tree_peak_rss_bytes": peak_rss,
         "peak_rss_limit_bytes": 512 * 1024 * 1024,
+        "elapsed_milliseconds": elapsed_milliseconds,
+        "timeout_limit_milliseconds": 300_000,
     }
 
 
@@ -3081,6 +3117,10 @@ def analyze_map(
     independent_cold: bool = True,
 ) -> dict:
     primary_started = time.monotonic()
+    if limits.full_cold_timeout_seconds != 300.0:
+        raise AtlasAnalysisError(
+            "Atlas full-cold timeout must remain the frozen 300 seconds"
+        )
     if (
         pmove_oracle is None or hook_oracle is None or fall_oracle is None
         or hook_attestation is None
@@ -3217,6 +3257,15 @@ def analyze_map(
             )):
                 raise AtlasAnalysisError(
                     "persistent oracle identities differ from admitted B1 seal"
+                )
+            if hook_context is not None and any((
+                hook_context.identity["tool_identity"]
+                != b1_authority_seal.hook_tool_identity,
+                hook_context.identity["physics_identity"]
+                != b1_authority_seal.hook_physics_identity,
+            )):
+                raise AtlasAnalysisError(
+                    "persistent hook identity differs from admitted B1 seal"
                 )
             if hook_materialization is not None:
                 process_identities = {
@@ -3387,6 +3436,7 @@ def analyze_map(
                 metadata.sha256, provenance_sha256, cm, pmove_context,
                 hook_context if compiled_hooks["edges"] else None,
                 hook_attestation,
+                b1_authority_seal.as_dict(),
             )
             cm_identity = dict(cm.identity)
             cm_identity.pop("map", None)
@@ -3492,16 +3542,21 @@ def analyze_map(
     }
     analyzer_inputs = [
         Path(__file__),
+        Path(__file__).resolve().with_name("atlas_b1_authority.py"),
+        Path(__file__).resolve().with_name("atlas_drop_replay.py"),
+        Path(__file__).resolve().with_name("atlas_exact_drops.py"),
         Path(__file__).resolve().with_name("atlas_entity_semantics.py"),
         Path(__file__).resolve().with_name("atlas_surface_bands.py"),
         Path(__file__).resolve().with_name("generated_claim_probes.py"),
+        Path(__file__).resolve().with_name("hook_claims_v2.py"),
+        Path(__file__).resolve().with_name("ibsp38.py"),
         Path(__file__).resolve().parents[1] / "tools/atlas_cold_worker.py",
-        Path(__file__).resolve().parents[1] / "crates/q2-lattice/src/bin/q2_atlas_pack.rs",
-        Path(__file__).resolve().parents[1] / "crates/q2-lattice/src/atlas/admission.rs",
-        Path(__file__).resolve().parents[1] / "crates/q2-lattice/src/atlas/manifest.rs",
-        Path(__file__).resolve().parents[1] / "crates/q2-lattice/src/atlas/storage.rs",
         Path(__file__).resolve().parents[1] / "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md",
+        Path(__file__).resolve().parents[1] / "docs/MULTIRES-LATTICE-MAP-ATLAS-PLAN-2026-07-14.md",
     ]
+    analyzer_inputs.extend(sorted(
+        (Path(__file__).resolve().parents[1] / "crates/q2-lattice/src").rglob("*.rs")
+    ))
     analyzer_sha256 = sha256_bytes(canonical_json([
         {
             "path": str(path.relative_to(Path(__file__).resolve().parents[1])),
@@ -3577,6 +3632,11 @@ def analyze_map(
         "verifier_sha256": sha256_file(verifier),
         "verification": verification,
     }
+    primary_elapsed_milliseconds = max(
+        1, math.ceil((time.monotonic() - primary_started) * 1000.0)
+    )
+    if primary_elapsed_milliseconds > 300_000:
+        raise AtlasAnalysisError("primary Atlas analysis exceeded 300 seconds")
     manifest = {
         "schema": SCHEMA,
         "status": "candidate",
@@ -3606,6 +3666,9 @@ def analyze_map(
             "analyzer_sha256": analyzer_sha256,
             "atlas_manifest_sha256": sha256_file(atlas_manifest_path),
         },
+        "admissions": {
+            "b1_runtime_authority_seal": b1_authority_seal.as_dict(),
+        },
         "oracles": {
             "collision": {
                 "status": "oracle", "admitted": True,
@@ -3620,6 +3683,13 @@ def analyze_map(
                 "physics_identity": pmove_identity["physics_identity"],
                 "tool_identity": pmove_identity["tool_identity"],
                 "requests": oracle_manifest["pmove"]["requests"],
+            },
+            "fall": {
+                "status": "oracle", "admitted": True,
+                "executable_sha256": oracle_manifest["fall"]["binary_sha256"],
+                "physics_identity": oracle_manifest["fall"]["identity"]["physics_identity"],
+                "tool_identity": oracle_manifest["fall"]["identity"]["tool_identity"],
+                "requests": oracle_manifest["fall"]["requests"],
             },
             "hook": hook,
         },
@@ -3646,6 +3716,7 @@ def analyze_map(
         "l0_plane_counts": l0_plane_counts,
         "confidence_summary": {
             "collision": "exact-engine", "movement": "exact-engine" if pmove_oracle else "omitted",
+            "fall": "exact-lithium",
             "hook": (
                 "exact-engine-replayed-edges" if compiled_hooks["edges"]
                 else "attested-no-replayed-edge" if hook["authority_admitted"]
@@ -3655,8 +3726,11 @@ def analyze_map(
         },
         "limitations": limitations,
         "performance": {
+            "primary_elapsed_milliseconds": primary_elapsed_milliseconds,
+            "primary_timeout_limit_milliseconds": 300_000,
             "cm_requests": oracle_manifest["collision"]["requests"],
             "pmove_requests": 0 if oracle_manifest["pmove"] is None else oracle_manifest["pmove"]["requests"],
+            "fall_requests": oracle_manifest["fall"]["requests"],
             "surface_occupancy_requests": (
                 surface_evidence["model0_occupancy_requests"]
                 + surface_evidence["inline_occupancy_requests"]
@@ -3679,7 +3753,8 @@ def analyze_map(
         cold_proof = _full_cold_rebuild(
             bsp, output_dir, canonical_map_id, provenance,
             cm_oracle=cm_oracle, pmove_oracle=pmove_oracle,
-            hook_oracle=hook_oracle, hook_attestation=hook_attestation,
+            hook_oracle=hook_oracle, fall_oracle=fall_oracle,
+            hook_attestation=hook_attestation,
             packer=packer, verifier=verifier, limits=limits,
             generator_claims_sha256=generator_claims_sha256,
             generator_claims=generator_claims,

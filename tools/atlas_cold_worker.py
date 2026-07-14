@@ -22,6 +22,7 @@ def main() -> int:
     if set(specification) != {
         "schema", "bsp", "output_dir", "canonical_map_id", "provenance",
         "cm_oracle", "pmove_oracle", "hook_oracle", "hook_attestation",
+        "fall_oracle",
         "packer", "verifier", "limits", "generator_claims_sha256",
         "generator_claims", "generator_safety", "hook_materialization",
     } or specification["schema"] != "q2-atlas-cold-worker-v1":
@@ -35,6 +36,7 @@ def main() -> int:
         cm_oracle=Path(specification["cm_oracle"]),
         pmove_oracle=optional_path(specification["pmove_oracle"]),
         hook_oracle=optional_path(specification["hook_oracle"]),
+        fall_oracle=optional_path(specification["fall_oracle"]),
         hook_attestation=optional_path(specification["hook_attestation"]),
         packer=Path(specification["packer"]),
         verifier=Path(specification["verifier"]),

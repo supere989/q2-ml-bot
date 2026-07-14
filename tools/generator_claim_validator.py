@@ -1162,7 +1162,8 @@ def _validate_hazards(
         {
             "l0_raw_cells", "l0_expanded_cells", "types",
             "lethal_drop_edges", "guarded_drop_edges",
-            "uncontained_drop_edges",
+            "uncontained_drop_edges", "classification_status", "evidence",
+            "validation_version", "drop_classification",
         },
         "compiled hazards",
     )
@@ -1174,6 +1175,39 @@ def _validate_hazards(
         failures.append("aggregate Atlas has no raw hazard cells")
     if _integer(hazards.get("l0_expanded_cells"), "aggregate expanded hazard cells", minimum=0) <= 0:
         failures.append("aggregate Atlas has no expanded hazard cells")
+    if hazards.get("classification_status") != ORACLE_STATUS:
+        failures.append("aggregate Atlas hazard classification is not oracle-authoritative")
+    if _integer(hazards.get("evidence"), "aggregate hazard evidence", minimum=0) <= 0:
+        failures.append("aggregate Atlas hazard classification has no evidence")
+    if _integer(
+        hazards.get("validation_version"), "aggregate hazard validation version", minimum=0
+    ) <= 0:
+        failures.append("aggregate Atlas hazard classification has no validation version")
+    drop = _mapping(hazards.get("drop_classification"), "exact drop classification")
+    _exact_keys(drop, {
+        "classification_status", "evidence", "validation_version",
+        "candidate_count", "exact_safe", "exact_lethal", "unknown_omitted",
+        "severity_counts",
+    }, "exact drop classification")
+    if drop.get("classification_status") != ORACLE_STATUS:
+        failures.append("drop classification is not oracle-authoritative")
+    if _integer(drop.get("evidence"), "drop evidence", minimum=0) <= 0:
+        failures.append("drop classification has no exact authority evidence")
+    if _integer(drop.get("validation_version"), "drop validation version", minimum=0) <= 0:
+        failures.append("drop classification has no validation version")
+    drop_counts = [
+        _integer(drop.get(name), f"drop {name}", minimum=0)
+        for name in ("exact_safe", "exact_lethal", "unknown_omitted")
+    ]
+    if sum(drop_counts) != _integer(
+        drop.get("candidate_count"), "drop candidate count", minimum=0
+    ):
+        failures.append("drop classification counts do not cover every candidate")
+    severity_counts = _mapping(drop.get("severity_counts"), "drop severity counts")
+    if not set(severity_counts).issubset({"none", "footstep", "short", "fall", "far"}):
+        failures.append("drop severity classes differ from fall oracle")
+    for name, count in severity_counts.items():
+        _integer(count, f"drop severity {name}", minimum=0)
 
     meta = claims.get("_meta")
     safety_failures = []
@@ -1579,7 +1613,7 @@ def validate_stock_analysis(
     required_hazard_keys = {
         "l0_raw_cells", "l0_expanded_cells", "types", "lethal_drop_edges",
         "guarded_drop_edges", "uncontained_drop_edges", "classification_status",
-        "evidence", "validation_version",
+        "evidence", "validation_version", "drop_classification",
     }
     if not required_hazard_keys.issubset(hazards):
         hazard_failures.append(
@@ -1605,6 +1639,25 @@ def validate_stock_analysis(
             hazards.get("validation_version"), "stock hazard validation version", minimum=0
         ) <= 0:
             hazard_failures.append("stock hazard classification has no validation version")
+        drop = _mapping(
+            hazards.get("drop_classification"), "compiled stock drop classification"
+        )
+        required_drop_keys = {
+            "classification_status", "evidence", "validation_version",
+            "candidate_count", "exact_safe", "exact_lethal", "unknown_omitted",
+            "severity_counts",
+        }
+        if set(drop) != required_drop_keys:
+            hazard_failures.append("stock drop classification contract differs")
+        elif (
+            drop.get("classification_status") != ORACLE_STATUS
+            or _integer(drop.get("evidence"), "stock drop evidence", minimum=0) <= 0
+            or _integer(
+                drop.get("validation_version"),
+                "stock drop validation version", minimum=0,
+            ) <= 0
+        ):
+            hazard_failures.append("stock drop classification lacks oracle authority")
     criteria = {
         "analysis_quality": quality,
         "artifact_authority": artifact_authority,

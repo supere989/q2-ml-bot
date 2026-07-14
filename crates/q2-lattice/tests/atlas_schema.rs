@@ -3,15 +3,16 @@ use std::time::Instant;
 
 use q2_lattice_rs::atlas::{
     ATLAS_CELL_SIZES, ATLAS_MAGIC, ATLAS_SCHEMA_VERSION, ArtifactManifest, AtlasAggregateCell,
-    AtlasArtifact, AtlasCounts, AtlasLevel, AtlasLimits, AtlasManifest, AtlasOrigin, BspIdentity,
-    COLLISION_ORACLE_NAME, COLLISION_ORACLE_SCHEMA, COST_INFINITY, ChannelManifest,
-    CollisionOracleAdmission, CollisionParameters, CollisionSourceClosure, ConservativeChild,
-    CorridorWitness, EdgeInput, EdgeType, GridIndex, GridManifest, HOOK_ORACLE_NAME,
-    HOOK_ORACLE_SCHEMA, HOOK_PARITY_CASES_V1, HOOK_PARITY_NAME, HOOK_PARITY_SCHEMA,
-    HookOracleAdmission, HookParameters, HookParityAttestation, HookSourceClosure, HullManifest,
-    L0Address, L0BitPlane, L0Chunk, L0ScalarPlane, L1Graph, L1Node, MASK_PLAYERSOLID_V1,
-    MASK_SHOT_V1, ManifestBudgets, NodeFlags, ORACLE_SEMANTIC_VERSION, OracleAdmissions,
-    OracleBspBinding, OracleToolIdentity, PMOVE_ORACLE_NAME, PMOVE_ORACLE_SCHEMA,
+    AtlasArtifact, AtlasCounts, AtlasLevel, AtlasLimits, AtlasManifest, AtlasOrigin,
+    B1AuthorityExecutables, B1AuthorityIdentities, B1AuthorityIdentity, B1NormativeDocuments,
+    B1RuntimeAuthoritySeal, BspIdentity, COLLISION_ORACLE_NAME, COLLISION_ORACLE_SCHEMA,
+    COST_INFINITY, ChannelManifest, CollisionOracleAdmission, CollisionParameters,
+    CollisionSourceClosure, ConservativeChild, CorridorWitness, EdgeInput, EdgeType, GridIndex,
+    GridManifest, HOOK_ORACLE_NAME, HOOK_ORACLE_SCHEMA, HOOK_PARITY_CASES_V1, HOOK_PARITY_NAME,
+    HOOK_PARITY_SCHEMA, HookOracleAdmission, HookParameters, HookParityAttestation,
+    HookSourceClosure, HullManifest, L0Address, L0BitPlane, L0Chunk, L0ScalarPlane, L1Graph,
+    L1Node, MASK_PLAYERSOLID_V1, MASK_SHOT_V1, ManifestBudgets, NodeFlags, ORACLE_SEMANTIC_VERSION,
+    OracleAdmissions, OracleBspBinding, OracleToolIdentity, PMOVE_ORACLE_NAME, PMOVE_ORACLE_SCHEMA,
     PmoveOracleAdmission, PmoveParameters, PmoveSourceClosure, SparseL0, Stance, ToolIdentity,
     aggregate_conservative, decode_zstd_envelope, encode_zstd_envelope, sha256_hex,
 };
@@ -170,7 +171,47 @@ fn oracle_admissions(bsp: &BspIdentity, pmove: bool, hook: bool) -> OracleAdmiss
         }
         .seal()
     });
+    let pmove_tool = pmove_admission.as_ref().map(|item| &item.tool);
+    let hook_tool = hook_admission.as_ref().map(|item| &item.tool);
     OracleAdmissions {
+        b1_runtime_authority_seal: B1RuntimeAuthoritySeal {
+            schema: "q2-b1-runtime-authority-seal-v1".to_owned(),
+            normative_documents: B1NormativeDocuments {
+                design_sha256: digest(0x41),
+                plan_sha256: digest(0x42),
+            },
+            hook_parity_attestation_sha256: digest(0x43),
+            fixture_bsp_sha256: digest(0x44),
+            analysis_bsp_sha256: bsp.sha256.clone(),
+            executables: B1AuthorityExecutables {
+                cm_sha256: collision.tool.executable_sha256.clone(),
+                pmove_sha256: pmove_tool
+                    .map_or_else(|| digest(0x45), |item| item.executable_sha256.clone()),
+                hook_sha256: hook_tool
+                    .map_or_else(|| digest(0x46), |item| item.executable_sha256.clone()),
+                fall_sha256: digest(0x47),
+            },
+            identities: B1AuthorityIdentities {
+                collision: B1AuthorityIdentity {
+                    tool_identity: digest(0x48),
+                    physics_identity: collision.tool.physics_identity_sha256.clone(),
+                },
+                pmove: B1AuthorityIdentity {
+                    tool_identity: digest(0x49),
+                    physics_identity: pmove_tool
+                        .map_or_else(|| digest(0x4a), |item| item.physics_identity_sha256.clone()),
+                },
+                hook: B1AuthorityIdentity {
+                    tool_identity: digest(0x4b),
+                    physics_identity: hook_tool
+                        .map_or_else(|| digest(0x4c), |item| item.physics_identity_sha256.clone()),
+                },
+                fall: B1AuthorityIdentity {
+                    tool_identity: digest(0x4d),
+                    physics_identity: digest(0x4e),
+                },
+            },
+        },
         collision_oracle: collision,
         pmove_oracle: pmove_admission,
         hook_oracle: hook_admission,
@@ -417,11 +458,7 @@ fn two_node_graph(
 #[test]
 fn graph_trajectory_edges_require_admitted_optional_oracles() {
     let bsp = bsp_identity();
-    let collision_only = oracle_admissions(&bsp, false, false).admit(&bsp).unwrap();
-    assert!(two_node_graph(EdgeType::Walk, 1, 1, &collision_only).is_ok());
-    assert!(two_node_graph(EdgeType::Jump, 1, 1, &collision_only).is_err());
-    assert!(two_node_graph(EdgeType::ControlledDrop, 1, 1, &collision_only).is_err());
-    assert!(two_node_graph(EdgeType::Hook, 1, 1, &collision_only).is_err());
+    assert!(oracle_admissions(&bsp, false, false).admit(&bsp).is_err());
 
     let pmove_only = oracle_admissions(&bsp, true, false).admit(&bsp).unwrap();
     assert!(two_node_graph(EdgeType::Jump, 1, 1, &pmove_only).is_ok());
@@ -847,7 +884,7 @@ fn manifest_is_canonical_bound_and_strict() {
     let bytes = source.canonical_json(&limits).unwrap();
     assert_eq!(
         sha256_hex(&bytes),
-        "9cd1970e9abdac3966129f91c0696a5ac01288c525883ff68fb00bccc9fcb60a"
+        "be5ca201540e86b3686eb58f45ea64271e4366303a09e2ae1f38ef723281b970"
     );
     let restored = AtlasManifest::from_canonical_json(&bytes, &limits).unwrap();
     assert_eq!(restored.channels[0].level, 0);
@@ -940,40 +977,17 @@ fn manifest_is_canonical_bound_and_strict() {
 }
 
 #[test]
-fn optional_trajectory_oracles_have_a_canonical_absent_round_trip() {
+fn missing_pmove_authority_is_not_a_canonical_runtime() {
     let limits = AtlasLimits::default();
     let payload = artifact(false).encode_uncompressed(&limits).unwrap();
     let envelope = encode_zstd_envelope(&payload, &limits).unwrap();
     let mut collision_only = manifest(&payload, envelope.len() as u64);
     collision_only.oracles.pmove_oracle = None;
     collision_only.oracles.hook_oracle = None;
-    let bytes = collision_only.canonical_json(&limits).unwrap();
-    let text = std::str::from_utf8(&bytes).unwrap();
-    assert!(!text.contains("pmove_oracle"));
-    assert!(!text.contains("hook_oracle"));
-    let restored = AtlasManifest::from_canonical_json(&bytes, &limits).unwrap();
-    assert!(restored.oracles.pmove_oracle.is_none());
-    assert!(restored.oracles.hook_oracle.is_none());
-    assert_eq!(restored.canonical_json(&limits).unwrap(), bytes);
-
-    let empty = AtlasArtifact::empty(AtlasOrigin(restored.grid.origin));
-    let empty_payload = empty.encode_uncompressed(&limits).unwrap();
-    let empty_envelope = encode_zstd_envelope(&empty_payload, &limits).unwrap();
-    let mut empty_manifest = restored.clone();
-    empty_manifest.counts = AtlasCounts::from_artifact(&empty);
-    empty_manifest.artifacts.insert(
-        "fixture.atlas.bin.zst".to_owned(),
-        ArtifactManifest::from_uncompressed(
-            "application/vnd.q2.atlas-v1",
-            &empty_payload,
-            empty_envelope.len() as u64,
-            empty_manifest.counts.named_counts(),
-        ),
-    );
-    empty_manifest
-        .verify_atlas_artifact("fixture.atlas.bin.zst", &empty_payload, &empty, &limits)
+    assert!(collision_only.canonical_json(&limits).is_err());
+    let bytes = manifest(&payload, envelope.len() as u64)
+        .canonical_json(&limits)
         .unwrap();
-
     let mut explicit_null: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     explicit_null["oracles"]["pmove_oracle"] = serde_json::Value::Null;
     assert!(
@@ -1015,7 +1029,7 @@ fn collision_oracle_is_mandatory_and_manifest_artifact_verification_rechecks_edg
     let mut no_trajectory = source;
     no_trajectory.oracles.pmove_oracle = None;
     no_trajectory.oracles.hook_oracle = None;
-    no_trajectory.canonical_json(&limits).unwrap();
+    assert!(no_trajectory.canonical_json(&limits).is_err());
     assert!(
         no_trajectory
             .verify_atlas_artifact(

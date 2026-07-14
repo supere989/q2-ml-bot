@@ -126,10 +126,13 @@ mod tests {
 
     use q2_lattice_rs::atlas::{
         ATLAS_CELL_SIZES, ATLAS_MAGIC, ATLAS_SCHEMA_VERSION, ArtifactManifest, AtlasArtifact,
-        AtlasOrigin, BspIdentity, COLLISION_ORACLE_NAME, COLLISION_ORACLE_SCHEMA,
-        CollisionOracleAdmission, CollisionParameters, CollisionSourceClosure, GridManifest,
-        HullManifest, MASK_PLAYERSOLID_V1, MASK_SHOT_V1, ManifestBudgets, ORACLE_SEMANTIC_VERSION,
-        OracleAdmissions, OracleBspBinding, OracleToolIdentity, ToolIdentity,
+        AtlasOrigin, B1AuthorityExecutables, B1AuthorityIdentities, B1AuthorityIdentity,
+        B1NormativeDocuments, B1RuntimeAuthoritySeal, BspIdentity, COLLISION_ORACLE_NAME,
+        COLLISION_ORACLE_SCHEMA, CollisionOracleAdmission, CollisionParameters,
+        CollisionSourceClosure, GridManifest, HullManifest, MASK_PLAYERSOLID_V1, MASK_SHOT_V1,
+        ManifestBudgets, ORACLE_SEMANTIC_VERSION, OracleAdmissions, OracleBspBinding,
+        OracleToolIdentity, PMOVE_ORACLE_NAME, PMOVE_ORACLE_SCHEMA, PmoveOracleAdmission,
+        PmoveParameters, PmoveSourceClosure, ToolIdentity,
     };
     use serde_json::Value;
 
@@ -193,6 +196,33 @@ mod tests {
             contract_sha256: String::new(),
         }
         .seal();
+        let pmove = PmoveOracleAdmission {
+            tool: OracleToolIdentity {
+                name: PMOVE_ORACLE_NAME.to_owned(),
+                schema: PMOVE_ORACLE_SCHEMA.to_owned(),
+                version: ORACLE_SEMANTIC_VERSION,
+                executable_sha256: digest(0x19),
+                physics_identity_sha256: digest(0x1a),
+            },
+            bsp: OracleBspBinding {
+                sha256: bsp.sha256.clone(),
+                provenance_sha256: bsp.provenance_sha256.clone(),
+            },
+            parameters: PmoveParameters {
+                gravity: 800,
+                airaccelerate_f32_bits: 0.0_f32.to_bits(),
+                constants: "fixture-pmove-constants".to_owned(),
+            },
+            source: PmoveSourceClosure {
+                collision_sha256: collision.source.collision_sha256.clone(),
+                pmove_sha256: digest(0x1b),
+                shared_header_sha256: collision.source.shared_header_sha256.clone(),
+                shared_source_sha256: collision.source.shared_source_sha256.clone(),
+                build_contract: collision.source.build_contract.clone(),
+            },
+            contract_sha256: String::new(),
+        }
+        .seal();
         let artifact = AtlasArtifact::empty(AtlasOrigin([0, 0, 0]));
         let raw = artifact.encode_uncompressed(&limits).unwrap();
         let counts = AtlasCounts::from_artifact(&artifact);
@@ -210,15 +240,49 @@ mod tests {
             byte_order: "little".to_owned(),
             atlas_magic: String::from_utf8_lossy(ATLAS_MAGIC).into_owned(),
             specification_sha256: digest(0x17),
-            bsp,
+            bsp: bsp.clone(),
             analyzer: ToolIdentity {
                 name: "fixture-analyzer".to_owned(),
                 version: "1".to_owned(),
                 sha256: digest(0x18),
             },
             oracles: OracleAdmissions {
+                b1_runtime_authority_seal: B1RuntimeAuthoritySeal {
+                    schema: "q2-b1-runtime-authority-seal-v1".to_owned(),
+                    normative_documents: B1NormativeDocuments {
+                        design_sha256: digest(0x1c),
+                        plan_sha256: digest(0x1d),
+                    },
+                    hook_parity_attestation_sha256: digest(0x1e),
+                    fixture_bsp_sha256: digest(0x1f),
+                    analysis_bsp_sha256: bsp.sha256.clone(),
+                    executables: B1AuthorityExecutables {
+                        cm_sha256: collision.tool.executable_sha256.clone(),
+                        pmove_sha256: pmove.tool.executable_sha256.clone(),
+                        hook_sha256: digest(0x20),
+                        fall_sha256: digest(0x21),
+                    },
+                    identities: B1AuthorityIdentities {
+                        collision: B1AuthorityIdentity {
+                            tool_identity: digest(0x22),
+                            physics_identity: collision.tool.physics_identity_sha256.clone(),
+                        },
+                        pmove: B1AuthorityIdentity {
+                            tool_identity: digest(0x23),
+                            physics_identity: pmove.tool.physics_identity_sha256.clone(),
+                        },
+                        hook: B1AuthorityIdentity {
+                            tool_identity: digest(0x24),
+                            physics_identity: digest(0x25),
+                        },
+                        fall: B1AuthorityIdentity {
+                            tool_identity: digest(0x26),
+                            physics_identity: digest(0x27),
+                        },
+                    },
+                },
                 collision_oracle: collision,
-                pmove_oracle: None,
+                pmove_oracle: Some(pmove),
                 hook_oracle: None,
             },
             generator: None,

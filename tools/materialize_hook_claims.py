@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 from harness.atlas_analyzer import (  # noqa: E402
     AnalyzerLimits,
     AtlasAnalysisError,
+    FallOracleProcess,
     HookOracleProcess,
     OracleProcess,
     _admit_hook,
@@ -30,6 +31,10 @@ from harness.atlas_analyzer import (  # noqa: E402
     _replay_hook_record_exact,
     canonical_json,
     sha256_file,
+)
+from harness.atlas_b1_authority import (  # noqa: E402
+    B1AuthorityError,
+    admit_b1_runtime_authorities,
 )
 from harness.hook_claims_v2 import (  # noqa: E402
     HookClaimsV2Error,
@@ -90,6 +95,7 @@ def materialize(
     cm_oracle: Path,
     pmove_oracle: Path,
     hook_oracle: Path,
+    fall_oracle: Path,
     hook_parity_attestation: Path,
     limits: AnalyzerLimits,
 ) -> dict:
@@ -99,9 +105,20 @@ def materialize(
     output_attestation = output_attestation.resolve()
     if not all(path.is_file() for path in (
         bsp, meta, runtime_sidecar, cm_oracle, pmove_oracle,
-        hook_oracle, hook_parity_attestation,
+        hook_oracle, fall_oracle, hook_parity_attestation,
     )):
         raise AtlasAnalysisError("hook materialization input is missing")
+    try:
+        admit_b1_runtime_authorities(
+            cm_oracle=cm_oracle, pmove_oracle=pmove_oracle,
+            hook_oracle=hook_oracle, fall_oracle=fall_oracle,
+            hook_parity_attestation=hook_parity_attestation,
+            analysis_bsp=bsp, repo_root=ROOT,
+        )
+    except B1AuthorityError as error:
+        raise AtlasAnalysisError(
+            f"hook materialization B1 authority admission failed: {error}"
+        ) from error
     metadata = parse_ibsp38(bsp)
     map_id = bsp.stem
     if meta.name != f"{map_id}.meta.json" or runtime_sidecar.name != f"{map_id}.json":
@@ -185,11 +202,17 @@ def materialize(
         with OracleProcess(pmove_oracle, bsp, "pmove", limits) as pmove:
             if pmove.identity["map_sha256"] != initial_bsp_sha256:
                 raise AtlasAnalysisError("Pmove oracle loaded different BSP bytes")
-            with HookOracleProcess(
+            with FallOracleProcess(
+                fall_oracle,
+                max_requests=limits.max_oracle_requests,
+                batch_size=limits.oracle_batch,
+                batch_timeout_seconds=limits.oracle_batch_timeout_seconds,
+                exit_timeout_seconds=limits.process_exit_timeout_seconds,
+            ) as fall, HookOracleProcess(
                 hook_oracle, str(hook_admission["physics_identity"]), limits,
             ) as hook:
-                nodes, edges, spawn_indices = _build_navigation(
-                    cm, pmove, spawns, origin, limits, candidate_points,
+                nodes, edges, spawn_indices, _drop_classifications = _build_navigation(
+                    cm, pmove, fall, bsp, spawns, origin, limits, candidate_points,
                 )
                 reachable = _reachable_nodes(edges, spawn_indices)
                 geometries: set[tuple] = set()
@@ -319,6 +342,7 @@ def main() -> int:
     parser.add_argument("--cm-oracle", type=Path, required=True)
     parser.add_argument("--pmove-oracle", type=Path, required=True)
     parser.add_argument("--hook-oracle", type=Path, required=True)
+    parser.add_argument("--fall-oracle", type=Path, required=True)
     parser.add_argument("--hook-parity-attestation", type=Path, required=True)
     args = parser.parse_args()
     try:
@@ -327,6 +351,7 @@ def main() -> int:
             output_attestation=args.output_attestation,
             cm_oracle=args.cm_oracle, pmove_oracle=args.pmove_oracle,
             hook_oracle=args.hook_oracle,
+            fall_oracle=args.fall_oracle,
             hook_parity_attestation=args.hook_parity_attestation,
             limits=AnalyzerLimits(),
         )

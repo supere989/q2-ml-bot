@@ -326,25 +326,25 @@ def classify_drop_trajectories(
         for trajectory in trajectories
     ]
     pmove_stages = [pmove_requests_for_drop_manifest(item) for item in manifests]
-    identity_requests = [
-        stage["identity_request"] for stage in pmove_stages
+    pmove_indices = [
+        index for index, stage in enumerate(pmove_stages)
         if stage["classification"] == "NeedsPmoveAuthority"
     ]
-    if len(identity_requests) != len(trajectories):
-        raise ExactDropAnalysisError("internally generated drop manifest is invalid")
+    identity_requests = [
+        pmove_stages[index]["identity_request"] for index in pmove_indices
+    ]
     pmove_identities = pmove_process.call(identity_requests)
-    prepared = [
-        prepare_drop_fall_request(
-            manifest,
+    prepared: list[dict[str, Any]] = [dict(stage) for stage in pmove_stages]
+    identities_by_index: dict[int, Mapping[str, Any]] = {}
+    for index, identity in zip(pmove_indices, pmove_identities):
+        identities_by_index[index] = identity
+        prepared[index] = prepare_drop_fall_request(
+            manifests[index],
             pmove_identity=identity,
-            pmove_response=trajectory.response,
+            pmove_response=trajectories[index].response,
             pmove_executable_sha256=_sha256_file(pmove_process.binary),
             map_sha256=pmove_process.identity["map_sha256"],
         )
-        for manifest, identity, trajectory in zip(
-            manifests, pmove_identities, trajectories
-        )
-    ]
     exact_indices = [
         index for index, stage in enumerate(prepared)
         if stage["classification"] == "NeedsFallAuthority"
@@ -358,12 +358,13 @@ def classify_drop_trajectories(
     fall_records = fall_process.call(fall_requests)
     record_cursor = 0
     results: list[dict[str, Any]] = []
-    for index, (manifest, identity, trajectory, stage) in enumerate(zip(
-        manifests, pmove_identities, trajectories, prepared
+    for index, (manifest, trajectory, stage) in enumerate(zip(
+        manifests, trajectories, prepared
     )):
         if stage["classification"] == "Unknown":
             exact = stage
         else:
+            identity = identities_by_index[index]
             fall_identity = fall_records[record_cursor]
             fall_response = fall_records[record_cursor + 1]
             record_cursor += 2

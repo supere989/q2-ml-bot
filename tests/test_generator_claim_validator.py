@@ -219,6 +219,19 @@ def _analysis(map_path: Path, claims: dict) -> dict:
                 "lethal_drop_edges": len(meta["safety"]["lethal_edges"]),
                 "guarded_drop_edges": len(meta["safety"]["lethal_edges"]),
                 "uncontained_drop_edges": 0,
+                "classification_status": "oracle",
+                "evidence": 11,
+                "validation_version": 1,
+                "drop_classification": {
+                    "classification_status": "oracle",
+                    "evidence": 10,
+                    "validation_version": 1,
+                    "candidate_count": 0,
+                    "exact_safe": 0,
+                    "exact_lethal": 0,
+                    "unknown_omitted": 0,
+                    "severity_counts": {},
+                },
             },
             "hazard_claims": [
                 {
