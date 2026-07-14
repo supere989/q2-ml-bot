@@ -161,7 +161,17 @@ backup/visibility only, not a compute migration.
   via the wsl-tunnel service above); events in `~/q2-ml-bot/runs/`.
 - Headless `q2ded` servers on ports 27910+, configs `ml_server_*.cfg`.
 
-**Current public-training state (updated 2026-07-14):** the
+**Current public-training state (updated 2026-07-14):** every model lineage
+described below is retired and must not be resumed, exported, or deployed. The
+old `q2_ppo` and `q2_tb` sessions and four network clients are stopped, and the
+former current checkpoint/event directories have been moved out of operational
+selectors without making a fallback copy. The public and teacher server
+services remain online only until the multires protocol generation is replaced
+atomically. Follow
+`docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md` and its execution plan;
+the paragraphs below are baseline evidence.
+
+The
 `public_network_engagement_anchor_v3` trainer and four clients are stopped. Its
 step-4,063,488 checkpoint is quality-invalid: true pitch averaged about +86
 degrees, down-look rate was 100%, and backward commands were 70.5%. Never
@@ -172,7 +182,7 @@ also rejected and archived under the staging tree.
 
 The fresh `public_network_thermal_fresh_v1` experiment is stopped and archived.
 It repaired posture and forward motion, but its step-49,152 zero-state holdout
-still measured 39.6-degree yaw and 16.9-degree pitch MAE. The active
+still measured 39.6-degree yaw and 16.9-degree pitch MAE. The retired
 `public_network_thermal_bc_live_v2` lineage starts from a 100k-sample,
 32-epoch distilled-backbone clone of that exact step. It passed the fixed
 holdout at 2.23-degree yaw, 1.69-degree pitch, 30.0% post-command alignment,
@@ -180,7 +190,7 @@ holdout at 2.23-degree yaw, 1.69-degree pitch, 30.0% post-command alignment,
 Head-only and 20k/8-epoch clones did not learn the geometry; do not promote
 them merely because their loss converged.
 
-The active run uses `Q2_EXT_OBS=1`, the Rust persistent lattice, deterministic
+The retired run used `Q2_EXT_OBS=1`, the Rust persistent lattice, deterministic
 seed `7142026`, two PPO epochs, one full 512-sample recurrent minibatch, LR
 `1e-5`, `aim_anchor_coef=0.02`, `aim_anchor_fire_weight=0`, and
 `--reset_optimizer 1`. It resumes the matching 398-cell/four-client
@@ -194,8 +204,9 @@ checkpointed. Old dynamic lattice state is invalid because it contains
 pre-transform-fix deposits; rebuild it from attested map sidecars. See
 `docs/TARGET-THERMAL-LATTICE-PROTOTYPE-2026-07-14.md`.
 
-The active trainer is tmux `q2_ppo`; TensorBoard tmux `q2_tb` watches only
-`training-data/runs/current_public_network_thermal_bc_live_v2`. The public
+There is no active trainer or TensorBoard process. The former
+`training-data/runs/current_public_network_thermal_bc_live_v2` and matching
+checkpoint root are absent from operational paths. The public
 client-telemetry credential is durably mirrored on WSL, mode 0600, at
 `/home/raymond/q2-rollout/public-client-telemetry.env`. It is intentionally
 different from `Q2_ROLLOUT_TOKEN`; sourcing the rollout-worker secret for the

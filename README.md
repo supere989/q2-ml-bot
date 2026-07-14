@@ -2,8 +2,17 @@
 
 ML-based bot engine for Quake 2 (Lithium II + 3ZB2 base).
 
-**Status:** The network-native target/thermal-lattice prototype is training on
-the live public server as `public_network_thermal_bc_live_v2`. It uses four
+**Current status (2026-07-14):** the multiresolution Atlas/Lattice replacement
+is under construction on `feature/multires-map-atlas-v1`. All previous model
+lineages are retired and forbidden as resume or deployment sources. The old
+trainer, four ML clients, and TensorBoard view are stopped; their operational
+checkpoint/event paths are absent. The public and teacher game services remain
+online only until the new game/client/Python protocol can replace them
+atomically. The authoritative specification and batch plan are
+`docs/MULTIRES-LATTICE-MAP-ATLAS-{DESIGN,PLAN}-2026-07-14.md`.
+
+**Retired baseline:** The network-native target/thermal-lattice prototype was
+training on the live public server as `public_network_thermal_bc_live_v2`. It used four
 ordinary headless clients, the Rust persistent lattice, a per-client transient
 thermal overlay, and exact damage-point aim.
 Four headless Yamagi clients connect as ordinary protocol-34 players while a
@@ -41,10 +50,9 @@ produced 1,539 aligned frames, 1,117 aligned shots, 49 hit events, 15 repeat-hit
 events, and two kills with zero transport failures or echo timeouts. The
 generated-map prototype gate has passed; a matching stock-map season remains
 required for promotion.
-Combat quality remains below the promotion target and must be
+That retired run's combat quality remained below the promotion target and must be
 judged by a fresh seasonal soak, not loss convergence.
-**See `docs/HANDOFF-2026-07-13-NETWORK.md` for the exact active topology,
-commits, rollback locations, validation evidence, and next checks.**
+**See the multires specification and plan for the active implementation state.**
 The channel-by-channel sufficiency review is in
 `docs/TELEMETRY-AUDIT-2026-07-14.md`.
 The implemented redesign and cutover gates are in
