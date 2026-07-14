@@ -18,10 +18,12 @@ pub const RETIRED_DYN_MAGIC: &[u8; 8] = b"Q2LAT001";
 pub const DYN_SCHEMA_VERSION: u16 = 2;
 pub const DYN_FEATURE_WIDTH: usize = 24;
 pub const DYN_CELL_ENCODED_BYTES: usize = 40;
+pub const DYN_L2_CELL_SIZE: u32 = 64;
+pub const DYN_L3_CELL_SIZE: u32 = 256;
 pub const THERMAL_MAX_AGE_TICKS: u64 = 5;
 
 const BYTE_ORDER_LITTLE: u16 = 0x454c;
-const SNAPSHOT_HEADER_BYTES: usize = 200;
+const SNAPSHOT_HEADER_BYTES: usize = 208;
 const COMPRESSION_ZSTD: u8 = 1;
 const ZSTD_LEVEL: i8 = 3;
 const COARSE_PARENT_BUDGET: usize = 4;
@@ -1158,6 +1160,8 @@ pub fn encode_snapshot(state: &DynState, limits: &DynLimits) -> DynResult<Vec<u8
     for value in state.fence.origin.0 {
         push_i64(&mut output, value);
     }
+    push_u32(&mut output, DYN_L2_CELL_SIZE);
+    push_u32(&mut output, DYN_L3_CELL_SIZE);
     push_u64(&mut output, state.fence.map_epoch);
     push_u64(&mut output, state.environment_steps);
     push_u32(&mut output, state.client_id);
@@ -1299,7 +1303,18 @@ impl SnapshotHeader {
             atlas_sha256: reader.array_32()?,
             map_sha256: reader.array_32()?,
             origin: AtlasOrigin([reader.i64()?, reader.i64()?, reader.i64()?]),
+            map_epoch: 0,
+        };
+        let l2_cell_size = reader.u32()?;
+        let l3_cell_size = reader.u32()?;
+        if l2_cell_size != DYN_L2_CELL_SIZE || l3_cell_size != DYN_L3_CELL_SIZE {
+            return Err(DynError::InvalidFormat(format!(
+                "Dyn cell-size fence mismatch: L2={l2_cell_size}, L3={l3_cell_size}"
+            )));
+        }
+        let fence = DynFence {
             map_epoch: reader.u64()?,
+            ..fence
         };
         fence.validate()?;
         let environment_steps = reader.u64()?;

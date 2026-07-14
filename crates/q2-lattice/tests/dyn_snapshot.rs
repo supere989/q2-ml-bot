@@ -4,13 +4,14 @@ use std::time::{Duration, Instant};
 
 use q2_lattice_rs::atlas::{AtlasOrigin, GridIndex};
 use q2_lattice_rs::dynstate::{
-    BatchExpectation, DYN_FEATURE_NAMES, DYN_MAGIC, DynBatch, DynCell, DynError, DynFeatureIndex,
-    DynFeatureInput, DynFence, DynLimits, DynState, PersistentChannels, RETIRED_DYN_MAGIC,
-    THERMAL_MAX_AGE_TICKS, ThermalOverlay, decode_snapshot, encode_snapshot,
+    BatchExpectation, DYN_FEATURE_NAMES, DYN_L2_CELL_SIZE, DYN_L3_CELL_SIZE, DYN_MAGIC, DynBatch,
+    DynCell, DynError, DynFeatureIndex, DynFeatureInput, DynFence, DynLimits, DynState,
+    PersistentChannels, RETIRED_DYN_MAGIC, THERMAL_MAX_AGE_TICKS, ThermalOverlay, decode_snapshot,
+    encode_snapshot,
 };
 use sha2::{Digest, Sha256};
 
-const HEADER_BYTES: usize = 200;
+const HEADER_BYTES: usize = 208;
 
 fn fence(epoch: u64) -> DynFence {
     DynFence {
@@ -175,6 +176,18 @@ fn q2lat002_canonical_snapshot_round_trips_exactly() {
     let original = populated_state(2, 4, 65_536, 512);
     let encoded = encode_snapshot(&original, &limits).unwrap();
     assert_eq!(&encoded[..8], DYN_MAGIC);
+    assert_eq!(
+        u32::from_le_bytes(encoded[12..16].try_into().unwrap()),
+        HEADER_BYTES as u32
+    );
+    assert_eq!(
+        u32::from_le_bytes(encoded[160..164].try_into().unwrap()),
+        DYN_L2_CELL_SIZE
+    );
+    assert_eq!(
+        u32::from_le_bytes(encoded[164..168].try_into().unwrap()),
+        DYN_L3_CELL_SIZE
+    );
     let restored = decode_snapshot(&encoded, fence(17), &limits).unwrap();
     assert_eq!(restored.client_id(), 2);
     assert_eq!(restored.client_count(), 4);
@@ -250,6 +263,34 @@ fn q2lat001_and_mixed_schema_batches_fail_closed() {
             expected: 2,
             found: 3
         })
+    ));
+}
+
+#[test]
+fn q2lat002_rejects_cell_size_mismatches_and_the_unfenced_legacy_header() {
+    let limits = DynLimits::default();
+    let valid = encode_snapshot(&state(0, 1, 128), &limits).unwrap();
+
+    let mut wrong_l2 = valid.clone();
+    wrong_l2[160..164].copy_from_slice(&(DYN_L2_CELL_SIZE / 2).to_le_bytes());
+    assert!(matches!(
+        decode_snapshot(&wrong_l2, fence(17), &limits),
+        Err(DynError::InvalidFormat(message)) if message.contains("cell-size fence")
+    ));
+
+    let mut wrong_l3 = valid.clone();
+    wrong_l3[164..168].copy_from_slice(&(DYN_L3_CELL_SIZE / 2).to_le_bytes());
+    assert!(matches!(
+        decode_snapshot(&wrong_l3, fence(17), &limits),
+        Err(DynError::InvalidFormat(message)) if message.contains("cell-size fence")
+    ));
+
+    let mut legacy = valid.clone();
+    legacy.drain(160..168);
+    legacy[12..16].copy_from_slice(&200_u32.to_le_bytes());
+    assert!(matches!(
+        decode_snapshot(&legacy, fence(17), &limits),
+        Err(DynError::InvalidFormat(message)) if message.contains("header size")
     ));
 }
 

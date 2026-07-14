@@ -5,11 +5,13 @@ deterministic L3 (256 units) mip. It never owns or encodes Atlas cells, thermal
 tracks, readiness plumes, L0 occupancy, recovery vectors, or guideposts.
 
 The authoritative snapshot begins with `Q2LAT002`. `Q2LAT001` is retired and
-is rejected without conversion. The fixed 200-byte little-endian header binds
+is rejected without conversion. The fixed 208-byte little-endian header binds
 schema 2, dictionary-free zstd level 3, compressed and uncompressed lengths,
 the uncompressed payload SHA-256, Atlas SHA-256, map SHA-256, snapped origin,
-map epoch, environment steps, client ID/count, and L2/L3 counts. Reserved bits
-must be zero.
+the frozen L2/L3 cell sizes (`64`, `256`), map epoch, environment steps, client
+ID/count, and L2/L3 counts. Reserved bits must be zero. Earlier 200-byte
+`Q2LAT002` prototypes did not carry the cell-size fence and are rejected rather
+than inferred or upgraded in place.
 
 The compressed body contains ordered L2 records followed by ordered L3
 records. A record is 40 bytes: signed xyz `i32`, engagement/threat/opportunity/
