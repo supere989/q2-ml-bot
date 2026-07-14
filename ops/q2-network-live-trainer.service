@@ -1,0 +1,21 @@
+[Unit]
+Description=Q2 network-native live trainer
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/raymond/q2-network-client-staging-20260713/source/q2-ml-bot
+EnvironmentFile=%h/.config/q2-network-live-trainer.env
+Environment=Q2_EXT_OBS=1
+Environment=LD_LIBRARY_PATH=/home/raymond/q2-network-client-staging-20260713/runtime/lib
+ExecStartPre=/usr/bin/bash -c "test -n \"${Q2_ML_CLIENT_TELEMETRY_TOKEN}\""
+ExecStart=/usr/bin/bash -lc "exec ${Q2_NETWORK_TRAIN_COMMAND}"
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+StandardOutput=append:/home/raymond/q2-network-client-staging-20260713/logs/live-trainer.log
+StandardError=append:/home/raymond/q2-network-client-staging-20260713/logs/live-trainer.log
+
+[Install]
+WantedBy=default.target

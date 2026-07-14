@@ -1,6 +1,6 @@
 # Network-Native Client Harness Prototype
 
-Status: working isolated prototype, not yet the primary trainer.
+Status: public cutover candidate with batched PPO integration.
 
 ## Conclusion
 
@@ -123,24 +123,21 @@ servicing every connection. The network-native backend is therefore real-time
 and latest-action-wins. That is correct for live behavior but changes PPO's
 collection timing.
 
-The primary-trainer cutover requires these remaining gates:
+`harness.client_batch` now owns N independent clients, dispatches a complete
+same-policy round before collecting, and admits only usercmd echoes matching
+the requested movement/buttons. Policy versions are monotonic, stale or
+mismatched experience is rejected, and a map change produces an explicitly
+nontrainable synchronization boundary. `train/ppo.py` uses this adapter when
+`Q2_NETWORK_CLIENTS` is nonzero and records its admission metrics in
+TensorBoard.
 
-1. Add a batched client manager so one rollout worker owns N Yamagi processes
-   and returns same-frame client sets without serial socket waits.
-2. Tag each transition with policy version and action tick; reject experience
-   whose action echo does not match the policy decision being trained.
-3. Run observation/reward parity A/B between an in-process ML bot and a
-   network client placed in the same deterministic scenario.
-4. Measure achievable client density and transitions/sec on WSL, Nobara, and
-   procreator. Rendering is gone, but each client still pays netchan and
-   snapshot parsing costs.
-5. Use the existing synchronous LAN rollout generation boundary, or move to
-   V-trace/APPO if action staleness is allowed within a rollout. Do not feed
-   arbitrarily stale real-time trajectories into the current PPO update.
-6. Pass deterministic validation where network scheduling permits, then the
-   movement, combat, aim, and seasonal quality gates before replacing the
-   current trainer.
+The public cutover layout keeps four full clients on WSL, two open human slots,
+normal game traffic on UDP 28000, and the per-client conduit on UDP 28049 over
+Tailscale. The conduit port must be firewalled to the rollout host. The public
+q2ded remains at `timescale 1`; its map lifecycle alternates shuffled stock
+maps with generated `mllive_*` maps supplied by the WSL map farm.
 
-Until those gates pass, the active WSL trainer and public server remain on
-their current runtimes. The conduit is default-off and this prototype was
-tested only on isolated ports 28200/28201.
+The remaining release gate is operational rather than architectural: pass the
+cross-host four-client canary, archive the prior trainer at a checkpoint,
+install the coordinated secret/firewall/module, and verify advancing accepted
+transitions plus TensorBoard metrics before declaring the new lane primary.

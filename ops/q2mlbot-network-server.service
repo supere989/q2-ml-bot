@@ -1,0 +1,32 @@
+[Unit]
+Description=Q2 public network-native ML training server
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=q2mlbot
+Group=q2mlbot
+WorkingDirectory=/home/q2mlbot/q2-ml-bot
+Environment=Q2_BIND_IP=
+Environment=Q2_ROOT=/home/q2mlbot/q2_lithium_merge
+EnvironmentFile=/etc/q2mlbot/network-client-harness.env
+UMask=0077
+ExecStart=/home/q2mlbot/venv/bin/python3 -u tools/network_public_server.py \
+  --map_farm_url http://100.86.206.50:32510 \
+  --stock_maps q2dm1,q2dm3,q2dm5,q2dm7 \
+  --rotation_seed 1103 \
+  --port 28000 \
+  --maxclients 6 \
+  --timelimit 15 \
+  --fraglimit 20 \
+  --dlserver http://5.78.204.86:32494
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=10
+StandardOutput=append:/home/q2mlbot/q2mlbot.log
+StandardError=append:/home/q2mlbot/q2mlbot.log
+
+[Install]
+WantedBy=multi-user.target

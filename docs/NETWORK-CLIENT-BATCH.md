@@ -67,6 +67,15 @@ transition, and a terminal flag seen on any of those packets is preserved.
 Echo validation therefore does not silently discard combat reward or a brief
 death/intermission boundary.
 
+A live `gamemap` starts a new server-frame epoch. If any client reports a map
+different from the one in which its action was dispatched, the collector
+aligns every client to the new map and returns fresh initial observations with
+zero reward and `trainable_transition=False`. PPO resets recurrent and episode
+state and recollects that rollout slot. The old-map action/new-map observation
+pair therefore never enters the rollout buffer. The client conduit preserves
+its route sequence across this between-level lifecycle; a sequence rollback is
+still rejected as stale traffic.
+
 Accepted info dictionaries contain:
 
 - `batch_round_id`, `policy_version`, and `action_tick`
@@ -85,7 +94,8 @@ wire packet carries the action tick but does not carry policy version.
 `network_client/*`, including accepted/failed rounds, dispatched/accepted
 transitions, stale-policy rejections, stale/mismatched authoritative echoes,
 timeouts, authoritative-echo acceptance rate, and maximum within-round server
-frame span.
+frame span. `network_client/map_epoch_resyncs` counts the intentionally
+discarded map-boundary rounds.
 
 ## Client filesystem and process isolation
 

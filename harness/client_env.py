@@ -33,6 +33,7 @@ class ClientActionDispatch:
     client_slot: int
     after_sequence: int
     action_tick: int
+    map_name: str
     action: Action
 
 
@@ -205,6 +206,7 @@ class Q2NetworkClientEnv:
             client_slot=self._last.client_slot,
             after_sequence=self._last.sequence,
             action_tick=self._last.server_frame,
+            map_name=self._last.map_name,
             action=action,
         )
         self._socket.sendto(

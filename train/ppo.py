@@ -610,9 +610,22 @@ def train(cfg: dict):
 
     from harness.env import Q2MultiEnv, discover_map_pool
 
-    n_servers         = cfg["n_servers"]
-    n_bots            = cfg["n_bots_per_server"]    # bots IN server (ML + AI)
-    n_ml              = max(1, min(int(cfg.get("n_ml_bots", 1)), n_bots))
+    try:
+        network_client_count = int(os.environ.get("Q2_NETWORK_CLIENTS", "0"))
+    except ValueError as error:
+        raise ValueError("Q2_NETWORK_CLIENTS must be an integer") from error
+    if network_client_count < 0:
+        raise ValueError("Q2_NETWORK_CLIENTS cannot be negative")
+    network_native = network_client_count > 0
+
+    n_servers         = 1 if network_native else cfg["n_servers"]
+    n_bots            = (
+        network_client_count if network_native else cfg["n_bots_per_server"]
+    )
+    n_ml              = (
+        network_client_count if network_native else
+        max(1, min(int(cfg.get("n_ml_bots", 1)), n_bots))
+    )
     total_venvs       = n_servers * n_ml
     map_pool = discover_map_pool(
         map_name=cfg["map_name"],
@@ -624,6 +637,10 @@ def train(cfg: dict):
           f"{' ...' if len(map_pool) > 8 else ''}")
 
     distributed = os.environ.get("Q2_DISTRIBUTED_LEARNER", "0") == "1"
+    if network_native and distributed:
+        raise ValueError(
+            "Q2_NETWORK_CLIENTS and Q2_DISTRIBUTED_LEARNER are mutually exclusive"
+        )
     rollout_coordinator = None
     rollout_server = None
     publish_distributed_policy = None
@@ -751,29 +768,104 @@ def train(cfg: dict):
             f"recovery={'on' if recovery_enabled else 'off'}"
         )
 
-    servers = [] if distributed else [
-        Q2MultiEnv(
-            server_id    = i,
-            map_name     = cfg["map_name"],
-            map_pool     = map_pool,
-            map_seed     = int(cfg["map_seed"]),
-            game_seed    = (
-                None if int(cfg.get("game_seed", -1)) < 0
-                else int(cfg["game_seed"]) + i * 1009
-            ),
-            spatial_seed = seed + i * 104729,
-            map_change_episodes = int(cfg["map_change_episodes"]),
-            n_bots       = n_bots,
-            num_ml_bots  = n_ml,
-            port_offset  = i,
-            max_ep_steps = cfg["max_ep_steps"],
-            timelimit    = cfg["timelimit"],
-            fraglimit    = cfg["fraglimit"],
-            timescale    = float(cfg.get("timescale", 1.0)),
-            console_pipe = True,   # live gamemap rotation instead of restarts
+    if distributed:
+        servers = []
+    elif network_native:
+        from harness.client_batch import build_network_client_multi_env
+
+        telemetry_token = os.environ.get(
+            "Q2_ML_CLIENT_TELEMETRY_TOKEN", ""
         )
-        for i in range(n_servers)
-    ]
+        if not telemetry_token:
+            raise ValueError(
+                "network-native training requires "
+                "Q2_ML_CLIENT_TELEMETRY_TOKEN"
+            )
+        required_network_paths = {
+            "Q2_NETWORK_CLIENT_BINARY": os.environ.get(
+                "Q2_NETWORK_CLIENT_BINARY", ""
+            ),
+            "Q2_NETWORK_CLIENT_ROOT": os.environ.get(
+                "Q2_NETWORK_CLIENT_ROOT", ""
+            ),
+        }
+        missing_network_paths = [
+            name for name, value in required_network_paths.items() if not value
+        ]
+        if missing_network_paths:
+            raise ValueError(
+                "network-native training requires "
+                + ", ".join(missing_network_paths)
+            )
+        network_server = os.environ.get(
+            "Q2_NETWORK_SERVER", "100.101.57.114:28000"
+        )
+        telemetry_server = os.environ.get(
+            "Q2_NETWORK_TELEMETRY_SERVER", "100.101.57.114:28049"
+        )
+        client_data_root = os.environ.get(
+            "Q2_NETWORK_CLIENT_DATA_ROOT",
+            str(Path(required_network_paths["Q2_NETWORK_CLIENT_ROOT"]) / ".ml-clients"),
+        )
+        servers = [build_network_client_multi_env(
+            n_clients=network_client_count,
+            server=network_server,
+            telemetry_server=telemetry_server,
+            telemetry_token=telemetry_token,
+            client_binary=required_network_paths["Q2_NETWORK_CLIENT_BINARY"],
+            client_root=required_network_paths["Q2_NETWORK_CLIENT_ROOT"],
+            client_data_root=client_data_root,
+            harness_host=os.environ.get("Q2_NETWORK_HARNESS_HOST", "127.0.0.1"),
+            harness_port_base=int(os.environ.get(
+                "Q2_NETWORK_HARNESS_PORT_BASE", "39000"
+            )),
+            qport_base=int(os.environ.get("Q2_NETWORK_QPORT_BASE", "49000")),
+            client_id_prefix=os.environ.get(
+                "Q2_NETWORK_CLIENT_ID_PREFIX", "public-trainer"
+            ),
+            name_prefix=os.environ.get("Q2_NETWORK_CLIENT_NAME_PREFIX", "Lattice"),
+            client_timeout=float(os.environ.get(
+                "Q2_NETWORK_CLIENT_TIMEOUT", "30"
+            )),
+            round_timeout=float(os.environ.get(
+                "Q2_NETWORK_ROUND_TIMEOUT", "2"
+            )),
+            max_rejected_echoes=int(os.environ.get(
+                "Q2_NETWORK_MAX_REJECTED_ECHOES", "16"
+            )),
+            max_ep_steps=int(cfg["max_ep_steps"]),
+            initial_policy_version=resume_steps,
+            spatial_seed=seed,
+        )]
+        print(
+            "Network-native clients: "
+            f"count={network_client_count} game={network_server} "
+            f"telemetry={telemetry_server} policy_version={resume_steps}"
+        )
+    else:
+        servers = [
+            Q2MultiEnv(
+                server_id    = i,
+                map_name     = cfg["map_name"],
+                map_pool     = map_pool,
+                map_seed     = int(cfg["map_seed"]),
+                game_seed    = (
+                    None if int(cfg.get("game_seed", -1)) < 0
+                    else int(cfg["game_seed"]) + i * 1009
+                ),
+                spatial_seed = seed + i * 104729,
+                map_change_episodes = int(cfg["map_change_episodes"]),
+                n_bots       = n_bots,
+                num_ml_bots  = n_ml,
+                port_offset  = i,
+                max_ep_steps = cfg["max_ep_steps"],
+                timelimit    = cfg["timelimit"],
+                fraglimit    = cfg["fraglimit"],
+                timescale    = float(cfg.get("timescale", 1.0)),
+                console_pipe = True,   # live gamemap rotation instead of restarts
+            )
+            for i in range(n_servers)
+        ]
     lattice_instances = [
         sr for server in servers for sr in server._spatial_rewards
     ]
@@ -828,7 +920,8 @@ def train(cfg: dict):
     # isolated by map prefix so it never touches maps other runs glob. See
     # train/curriculum.py for the absorb-for-entropy-not-convergence rationale.
     evolver = None
-    if not distributed and os.environ.get("Q2_CURRICULUM_EVOLVE") == "1":
+    if (not distributed and not network_native and
+            os.environ.get("Q2_CURRICULUM_EVOLVE") == "1"):
         try:
             from train.curriculum import CurriculumEvolver
             _pref = os.environ.get("Q2_CURRICULUM_PREFIX") or (
@@ -846,12 +939,19 @@ def train(cfg: dict):
 
     run_name = (f"ppo_{run_tag}_{int(time.time())}" if run_tag
                 else f"ppo_{_safe_tag(map_label)}_{int(time.time())}")
-    writer   = SummaryWriter(log_dir=f"runs/{run_name}")
+    runs_dir = Path(os.environ.get("Q2_RUNS_DIR", "runs"))
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    writer   = SummaryWriter(log_dir=str(runs_dir / run_name))
     writer.add_scalar("config/seed", seed, resume_steps)
-    print(f"TensorBoard log: runs/{run_name}")
+    print(f"TensorBoard log: {runs_dir / run_name}")
     print(f"  view with:  tensorboard --logdir runs --bind_all")
     if distributed:
         print(f"  virtual envs: {total_venvs} from distributed rollout quorum")
+    elif network_native:
+        print(
+            f"  virtual envs: {total_venvs} normal-player clients on the "
+            "public network-native lane"
+        )
     else:
         print(
             f"  virtual envs: {total_venvs}  "
@@ -882,7 +982,9 @@ def train(cfg: dict):
         rollout_behavior = {key: 0.0 for key in behavior_metric_keys}
         rollout_behavior_samples = 0
 
-        for step in range(0 if distributed else cfg["n_steps"]):
+        accepted_rollout_steps = 0
+        target_rollout_steps = 0 if distributed else int(cfg["n_steps"])
+        while accepted_rollout_steps < target_rollout_steps:
             # Store the current observation which produced the actions!
             current_obs = obs_np.copy()
 
@@ -905,16 +1007,66 @@ def train(cfg: dict):
             def _step_server(si_srv):
                 si, srv = si_srv
                 base = si * n_ml
-                return si, srv.step_all([actions_np[base + k] for k in range(srv.n_ml)])
+                actions = [actions_np[base + k] for k in range(srv.n_ml)]
+                if network_native:
+                    return si, srv.step_all(
+                        actions, policy_version=total_env_steps
+                    )
+                return si, srv.step_all(actions)
 
             with ThreadPoolExecutor(max_workers=n_servers) as ex:
                 step_results = list(ex.map(_step_server, enumerate(servers)))
+
+            # A live gamemap resets the authoritative server-frame epoch.  The
+            # client batch returns the first observation from the new map as a
+            # synchronization boundary, not as a transition from the old map.
+            # Reset recurrent/episode memory and recollect this rollout slot so
+            # cross-map rewards and actions can never enter PPO.
+            if network_native:
+                trainable_flags = [
+                    bool(info.get("trainable_transition", False))
+                    for _si, results in step_results
+                    for _o, _r, _term, _trunc, info in results
+                ]
+                if not all(trainable_flags):
+                    if any(trainable_flags):
+                        raise RuntimeError(
+                            "network collector returned a partially trainable "
+                            "map-epoch round"
+                        )
+                    target_maps = set()
+                    for si, results in step_results:
+                        base = si * n_ml
+                        for bi, (o, _r, _term, _trunc, info) in enumerate(results):
+                            vi = base + bi
+                            obs_np[vi] = o
+                            hx_list[vi] = policy.init_hidden(1, device)
+                            target_maps.add(str(info.get("map", "unknown")))
+                            ep_rewards[vi] = 0.0
+                            ep_base_rewards[vi] = 0.0
+                            ep_spatial_rewards[vi] = 0.0
+                            ep_kills[vi] = 0.0
+                            ep_deaths[vi] = 0.0
+                            ep_lengths[vi] = 0
+                    print(
+                        "Network client map epoch resynchronized: "
+                        + ", ".join(sorted(target_maps))
+                    )
+                    continue
 
             for si, results in step_results:
                 base = si * n_ml
                 srv = servers[si]
                 for bi, (o, r, term, trunc, info) in enumerate(results):
                     vi = base + bi
+                    if network_native and (
+                        not info.get("trainable_transition", False)
+                        or int(info.get("policy_version", -1)) != total_env_steps
+                    ):
+                        raise RuntimeError(
+                            "network collector returned an unversioned or "
+                            "non-trainable transition"
+                        )
                     spatial_bonus = float(info.get("spatial_bonus", 0.0))
                     base_reward = float(info.get("reward_base", r - spatial_bonus))
                     kills = float(info.get("kills", 0.0))
@@ -961,6 +1113,7 @@ def train(cfg: dict):
                 h_step,
                 c_step,
             )
+            accepted_rollout_steps += 1
 
         if distributed:
             from harness.rollout_protocol import merge_ppo_batches
@@ -1879,6 +2032,10 @@ def train(cfg: dict):
             ):
                 writer.add_scalar(tag, rollout_behavior[key] / denom, total_env_steps)
 
+        if network_native:
+            for tag, value in servers[0].metrics.as_dict().items():
+                writer.add_scalar(tag, value, total_env_steps)
+
         completed_ep_rewards.clear()
         completed_ep_base_rewards.clear()
         completed_ep_spatial_rewards.clear()
@@ -1937,6 +2094,10 @@ def train(cfg: dict):
         if total_env_steps >= next_save_at:
             ckpt = save_dir / f"policy_{total_env_steps:08d}.pt"
             torch.save(policy.state_dict(), ckpt)
+            torch.save(
+                optimizer.state_dict(),
+                save_dir / f"optimizer_{total_env_steps:08d}.pt",
+            )
             try:
                 from harness.spatial import save_lattice_state
                 lattice_ckpt = save_lattice_state(
@@ -1984,6 +2145,10 @@ def train(cfg: dict):
 
     final_ckpt = save_dir / f"policy_{total_env_steps:08d}.pt"
     torch.save(policy.state_dict(), final_ckpt)
+    torch.save(
+        optimizer.state_dict(),
+        save_dir / f"optimizer_{total_env_steps:08d}.pt",
+    )
     try:
         from harness.spatial import save_lattice_state
         save_lattice_state(
