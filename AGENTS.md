@@ -181,8 +181,9 @@ checkpointed. Old dynamic lattice state is invalid because it contains
 pre-transform-fix deposits; rebuild it from attested map sidecars. See
 `docs/TARGET-THERMAL-LATTICE-PROTOTYPE-2026-07-14.md`.
 
-The public client conduit is wire version 3. Its protocol-34 impulse attestation
-contains a modulo-six action generation plus hook/weapon request. Same-frame
+The public client conduit is wire version 4. Its protocol-34 impulse and five
+unused button bits carry a modulo-192 action generation plus hook/weapon
+request; the server strips the private button bits before gameplay. Same-frame
 action echoes are admissible only when that generation matches; C records the
 latest intended angle relative to that decision generation's initial view in
 the frame across multiple `ClientThink` calls. Never reuse the prior

@@ -32,7 +32,6 @@ from .protocol import (
     ML_ACTION_GENERATION_COUNT,
     ML_ACTION_GENERATION_MASK,
     ML_ACTION_GENERATION_SHIFT,
-    ML_ACTION_GENERATION_VALID,
     ML_TERMINAL_INTERMISSION,
 )
 
@@ -268,8 +267,8 @@ class Q2NetworkClientBatch:
                 gate_flags & ML_ACTION_GENERATION_MASK
             ) >> ML_ACTION_GENERATION_SHIFT
             if (
-                not bool(gate_flags & ML_ACTION_GENERATION_VALID)
-                or echoed_generation
+                echoed_generation == 0
+                or echoed_generation - 1
                 != dispatch.action_tick % ML_ACTION_GENERATION_COUNT
             ):
                 return "stale", echo_tick

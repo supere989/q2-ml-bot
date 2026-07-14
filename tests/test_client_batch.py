@@ -16,7 +16,6 @@ from harness.protocol import Action
 from harness.protocol import ML_FIRE_GATE_SUPPRESSED
 from harness.protocol import (
     ML_ACTION_GENERATION_SHIFT,
-    ML_ACTION_GENERATION_VALID,
 )
 
 
@@ -286,9 +285,7 @@ def test_look_echo_must_match_the_dispatched_policy_action():
 
 def test_same_tick_echo_requires_matching_action_generation():
     events = []
-    generation_flags = ML_ACTION_GENERATION_VALID | (
-        (10 % 6) << ML_ACTION_GENERATION_SHIFT
-    )
+    generation_flags = ((10 % 192) + 1) << ML_ACTION_GENERATION_SHIFT
     env = _FakeEnv(
         "client-a",
         0,
@@ -315,9 +312,7 @@ def test_same_tick_echo_requires_matching_action_generation():
 
 def test_same_tick_echo_rejects_stale_action_generation():
     events = []
-    stale_generation_flags = ML_ACTION_GENERATION_VALID | (
-        (9 % 6) << ML_ACTION_GENERATION_SHIFT
-    )
+    stale_generation_flags = ((9 % 192) + 1) << ML_ACTION_GENERATION_SHIFT
     env = _FakeEnv(
         "client-a",
         0,
@@ -345,9 +340,7 @@ def test_same_tick_echo_rejects_stale_action_generation():
 
 def test_same_tick_engine_pitch_clamp_returns_nontrainable_resync():
     events = []
-    generation_flags = ML_ACTION_GENERATION_VALID | (
-        (10 % 6) << ML_ACTION_GENERATION_SHIFT
-    )
+    generation_flags = ((10 % 192) + 1) << ML_ACTION_GENERATION_SHIFT
     env = _FakeEnv(
         "client-a",
         0,

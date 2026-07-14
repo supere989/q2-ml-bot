@@ -50,7 +50,7 @@ intercept is deliberately deferred until the hitscan geometry is proven.
 
 Policy input stays 219 floats with `Q2_EXT_OBS=1`; the packet size and model
 tensor shapes do not change. The observation magic is now `QMLP`, the public
-client conduit requires version 3, teacher envelopes require version 2, and rollout telemetry
+client conduit requires version 4, teacher envelopes require version 2, and rollout telemetry
 requires `ppo-telemetry-v8`. Old game, client, teacher, or worker endpoints are
 rejected instead of silently parsing the new semantics.
 
@@ -115,7 +115,8 @@ not the entropy of a censored distribution. Authoritative admission compares
 echoed yaw, pitch, movement, jump, fire, hook, and weapon. Hook/weapon remain
 ordinary reliable Quake commands, with their exact policy request carried in
 the otherwise-unused protocol-34 `usercmd.impulse` byte for tick attribution.
-The same byte also carries a modulo-six action generation. A same-server-frame
+Five otherwise-unused button bits join that byte to carry a modulo-192 action
+generation; the server strips the private bits before gameplay. A same-server-frame
 echo is admitted only when that generation matches, while multiple
 `ClientThink` calls record the latest intended angle relative to the current
 decision generation's initial view within that frame, so a previous decision
