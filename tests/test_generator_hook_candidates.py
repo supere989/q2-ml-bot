@@ -6,8 +6,12 @@ import math
 from maps.generator import (
     FloorLightRegion,
     HOOK_CEILING,
+    HOOK_COORDINATE_GEOMETRY_FLOOR,
     HOOK_EYE_Z,
+    HOOK_RELEASES_PER_SOURCE,
+    HOOK_RELEASE_TICKS,
     MAX_HOOK_CANDIDATES_V2,
+    MAX_HOOK_SOURCES_PER_GEOMETRY,
     PMOVE_FIXED_QUANTUM,
     PLAYER_MINS_Z,
     HorizontalSurface,
@@ -132,6 +136,103 @@ def test_generated_hook_candidate_schema_order_and_distance_are_stable(tmp_path)
             for region in first_meta["lighting"]["regions"]
         }
         assert record["flags"] == HOOK_CEILING
+
+
+def test_hook_pool_has_bounded_map_source_and_release_diversity(tmp_path) -> None:
+    generate_map("diverse", 91470500, tmp_path, style="arena_vertical")
+    metadata = json.loads((tmp_path / "diverse.meta.json").read_text())
+    records = metadata["hook_claim_candidates_v2"]["records"]
+    grouped: dict[str, list[dict]] = {}
+    for record in records:
+        geometry_id = record["claim_id"].split(":candidate:", 1)[0]
+        grouped.setdefault(geometry_id, []).append(record)
+
+    expected_geometries = MAX_HOOK_CANDIDATES_V2 // (
+        MAX_HOOK_SOURCES_PER_GEOMETRY * HOOK_RELEASES_PER_SOURCE
+    )
+    assert len(records) == MAX_HOOK_CANDIDATES_V2
+    assert len(grouped) == expected_geometries
+    assert len({
+        (tuple(rows[0]["anchor_milliunits"]),
+         tuple(rows[0]["landing_milliunits"]), rows[0]["flags"])
+        for rows in grouped.values()
+    }) == expected_geometries
+    assert len({
+        tuple(rows[0]["landing_milliunits"]) for rows in grouped.values()
+    }) == expected_geometries
+    assert len({
+        rows[0]["landing_milliunits"][2] for rows in grouped.values()
+    }) == 3
+
+    two_source_groups = 0
+    for rows in grouped.values():
+        sources = {tuple(row["source_milliunits"]) for row in rows}
+        assert 1 <= len(sources) <= MAX_HOOK_SOURCES_PER_GEOMETRY
+        two_source_groups += len(sources) == MAX_HOOK_SOURCES_PER_GEOMETRY
+        for source in sources:
+            source_rows = [
+                row for row in rows
+                if tuple(row["source_milliunits"]) == source
+            ]
+            assert HOOK_RELEASES_PER_SOURCE <= len(source_rows) <= len(
+                HOOK_RELEASE_TICKS
+            )
+    assert two_source_groups >= expected_geometries - 1
+    assert {
+        row["release_after_ticks"] for row in records
+    } == set(HOOK_RELEASE_TICKS)
+
+
+def test_hook_pool_preserves_coordinate_class_before_diversifying() -> None:
+    generator = MapGenerator(seed=91470500, style="arena_vertical")
+    generator.generate()
+    sources = generator._authored_floor_origins()
+    eligible = []
+    for region in generator.light_regions:
+        for sample in region.samples:
+            landing = (
+                float(sample[0]), float(sample[1]),
+                float(region.floor_z - PLAYER_MINS_Z),
+            )
+            anchor = generator._real_ceiling_anchor(landing)
+            if anchor is None:
+                continue
+            if any(
+                generator._hook_l1_index(source)
+                != generator._hook_l1_index(landing)
+                and 150_000 <= generator._hook_distance_milliunits(source, anchor)
+                <= 580_000
+                for source in sources
+            ):
+                eligible.append((anchor, landing, HOOK_CEILING))
+    coordinate_order = sorted(eligible, key=lambda value: (
+        value[0][2], value[0][1], value[0][0],
+        value[1][2], value[1][1], value[1][0], value[2],
+    ))
+    published = {
+        (zone.anchor, zone.landing, zone.flags) for zone in generator.hook_zones
+    }
+    assert set(coordinate_order[:HOOK_COORDINATE_GEOMETRY_FLOOR]) <= published
+
+
+def test_hook_primary_source_prefers_exact_spawn_proposals() -> None:
+    generator = _minimal_generator()
+    generator._annotate_hook_zones()
+    spawn_sources = {
+        (round(x * 1000), round(y * 1000),
+         round((z + PMOVE_FIXED_QUANTUM) * 1000))
+        for x, y, z in generator.spawn_points
+    }
+    records = generator.hook_claim_candidates_v2_manifest()["records"]
+    primary_records = [
+        record for record in records
+        if record["claim_id"].endswith("candidate:0000")
+    ]
+    assert primary_records
+    assert all(
+        tuple(record["source_milliunits"]) in spawn_sources
+        for record in primary_records
+    )
 
 
 def test_runtime_sidecar_is_unique_eight_field_unproven_projection(tmp_path) -> None:

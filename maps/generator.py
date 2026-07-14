@@ -52,6 +52,8 @@ HOOK_RELEASE_TICK_MSEC = 100
 HOOK_RELEASE_TICKS = tuple(range(1, 7))
 MAX_HOOK_SOURCES_PER_GEOMETRY = 2
 MAX_HOOK_CANDIDATES_V2 = 512
+HOOK_RELEASES_PER_SOURCE = 4        # two ranks x four schedules x 64 cells
+HOOK_COORDINATE_GEOMETRY_FLOOR = 43  # complete former 512/(2*6) prefix
 MAX_RUNTIME_HOOK_ZONES = 256  # must match ml_bridge.c MAX_HOOK_ZONES
 DM_SPAWN_COUNT = 8         # headroom for six-player live matches
 MIN_SPAWN_SEPARATION = 384 # minimum 2D spacing for generated DM spawns
@@ -2478,6 +2480,146 @@ class MapGenerator:
             return None
         return (float(x), float(y), float(first.box.z0))
 
+    @staticmethod
+    def _hook_geometry_key(
+        geometry: Tuple[
+            Tuple[float, float, float], Tuple[float, float, float], int
+        ],
+    ) -> tuple:
+        anchor, landing, flags = geometry
+        return (
+            landing[2], landing[1], landing[0],
+            anchor[2], anchor[1], anchor[0], flags,
+        )
+
+    def _diverse_hook_geometry_order(
+        self,
+        geometries: Sequence[
+            Tuple[Tuple[float, float, float], Tuple[float, float, float], int]
+        ],
+    ) -> List[
+        Tuple[Tuple[float, float, float], Tuple[float, float, float], int]
+    ]:
+        """Order desired L1 cells by spawn proximity, then farthest coverage.
+
+        This is proposal ordering only. Authored room connectivity is never
+        treated as movement evidence; compiled CM/Pmove replay remains the
+        sole authority. Starting once near each spawn avoids the old
+        low-Z/low-Y prefix, while deterministic farthest-point ordering spreads
+        the bounded pool over the remaining authored landing cells and floors.
+        """
+
+        remaining = sorted(set(geometries), key=self._hook_geometry_key)
+        ordered: List[
+            Tuple[Tuple[float, float, float], Tuple[float, float, float], int]
+        ] = []
+        for spawn in sorted(
+            self.spawn_points, key=lambda value: (value[2], value[1], value[0])
+        ):
+            if not remaining:
+                break
+            sx, sy, sz = spawn
+            geometry = min(
+                remaining,
+                key=lambda value: (
+                    value[1][2] != float(sz),
+                    abs(value[1][2] - float(sz)),
+                    (value[1][0] - sx) ** 2 + (value[1][1] - sy) ** 2,
+                    self._hook_geometry_key(value),
+                ),
+            )
+            remaining.remove(geometry)
+            ordered.append(geometry)
+
+        if remaining and not ordered:
+            ordered.append(remaining.pop(0))
+        while remaining:
+            selected_cells = [
+                self._hook_l1_index(value[1]) for value in ordered
+            ]
+
+            def coverage_distance(value) -> int:
+                cell = self._hook_l1_index(value[1])
+                return min(
+                    (cell[0] - prior[0]) ** 2
+                    + (cell[1] - prior[1]) ** 2
+                    + 4 * (cell[2] - prior[2]) ** 2
+                    for prior in selected_cells
+                )
+
+            geometry = min(
+                remaining,
+                key=lambda value: (
+                    -coverage_distance(value), self._hook_geometry_key(value)
+                ),
+            )
+            remaining.remove(geometry)
+            ordered.append(geometry)
+        return ordered
+
+    def _hook_source_priority(
+        self,
+        source: Tuple[float, float, float],
+        landing: Tuple[float, float, float],
+        distance_milliunits: int,
+    ) -> tuple:
+        """Rank likely reachable authored sources without claiming reachability."""
+
+        fixed_spawns = {
+            (float(x), float(y), float(z) + PMOVE_FIXED_QUANTUM)
+            for x, y, z in self.spawn_points
+        }
+        spawn_floor_origins = {
+            float(z) + PMOVE_FIXED_QUANTUM for _x, _y, z in self.spawn_points
+        }
+        exact_spawn = source in fixed_spawns
+        on_spawn_floor = source[2] in spawn_floor_origins
+        on_landing_floor = source[2] == landing[2] + PMOVE_FIXED_QUANTUM
+        if on_spawn_floor and on_landing_floor:
+            authored_tier = 0
+        elif exact_spawn:
+            authored_tier = 1
+        elif on_spawn_floor:
+            authored_tier = 2
+        elif on_landing_floor:
+            authored_tier = 3
+        else:
+            authored_tier = 4
+        return (
+            authored_tier, distance_milliunits,
+            source[2], source[1], source[0],
+        )
+
+    def _select_hook_sources(
+        self,
+        sources: Sequence[Tuple[int, Tuple[float, float, float]]],
+        landing: Tuple[float, float, float],
+    ) -> List[Tuple[int, Tuple[float, float, float]]]:
+        """Select both demonstrated local ranks, preferring spawn floors."""
+
+        ranked = sorted(
+            sources,
+            key=lambda value: self._hook_source_priority(
+                value[1], landing, value[0]
+            ),
+        )
+        return ranked[:MAX_HOOK_SOURCES_PER_GEOMETRY]
+
+    @staticmethod
+    def _hook_release_window(
+        source_rank: int, geometry_ordinal: int
+    ) -> Tuple[int, ...]:
+        """Cover the useful release interior while retaining both tail bins."""
+
+        if source_rank == 0:
+            # Most rank-0 wins are ticks 2..5. One deterministic eighth keeps
+            # tick 1 represented without allowing any replay result to steer a
+            # particular map row.
+            if geometry_ordinal % 8 == 0:
+                return HOOK_RELEASE_TICKS[:HOOK_RELEASES_PER_SOURCE]
+            return HOOK_RELEASE_TICKS[1:1 + HOOK_RELEASES_PER_SOURCE]
+        return HOOK_RELEASE_TICKS[-HOOK_RELEASES_PER_SOURCE:]
+
     def _annotate_hook_zones(self):
         """Publish source-bound v2 proposals, never traversal authority.
 
@@ -2491,7 +2633,7 @@ class MapGenerator:
         source_origins = self._authored_floor_origins()
         grouped: dict[
             Tuple[Tuple[float, float, float], Tuple[float, float, float], int],
-            List[HookClaimCandidateV2],
+            List[Tuple[int, Tuple[float, float, float]]],
         ] = {}
 
         for region in sorted(
@@ -2507,7 +2649,7 @@ class MapGenerator:
                 anchor = self._real_ceiling_anchor(landing)
                 if anchor is None:
                     continue
-                sources = []
+                sources: List[Tuple[int, Tuple[float, float, float]]] = []
                 for source in source_origins:
                     if self._hook_l1_index(source) == self._hook_l1_index(landing):
                         continue
@@ -2515,43 +2657,82 @@ class MapGenerator:
                     if not HOOK_MIN * 1000 <= distance_milliunits <= HOOK_MAX * 1000:
                         continue
                     sources.append((distance_milliunits, source))
-                sources.sort(key=lambda value: (
-                    value[0], value[1][2], value[1][1], value[1][0]
-                ))
-                candidates = []
-                for distance_milliunits, source in sources[
-                    :MAX_HOOK_SOURCES_PER_GEOMETRY
-                ]:
-                    for release_after_ticks in HOOK_RELEASE_TICKS:
-                        candidates.append(HookClaimCandidateV2(
-                            source=source,
-                            anchor=anchor,
-                            landing=landing,
-                            release_after_ticks=release_after_ticks,
-                            distance_milliunits=distance_milliunits,
-                            flags=HOOK_CEILING,
-                        ))
-                if candidates:
-                    grouped[(anchor, landing, HOOK_CEILING)] = candidates
+                if sources:
+                    grouped[(anchor, landing, HOOK_CEILING)] = sources
 
-        for geometry in sorted(grouped, key=lambda value: (
+        coordinate_order = sorted(grouped, key=lambda value: (
             value[0][2], value[0][1], value[0][0],
             value[1][2], value[1][1], value[1][0], value[2],
-        )):
+        ))
+        diverse_order = self._diverse_hook_geometry_order(list(grouped))
+        # Preserve the complete old coordinate-prefix geometry class (winning
+        # attestations span ordinals 0..42), then add map-wide cells. Reorder
+        # that union by the spawn-seeded farthest traversal so the campaign
+        # sees representative floors/XY regions first without map-specific
+        # replay rows steering the selection.
+        geometry_limit = min(
+            len(diverse_order),
+            MAX_HOOK_CANDIDATES_V2
+            // (MAX_HOOK_SOURCES_PER_GEOMETRY * HOOK_RELEASES_PER_SOURCE),
+            MAX_RUNTIME_HOOK_ZONES,
+        )
+        selected_geometry_set = set(
+            coordinate_order[:min(HOOK_COORDINATE_GEOMETRY_FLOOR, geometry_limit)]
+        )
+        for geometry in diverse_order:
+            if len(selected_geometry_set) >= geometry_limit:
+                break
+            selected_geometry_set.add(geometry)
+        geometry_order = [
+            geometry for geometry in diverse_order
+            if geometry in selected_geometry_set
+        ]
+        selected_geometry_sources = [
+            (geometry, self._select_hook_sources(grouped[geometry], geometry[1]))
+            for geometry in geometry_order
+        ]
+        extra_release_budget = max(
+            0,
+            MAX_HOOK_CANDIDATES_V2 - sum(
+                len(sources) * HOOK_RELEASES_PER_SOURCE
+                for _geometry, sources in selected_geometry_sources
+            ),
+        )
+        for geometry_ordinal, (geometry, selected_sources) in enumerate(
+            selected_geometry_sources
+        ):
             if len(self.hook_zones) >= MAX_RUNTIME_HOOK_ZONES:
                 break
-            candidates = sorted(grouped[geometry], key=lambda candidate: (
-                candidate.distance_milliunits,
-                candidate.source[2], candidate.source[1], candidate.source[0],
-                candidate.release_after_ticks,
-            ))
+            anchor, landing, flags = geometry
+            if not selected_sources:
+                continue
+            candidates = []
+            for source_rank, (distance_milliunits, source) in enumerate(
+                selected_sources
+            ):
+                release_window = list(self._hook_release_window(
+                    source_rank, geometry_ordinal
+                ))
+                for release_after_ticks in HOOK_RELEASE_TICKS:
+                    if extra_release_budget <= 0:
+                        break
+                    if release_after_ticks not in release_window:
+                        release_window.append(release_after_ticks)
+                        extra_release_budget -= 1
+                candidates.extend(
+                    HookClaimCandidateV2(
+                        source=source, anchor=anchor, landing=landing,
+                        release_after_ticks=release_after_ticks,
+                        distance_milliunits=distance_milliunits, flags=flags,
+                    )
+                    for release_after_ticks in release_window
+                )
             remaining = MAX_HOOK_CANDIDATES_V2 - len(self.hook_claim_candidates_v2)
             if remaining <= 0:
                 break
             candidates = candidates[:remaining]
             if not candidates:
                 continue
-            geometry_ordinal = len(self.hook_zones)
             for candidate_ordinal, candidate in enumerate(candidates):
                 claim_id = (
                     f"hook:{geometry_ordinal:04d}:candidate:{candidate_ordinal:04d}"

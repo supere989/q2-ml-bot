@@ -57,6 +57,29 @@ one exact 100 ms hook-pull schedule. Candidate IDs, geometries, sources, and
 release schedules are deterministically ordered. Source and landing may not
 occupy the same L1 cell.
 
+The bounded pool preserves the complete former 43-geometry coordinate class,
+then adds deterministic farthest-point L1 coverage across the remaining floors
+and XY cells. The resulting union is ordered from one desired landing near each
+authored spawn through the farthest remaining cells. Sources on authored spawn
+floors are considered first, followed by sources on the desired landing floor;
+these are only proposal heuristics and never reachability evidence. Both source
+ranks are retained because the first exact campaign proved records from each.
+Each receives at least four deterministic release schedules: rank zero
+concentrates on the 2--5 interior with one-in-eight 1--4 coverage, while rank
+one covers 3--6.
+If a retained geometry has only one eligible source, its vacant bounded slots
+are filled by omitted schedules on earlier selected sources.
+A full pool therefore covers 64 desired landing geometries, both source ranks,
+and every release tick. The caps remain 512 records, two sources per desired
+geometry, and 256 runtime projection rows.
+
+The allocation is based only on aggregate, quarantined campaign classes. The
+13 initially passing maps selected 78 records: 47 source-rank-zero and 31
+source-rank-one; release ticks 1--6 contributed 5, 14, 20, 18, 11, and 10
+records respectively; and winning geometry ordinals ranged from 0 through 42.
+No measured anchor, measured landing, map identity, or per-map winning row is
+an input to proposal generation.
+
 The generated `<map>.json` remains an eight-field C-loader-compatible
 projection:
 
