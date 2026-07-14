@@ -112,6 +112,7 @@ DEFAULT = dict(
     aim_anchor_fire_weight = 1.0,
     aim_anchor_yaw_deg  = 12.0,
     aim_anchor_pitch_deg = 14.0,
+    target_fire_gate    = 1,     # network-native only: mask blind/unaligned fire
     lattice_direction_coef = 0.02,
 )
 
@@ -213,17 +214,37 @@ class RolloutBuffer:
         self.dones    = torch.zeros(n_steps, n_envs,           device=device)
         self.values   = torch.zeros(n_steps, n_envs,           device=device)
         self.log_probs = torch.zeros(n_steps, n_envs,          device=device)
+        # A hard action mask is part of the behavior distribution. Preserve
+        # the rollout-time decision so PPO evaluates the same distribution.
+        self.fire_allowed = torch.ones(
+            n_steps, n_envs, dtype=torch.bool, device=device
+        )
         self.h_states = torch.zeros(n_steps, n_envs, hidden_dim, device=device)
         self.c_states = torch.zeros(n_steps, n_envs, hidden_dim, device=device)
         self.ptr      = 0
 
-    def add(self, obs, action, reward, done, value, log_prob, h_state, c_state):
+    def add(
+        self,
+        obs,
+        action,
+        reward,
+        done,
+        value,
+        log_prob,
+        h_state,
+        c_state,
+        fire_allowed=None,
+    ):
         self.obs[self.ptr]       = obs
         self.actions[self.ptr]   = action
         self.rewards[self.ptr]   = reward
         self.dones[self.ptr]     = done
         self.values[self.ptr]    = value
         self.log_probs[self.ptr] = log_prob
+        if fire_allowed is None:
+            self.fire_allowed[self.ptr] = True
+        else:
+            self.fire_allowed[self.ptr] = fire_allowed
         self.h_states[self.ptr]  = h_state
         self.c_states[self.ptr]  = c_state
         self.ptr += 1
@@ -240,6 +261,54 @@ class RolloutBuffer:
         self.returns = advantages + self.values
         self.advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         self.ptr = 0
+
+
+def _reconcile_server_fire_suppressions(
+    actions: np.ndarray,
+    log_probs: np.ndarray,
+    fire_allowed: np.ndarray,
+    fire_metadata: dict | None,
+    step_results,
+    *,
+    n_ml: int,
+) -> int:
+    """Replace server-suppressed fire with its exact hard-mask likelihood.
+
+    The network server may invalidate a shot after collection-time inference
+    because protection or target state changed. The applied action is no-fire,
+    whose log-probability under the resulting closed gate is zero. Remove the
+    sampled fire log-probability from the recorded joint likelihood and store
+    the closed mask so every later PPO evaluation uses that same distribution.
+    """
+    suppressions = 0
+    for server_index, results in step_results:
+        base = server_index * n_ml
+        for bot_index, (_obs, _reward, _term, _trunc, info) in enumerate(results):
+            if not info.get("fire_gate_suppressed", False):
+                continue
+            vector_index = base + bot_index
+            if (
+                fire_metadata is None
+                or actions[vector_index, 5] <= 0.5
+                or not fire_allowed[vector_index]
+            ):
+                raise RuntimeError(
+                    "server suppressed fire outside the recorded network "
+                    "target-gate distribution"
+                )
+            fire_log_probability = float(
+                fire_metadata["raw_fire_log_probability"][vector_index]
+            )
+            if not np.isfinite(fire_log_probability):
+                raise RuntimeError(
+                    "server-suppressed fire has a non-finite behavior "
+                    "log-probability"
+                )
+            log_probs[vector_index] -= fire_log_probability
+            actions[vector_index, 5] = 0.0
+            fire_allowed[vector_index] = False
+            suppressions += 1
+    return suppressions
 
 
 def _forward_sequence_with_done_masks(
@@ -548,6 +617,7 @@ def train(cfg: dict):
     aim_anchor_fire_weight = float(cfg.get("aim_anchor_fire_weight", 1.0))
     aim_anchor_yaw_deg = float(cfg.get("aim_anchor_yaw_deg", 12.0))
     aim_anchor_pitch_deg = float(cfg.get("aim_anchor_pitch_deg", 14.0))
+    target_fire_gate_requested = bool(int(cfg.get("target_fire_gate", 1)))
     lattice_direction_coef = float(cfg.get("lattice_direction_coef", 0.02) or 0.0)
     for name, value in (
         ("aim_anchor_coef", aim_anchor_coef),
@@ -617,6 +687,7 @@ def train(cfg: dict):
     if network_client_count < 0:
         raise ValueError("Q2_NETWORK_CLIENTS cannot be negative")
     network_native = network_client_count > 0
+    target_fire_gate = network_native and target_fire_gate_requested
 
     n_servers         = 1 if network_native else cfg["n_servers"]
     n_bots            = (
@@ -842,6 +913,12 @@ def train(cfg: dict):
             f"count={network_client_count} game={network_server} "
             f"telemetry={telemetry_server} policy_version={resume_steps}"
         )
+        print(
+            "Network target-fire gate: "
+            f"{'ON' if target_fire_gate else 'off'} "
+            f"yaw<={aim_anchor_yaw_deg:g}deg "
+            f"pitch<={aim_anchor_pitch_deg:g}deg"
+        )
     else:
         servers = [
             Q2MultiEnv(
@@ -981,6 +1058,10 @@ def train(cfg: dict):
         policy.eval()
         rollout_behavior = {key: 0.0 for key in behavior_metric_keys}
         rollout_behavior_samples = 0
+        rollout_fire_gate_samples = 0
+        rollout_fire_gate_allowed = 0
+        rollout_fire_gate_executed = 0
+        rollout_fire_gate_blocked_probability = 0.0
 
         accepted_rollout_steps = 0
         target_rollout_steps = 0 if distributed else int(cfg["n_steps"])
@@ -997,8 +1078,29 @@ def train(cfg: dict):
                 c_step = torch.zeros(total_venvs, HIDDEN_DIM, device=device)
 
             # Batched policy inference — 1 GPU call instead of total_venvs calls
-            actions_np, values_np, lps_np, hx_list = policy.act_batch(
-                obs_np, hx_list, device)
+            fire_metadata = None
+            if network_native:
+                (
+                    actions_np,
+                    values_np,
+                    lps_np,
+                    hx_list,
+                    fire_metadata,
+                ) = policy.act_batch(
+                    obs_np,
+                    hx_list,
+                    device,
+                    gate_fire=target_fire_gate,
+                    fire_gate_yaw_deg=aim_anchor_yaw_deg,
+                    fire_gate_pitch_deg=aim_anchor_pitch_deg,
+                    return_fire_metadata=True,
+                )
+                fire_allowed_np = fire_metadata["fire_allowed"]
+            else:
+                actions_np, values_np, lps_np, hx_list = policy.act_batch(
+                    obs_np, hx_list, device
+                )
+                fire_allowed_np = np.ones(total_venvs, dtype=np.bool_)
 
             rewards_np = np.zeros(total_venvs, dtype=np.float32)
             dones_np   = np.zeros(total_venvs, dtype=np.float32)
@@ -1064,6 +1166,32 @@ def train(cfg: dict):
                     )
                     continue
 
+                # The server independently rejects a shot when protection or
+                # last-moment world-state changes invalidate the policy mask.
+                # Reconcile that authoritative shield into the stored action
+                # and behavior log-probability so PPO never learns from an
+                # action the game did not execute. This remains required when
+                # the proactive policy gate is disabled for an ablation.
+                _reconcile_server_fire_suppressions(
+                    actions_np,
+                    lps_np,
+                    fire_allowed_np,
+                    fire_metadata,
+                    step_results,
+                    n_ml=n_ml,
+                )
+
+            if target_fire_gate:
+                rollout_fire_gate_samples += int(fire_allowed_np.size)
+                rollout_fire_gate_allowed += int(fire_allowed_np.sum())
+                rollout_fire_gate_executed += int(
+                    (actions_np[:, 5] > 0.5).sum()
+                )
+                closed = ~fire_allowed_np
+                rollout_fire_gate_blocked_probability += float(
+                    fire_metadata["raw_fire_probability"][closed].sum()
+                )
+
             for si, results in step_results:
                 base = si * n_ml
                 srv = servers[si]
@@ -1122,6 +1250,9 @@ def train(cfg: dict):
                 torch.from_numpy(lps_np).to(device, dtype=torch.float32),
                 h_step,
                 c_step,
+                torch.from_numpy(fire_allowed_np).to(
+                    device, dtype=torch.bool
+                ),
             )
             accepted_rollout_steps += 1
 
@@ -1241,6 +1372,7 @@ def train(cfg: dict):
         adv_chunked = buf.advantages.reshape(num_chunks_per_env, chunk_len, N_envs).permute(0, 2, 1).reshape(total_chunks, chunk_len)
         ret_chunked = buf.returns.reshape(num_chunks_per_env, chunk_len, N_envs).permute(0, 2, 1).reshape(total_chunks, chunk_len)
         log_probs_chunked = buf.log_probs.reshape(num_chunks_per_env, chunk_len, N_envs).permute(0, 2, 1).reshape(total_chunks, chunk_len)
+        fire_allowed_chunked = buf.fire_allowed.reshape(num_chunks_per_env, chunk_len, N_envs).permute(0, 2, 1).reshape(total_chunks, chunk_len)
         dones_chunked = buf.dones.reshape(num_chunks_per_env, chunk_len, N_envs).permute(0, 2, 1).reshape(total_chunks, chunk_len)
 
         aim_anchor_targets = None
@@ -1376,7 +1508,11 @@ def train(cfg: dict):
                 val_b = val_b.squeeze(-1) # (B_chunks, chunk_len)
 
                 # Compute mixed-action log probabilities and entropy using policy's built-in function
-                log_prob, entropy = policy.action_log_prob_entropy(act_params, act_b)
+                log_prob, entropy = policy.action_log_prob_entropy(
+                    act_params,
+                    act_b,
+                    fire_allowed=fire_allowed_chunked[b],
+                )
                 log_prob = log_prob.reshape(-1)
                 entropy = entropy.reshape(-1)
 
@@ -1613,7 +1749,9 @@ def train(cfg: dict):
                     else:
                         params_post, values_post, _ = policy(obs_post)
                     log_prob_post, _entropy_post = policy.action_log_prob_entropy(
-                        params_post, act_post
+                        params_post,
+                        act_post,
+                        fire_allowed=fire_allowed_chunked[start_i:end_i],
                     )
                     log_ratio_post = (
                         log_prob_post.reshape(-1)
@@ -1812,6 +1950,31 @@ def train(cfg: dict):
                     f"diagnostics/{name}", value, total_env_steps
                 )
         writer.add_scalar("train/sps", sps, total_env_steps)
+        if target_fire_gate and rollout_fire_gate_samples > 0:
+            gate_denom = float(rollout_fire_gate_samples)
+            allowed_rate = rollout_fire_gate_allowed / gate_denom
+            writer.add_scalar(
+                "targeting/fire_gate_allowed_rate",
+                allowed_rate,
+                total_env_steps,
+            )
+            writer.add_scalar(
+                "targeting/fire_gate_closed_rate",
+                1.0 - allowed_rate,
+                total_env_steps,
+            )
+            writer.add_scalar(
+                "targeting/executed_fire_rate",
+                rollout_fire_gate_executed / gate_denom,
+                total_env_steps,
+            )
+            closed_count = rollout_fire_gate_samples - rollout_fire_gate_allowed
+            writer.add_scalar(
+                "targeting/blocked_fire_probability_mean",
+                rollout_fire_gate_blocked_probability
+                / float(max(1, closed_count)),
+                total_env_steps,
+            )
 
         rollout_tensors = {
             "reward": buf.rewards,
@@ -1852,6 +2015,21 @@ def train(cfg: dict):
             writer.add_scalar(
                 "behavior/fire_no_ammo_rate",
                 rollout_behavior["fire_no_ammo"] / denom,
+                total_env_steps,
+            )
+            writer.add_scalar(
+                "targeting/acquisition_bonus_mean",
+                rollout_behavior["target_alignment_bonus"] / denom,
+                total_env_steps,
+            )
+            writer.add_scalar(
+                "targeting/acquisition_rate",
+                rollout_behavior["target_acquired"] / denom,
+                total_env_steps,
+            )
+            writer.add_scalar(
+                "targeting/aligned_rate",
+                rollout_behavior["target_aligned"] / denom,
                 total_env_steps,
             )
             writer.add_scalar(

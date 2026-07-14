@@ -24,7 +24,12 @@ from .client_env import (
     Q2NetworkClientEnv,
 )
 from .client_protocol import ClientTelemetry
-from .protocol import Action
+from .protocol import (
+    Action,
+    ML_FIRE_GATE_PROTECTED,
+    ML_FIRE_GATE_SUPPRESSED,
+    ML_FIRE_GATE_TARGET,
+)
 
 
 class StalePolicyVersionError(ValueError):
@@ -78,6 +83,7 @@ class BatchMetrics:
     realtime_catchup_resyncs: int
     preflight_packets_drained: int
     max_observed_frame_span: int
+    fire_gate_suppressions: int
 
     def as_dict(self, prefix: str = "network_client") -> dict[str, int | float]:
         attempted = self.transitions_accepted + self.stale_echoes_rejected + \
@@ -100,6 +106,7 @@ class BatchMetrics:
             f"{prefix}/realtime_catchup_resyncs": self.realtime_catchup_resyncs,
             f"{prefix}/preflight_packets_drained": self.preflight_packets_drained,
             f"{prefix}/max_observed_frame_span": self.max_observed_frame_span,
+            f"{prefix}/fire_gate_suppressions": self.fire_gate_suppressions,
             f"{prefix}/authoritative_echo_accept_rate": (
                 self.transitions_accepted / attempted if attempted else 1.0
             ),
@@ -200,6 +207,7 @@ class Q2NetworkClientBatch:
         self._realtime_catchup_resyncs = 0
         self._preflight_packets_drained = 0
         self._max_observed_frame_span = 0
+        self._fire_gate_suppressions = 0
 
     @staticmethod
     def _policy_version(value: int) -> int:
@@ -234,9 +242,17 @@ class Q2NetworkClientBatch:
             abs(float(debug[4]) - expected_forward) <= self.movement_tolerance
             and abs(float(debug[5]) - expected_right) <= self.movement_tolerance
         )
+        echoed_fire = bool(int(debug[9]))
+        requested_fire = bool(dispatch.action.fire)
+        gate_flags = int(debug[11]) if len(debug) >= 12 else 0
+        fire_suppressed = (
+            requested_fire
+            and not echoed_fire
+            and bool(gate_flags & ML_FIRE_GATE_SUPPRESSED)
+        )
         button_matches = (
             bool(int(debug[8])) == bool(dispatch.action.jump)
-            and bool(int(debug[9])) == bool(dispatch.action.fire)
+            and (echoed_fire == requested_fire or fire_suppressed)
         )
         return ("matched" if movement_matches and button_matches else "mismatch"), echo_tick
 
@@ -727,6 +743,11 @@ class Q2NetworkClientBatch:
             infos = []
             for result, tag, match in zip(results, tags, accepted):
                 info = dict(result[4])
+                debug = match.telemetry.observation.action_debug
+                gate_flags = int(debug[11]) if len(debug) >= 12 else 0
+                fire_suppressed = bool(
+                    gate_flags & ML_FIRE_GATE_SUPPRESSED
+                )
                 info.update({
                     "batch_round_id": tag.round_id,
                     "policy_version": tag.policy_version,
@@ -737,8 +758,20 @@ class Q2NetworkClientBatch:
                     "trainable_transition": True,
                     "stale_echoes_rejected": match.stale_echoes,
                     "mismatched_echoes_rejected": match.mismatched_echoes,
+                    "fire_gate_protected": bool(
+                        gate_flags & ML_FIRE_GATE_PROTECTED
+                    ),
+                    "fire_gate_target": bool(
+                        gate_flags & ML_FIRE_GATE_TARGET
+                    ),
+                    "fire_gate_suppressed": fire_suppressed,
+                    "effective_action_fire": bool(int(debug[9])),
                 })
                 infos.append(info)
+
+            self._fire_gate_suppressions += sum(
+                int(info["fire_gate_suppressed"]) for info in infos
+            )
 
             frame_values = [match.telemetry.server_frame for match in accepted]
             frame_span = max(frame_values) - min(frame_values)
@@ -786,6 +819,7 @@ class Q2NetworkClientBatch:
             realtime_catchup_resyncs=self._realtime_catchup_resyncs,
             preflight_packets_drained=self._preflight_packets_drained,
             max_observed_frame_span=self._max_observed_frame_span,
+            fire_gate_suppressions=self._fire_gate_suppressions,
         )
 
     def close(self):

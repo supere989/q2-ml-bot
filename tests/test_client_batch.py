@@ -13,6 +13,7 @@ from harness.client_env import ClientActionDispatch, ClientTelemetryDrain
 from harness.client_env import Q2NetworkClientEnv
 from harness.client_protocol import ClientTelemetry
 from harness.protocol import Action
+from harness.protocol import ML_FIRE_GATE_SUPPRESSED
 
 
 class _Spatial:
@@ -39,6 +40,7 @@ def _telemetry(
     terminal=False,
     damage_dealt=0.0,
     map_name="q2dm1",
+    gate_flags=0,
 ):
     debug = np.zeros(12, dtype=np.float32)
     debug[0] = echo_tick
@@ -47,6 +49,7 @@ def _telemetry(
     debug[5] = right
     debug[8] = int(jump)
     debug[9] = int(fire)
+    debug[11] = int(gate_flags)
     obs = SimpleNamespace(
         action_debug=debug,
         is_terminal=terminal,
@@ -229,6 +232,43 @@ def test_failed_echo_round_never_returns_a_trainable_transition():
         assert metrics.failed_rounds == 1
         assert metrics.mismatched_echoes_rejected == 1
         assert metrics.transitions_accepted == 0
+    finally:
+        batch.close()
+
+
+def test_server_suppressed_fire_is_an_admitted_effective_action():
+    events = []
+    env = _FakeEnv(
+        "client-a",
+        0,
+        [
+            _telemetry(
+                "client-a",
+                0,
+                2,
+                11,
+                echo_tick=11,
+                accepted=1,
+                fire=False,
+                gate_flags=ML_FIRE_GATE_SUPPRESSED,
+            )
+        ],
+        events,
+    )
+    batch = Q2NetworkClientBatch([env], round_timeout=1.0)
+    try:
+        batch.reset()
+        result = batch.collect_round(
+            [Action(fire=True)], policy_version=9
+        )
+        assert result.infos[0]["fire_gate_suppressed"] is True
+        assert result.infos[0]["effective_action_fire"] is False
+        assert result.infos[0]["trainable_transition"] is True
+        assert batch.metrics.fire_gate_suppressions == 1
+        assert (
+            batch.metrics.as_dict()["network_client/fire_gate_suppressions"]
+            == 1
+        )
     finally:
         batch.close()
 

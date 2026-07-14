@@ -40,6 +40,12 @@ ML_TERMINAL_NONE         = 0
 ML_TERMINAL_DEATH        = 1
 ML_TERMINAL_INTERMISSION = 2
 
+# action_debug[11] flags emitted by game.so. These are debug/control-plane
+# metadata and intentionally remain outside the policy observation vector.
+ML_FIRE_GATE_PROTECTED  = 0x01
+ML_FIRE_GATE_TARGET     = 0x02
+ML_FIRE_GATE_SUPPRESSED = 0x04
+
 # ── Observation ────────────────────────────────────────────────────────
 
 # ml_self_t:  pos[3] vel[3] health armor weapon_id ammo  → 10 floats

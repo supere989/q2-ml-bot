@@ -14,6 +14,8 @@ import uuid
 from .client_protocol import ClientTelemetry, parse_client_telemetry
 from .protocol import (
     Action,
+    ML_FIRE_GATE_PROTECTED,
+    ML_FIRE_GATE_TARGET,
     R_DAMAGE_DEALT,
     R_DAMAGE_TAKEN,
     R_DEATH,
@@ -23,6 +25,17 @@ from .protocol import (
     pack_action,
 )
 from .spatial import VoxelSpatialReward
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+TARGET_ACQUIRE_REWARD = _float_env("R_TARGET_ACQUIRE", 0.02)
+TARGET_ACQUIRE_COOLDOWN_FRAMES = 20
 
 
 @dataclass(frozen=True)
@@ -130,6 +143,9 @@ class Q2NetworkClientEnv:
         self._process: subprocess.Popen | None = None
         self._client_address: tuple[str, int] | None = None
         self._last: ClientTelemetry | None = None
+        self._target_alignment_map: str | None = None
+        self._target_was_aligned = False
+        self._last_target_acquire_frame = -TARGET_ACQUIRE_COOLDOWN_FRAMES
 
     def start(self) -> ClientTelemetry:
         if self._process is not None:
@@ -300,6 +316,49 @@ class Q2NetworkClientEnv:
             "action_debug_movement": [float(value) for value in obs.action_debug[4:8]],
         }
 
+    @staticmethod
+    def _target_is_aligned(current: ClientTelemetry) -> bool:
+        obs = current.observation
+        flags = int(obs.action_debug[11]) if len(obs.action_debug) >= 12 else 0
+        alive = float(obs.self_state[6]) > 0.0
+        return bool(
+            alive
+            and not obs.is_terminal
+            and flags & ML_FIRE_GATE_TARGET
+            and not flags & ML_FIRE_GATE_PROTECTED
+        )
+
+    def _reset_target_alignment(self, current: ClientTelemetry) -> None:
+        self._target_alignment_map = current.map_name
+        self._target_was_aligned = self._target_is_aligned(current)
+        self._last_target_acquire_frame = (
+            int(current.server_frame) - TARGET_ACQUIRE_COOLDOWN_FRAMES
+        )
+
+    def _target_acquisition_bonus(
+        self, current: ClientTelemetry
+    ) -> tuple[float, bool, bool]:
+        if current.map_name != self._target_alignment_map:
+            self._target_alignment_map = current.map_name
+            self._target_was_aligned = False
+            self._last_target_acquire_frame = (
+                int(current.server_frame) - TARGET_ACQUIRE_COOLDOWN_FRAMES
+            )
+        aligned = self._target_is_aligned(current)
+        acquired = bool(
+            aligned
+            and not self._target_was_aligned
+            and int(current.server_frame) - self._last_target_acquire_frame
+            >= TARGET_ACQUIRE_COOLDOWN_FRAMES
+        )
+        bonus = TARGET_ACQUIRE_REWARD if acquired else 0.0
+        if acquired:
+            self._last_target_acquire_frame = int(current.server_frame)
+        self._target_was_aligned = aligned
+        if current.observation.is_terminal:
+            self._target_was_aligned = False
+        return float(bonus), acquired, aligned
+
     def initial_result(
         self,
         current: ClientTelemetry,
@@ -307,6 +366,7 @@ class Q2NetworkClientEnv:
         vector: bool = False,
     ):
         """Convert a packet returned by :meth:`start` into reset output."""
+        self._reset_target_alignment(current)
         info = self._base_info(current)
         if not vector:
             return current.observation, info
@@ -324,9 +384,16 @@ class Q2NetworkClientEnv:
         """Convert an already echo-validated telemetry packet into a step result."""
         obs = current.observation
         reward = authoritative_reward(obs)
+        target_bonus, target_acquired, target_aligned = (
+            self._target_acquisition_bonus(current)
+        )
+        reward += target_bonus
         info = self._base_info(current)
         info.update({
             "reward_base": float(reward),
+            "target_alignment_bonus": target_bonus,
+            "target_acquired": target_acquired,
+            "target_aligned": target_aligned,
             "damage_dealt": float(obs.reward_damage_dealt),
             "damage_taken": float(obs.reward_damage_taken),
             "kills": float(obs.reward_kill),
@@ -393,6 +460,9 @@ class Q2NetworkClientEnv:
         self._client_address = None
         self._last = None
         self._spatial_map = None
+        self._target_alignment_map = None
+        self._target_was_aligned = False
+        self._last_target_acquire_frame = -TARGET_ACQUIRE_COOLDOWN_FRAMES
 
     def __enter__(self):
         self.start()

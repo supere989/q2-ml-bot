@@ -47,6 +47,101 @@ WEAPON_EMB_DIM = 16
 
 LOG_STD_MIN, LOG_STD_MAX = -3.0, 1.0
 
+# Observation layout after entities: rays[16*4], hook zones[4*8], audio[5],
+# yaw, pitch. Extended observations are appended later and do not shift this.
+_AIM_PITCH_OBS_INDEX = ENT_OFF + ENT_LEN + 16 * 4 + 4 * 8 + 5 + 1
+
+
+def _wrap_degrees_tensor(angle: torch.Tensor) -> torch.Tensor:
+    return torch.remainder(angle + 180.0, 360.0) - 180.0
+
+
+def target_fire_allowed(
+    obs: torch.Tensor,
+    look_action: torch.Tensor,
+    *,
+    yaw_threshold_deg: float = 12.0,
+    pitch_threshold_deg: float = 14.0,
+) -> torch.Tensor:
+    """Return whether a sampled look command ends on a visible enemy.
+
+    Entity coordinates are authoritative, normalized, and already expressed
+    in Quake's local forward/right/up basis. The calculation mirrors the aim
+    teacher's Quake yaw sign and engine pitch clamp, but accepts alignment with
+    any live visible enemy rather than only the nearest one.
+    """
+    if yaw_threshold_deg < 0 or pitch_threshold_deg < 0:
+        raise ValueError("fire-gate alignment thresholds must be nonnegative")
+    if obs.shape[:-1] != look_action.shape[:-1] or look_action.shape[-1] != 2:
+        raise ValueError(
+            "look_action must match the observation leading dimensions and "
+            "contain yaw/pitch"
+        )
+
+    entities = obs[..., ENT_OFF:ENT_OFF + ENT_LEN].reshape(
+        *obs.shape[:-1], ENT_CNT, ENT_DIM
+    )
+    candidates = (
+        (entities[..., 6] > 0.0)
+        & (entities[..., 7] > 0.5)
+        & (entities[..., 8] > 0.5)
+    )
+    xyz = entities[..., :3]
+    current_pitch = obs[..., _AIM_PITCH_OBS_INDEX] * 90.0
+    pitch_rad = current_pitch * (torch.pi / 180.0)
+    x, y, z = xyz.unbind(dim=-1)
+    horizontal_forward = (
+        torch.cos(pitch_rad).unsqueeze(-1) * x
+        + torch.sin(pitch_rad).unsqueeze(-1) * z
+    )
+    vertical = (
+        -torch.sin(pitch_rad).unsqueeze(-1) * x
+        + torch.cos(pitch_rad).unsqueeze(-1) * z
+    )
+    horizontal_distance = torch.hypot(horizontal_forward, y).clamp_min(1e-6)
+    desired_yaw = _wrap_degrees_tensor(
+        -torch.atan2(y, horizontal_forward) * (180.0 / torch.pi)
+    )
+    target_pitch = -torch.atan2(vertical, horizontal_distance) * (
+        180.0 / torch.pi
+    )
+    desired_pitch = target_pitch - current_pitch.unsqueeze(-1)
+
+    yaw_command = look_action[..., 0].clamp(-45.0, 45.0)
+    pitch_command = look_action[..., 1].clamp(-30.0, 30.0)
+    new_pitch = (current_pitch + pitch_command).clamp(-89.0, 89.0)
+    effective_pitch_command = new_pitch - current_pitch
+    yaw_residual = _wrap_degrees_tensor(
+        -desired_yaw + yaw_command.unsqueeze(-1)
+    )
+    pitch_residual = (
+        -desired_pitch + effective_pitch_command.unsqueeze(-1)
+    )
+    aligned = (
+        candidates
+        & (yaw_residual.abs() <= float(yaw_threshold_deg))
+        & (pitch_residual.abs() <= float(pitch_threshold_deg))
+    )
+    self_alive = obs[..., 6] > 0.0
+    return self_alive & aligned.any(dim=-1)
+
+
+def _masked_fire_logits(
+    fire_logits: torch.Tensor,
+    fire_allowed: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Make no-fire the sole action where the authoritative gate is closed."""
+    if fire_allowed is None:
+        return fire_logits
+    allowed = fire_allowed.to(device=fire_logits.device, dtype=torch.bool)
+    if allowed.shape != fire_logits.shape[:-1]:
+        raise ValueError(
+            "fire_allowed must match the fire-logit leading dimensions"
+        )
+    closed = torch.zeros_like(fire_logits)
+    closed[..., 1] = torch.finfo(fire_logits.dtype).min
+    return torch.where(allowed.unsqueeze(-1), fire_logits, closed)
+
 
 def _stateful_enabled() -> bool:
     return os.environ.get("Q2_POLICY_STATEFUL", "1").lower() in {"1", "true", "yes", "on"}
@@ -216,6 +311,7 @@ class Q2BotPolicy(nn.Module):
         self,
         act_params: dict,
         actions: torch.Tensor,
+        fire_allowed: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Log-probability and entropy for the full mixed action vector."""
         cont_dist = torch.distributions.Normal(
@@ -227,6 +323,7 @@ class Q2BotPolicy(nn.Module):
 
         weapon_idx = actions[..., 7].round().long().clamp(0, WEAPON_CLASSES - 1)
         fire_logits = self.fire_logits_for(act_params["feat"], weapon_idx)
+        fire_logits = _masked_fire_logits(fire_logits, fire_allowed)
 
         for logits, action_idx, max_class in (
             (act_params["jump_logits"],   4, 1),
@@ -301,7 +398,11 @@ class Q2BotPolicy(nn.Module):
         hx_list:      list,                                          # list of N (h, c) tuples
         device:       torch.device = torch.device("cpu"),
         deterministic: bool = False,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, list]:
+        gate_fire: bool = False,
+        fire_gate_yaw_deg: float = 12.0,
+        fire_gate_pitch_deg: float = 14.0,
+        return_fire_metadata: bool = False,
+    ) -> tuple:
         """
         Vectorized inference across N envs in a single GPU call.
 
@@ -313,10 +414,17 @@ class Q2BotPolicy(nn.Module):
         """
         N = obs_batch.shape[0]
         if N == 0:
-            return (np.zeros((0, 8), np.float32),
-                    np.zeros(0, np.float32),
-                    np.zeros(0, np.float32),
-                    [])
+            result = (np.zeros((0, 8), np.float32),
+                      np.zeros(0, np.float32),
+                      np.zeros(0, np.float32),
+                      [])
+            if return_fire_metadata:
+                return (*result, {
+                    "fire_allowed": np.ones(0, dtype=np.bool_),
+                    "raw_fire_probability": np.zeros(0, dtype=np.float32),
+                    "raw_fire_log_probability": np.zeros(0, dtype=np.float32),
+                })
+            return result
 
         # Stack hidden states: each is (1, 1, H); we need (1, N, H)
         if _stateful_enabled():
@@ -351,8 +459,20 @@ class Q2BotPolicy(nn.Module):
         jump, jump_lp     = sample_cat(act_params["jump_logits"])
         hook, hook_lp     = sample_cat(act_params["hook_logits"])
         weapon, weapon_lp = sample_cat(act_params["weapon_logits"])
-        fire_logits = self.fire_logits_for(
+        raw_fire_logits = self.fire_logits_for(
             act_params["feat"], weapon.unsqueeze(-1)
+        )
+        fire_allowed = torch.ones(N, dtype=torch.bool, device=device)
+        if gate_fire:
+            fire_allowed = target_fire_allowed(
+                obs_t.squeeze(1),
+                cont[:, 2:4],
+                yaw_threshold_deg=fire_gate_yaw_deg,
+                pitch_threshold_deg=fire_gate_pitch_deg,
+            )
+        fire_logits = _masked_fire_logits(
+            raw_fire_logits,
+            fire_allowed.unsqueeze(-1),
         )
         fire, fire_lp     = sample_cat(fire_logits)
         log_probs = log_probs + jump_lp + fire_lp + hook_lp + weapon_lp
@@ -367,10 +487,22 @@ class Q2BotPolicy(nn.Module):
         new_hx = [(h_new[:, i:i+1, :].clone(), c_new[:, i:i+1, :].clone())
                   for i in range(N)]
 
-        return (actions.cpu().numpy().astype(np.float32),
-                value.squeeze().cpu().numpy().astype(np.float32),
-                log_probs.cpu().numpy().astype(np.float32),
-                new_hx)
+        result = (actions.cpu().numpy().astype(np.float32),
+                  value.squeeze().cpu().numpy().astype(np.float32),
+                  log_probs.cpu().numpy().astype(np.float32),
+                  new_hx)
+        if not return_fire_metadata:
+            return result
+        metadata = {
+            "fire_allowed": fire_allowed.cpu().numpy().astype(np.bool_),
+            "raw_fire_probability": raw_fire_logits.softmax(dim=-1)[
+                ..., 1
+            ].squeeze(-1).cpu().numpy().astype(np.float32),
+            "raw_fire_log_probability": raw_fire_logits.log_softmax(dim=-1)[
+                ..., 1
+            ].squeeze(-1).cpu().numpy().astype(np.float32),
+        }
+        return (*result, metadata)
 
     def param_count(self) -> int:
         return sum(p.numel() for p in self.parameters())
