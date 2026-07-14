@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import os
@@ -13,6 +12,21 @@ import time
 import urllib.request
 import zipfile
 from pathlib import Path
+
+try:
+    from tools.map_bundle import (
+        artifact_names,
+        install_bundle,
+        validate_manifest,
+        verify_payloads,
+    )
+except ModuleNotFoundError:  # direct execution from tools/
+    from map_bundle import (
+        artifact_names,
+        install_bundle,
+        validate_manifest,
+        verify_payloads,
+    )
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -43,25 +57,24 @@ class FarmMapGenerator:
                     raise RuntimeError("remote map queue is empty")
                 bundle_data = response.read()
             with zipfile.ZipFile(io.BytesIO(bundle_data)) as bundle:
-                manifest = json.loads(bundle.read("manifest.json"))
-                name = str(manifest["name"])
+                members = bundle.namelist()
+                if len(members) != len(set(members)):
+                    raise ValueError("map bundle contains duplicate members")
+                manifest_payload = bundle.read("manifest.json")
+                manifest = json.loads(manifest_payload)
+                name = validate_manifest(manifest)
                 if not self._valid_name(name):
                     raise ValueError(f"invalid farm map name {name!r}")
-                expected = {
-                    f"{name}.bsp": manifest["files"][f"{name}.bsp"],
-                    f"{name}.json": manifest["files"][f"{name}.json"],
+                expected_members = {"manifest.json", *artifact_names(name)}
+                if set(members) != expected_members:
+                    raise ValueError("map bundle archive member set is invalid")
+                payloads = {
+                    filename: bundle.read(filename)
+                    for filename in artifact_names(name)
                 }
-                payloads = {filename: bundle.read(filename) for filename in expected}
-                for filename, digest in expected.items():
-                    actual = hashlib.sha256(payloads[filename]).hexdigest()
-                    if actual != digest:
-                        raise ValueError(f"checksum mismatch for {filename}")
+                verify_payloads(manifest, payloads)
             install_dir = self.q2_root / "baseq2" / "maps"
-            install_dir.mkdir(parents=True, exist_ok=True)
-            for filename, payload in payloads.items():
-                temporary = install_dir / f".{filename}.{os.getpid()}.tmp"
-                temporary.write_bytes(payload)
-                os.replace(temporary, install_dir / filename)
+            install_bundle(install_dir, manifest, manifest_payload, payloads)
             self._result = name
         except Exception as error:
             self._error = str(error)

@@ -15,6 +15,7 @@ from harness.spatial import (
     load_lattice_state,
     save_lattice_state,
 )
+from tools.map_bundle import build_manifest, encode_manifest, installed_manifest_name
 if torch is not None:
     from train.ppo import _lattice_direction_loss
 
@@ -58,6 +59,25 @@ def _write_sidecars(root, map_name="prototype"):
     }))
 
 
+def _attest_sidecars(root, map_name):
+    payloads = {
+        f"{map_name}.bsp": b"compiled-bsp",
+        f"{map_name}.json": b"# hook zones\n",
+        f"{map_name}.lattice.json": (
+            root / f"{map_name}.lattice.json"
+        ).read_bytes(),
+        f"{map_name}.routes.json": (
+            root / f"{map_name}.routes.json"
+        ).read_bytes(),
+    }
+    for filename, payload in payloads.items():
+        (root / filename).write_bytes(payload)
+    manifest = build_manifest(map_name, {"generator": "test"}, payloads)
+    (root / installed_manifest_name(map_name)).write_bytes(
+        encode_manifest(manifest)
+    )
+
+
 def test_preload_and_route_timing_reach_live_memory(tmp_path, monkeypatch):
     _write_sidecars(tmp_path)
     monkeypatch.setenv("Q2_LATTICE_DIR", str(tmp_path))
@@ -77,6 +97,57 @@ def test_preload_and_route_timing_reach_live_memory(tmp_path, monkeypatch):
     assert features[16] > 0.0  # objective/readiness opportunity pull
     assert reward.dynamic_cells["prototype"]
     assert reward.selected_route == "offense"
+
+
+def test_live_farm_preload_requires_and_records_bundle_attestation(
+    tmp_path, monkeypatch,
+):
+    map_name = "mllive_12345678"
+    _write_sidecars(tmp_path, map_name)
+    _attest_sidecars(tmp_path, map_name)
+    monkeypatch.setenv("Q2_LATTICE_DIR", str(tmp_path))
+    reward = VoxelSpatialReward.from_env(seed=7)
+
+    reward.reset(map_name, _obs(pos=(128, 128, 128), tick=10))
+
+    sources = reward.sidecar_sources[map_name]
+    assert sources["bundle"].endswith(f"{map_name}.bundle.json")
+    assert len(sources["bundle_sha256"]) == 64
+    assert sources["item_timing"].endswith(f"{map_name}.routes.json")
+    assert map_name in reward.item_timings
+
+
+def test_live_farm_preload_rejects_corrupt_attested_route_graph(
+    tmp_path, monkeypatch,
+):
+    map_name = "mllive_12345678"
+    _write_sidecars(tmp_path, map_name)
+    _attest_sidecars(tmp_path, map_name)
+    (tmp_path / f"{map_name}.routes.json").write_text("{}")
+    monkeypatch.setenv("Q2_LATTICE_DIR", str(tmp_path))
+    reward = VoxelSpatialReward.from_env(seed=7)
+
+    reward.reset(map_name, _obs(pos=(128, 128, 128), tick=10))
+
+    sources = reward.sidecar_sources[map_name]
+    assert "routes" not in sources
+    assert "mismatch" in sources["routes_error"]
+    assert map_name not in reward.item_timings
+
+
+def test_live_farm_preload_rejects_unattested_sidecars(tmp_path, monkeypatch):
+    map_name = "mllive_12345678"
+    _write_sidecars(tmp_path, map_name)
+    monkeypatch.setenv("Q2_LATTICE_DIR", str(tmp_path))
+    reward = VoxelSpatialReward.from_env(seed=7)
+
+    reward.reset(map_name, _obs(pos=(128, 128, 128), tick=10))
+
+    sources = reward.sidecar_sources[map_name]
+    assert "lattice" not in sources
+    assert "no installed bundle manifest" in sources["lattice_error"]
+    assert "routes" not in sources
+    assert "no installed bundle manifest" in sources["routes_error"]
 
 
 def test_own_pickup_rephases_item_readiness(tmp_path, monkeypatch):

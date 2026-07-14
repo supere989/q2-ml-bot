@@ -20,6 +20,13 @@ import numpy as np
 
 from .protocol import OBS_SESSION_MEMORY_DIM, Observation
 from .item_timing import ItemTimingTable
+from tools.map_bundle import (
+    farm_map_requires_attestation,
+    installed_manifest_name,
+    sha256_bytes,
+    validate_manifest,
+    verify_installed_artifact,
+)
 
 HOOK_REQUIRED = 4
 BLASTER_ITEM_INDEX = 8
@@ -486,6 +493,27 @@ class VoxelSpatialReward:
                 return candidate
         return None
 
+    @staticmethod
+    def _read_attested_sidecar(
+        map_name: str, path: Path,
+    ) -> tuple[bytes, dict | None]:
+        """Verify farm sidecars while retaining legacy local-map support."""
+        manifest_path = path.parent / installed_manifest_name(map_name)
+        if not manifest_path.is_file():
+            if farm_map_requires_attestation(map_name):
+                raise ValueError(
+                    f"farm sidecar has no installed bundle manifest: {manifest_path}"
+                )
+            return path.read_bytes(), None
+        manifest_payload = manifest_path.read_bytes()
+        manifest = json.loads(manifest_payload)
+        validate_manifest(manifest, map_name)
+        payload = verify_installed_artifact(path, manifest)
+        return payload, {
+            "path": str(manifest_path),
+            "sha256": sha256_bytes(manifest_payload),
+        }
+
     def _ensure_map_lattice(self, map_name: str, tick: int,
                             reset_clock: bool = False) -> None:
         """Load generator priors once and initialize the live item clock."""
@@ -496,11 +524,17 @@ class VoxelSpatialReward:
             lattice_path = self._find_sidecar(map_name, "lattice")
             if lattice_path is not None:
                 try:
-                    payload = json.loads(lattice_path.read_text())
+                    encoded, attestation = self._read_attested_sidecar(
+                        map_name, lattice_path,
+                    )
+                    payload = json.loads(encoded)
                     self._preload_lattice_payload(map_name, payload)
                     sources["lattice"] = str(lattice_path)
-                except (OSError, ValueError, TypeError, KeyError):
-                    sources["lattice_error"] = str(lattice_path)
+                    if attestation is not None:
+                        sources["bundle"] = attestation["path"]
+                        sources["bundle_sha256"] = attestation["sha256"]
+                except (OSError, ValueError, TypeError, KeyError) as error:
+                    sources["lattice_error"] = f"{lattice_path}: {error}"
             self.preloaded_maps.add(map_name)
 
         if not self.lattice_routes_enabled:
@@ -510,11 +544,18 @@ class VoxelSpatialReward:
             route_path = self._find_sidecar(map_name, "routes")
             if route_path is not None:
                 try:
-                    graph = json.loads(route_path.read_text())
+                    encoded, attestation = self._read_attested_sidecar(
+                        map_name, route_path,
+                    )
+                    graph = json.loads(encoded)
                     self.route_graphs[map_name] = graph
                     sources["routes"] = str(route_path)
-                except (OSError, ValueError, TypeError):
-                    sources["routes_error"] = str(route_path)
+                    sources["item_timing"] = str(route_path)
+                    if attestation is not None:
+                        sources["bundle"] = attestation["path"]
+                        sources["bundle_sha256"] = attestation["sha256"]
+                except (OSError, ValueError, TypeError, KeyError) as error:
+                    sources["routes_error"] = f"{route_path}: {error}"
                     graph = None
         if graph is not None and (map_name not in self.item_timings or reset_clock):
             table = ItemTimingTable()

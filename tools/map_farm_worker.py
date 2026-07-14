@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import random
@@ -20,6 +19,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from tools.map_bundle import (
+    artifact_names,
+    build_manifest,
+    encode_manifest,
+    install_bundle,
+)
+
 LIVE_MAP_PREFIX = "mllive"
 ARENA_STYLES = ("arena_open", "arena_vertical", "arena_lanes")
 LEGACY_STYLES = ("open", "towers", "canyon", "pits")
@@ -31,7 +39,8 @@ SEED_RANGES = {
 
 class MapFarm:
     def __init__(self, queue_dir: Path, q2_root: Path, depth: int, threads: int = 8,
-                 prefix: str = LIVE_MAP_PREFIX, arena_fraction: float = 0.5):
+                 prefix: str = LIVE_MAP_PREFIX, arena_fraction: float = 0.5,
+                 install_dir: Path | None = None):
         if not re.fullmatch(r"[a-z][a-z0-9_]{1,31}", prefix):
             raise ValueError(f"invalid map prefix {prefix!r}")
         self.queue_dir = queue_dir
@@ -39,6 +48,13 @@ class MapFarm:
         self.depth = max(1, depth)
         self.threads = max(1, threads)
         self.prefix = prefix
+        # This WSL mirror is the network trainer's authoritative sidecar root.
+        # It is published before the corresponding bundle can be claimed.
+        self.install_dir = (
+            Path(install_dir)
+            if install_dir is not None
+            else self.q2_root / "baseq2" / "maps"
+        )
         self.arena_target = min(
             self.depth,
             max(0, int(round(self.depth * max(0.0, min(1.0, arena_fraction))))),
@@ -78,14 +94,6 @@ class MapFarm:
                 "last_error": self.last_error,
             }
 
-    @staticmethod
-    def _sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-
     def _build_one(self) -> None:
         low, high = SEED_RANGES.get(self.prefix, (10_000_000, 99_999_999))
         seed = random.SystemRandom().randint(low, high)
@@ -95,6 +103,8 @@ class MapFarm:
         bsp_path = generated / f"{name}.bsp"
         json_path = generated / f"{name}.json"
         meta_path = generated / f"{name}.meta.json"
+        lattice_path = generated / f"{name}.lattice.json"
+        routes_path = generated / f"{name}.routes.json"
         q2tool = ROOT / "maps" / "q2tools" / "bin" / "q2tool"
         ready_styles = self.status()["ready_styles"]
         arena_ready = sum(style in ARENA_STYLES for style in ready_styles.values())
@@ -103,6 +113,7 @@ class MapFarm:
         with self.lock:
             self.building = name
             self.last_error = ""
+        temporary = None
         try:
             subprocess.run(
                 [sys.executable, str(ROOT / "maps" / "generator.py"),
@@ -115,22 +126,37 @@ class MapFarm:
                  "-moddir", str(self.q2_root / "baseq2"), str(map_path)],
                 cwd=ROOT, check=True,
             )
-            if not bsp_path.is_file() or not json_path.is_file() or not meta_path.is_file():
-                raise RuntimeError(f"compiler did not produce map artifacts for {name}")
-            generator_meta = json.loads(meta_path.read_text())
-            manifest = {
-                "name": name,
-                "generator": generator_meta,
-                "files": {
-                    bsp_path.name: self._sha256(bsp_path),
-                    json_path.name: self._sha256(json_path),
-                },
+            artifact_paths = {
+                bsp_path.name: bsp_path,
+                json_path.name: json_path,
+                lattice_path.name: lattice_path,
+                routes_path.name: routes_path,
             }
+            missing = [
+                filename for filename, path in artifact_paths.items()
+                if not path.is_file()
+            ]
+            if missing or not meta_path.is_file():
+                raise RuntimeError(
+                    f"compiler did not produce required artifacts for {name}: {missing}"
+                )
+            generator_meta = json.loads(meta_path.read_text())
+            payloads = {
+                filename: path.read_bytes()
+                for filename, path in artifact_paths.items()
+            }
+            manifest = build_manifest(name, generator_meta, payloads)
+            manifest_payload = encode_manifest(manifest)
             temporary = self.queue_dir / f".{name}.{uuid.uuid4().hex}.tmp"
             with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_STORED) as bundle:
-                bundle.write(bsp_path, bsp_path.name)
-                bundle.write(json_path, json_path.name)
-                bundle.writestr("manifest.json", json.dumps(manifest, sort_keys=True))
+                for filename in artifact_names(name):
+                    bundle.writestr(filename, payloads[filename])
+                bundle.writestr("manifest.json", manifest_payload)
+            # Make lattice priors and the route/item clock available to the
+            # WSL network trainer before the public server can claim this map.
+            install_bundle(
+                self.install_dir, manifest, manifest_payload, payloads,
+            )
             os.replace(temporary, self.queue_dir / f"{name}.zip")
             print(f"[farm] ready {name}", flush=True)
         except Exception as error:
@@ -139,6 +165,11 @@ class MapFarm:
             print(f"[farm] build failed for {name}: {error}", flush=True)
             time.sleep(5)
         finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
             for suffix in (
                 ".map", ".prt", ".bsp", ".json", ".meta.json",
                 ".lattice.json", ".routes.json",
@@ -225,10 +256,15 @@ def main() -> int:
     parser.add_argument("--arena_fraction", type=float, default=0.5)
     parser.add_argument("--queue_dir", default=str(ROOT / "maps" / "farm_queue"))
     parser.add_argument("--q2_root", default=os.environ.get("Q2_ROOT", str(ROOT.parent / "runtime")))
+    parser.add_argument(
+        "--install_dir", default="",
+        help="persistent WSL bundle mirror (default: Q2_ROOT/baseq2/maps)",
+    )
     args = parser.parse_args()
 
     farm = MapFarm(Path(args.queue_dir), Path(args.q2_root), args.queue_depth,
-                   args.threads, args.prefix, args.arena_fraction)
+                   args.threads, args.prefix, args.arena_fraction,
+                   Path(args.install_dir) if args.install_dir else None)
     builder = threading.Thread(target=farm.build_loop, name="map-builder", daemon=True)
     builder.start()
     server = ThreadingHTTPServer((args.bind, args.port), handler_for(farm))
