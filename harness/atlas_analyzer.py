@@ -103,7 +103,7 @@ class AnalyzerLimits:
     max_oracle_requests: int = 2_000_000
     flood_source_batch: int = 128
     max_visibility_pairs: int = 16_384
-    max_pmove_sources: int = 256
+    max_pmove_sources: int = 2_048
 
 
 class OracleProcess:
@@ -183,10 +183,16 @@ class OracleProcess:
     def call(self, requests: Sequence[dict]) -> list[dict]:
         if not requests:
             return []
-        if len(requests) > self.limits.oracle_batch:
+        batch_limit = self.limits.oracle_batch
+        if self.kind == "pmove" and any(len(request.get("commands", [])) > 4 for request in requests):
+            # Multi-frame Pmove responses are large enough that even 32 can
+            # fill a pipe before the parent reads. Keep trajectory batches
+            # below the measured pipe capacity.
+            batch_limit = min(batch_limit, 4)
+        if len(requests) > batch_limit:
             output: list[dict] = []
-            for start in range(0, len(requests), self.limits.oracle_batch):
-                output.extend(self.call(requests[start:start + self.limits.oracle_batch]))
+            for start in range(0, len(requests), batch_limit):
+                output.extend(self.call(requests[start:start + batch_limit]))
             return output
         self.requests += len(requests)
         if self.requests > self.limits.max_oracle_requests:
@@ -249,6 +255,18 @@ class OracleProcess:
             "command", "version", "executable_sha256",
         }, "archiver provenance")
         _exact_keys(provenance["build"], {"cflags", "ldflags"}, "build provenance")
+        if self.kind == "cm":
+            model0 = _exact_keys(record["model0"], {"mins", "maxs", "headnode"}, "cm model0")
+            for name in ("mins", "maxs"):
+                values = model0[name]
+                if (
+                    not isinstance(values, list) or len(values) != 3
+                    or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                           or not math.isfinite(value) for value in values)
+                ):
+                    raise AtlasAnalysisError(f"cm model0 {name} is invalid")
+            if isinstance(model0["headnode"], bool) or not isinstance(model0["headnode"], int):
+                raise AtlasAnalysisError("cm model0 headnode is invalid")
         return record
 
     def _validate_response(self, record: dict) -> None:
@@ -361,6 +379,22 @@ def _snapped_origin(model_mins: Sequence[float]) -> tuple[int, int, int]:
     return tuple((value // 256) * 256 for value in integer_mins)  # type: ignore[return-value]
 
 
+def _oracle_atlas_origin(metadata: BspMetadata, identity: Mapping[str, Any]) -> tuple[int, int, int]:
+    """Bind Atlas coordinates to CM's expanded inline-model-0 authority."""
+    model = identity["model0"]
+    expected_mins = [value - 1.0 for value in metadata.model0.mins]
+    expected_maxs = [value + 1.0 for value in metadata.model0.maxs]
+    if (
+        any(abs(float(actual) - expected) > 1e-4
+            for actual, expected in zip(model["mins"], expected_mins))
+        or any(abs(float(actual) - expected) > 1e-4
+               for actual, expected in zip(model["maxs"], expected_maxs))
+        or model["headnode"] != metadata.model0.headnode
+    ):
+        raise AtlasAnalysisError("metadata/parser model0 differs from collision oracle model0")
+    return _snapped_origin(model["mins"])
+
+
 def _grid_index(point: Sequence[float], origin: Sequence[int], size: int) -> tuple[int, int, int]:
     return tuple(math.floor((point[axis] - origin[axis]) / size) for axis in range(3))  # type: ignore[return-value]
 
@@ -406,6 +440,97 @@ def _node_probe_requests(points: Sequence[tuple[float, float, float]]) -> list[d
     return requests
 
 
+def _directed_adjacency(
+    edges: Sequence[Mapping[str, Any]],
+) -> dict[tuple[int, int, int], list[tuple[int, int, int]]]:
+    adjacency: dict[tuple[int, int, int], list[tuple[int, int, int]]] = defaultdict(list)
+    for edge in edges:
+        adjacency[tuple(edge["source"])].append(tuple(edge["target"]))
+    for values in adjacency.values():
+        values.sort(key=lambda item: (item[2], item[1], item[0]))
+    return adjacency
+
+
+def _assign_directed_regions(
+    nodes: Mapping[tuple[int, int, int], NavNode], edges: Sequence[Mapping[str, Any]],
+) -> None:
+    """Assign deterministic strongly-connected region IDs (Kosaraju)."""
+    adjacency = _directed_adjacency(edges)
+    reverse: dict[tuple[int, int, int], list[tuple[int, int, int]]] = defaultdict(list)
+    for source, targets in adjacency.items():
+        for target in targets:
+            reverse[target].append(source)
+    order: list[tuple[int, int, int]] = []
+    visited: set[tuple[int, int, int]] = set()
+    ordered = sorted(nodes, key=lambda item: (item[2], item[1], item[0]))
+    for seed in ordered:
+        if seed in visited:
+            continue
+        stack: list[tuple[tuple[int, int, int], bool]] = [(seed, False)]
+        while stack:
+            current, expanded = stack.pop()
+            if expanded:
+                order.append(current)
+                continue
+            if current in visited:
+                continue
+            visited.add(current)
+            stack.append((current, True))
+            for neighbor in reversed(adjacency.get(current, [])):
+                if neighbor not in visited:
+                    stack.append((neighbor, False))
+    for node in nodes.values():
+        node.region_id = 0
+    region = 0
+    for seed in reversed(order):
+        if nodes[seed].region_id:
+            continue
+        region += 1
+        nodes[seed].region_id = region
+        pending = [seed]
+        while pending:
+            current = pending.pop()
+            for neighbor in reverse.get(current, []):
+                if nodes[neighbor].region_id == 0:
+                    nodes[neighbor].region_id = region
+                    pending.append(neighbor)
+
+
+def _spawn_reachability(
+    edges: Sequence[Mapping[str, Any]],
+    spawn_indices: Mapping[int, tuple[int, int, int]],
+) -> dict[int, list[int]]:
+    adjacency = _directed_adjacency(edges)
+    output: dict[int, list[int]] = {}
+    for ordinal, seed in sorted(spawn_indices.items()):
+        visited = {seed}
+        pending = [seed]
+        while pending:
+            current = pending.pop()
+            for neighbor in adjacency.get(current, []):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    pending.append(neighbor)
+        output[ordinal] = [
+            other for other, key in sorted(spawn_indices.items())
+            if other != ordinal and key in visited
+        ]
+    return output
+
+
+def _mutually_reachable_spawn_pairs(
+    edges: Sequence[Mapping[str, Any]],
+    spawn_indices: Mapping[int, tuple[int, int, int]],
+) -> list[tuple[int, int]]:
+    reachable = _spawn_reachability(edges, spawn_indices)
+    return [
+        (left, right)
+        for left in sorted(reachable)
+        for right in reachable[left]
+        if left < right and left in reachable.get(right, [])
+    ]
+
+
 def _build_navigation(
     cm: OracleProcess,
     pmove: OracleProcess | None,
@@ -419,23 +544,36 @@ def _build_navigation(
                      STANDING_MINS, STANDING_MAXS)
         for ordinal, point in enumerate(seed_points)
     ])
-    grounded = []
+    grounded: list[tuple[float, float, float] | None] = []
     for point, support in zip(seed_points, seed_support):
-        if support["startsolid"] or support["fraction"] >= 1 or support["plane"]["normal"][2] < 0.7:
-            grounded.append(point)
+        if (
+            support["startsolid"] or support["allsolid"] or support["fraction"] >= 1
+            or support["plane"]["normal"][2] < 0.7
+        ):
+            grounded.append(None)
         else:
             grounded.append(tuple(support["endpos"]))
-    probes = cm.call(_node_probe_requests(grounded))
+    supported_points = [point for point in grounded if point is not None]
+    probes = cm.call(_node_probe_requests(supported_points))
     nodes: dict[tuple[int, int, int], NavNode] = {}
     queue: deque[tuple[int, int, int]] = deque()
     spawn_indices: dict[int, tuple[int, int, int]] = {}
+    probe_ordinal = 0
     for ordinal, ((entity_ordinal, _), point) in enumerate(zip(spawns, grounded)):
-        stand, crouch, contents = probes[ordinal * 3:ordinal * 3 + 3]
+        if point is None:
+            continue
+        stand, crouch, contents = probes[probe_ordinal * 3:probe_ordinal * 3 + 3]
+        probe_ordinal += 1
         key = _grid_index(point, origin, 16)
-        if stand["startsolid"] and crouch["startsolid"]:
+        if (
+            (stand["startsolid"] or stand["allsolid"])
+            and (crouch["startsolid"] or crouch["allsolid"])
+        ):
             continue
         node = NavNode(
-            key, point, not stand["startsolid"], not crouch["startsolid"], True,
+            key, point,
+            not stand["startsolid"] and not stand["allsolid"],
+            not crouch["startsolid"] and not crouch["allsolid"], True,
             contents["contents"], tuple(seed_support[ordinal]["plane"]["normal"]),
         )
         nodes.setdefault(key, node)
@@ -496,6 +634,11 @@ def _build_navigation(
             if target is None:
                 continue
             source = nodes[source_key]
+            # A diagonal endpoint hull trace is not Quake's step law. Only
+            # same-height origins are admitted as ordinary walk edges here;
+            # step/drop/jump candidates are challenged through Pmove below.
+            if abs(target.position[2] - source.position[2]) > 0.5:
+                continue
             mins = STANDING_MINS if source.standing_clear and target.standing_clear else CROUCHED_MINS
             maxs = STANDING_MAXS if source.standing_clear and target.standing_clear else CROUCHED_MAXS
             traces.append(_box_request(f"edge:{len(traces)}", source.position, target.position, mins, maxs))
@@ -518,7 +661,7 @@ def _build_navigation(
             if len(edges) > limits.max_l1_edges:
                 raise AtlasAnalysisError("L1 flood exceeded edge budget")
 
-    # Exact Pmove validates step/drop traversal only from a bounded,
+    # Exact Pmove validates step/drop/jump traversal only from a bounded,
     # deterministic set of spawn and CM-boundary nodes. Atlas v1 omits all
     # unprobed movement candidates; it never extrapolates a usercmd result.
     if pmove is not None:
@@ -530,26 +673,50 @@ def _build_navigation(
         ordered_nodes = sorted(nodes, key=lambda item: (item[2], item[1], item[0]))
         candidates = list(dict.fromkeys(spawn_indices.values()))
         candidates.extend(
-            key for key in ordered_nodes if outgoing[key] < 2 and key not in candidates
+            key for key in ordered_nodes if outgoing[key] < 4 and key not in candidates
         )
         for key in candidates[:limits.max_pmove_sources]:
             source = nodes[key]
             for yaw in (0, 90, 180, 270):
+                walk_id = f"pmove-walk:{key[0]}:{key[1]}:{key[2]}:{yaw}"
                 requests.append({
-                    "id": f"pmove:{key[0]}:{key[1]}:{key[2]}:{yaw}", "op": "simulate",
+                    "id": walk_id, "op": "simulate",
                     "origin": list(source.position), "pm_flags": 4, "snapinitial": False,
                     "commands": [
                         {"msec": 50, "angles": [0, yaw, 0], "forwardmove": 300}
                         for _ in range(4)
                     ],
                 })
-                metadata.append(key)
-        for source_key, result in zip(metadata, pmove.call(requests)):
+                metadata.append((key, "ground"))
+                if outgoing[key] < 2 or key in spawn_indices.values():
+                    jump_id = f"pmove-jump:{key[0]}:{key[1]}:{key[2]}:{yaw}"
+                    requests.append({
+                        "id": jump_id, "op": "simulate",
+                        "origin": list(source.position), "pm_flags": 4, "snapinitial": False,
+                        "commands": [
+                            {"msec": 50, "angles": [0, yaw, 0], "forwardmove": 300, "upmove": 300},
+                            *[
+                                {"msec": 50, "angles": [0, yaw, 0], "forwardmove": 300}
+                                for _ in range(15)
+                            ],
+                        ],
+                    })
+                    metadata.append((key, "jump"))
+        for (source_key, mode), result in zip(metadata, pmove.call(requests)):
             target_key = _grid_index(result["final"]["origin"], origin, 16)
             if target_key == source_key or target_key not in nodes or not result["final"]["grounded"]:
                 continue
             vertical = nodes[target_key].position[2] - nodes[source_key].position[2]
-            kind = "controlled_drop" if vertical < -18 else "step"
+            if mode == "jump":
+                if not any(not frame["grounded"] for frame in result["frames"]):
+                    continue
+                kind = "jump"
+            elif vertical < -18:
+                kind = "controlled_drop"
+            elif abs(vertical) <= 18.0:
+                kind = "step"
+            else:
+                continue
             key = (source_key, target_key, kind, "standing")
             if key in edge_keys:
                 continue
@@ -562,23 +729,10 @@ def _build_navigation(
                 "auxiliary": 0xFFFFFFFF,
             })
 
-    adjacency: dict[tuple[int, int, int], list[tuple[int, int, int]]] = defaultdict(list)
-    for edge in edges:
-        adjacency[tuple(edge["source"])].append(tuple(edge["target"]))
-    region = 0
-    for key in sorted(nodes, key=lambda item: (item[2], item[1], item[0])):
-        if nodes[key].region_id:
-            continue
-        region += 1
-        nodes[key].region_id = region
-        pending = [key]
-        while pending:
-            current = pending.pop()
-            neighbors = adjacency[current] + [source for source, values in adjacency.items() if current in values]
-            for neighbor in neighbors:
-                if nodes[neighbor].region_id == 0:
-                    nodes[neighbor].region_id = region
-                    pending.append(neighbor)
+    _assign_directed_regions(nodes, edges)
+    mutual = _mutually_reachable_spawn_pairs(edges, spawn_indices)
+    if not mutual:
+        raise AtlasAnalysisError("fewer than two mutually reachable deathmatch spawns")
     return nodes, edges, spawn_indices
 
 
@@ -822,7 +976,6 @@ def analyze_map(
         raise AtlasAnalysisError("map has fewer than two deathmatch spawns")
     output_dir.mkdir(parents=True, exist_ok=True)
     base = output_dir / canonical_map_id
-    origin = _snapped_origin(metadata.model0.mins)
     # Quake II's spawn lifecycle raises the selected entity origin by nine
     # units before linking the standing player hull. Analyze that real engine
     # origin while retaining the authored entity origin in the report.
@@ -833,6 +986,7 @@ def analyze_map(
     with OracleProcess(cm_oracle, bsp, "cm", limits) as cm:
         if cm.identity["map_sha256"] != metadata.sha256:
             raise AtlasAnalysisError("collision oracle loaded different BSP bytes")
+        origin = _oracle_atlas_origin(metadata, cm.identity)
         pmove_context = OracleProcess(pmove_oracle, bsp, "pmove", limits) if pmove_oracle else None
         try:
             if pmove_context and pmove_context.identity["map_sha256"] != metadata.sha256:
@@ -840,6 +994,7 @@ def analyze_map(
             nodes, edges, spawn_indices = _build_navigation(
                 cm, pmove_context, player_spawns, origin, limits,
             )
+            spawn_reachability = _spawn_reachability(edges, spawn_indices)
             visibility = _visibility(cm, nodes, limits)
             spawn_records = []
             for entity_ordinal, point in spawns:
@@ -849,11 +1004,7 @@ def analyze_map(
                 column = _column_clearance(cm, player_point)
                 reachable = []
                 if node is not None:
-                    reachable = [
-                        other for other, other_key in sorted(spawn_indices.items())
-                        if other != entity_ordinal and nodes.get(other_key) is not None
-                        and nodes[other_key].region_id == node.region_id
-                    ]
+                    reachable = spawn_reachability.get(entity_ordinal, [])
                 spawn_records.append({
                     "entity_ordinal": entity_ordinal,
                     "origin_milliunits": [round(value * 1000) for value in point],

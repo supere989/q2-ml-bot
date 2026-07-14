@@ -81,7 +81,9 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
         "author": "test", "license_name": "test fixture",
         "license_evidence": "generated in test", "redistribution": "redistributable",
     }
-    limits = AnalyzerLimits(max_l1_nodes=2_000, max_l1_edges=10_000)
+    limits = AnalyzerLimits(
+        max_l1_nodes=2_000, max_l1_edges=10_000, max_pmove_sources=32,
+    )
     outputs = []
     for name in ("first", "second"):
         output = tmp_path / name
