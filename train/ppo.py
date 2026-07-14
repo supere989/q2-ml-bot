@@ -1062,6 +1062,15 @@ def train(cfg: dict):
         rollout_fire_gate_allowed = 0
         rollout_fire_gate_executed = 0
         rollout_fire_gate_blocked_probability = 0.0
+        rollout_posture_samples = 0
+        rollout_signed_forward = 0.0
+        rollout_forward_commands = 0
+        rollout_backward_commands = 0
+        rollout_look_pitch = 0.0
+        rollout_look_pitch_abs = 0.0
+        rollout_view_pitch = 0.0
+        rollout_view_pitch_abs = 0.0
+        rollout_downlook_frames = 0
 
         accepted_rollout_steps = 0
         target_rollout_steps = 0 if distributed else int(cfg["n_steps"])
@@ -1180,6 +1189,26 @@ def train(cfg: dict):
                     step_results,
                     n_ml=n_ml,
                 )
+
+                # Explicit signed posture telemetry. The historical
+                # forward-intent metric used abs(move_forward), which hid a
+                # backwards moonwalk behind a healthy-looking value.
+                effective_forward = np.clip(actions_np[:, 0], -1.0, 1.0)
+                effective_look_pitch = np.clip(actions_np[:, 3], -30.0, 30.0)
+                pitch_obs_index = ENT_OFF + ENT_LEN + 16 * 4 + 4 * 8 + 5 + 1
+                view_pitch = current_obs[:, pitch_obs_index] * 90.0
+                rollout_posture_samples += int(effective_forward.size)
+                rollout_signed_forward += float(effective_forward.sum())
+                rollout_forward_commands += int((effective_forward > 0.15).sum())
+                rollout_backward_commands += int((effective_forward < -0.15).sum())
+                rollout_look_pitch += float(effective_look_pitch.sum())
+                rollout_look_pitch_abs += float(
+                    np.abs(effective_look_pitch).sum()
+                )
+                rollout_view_pitch += float(view_pitch.sum())
+                rollout_view_pitch_abs += float(np.abs(view_pitch).sum())
+                # Quake pitch is positive when looking down.
+                rollout_downlook_frames += int((view_pitch > 30.0).sum())
 
             if target_fire_gate:
                 rollout_fire_gate_samples += int(fire_allowed_np.size)
@@ -1975,6 +2004,19 @@ def train(cfg: dict):
                 / float(max(1, closed_count)),
                 total_env_steps,
             )
+        if rollout_posture_samples > 0:
+            posture_denom = float(rollout_posture_samples)
+            for tag, value in (
+                ("movement/signed_forward_mean", rollout_signed_forward),
+                ("movement/forward_command_rate", rollout_forward_commands),
+                ("movement/backward_command_rate", rollout_backward_commands),
+                ("aim/look_pitch_command_mean", rollout_look_pitch),
+                ("aim/look_pitch_command_abs_mean", rollout_look_pitch_abs),
+                ("aim/view_pitch_mean", rollout_view_pitch),
+                ("aim/view_pitch_abs_mean", rollout_view_pitch_abs),
+                ("aim/downlook_rate", rollout_downlook_frames),
+            ):
+                writer.add_scalar(tag, value / posture_denom, total_env_steps)
 
         rollout_tensors = {
             "reward": buf.rewards,

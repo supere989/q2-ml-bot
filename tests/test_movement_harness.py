@@ -20,14 +20,20 @@ if torch is not None:
     from models.policy import Q2BotPolicy
 
 
-def _movement_obs(*, speed, forward=1.0, right=0.0, jump=0):
+def _movement_obs(*, speed, forward=1.0, right=0.0, jump=0, pitch=0.0):
     self_state = np.zeros(10, dtype=np.float32)
     self_state[3] = speed
     action_debug = np.zeros(12, dtype=np.float32)
     action_debug[4] = forward
     action_debug[5] = right
     action_debug[8] = jump
-    return SimpleNamespace(self_state=self_state, action_debug=action_debug)
+    return SimpleNamespace(
+        self_state=self_state,
+        action_debug=action_debug,
+        pitch=pitch,
+        entity_count=0,
+        entities=np.zeros((8, 9), dtype=np.float32),
+    )
 
 
 def test_generated_maps_have_spare_clear_spawns_for_six_players():
@@ -74,6 +80,30 @@ def test_nominal_forward_speed_is_rewarded_without_rewarding_strafe_only():
     assert forward["movement_discipline"] > 0.0
     assert strafe["movement_nominal"] == 1.0
     assert strafe["movement_discipline"] == 0.0
+
+
+def test_backpedaling_is_not_rewarded_as_forward_traversal():
+    reward = VoxelSpatialReward()
+    forward = reward.movement_context(_movement_obs(speed=300, forward=1.0))
+    backward = reward.movement_context(_movement_obs(speed=300, forward=-1.0))
+
+    assert forward["forward_intent"] == 1.0
+    assert forward["backward_intent"] == 0.0
+    assert backward["forward_intent"] == 0.0
+    assert backward["backward_intent"] == 1.0
+    assert backward["movement_discipline"] < 0.0
+    assert forward["movement_discipline"] > backward["movement_discipline"]
+
+
+def test_no_target_downlook_gets_bounded_horizon_penalty():
+    reward = VoxelSpatialReward()
+    level = reward.movement_context(_movement_obs(speed=300, pitch=0.0))
+    down = reward.movement_context(_movement_obs(speed=300, pitch=60.0))
+
+    assert level["horizon_pitch_penalty"] == 0.0
+    assert down["view_pitch_abs"] == 60.0
+    assert 0.0 < down["horizon_pitch_penalty"] <= reward.horizon_pitch_penalty
+    assert down["movement_discipline"] < level["movement_discipline"]
 
 
 def test_slow_jump_and_hook_overspeed_inputs_are_detected():

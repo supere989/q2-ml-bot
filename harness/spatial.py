@@ -100,6 +100,7 @@ class VoxelSpatialReward:
     engagement_max: float = 1400.0
     combat_navigation_suppression: float = 0.85
     aim_alignment_reward: float = 0.02
+    aim_tracking_reward: float = 0.006
     aim_yaw_deg: float = 12.0
     aim_pitch_deg: float = 14.0
     # Legacy hook-use rewards are retained as zero-valued constructor/config
@@ -131,8 +132,11 @@ class VoxelSpatialReward:
     nominal_speed_max: float = 360.0
     movement_intent_min: float = 0.55
     nominal_speed_reward: float = 0.008
+    backward_movement_penalty: float = 0.010
     slow_movement_penalty: float = 0.012
     overspeed_penalty: float = 0.008
+    horizon_pitch_limit: float = 30.0
+    horizon_pitch_penalty: float = 0.006
     jump_cost: float = 0.006
     slow_jump_penalty: float = 0.014
     hook_overspeed_penalty: float = 0.012
@@ -289,6 +293,7 @@ class VoxelSpatialReward:
                 "Q2_COMBAT_NAV_SUPPRESSION", 0.85
             ),
             aim_alignment_reward=_env_float("R_AIM_ALIGNMENT", 0.02),
+            aim_tracking_reward=_env_float("R_AIM_TRACKING", 0.006),
             aim_yaw_deg=_env_float("Q2_AIM_YAW_DEG", 12.0),
             aim_pitch_deg=_env_float("Q2_AIM_PITCH_DEG", 14.0),
             # Do not honor the old positive hook-use knobs.  A stale runtime
@@ -334,8 +339,11 @@ class VoxelSpatialReward:
             nominal_speed_max=_env_float("Q2_NOMINAL_SPEED_MAX", 360.0),
             movement_intent_min=_env_float("Q2_MOVEMENT_INTENT_MIN", 0.55),
             nominal_speed_reward=_env_float("R_MOVE_NOMINAL", 0.008),
+            backward_movement_penalty=_env_float("R_MOVE_BACKWARD", 0.010),
             slow_movement_penalty=_env_float("R_MOVE_SLOW", 0.012),
             overspeed_penalty=_env_float("R_MOVE_OVERSPEED", 0.008),
+            horizon_pitch_limit=_env_float("Q2_HORIZON_PITCH_LIMIT", 30.0),
+            horizon_pitch_penalty=_env_float("R_HORIZON_PITCH", 0.006),
             jump_cost=_env_float("R_JUMP_COST", 0.006),
             slow_jump_penalty=_env_float("R_JUMP_SLOW", 0.014),
             hook_overspeed_penalty=_env_float("R_HOOK_OVERSPEED", 0.012),
@@ -976,6 +984,18 @@ class VoxelSpatialReward:
 
         if aim_aligned:
             bonus += self.aim_alignment_reward
+        # The hard aligned bonus is intentionally decisive near the firing
+        # gate, but it was too sparse to pull a downward-looking policy back
+        # toward a visible player.  Add bounded dense progress inside the
+        # forward hemisphere; a target behind the view reports no candidate
+        # errors and receives no tracking credit.
+        aim_tracking_quality = 0.0
+        if visible_count > 0 and (
+                aim_aligned or aim_yaw_error > 0.0 or aim_pitch_error > 0.0):
+            yaw_quality = max(0.0, 1.0 - aim_yaw_error / 90.0)
+            pitch_quality = max(0.0, 1.0 - aim_pitch_error / 60.0)
+            aim_tracking_quality = yaw_quality * pitch_quality
+            bonus += self.aim_tracking_reward * aim_tracking_quality
 
         hook_required_near = self._has_required_hook_nearby(obs)
 
@@ -998,6 +1018,7 @@ class VoxelSpatialReward:
         horizontal_speed = float(movement["movement_speed"])
         movement_intent = float(movement["movement_intent"])
         forward_intent = float(movement["forward_intent"])
+        backward_intent = float(movement["backward_intent"])
         nominal_speed = bool(movement["movement_nominal"])
         slow_movement = bool(movement["movement_slow"])
         overspeed = bool(movement["movement_overspeed"])
@@ -1288,6 +1309,7 @@ class VoxelSpatialReward:
             "aim_aligned": float(aim_aligned),
             "aim_yaw_error": float(aim_yaw_error),
             "aim_pitch_error": float(aim_pitch_error),
+            "aim_tracking_quality": float(aim_tracking_quality),
             "memory_death_aversion": float(death_aversion),
             "hook_required_near": float(hook_required_near),
             "hook_action": float(hook_action > 0),
@@ -1355,6 +1377,11 @@ class VoxelSpatialReward:
             "movement_speed": float(horizontal_speed),
             "movement_intent": float(movement_intent),
             "forward_intent": float(forward_intent),
+            "backward_intent": float(backward_intent),
+            "view_pitch_abs": float(movement["view_pitch_abs"]),
+            "horizon_pitch_penalty": float(
+                movement["horizon_pitch_penalty"]
+            ),
             "movement_nominal": float(nominal_speed),
             "movement_slow": float(slow_movement),
             "movement_overspeed": float(overspeed),
@@ -2300,7 +2327,8 @@ class VoxelSpatialReward:
         move_right = float(action_debug[5]) if len(action_debug) > 5 else 0.0
         jump_action = bool(int(action_debug[8])) if len(action_debug) > 8 else False
         movement_intent = min(1.0, hypot(move_forward, move_right))
-        forward_intent = min(1.0, abs(move_forward))
+        forward_intent = min(1.0, max(0.0, move_forward))
+        backward_intent = min(1.0, max(0.0, -move_forward))
         horizontal_speed = hypot(float(obs.self_state[3]), float(obs.self_state[4]))
         wants_movement = movement_intent >= self.movement_intent_min
         nominal_speed = wants_movement and (
@@ -2321,6 +2349,26 @@ class VoxelSpatialReward:
                          max(1.0, self.nominal_speed_max))
             delta -= self.overspeed_penalty * excess
 
+        # Nominal traversal must prefer actual forward travel. Previously the
+        # reward used abs(move_forward), making a backwards moonwalk exactly
+        # as valuable as moving into the direction the body is facing.
+        delta -= self.backward_movement_penalty * backward_intent
+
+        view_pitch = float(getattr(obs, "pitch", 0.0))
+        view_pitch_abs = abs(view_pitch)
+        visible_count = 0
+        if hasattr(obs, "entity_count") and hasattr(obs, "entities"):
+            visible_count, _nearest = self._visible_enemy_stats(obs)
+        horizon_penalty = 0.0
+        if visible_count == 0 and view_pitch_abs > self.horizon_pitch_limit:
+            excess = min(
+                1.0,
+                (view_pitch_abs - self.horizon_pitch_limit) /
+                max(1.0, 89.0 - self.horizon_pitch_limit),
+            )
+            horizon_penalty = self.horizon_pitch_penalty * excess
+            delta -= horizon_penalty
+
         jump_slow = jump_action and (slow_movement or not wants_movement)
         if jump_action:
             delta -= self.jump_cost
@@ -2330,6 +2378,9 @@ class VoxelSpatialReward:
             "movement_speed": float(horizontal_speed),
             "movement_intent": float(movement_intent),
             "forward_intent": float(forward_intent),
+            "backward_intent": float(backward_intent),
+            "view_pitch_abs": float(view_pitch_abs),
+            "horizon_pitch_penalty": float(horizon_penalty),
             "movement_nominal": float(nominal_speed),
             "movement_slow": float(slow_movement),
             "movement_overspeed": float(overspeed),

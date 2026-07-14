@@ -1,4 +1,5 @@
 from argparse import Namespace
+import json
 import struct
 
 from maps.generator import (
@@ -7,6 +8,7 @@ from maps.generator import (
     MIN_SAFE_HEADROOM,
     MapWriter,
     MapGenerator,
+    PALETTES,
     Room,
     SolidBox,
     T_CEIL,
@@ -232,6 +234,31 @@ def test_generated_spawns_have_safe_columns_and_escape_paths(tmp_path):
     assert result["blocked_spawn_columns"] == 0
     assert result["trapped_spawns"] == 0
     assert result["static_ok"] is True
+
+
+def test_validator_rejects_missing_lethal_drop_guard(tmp_path):
+    generate_map("guarded", 42, tmp_path, style="arena_vertical")
+    map_path = tmp_path / "guarded.map"
+    baseline = static_validate(map_path, _static_args())
+    assert baseline["lethal_drop_ok"] is True
+    assert baseline["lethal_edges"] > 0
+    assert baseline["missing_lethal_guards"] == 0
+
+    metadata = json.loads((tmp_path / "guarded.meta.json").read_text())
+    bounds = metadata["safety"]["guard_walls"][0]
+    palette = PALETTES[metadata["palette"]]
+    guard_brush = MapWriter().make_box_brush(
+        *bounds,
+        tf=palette["trim"], tc=palette["trim"], tw=palette["wall"],
+    )
+    source = map_path.read_text()
+    assert guard_brush in source
+    map_path.write_text(source.replace(guard_brush, "", 1))
+
+    invalid = static_validate(map_path, _static_args())
+    assert invalid["missing_lethal_guards"] == 1
+    assert invalid["lethal_drop_ok"] is False
+    assert invalid["static_ok"] is False
 
 
 def test_compiled_bsp_requires_nonempty_qrad_lightdata(tmp_path):

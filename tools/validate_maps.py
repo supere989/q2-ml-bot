@@ -31,6 +31,8 @@ from maps.generator import (  # noqa: E402
     FloorLightRegion,
     HorizontalSurface,
     InteriorLightZone,
+    LETHAL_GUARD_HEIGHT,
+    LETHAL_GUARD_THICKNESS,
     MIN_INTERIOR_LIGHT_RADIUS,
     MIN_INTERIOR_LIGHT_VALUE,
     LightSource,
@@ -380,6 +382,116 @@ def _compiled_lightdata_metrics(map_path: Path) -> Dict[str, object]:
         }
 
 
+def _lethal_drop_metrics(
+    map_path: Path,
+    worldspawn: Dict[str, str],
+    brushes: List[Tuple[float, float, float, float, float, float]],
+) -> Dict[str, object]:
+    """Verify every recorded void-facing floor edge has its solid guard."""
+    result: Dict[str, object] = {
+        "lethal_edges": 0,
+        "lethal_guard_walls": 0,
+        "missing_lethal_guards": 0,
+        "lethal_drop_ok": False,
+    }
+    meta_path = map_path.with_suffix(".meta.json")
+    if not meta_path.exists():
+        result["lethal_drop_error"] = "missing .meta.json safety contract"
+        return result
+    try:
+        metadata = json.loads(meta_path.read_text())
+        contract = metadata["safety"]
+        if int(contract.get("version", 0)) != 1:
+            raise ValueError("unsupported safety contract version")
+        guard_height = int(contract["guard_height"])
+        guard_thickness = int(contract["guard_thickness"])
+        edges = list(contract["lethal_edges"])
+        guard_walls = [
+            tuple(float(value) for value in bounds)
+            for bounds in contract["guard_walls"]
+        ]
+        if guard_height < LETHAL_GUARD_HEIGHT:
+            raise ValueError("lethal guard height is below the jump-safe minimum")
+        if guard_thickness < LETHAL_GUARD_THICKNESS:
+            raise ValueError("lethal guard thickness is below one wall brush")
+        if not edges or len(edges) != len(guard_walls):
+            raise ValueError("every lethal edge must have exactly one guard")
+        if int(metadata["lethal_edges"]) != len(edges):
+            raise ValueError("metadata lethal-edge count mismatch")
+        if int(metadata["lethal_guard_walls"]) != len(guard_walls):
+            raise ValueError("metadata lethal-guard count mismatch")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        result["lethal_drop_error"] = f"invalid safety contract: {exc}"
+        return result
+
+    edge_shapes_valid = True
+    for edge, wall in zip(edges, guard_walls):
+        try:
+            side = str(edge["side"])
+            x0, y0, x1, y1, floor_z = (
+                float(value) for value in edge["segment"]
+            )
+            wx0, wy0, wz0, wx1, wy1, wz1 = wall
+            edge_shapes_valid &= (
+                side in {"west", "east", "south", "north"} and
+                abs(wz0 - floor_z) <= FLOOR_EPSILON and
+                wz1 - wz0 >= LETHAL_GUARD_HEIGHT and
+                (
+                    side == "west" and abs(x0 - x1) <= FLOOR_EPSILON and
+                    abs(wx0 - x0) <= FLOOR_EPSILON and
+                    abs(wy0 - y0) <= FLOOR_EPSILON and
+                    abs(wy1 - y1) <= FLOOR_EPSILON
+                    or side == "east" and abs(x0 - x1) <= FLOOR_EPSILON and
+                    abs(wx1 - x0) <= FLOOR_EPSILON and
+                    abs(wy0 - y0) <= FLOOR_EPSILON and
+                    abs(wy1 - y1) <= FLOOR_EPSILON
+                    or side == "south" and abs(y0 - y1) <= FLOOR_EPSILON and
+                    abs(wy0 - y0) <= FLOOR_EPSILON and
+                    abs(wx0 - x0) <= FLOOR_EPSILON and
+                    abs(wx1 - x1) <= FLOOR_EPSILON
+                    or side == "north" and abs(y0 - y1) <= FLOOR_EPSILON and
+                    abs(wy1 - y0) <= FLOOR_EPSILON and
+                    abs(wx0 - x0) <= FLOOR_EPSILON and
+                    abs(wx1 - x1) <= FLOOR_EPSILON
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            edge_shapes_valid = False
+
+    def brush_exists(expected) -> bool:
+        return any(
+            all(abs(actual - wanted) <= FLOOR_EPSILON
+                for actual, wanted in zip(brush, expected))
+            for brush in brushes
+        )
+
+    missing = sum(not brush_exists(wall) for wall in guard_walls)
+    try:
+        world_version = int(worldspawn.get("_ml_safety_version", "0"))
+        world_edges = int(worldspawn.get("_ml_lethal_edges", "-1"))
+        world_guards = int(worldspawn.get("_ml_lethal_guard_walls", "-1"))
+        world_height = int(worldspawn.get("_ml_lethal_guard_height", "0"))
+    except ValueError:
+        world_version = world_edges = world_guards = world_height = -1
+    ok = (
+        edge_shapes_valid and missing == 0 and world_version == 1 and
+        world_edges == len(edges) and world_guards == len(guard_walls) and
+        world_height >= LETHAL_GUARD_HEIGHT
+    )
+    result.update({
+        "lethal_edges": len(edges),
+        "lethal_guard_walls": len(guard_walls),
+        "missing_lethal_guards": missing,
+        "lethal_drop_ok": ok,
+    })
+    if not ok:
+        result["lethal_drop_error"] = (
+            f"edges={len(edges)} guards={len(guard_walls)} missing={missing} "
+            f"shape_ok={edge_shapes_valid} world_version={world_version}"
+        )
+    return result
+
+
 def _floor_lighting_metrics(
     map_path: Path,
     ents: List[Dict[str, str]],
@@ -689,6 +801,7 @@ def static_validate(map_path: Path, args: argparse.Namespace) -> Dict[str, objec
         worldspawn,
         getattr(args, "min_light_coverage", MIN_FLOOR_LIGHT_COVERAGE),
     )
+    lethal_drops = _lethal_drop_metrics(map_path, worldspawn, brushes)
     if (compiled_lighting["compiled_bsp_present"] and
             not compiled_lighting["qrad_lightdata_ok"]):
         lighting["lighting_ok"] = False
@@ -738,6 +851,7 @@ def static_validate(map_path: Path, args: argparse.Namespace) -> Dict[str, objec
         blocked_spawn_columns == 0 and
         trapped_spawns == 0 and
         sandwiches["unsafe_horizontal_sandwiches"] == 0 and
+        lethal_drops["lethal_drop_ok"] and
         sky_ok and
         len(weapons) >= args.min_weapons and
         len(pickups) >= args.min_pickups and
@@ -763,6 +877,7 @@ def static_validate(map_path: Path, args: argparse.Namespace) -> Dict[str, objec
         "hook_zones": hook_zones,
         "required_hooks": required_hooks,
         **sandwiches,
+        **lethal_drops,
         **compiled_lighting,
         **lighting,
         "static_ok": static_ok,

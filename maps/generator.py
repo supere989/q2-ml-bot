@@ -67,6 +67,8 @@ KILL_PLANE_MARGIN = 512    # XY overhang beyond the generated layout
 KILL_PLANE_DAMAGE = 100000 # instant-kill damage for out-of-bounds falls
 KILL_PLANE_SPAWNFLAGS = 12 # trigger_hurt: SILENT | NO_PROTECTION
 KILL_PLANE_SURFACE_VALUE = 31337 # hook-impact marker; must match g_local.h
+LETHAL_GUARD_HEIGHT = 96   # higher than a normal jump; contains void edges
+LETHAL_GUARD_THICKNESS = WALL_T
 
 # Hook zone flags — must match ml_bridge.h
 HOOK_CEILING  = 1
@@ -560,6 +562,8 @@ class MapGenerator:
         self.light_sources: List[LightSource] = []
         self.light_coverages: dict = {}
         self.horizontal_surfaces: List[HorizontalSurface] = []
+        self.lethal_edges: List[dict] = []
+        self.lethal_guard_walls: List[SolidBox] = []
         self.interior_light_zones: List[InteriorLightZone] = []
         self.interior_light_sources: List[LightSource] = []
         self._interior_zone_specs: List[
@@ -837,6 +841,71 @@ class MapGenerator:
             self.spawn_blockers.append(SolidBox(
                 room.wx, room.wy, room.ceil_z - 8,
                 room.wx + room.w, room.wy + room.d, room.ceil_z + WALL_T))
+
+        # The skybox/kill plane is a final containment fallback, not playable
+        # traversal.  Seal every edge of the union of room floor plates so a
+        # normal movement or knockback path cannot enter that death volume.
+        self._plan_lethal_drop_guards()
+
+    def _plan_lethal_drop_guards(self) -> None:
+        """Build guard walls around every floor-union edge facing the void."""
+        self.lethal_edges = []
+        self.lethal_guard_walls = []
+        if not self.rooms:
+            return
+
+        xs = sorted({value for room in self.rooms
+                     for value in (room.wx, room.wx + room.w)})
+        ys = sorted({value for room in self.rooms
+                     for value in (room.wy, room.wy + room.d)})
+        covered: dict[Tuple[int, int], int] = {}
+        for ix, (x0, x1) in enumerate(zip(xs, xs[1:])):
+            x = (x0 + x1) / 2.0
+            for iy, (y0, y1) in enumerate(zip(ys, ys[1:])):
+                y = (y0 + y1) / 2.0
+                floors = [
+                    room.floor_z for room in self.rooms
+                    if room.wx <= x < room.wx + room.w
+                    and room.wy <= y < room.wy + room.d
+                ]
+                if floors:
+                    covered[(ix, iy)] = max(floors)
+
+        directions = (
+            ("west", -1, 0), ("east", 1, 0),
+            ("south", 0, -1), ("north", 0, 1),
+        )
+        thickness = LETHAL_GUARD_THICKNESS
+        for (ix, iy), floor_z in sorted(covered.items()):
+            x0, x1 = xs[ix], xs[ix + 1]
+            y0, y1 = ys[iy], ys[iy + 1]
+            for side, dx, dy in directions:
+                if (ix + dx, iy + dy) in covered:
+                    continue
+                if side == "west":
+                    wall = SolidBox(x0, y0, floor_z,
+                                    x0 + thickness, y1,
+                                    floor_z + LETHAL_GUARD_HEIGHT)
+                    edge = [x0, y0, x0, y1, floor_z]
+                elif side == "east":
+                    wall = SolidBox(x1 - thickness, y0, floor_z,
+                                    x1, y1,
+                                    floor_z + LETHAL_GUARD_HEIGHT)
+                    edge = [x1, y0, x1, y1, floor_z]
+                elif side == "south":
+                    wall = SolidBox(x0, y0, floor_z,
+                                    x1, y0 + thickness,
+                                    floor_z + LETHAL_GUARD_HEIGHT)
+                    edge = [x0, y0, x1, y0, floor_z]
+                else:
+                    wall = SolidBox(x0, y1 - thickness, floor_z,
+                                    x1, y1,
+                                    floor_z + LETHAL_GUARD_HEIGHT)
+                    edge = [x0, y1, x1, y1, floor_z]
+                self.lethal_edges.append({"side": side, "segment": edge})
+                self.lethal_guard_walls.append(wall)
+                self.spawn_blockers.append(wall)
+                self.light_occluders.append(wall)
 
     def _make_connection(self, ia: int, ib: int):
         a, b = self.rooms[ia], self.rooms[ib]
@@ -2463,6 +2532,20 @@ class MapGenerator:
             value=KILL_PLANE_SURFACE_VALUE,
         )
 
+    def _emit_lethal_drop_guards(self) -> None:
+        """Emit the planned solid containment around all void-facing floors."""
+        for wall in self.lethal_guard_walls:
+            self.writer.add_brush(
+                wall.x0, wall.y0, wall.z0, wall.x1, wall.y1, wall.z1,
+                tf=self.pal["trim"], tc=self.pal["trim"], tw=self.pal["wall"],
+            )
+        self.writer.world_props.update({
+            "_ml_safety_version": "1",
+            "_ml_lethal_edges": str(len(self.lethal_edges)),
+            "_ml_lethal_guard_walls": str(len(self.lethal_guard_walls)),
+            "_ml_lethal_guard_height": str(LETHAL_GUARD_HEIGHT),
+        })
+
     # ----- top-level generate -----
 
     def generate(self, grid_n: int = 5) -> Tuple[MapWriter, List[HookZone]]:
@@ -2473,6 +2556,7 @@ class MapGenerator:
 
         for room in self.rooms:
             self._emit_room(room)
+        self._emit_lethal_drop_guards()
         for conn in self.connections:
             self._emit_connection(conn)
 
@@ -2524,6 +2608,8 @@ class MapGenerator:
             "hook_required": sum(1 for z in self.hook_zones if z.flags & HOOK_REQUIRED),
             "arenas": sum(1 for r in self.rooms if r.kind == 'arena'),
             "kill_planes": 1 if self.rooms else 0,
+            "lethal_edges": len(self.lethal_edges),
+            "lethal_guard_walls": len(self.lethal_guard_walls),
             "terrace_levels": len(levels),
             "max_elevation": max(levels) if levels else 0,
             "stairs": self.stair_count,
@@ -2612,6 +2698,19 @@ class MapGenerator:
             ],
         }
 
+    def safety_manifest(self) -> dict:
+        """Serializable lethal-drop containment contract for validation."""
+        return {
+            "version": 1,
+            "guard_height": LETHAL_GUARD_HEIGHT,
+            "guard_thickness": LETHAL_GUARD_THICKNESS,
+            "lethal_edges": self.lethal_edges,
+            "guard_walls": [
+                [wall.x0, wall.y0, wall.z0, wall.x1, wall.y1, wall.z1]
+                for wall in self.lethal_guard_walls
+            ],
+        }
+
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -2639,9 +2738,10 @@ def generate_map(name: str, seed: Optional[int], out_dir: Path, grid_n: int = 5,
     meta = {
         "name": name,
         "seed": seed,
-        "generator": "v5",
+        "generator": "v6",
         **gen.stats(),
         "lighting": gen.lighting_manifest(),
+        "safety": gen.safety_manifest(),
     }
     meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
