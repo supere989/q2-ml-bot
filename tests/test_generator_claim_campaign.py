@@ -16,7 +16,10 @@ from tools.run_generator_cohort import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DECLARATION = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+DECLARATION = (
+    ROOT
+    / "tests/fixtures/multires/B2-GENERATED-COHORT-FRESH-DECLARATION.json"
+)
 FAILURE_71427 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71427-FAILURE.json"
 )

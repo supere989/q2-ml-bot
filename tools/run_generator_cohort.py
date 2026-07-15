@@ -644,6 +644,13 @@ def generate_source_freeze(
     _binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     declaration, declaration_sha256 = load_declaration(declaration_path)
+    # Imported here to avoid a module-import cycle: the retirement authority
+    # uses this module's strict declaration loader for every historical record.
+    from tools.retired_cohort_registry import require_unretired_declaration
+
+    require_unretired_declaration(
+        declaration_path, declaration, declaration_sha256
+    )
     if output_dir.resolve() == cold_dir.resolve():
         raise GeneratorCohortError("primary and cold directories must differ")
     if _path_is_within(report_path, output_dir) or _path_is_within(

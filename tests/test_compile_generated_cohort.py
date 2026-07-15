@@ -9,6 +9,7 @@ import struct
 import pytest
 
 from tools import compile_generated_cohort as compiler
+from tools import retired_cohort_registry as registry
 from tools import run_generator_cohort as cohort
 
 
@@ -106,6 +107,11 @@ with open(os.environ['MOCK_Q2TOOL_ORDER'], 'a', encoding='utf-8') as stream:
     stream.write(json.dumps(record, sort_keys=True) + '\\n')
 print('compile ' + map_path.stem, flush=True)
 print('diagnostic ' + map_path.stem, file=sys.stderr, flush=True)
+if os.environ.get('MOCK_Q2TOOL_EMIT_PRT') == '1':
+    map_path.with_suffix('.prt').write_bytes(('PRT:' + map_path.stem).encode('ascii'))
+if map_path.stem == os.environ.get('MOCK_Q2TOOL_EXTRA_MAP'):
+    suffix = os.environ.get('MOCK_Q2TOOL_EXTRA_SUFFIX', '.lin')
+    map_path.with_suffix(suffix).write_bytes(('EXTRA:' + map_path.stem).encode('ascii'))
 if map_path.stem == os.environ.get('MOCK_Q2TOOL_SLOW_MAP'):
     time.sleep(float(os.environ.get('MOCK_Q2TOOL_SLEEP_SECONDS', '2')))
 if map_path.stem == os.environ.get('MOCK_Q2TOOL_FAIL_MAP'):
@@ -175,6 +181,80 @@ def _run(
 
 def _load_report(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="ascii"))
+
+
+def test_retired_declaration_is_rejected_before_any_output_mutation(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "compiler-outputs"
+    staging = output_root / "compiled-staging"
+    publish = output_root / "compiled-published"
+    logs = output_root / "compile-logs"
+    report = output_root / "reports" / "compile-report.json"
+    declaration = (
+        compiler.ROOT
+        / "docs/multires/B2-GENERATED-COHORT-71438-DECLARATION.json"
+    )
+
+    with pytest.raises(
+        compiler.CompileCohortError, match="permanently retired"
+    ) as caught:
+        compiler.compile_generated_cohort(
+            declaration,
+            tmp_path / "missing-source",
+            staging,
+            publish,
+            logs,
+            report,
+            tmp_path / "missing-q2tool",
+            tmp_path / "missing-baseq2",
+        )
+
+    assert isinstance(caught.value.__cause__, registry.RetiredCohortRegistryError)
+    assert not output_root.exists()
+    assert not staging.exists()
+    assert not publish.exists()
+    assert not logs.exists()
+    assert not report.parent.exists()
+
+
+def test_retired_declaration_cli_refusal_is_one_line_and_creates_no_outputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output_root = tmp_path / "compiler-outputs"
+    declaration = (
+        compiler.ROOT
+        / "docs/multires/B2-GENERATED-COHORT-71438-DECLARATION.json"
+    )
+
+    exit_code = compiler.main(
+        [
+            "--declaration",
+            str(declaration),
+            "--source-root",
+            str(output_root / "source"),
+            "--staging-root",
+            str(output_root / "staging"),
+            "--publish-root",
+            str(output_root / "published"),
+            "--log-root",
+            str(output_root / "logs"),
+            "--report",
+            str(output_root / "reports/compile.json"),
+            "--q2tool",
+            str(output_root / "q2tool"),
+            "--basedir",
+            str(output_root / "basedir"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err.count("\n") == 1
+    assert captured.err.startswith("generated cohort compile failed: ")
+    assert "permanently retired" in captured.err
+    assert not output_root.exists()
 
 
 def test_rejects_parent_of_real_baseq2_instead_of_searching_for_assets(
@@ -300,12 +380,39 @@ def test_q2tool_failure_is_fail_fast_and_never_publishes(
     assert set(path.stem for path in paths["staging"].glob("*.bsp")) == set(names[:2])
 
 
+def test_nonzero_failure_retains_prt_as_terminal_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path)
+    first = paths["declaration"]["maps"][0]["map"]
+    monkeypatch.setenv("MOCK_Q2TOOL_ORDER", str(paths["order"]))
+    monkeypatch.setenv("MOCK_Q2TOOL_EMIT_PRT", "1")
+    monkeypatch.setenv("MOCK_Q2TOOL_FAIL_MAP", first)
+
+    with pytest.raises(compiler.CompileCohortError, match="exit code 23"):
+        _run(paths)
+
+    prt_path = paths["staging"] / f"{first}.prt"
+    report = _load_report(paths["report"])
+    result = report["maps"][0]
+    assert prt_path.read_bytes() == f"PRT:{first}".encode("ascii")
+    assert result["prt"] == {
+        "bytes": prt_path.stat().st_size,
+        "sha256": cohort.file_sha256(prt_path),
+    }
+    assert result["prt_error"] is None
+    assert result["prt_removed_after_success"] is False
+    assert result["passed"] is False
+    assert not paths["publish"].exists()
+
+
 def test_q2tool_timeout_closes_logs_fails_fast_and_never_publishes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths = _fixture(tmp_path)
     first = paths["declaration"]["maps"][0]["map"]
     monkeypatch.setenv("MOCK_Q2TOOL_ORDER", str(paths["order"]))
+    monkeypatch.setenv("MOCK_Q2TOOL_EMIT_PRT", "1")
     monkeypatch.setenv("MOCK_Q2TOOL_SLOW_MAP", first)
     monkeypatch.setenv("MOCK_Q2TOOL_SLEEP_SECONDS", "2")
 
@@ -333,6 +440,13 @@ def test_q2tool_timeout_closes_logs_fails_fast_and_never_publishes(
     assert "process group terminated" in stderr.read_text()
     assert result["stdout_log"]["sha256"] == cohort.file_sha256(stdout)
     assert result["stderr_log"]["sha256"] == cohort.file_sha256(stderr)
+    prt_path = paths["staging"] / f"{first}.prt"
+    assert prt_path.is_file()
+    assert result["prt"] == {
+        "bytes": prt_path.stat().st_size,
+        "sha256": cohort.file_sha256(prt_path),
+    }
+    assert result["prt_removed_after_success"] is False
     assert paths["staging"].is_dir()
     assert not paths["publish"].exists()
 
@@ -407,6 +521,12 @@ def test_success_uses_declaration_order_and_atomically_publishes_exact_stage(
         for row in report["maps"]
     )
     assert all(row["exit_code"] == 0 and row["passed"] is True for row in report["maps"])
+    assert all(
+        row["prt"] is None
+        and row["prt_error"] is None
+        and row["prt_removed_after_success"] is False
+        for row in report["maps"]
+    )
     assert not paths["staging"].exists()
     assert paths["publish"].is_dir()
     assert published_files == expected_files
@@ -440,3 +560,52 @@ def test_success_uses_declaration_order_and_atomically_publishes_exact_stage(
     assert compiler.verify_stage_membership(
         paths["declaration"], paths["publish"], "compiled"
     )["passed"] is True
+
+
+def test_success_records_and_durably_removes_prt_before_exact_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path)
+    monkeypatch.setenv("MOCK_Q2TOOL_ORDER", str(paths["order"]))
+    monkeypatch.setenv("MOCK_Q2TOOL_EMIT_PRT", "1")
+
+    report = _run(paths)
+
+    for result in report["maps"]:
+        payload = f"PRT:{result['map']}".encode("ascii")
+        assert result["prt"] == {
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        assert result["prt_error"] is None
+        assert result["prt_removed_after_success"] is True
+        assert result["passed"] is True
+    assert not list(paths["publish"].glob("*.prt"))
+    assert len(list(paths["publish"].iterdir())) == 168
+    assert report["postcompile_membership"]["passed"] is True
+    assert report["postcompile_membership"]["actual_file_count"] == 168
+
+
+def test_unknown_q2tool_output_is_not_deleted_and_rejects_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path)
+    first = paths["declaration"]["maps"][0]["map"]
+    monkeypatch.setenv("MOCK_Q2TOOL_ORDER", str(paths["order"]))
+    monkeypatch.setenv("MOCK_Q2TOOL_EXTRA_MAP", first)
+    monkeypatch.setenv("MOCK_Q2TOOL_EXTRA_SUFFIX", ".lin")
+
+    with pytest.raises(
+        compiler.CompileCohortError, match="postcompile membership differs"
+    ):
+        _run(paths)
+
+    extra = paths["staging"] / f"{first}.lin"
+    report = _load_report(paths["report"])
+    assert extra.read_bytes() == f"EXTRA:{first}".encode("ascii")
+    assert f"unexpected file {first}.lin" in report["postcompile_membership"][
+        "failures"
+    ]
+    assert report["failure"]["phase"] == "postcompile-membership"
+    assert report["publication"]["compiled_stage_published"] is False
+    assert not paths["publish"].exists()

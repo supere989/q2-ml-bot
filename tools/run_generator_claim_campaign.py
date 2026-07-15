@@ -37,6 +37,7 @@ from tools.run_generator_cohort import (  # noqa: E402
     load_declaration,
     verify_stage_membership,
 )
+from tools.retired_cohort_registry import require_unretired_declaration  # noqa: E402
 
 
 CAMPAIGN_SCHEMA = "q2-generator-claim-campaign-v2"
@@ -182,6 +183,9 @@ def prepare_claims(
     """Build every claim first, then atomically publish one exact claims root."""
 
     declaration, declaration_sha256 = load_declaration(declaration_path)
+    require_unretired_declaration(
+        declaration_path, declaration, declaration_sha256
+    )
     _require_distinct_roots(
         materialized_dir, claims_dir, "materialized and claims stages"
     )

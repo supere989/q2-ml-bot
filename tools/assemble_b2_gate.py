@@ -61,6 +61,10 @@ from tools.run_generator_cohort import (  # noqa: E402
     repository_binding,
     verify_stage_membership,
 )
+from tools.retired_cohort_registry import (  # noqa: E402
+    RetiredCohortRegistryError,
+    require_unretired_declaration,
+)
 from tools.source_route_contract import ROUTE_CONTRACT_SCHEMA  # noqa: E402
 from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
 
@@ -379,6 +383,25 @@ def _validate_b1_and_oracles(
     _require(fall.get("executable_sha256") == binaries["fall"], "fall oracle differs from B1")
     _require(parity.get("sha256") == binaries["hook_attestation"], "hook attestation differs from B1")
     _require(parity.get("passed") is True, "B1 hook parity is not passed")
+    hook_attestation = _mapping(
+        _load_json(paths.hook_attestation, canonical=False),
+        "B1 hook parity attestation",
+    )
+    _require(
+        hook_attestation.get("schema") == "q2-hook-parity-attestation-v1"
+        and hook_attestation.get("passed") is True,
+        "B1 hook parity attestation bytes are not passed",
+    )
+    hook_attested_binaries = _mapping(
+        hook_attestation.get("binaries"),
+        "B1 hook parity attested binaries",
+    )
+    _require(
+        hook_attested_binaries.get("cm_oracle_sha256") == binaries["cm"]
+        and hook_attested_binaries.get("pmove_oracle_sha256") == binaries["pmove"]
+        and hook_attested_binaries.get("hook_oracle_sha256") == binaries["hook"],
+        "oracle bytes differ from B1 hook parity attestation",
+    )
     return {
         "gate": _file_record(paths.b1_gate),
         "oracles": {name: _file_record(path) for name, path in {
@@ -410,6 +433,10 @@ def _expected_71438_rows() -> list[dict[str, Any]]:
 
 def _validate_declaration(path: Path) -> tuple[dict[str, Any], str]:
     declaration, digest = load_declaration(path)
+    try:
+        require_unretired_declaration(path, declaration, digest)
+    except RetiredCohortRegistryError as exc:
+        raise B2GateError(f"B2 declaration admission refused: {exc}") from exc
     _require(declaration["cohort_id"] == EXPECTED_COHORT, "B2 gate accepts only cohort 71438")
     _require(declaration["maps"] == _expected_71438_rows(), "71438 map/seed selection differs")
     return declaration, digest
@@ -737,6 +764,8 @@ def _validate_materialized(
     paths: B2GatePaths,
     declaration: Mapping[str, Any],
     declaration_sha256: str,
+    binaries: Mapping[str, str],
+    normative: Mapping[str, Any],
 ) -> dict[str, Any]:
     membership = _membership_with_declaration(
         declaration, declaration_sha256, paths.materialized_dir, "materialized"
@@ -771,6 +800,60 @@ def _validate_materialized(
         _require(
             len(value["selected_records"]) == 6,
             "materialization does not seal exactly six hooks",
+        )
+        oracles = _mapping(
+            value["oracles"], f"materialization oracles {map_id}",
+        )
+        admitted_oracles = {
+            "collision": binaries["cm"],
+            "pmove": binaries["pmove"],
+            "hook": binaries["hook"],
+            "fall": binaries["fall"],
+        }
+        _require(
+            all(
+                _mapping(
+                    oracles[name], f"materialization {name} oracle {map_id}",
+                ).get("executable_sha256") == admitted_sha256
+                for name, admitted_sha256 in admitted_oracles.items()
+            ),
+            f"materialization oracle differs from admitted B1 bytes for {map_id}",
+        )
+        _require(
+            oracles.get("hook_parity_attestation_sha256")
+            == binaries["hook_attestation"],
+            f"materialization hook parity differs from admitted B1 bytes for {map_id}",
+        )
+        seal = _mapping(
+            oracles["b1_runtime_authority_seal"],
+            f"materialization retained B1 seal {map_id}",
+        )
+        _require(
+            dict(_mapping(
+                seal.get("executables"),
+                f"materialization retained B1 executables {map_id}",
+            )) == {
+                "cm_sha256": binaries["cm"],
+                "pmove_sha256": binaries["pmove"],
+                "hook_sha256": binaries["hook"],
+                "fall_sha256": binaries["fall"],
+            },
+            f"materialization retained B1 executables differ for {map_id}",
+        )
+        _require(
+            seal.get("hook_parity_attestation_sha256")
+            == binaries["hook_attestation"],
+            f"materialization retained B1 hook parity differs for {map_id}",
+        )
+        _require(
+            dict(_mapping(
+                seal.get("normative_documents"),
+                f"materialization retained B1 normative documents {map_id}",
+            )) == {
+                "design_sha256": normative["design"]["sha256"],
+                "plan_sha256": normative["plan"]["sha256"],
+            },
+            f"materialization retained B1 normative documents differ for {map_id}",
         )
 
         compiled_runtime = paths.compiled_dir / f"{map_id}.json"
@@ -1830,7 +1913,7 @@ def assemble_gate(
         paths, declaration, declaration_sha256
     )
     materialized = _validate_materialized(
-        paths, declaration, declaration_sha256
+        paths, declaration, declaration_sha256, binaries, normative
     )
     claims, claims_membership = _validate_claims(
         paths, declaration, declaration_sha256

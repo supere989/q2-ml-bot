@@ -27,6 +27,7 @@ from tools.assemble_b2_gate import (
     _decode_dyn_snapshot,
     _dyn_source_authority,
     _expected_71438_rows,
+    _validate_declaration,
     _validate_dyn_evidence,
     _validate_materialized,
     _validate_source_route_contract,
@@ -260,6 +261,36 @@ def _write_materialized_fixture(
     return paths, declaration, document
 
 
+def _materialized_authorities(
+    document: dict,
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    oracles = document["oracles"]
+    seal = oracles["b1_runtime_authority_seal"]
+    return (
+        {
+            "cm": oracles["collision"]["executable_sha256"],
+            "pmove": oracles["pmove"]["executable_sha256"],
+            "hook": oracles["hook"]["executable_sha256"],
+            "fall": oracles["fall"]["executable_sha256"],
+            "hook_attestation": oracles["hook_parity_attestation_sha256"],
+            "atlas_verifier": "e" * 64,
+        },
+        {
+            "design": {"sha256": seal["normative_documents"]["design_sha256"]},
+            "plan": {"sha256": seal["normative_documents"]["plan_sha256"]},
+        },
+    )
+
+
+def _validate_materialized_fixture(
+    paths: B2GatePaths, declaration: dict, document: dict,
+) -> dict:
+    binaries, normative = _materialized_authorities(document)
+    return _validate_materialized(
+        paths, declaration, SHA, binaries, normative,
+    )
+
+
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
@@ -275,7 +306,7 @@ def test_materialized_v4_runtime_upgrade_is_exactly_bound(
         tmp_path, monkeypatch,
     )
 
-    result = _validate_materialized(paths, declaration, SHA)
+    result = _validate_materialized_fixture(paths, declaration, document)
 
     attestation = paths.materialized_dir / "fixture.hook-materialization.json"
     assert result["attestation_set_sha256"] == _sha256(canonical_bytes([
@@ -294,7 +325,7 @@ def test_materialized_v4_runtime_upgrade_is_exactly_bound(
 def test_materialized_unchanged_source_projection_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paths, declaration, _document = _write_materialized_fixture(
+    paths, declaration, document = _write_materialized_fixture(
         tmp_path, monkeypatch,
     )
     (paths.materialized_dir / "fixture.json").write_bytes(
@@ -302,20 +333,20 @@ def test_materialized_unchanged_source_projection_is_rejected(
     )
 
     with pytest.raises(B2GateError, match="runtime sidecar was not upgraded"):
-        _validate_materialized(paths, declaration, SHA)
+        _validate_materialized_fixture(paths, declaration, document)
 
 
 def test_materialized_tampered_runtime_sidecar_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paths, declaration, _document = _write_materialized_fixture(
+    paths, declaration, document = _write_materialized_fixture(
         tmp_path, monkeypatch,
     )
     runtime = paths.materialized_dir / "fixture.json"
     runtime.write_bytes(runtime.read_bytes() + b"tampered\n")
 
     with pytest.raises(B2GateError, match="invalid V4 runtime sidecar"):
-        _validate_materialized(paths, declaration, SHA)
+        _validate_materialized_fixture(paths, declaration, document)
 
 
 @pytest.mark.parametrize("binding", ["bsp", "materialization"])
@@ -340,7 +371,7 @@ def test_materialized_wrong_runtime_sidecar_binding_is_rejected(
     )
 
     with pytest.raises(B2GateError, match="invalid V4 runtime sidecar"):
-        _validate_materialized(paths, declaration, SHA)
+        _validate_materialized_fixture(paths, declaration, document)
 
 
 def test_materialized_wrong_source_projection_binding_is_rejected(
@@ -355,7 +386,7 @@ def test_materialized_wrong_source_projection_binding_is_rejected(
     )
 
     with pytest.raises(B2GateError, match="source projection differs"):
-        _validate_materialized(paths, declaration, SHA)
+        _validate_materialized_fixture(paths, declaration, document)
 
 
 def test_materialized_wrong_attested_bsp_binding_is_rejected(
@@ -373,7 +404,74 @@ def test_materialized_wrong_attested_bsp_binding_is_rejected(
     )
 
     with pytest.raises(B2GateError, match="BSP binding differs"):
-        _validate_materialized(paths, declaration, SHA)
+        _validate_materialized_fixture(paths, declaration, document)
+
+
+def test_materialized_wrong_admitted_oracle_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, declaration, document = _write_materialized_fixture(
+        tmp_path, monkeypatch,
+    )
+    binaries, normative = _materialized_authorities(document)
+    document["oracles"]["hook"]["executable_sha256"] = "0" * 64
+    document["fresh_strict_replay"]["oracles"]["hook"][
+        "executable_sha256"
+    ] = "0" * 64
+    document["oracles"]["b1_runtime_authority_seal"]["executables"][
+        "hook_sha256"
+    ] = "0" * 64
+    (paths.materialized_dir / "fixture.hook-materialization.json").write_bytes(
+        canonical_bytes(document)
+    )
+
+    with pytest.raises(B2GateError, match="oracle differs from admitted B1"):
+        _validate_materialized(
+            paths, declaration, SHA, binaries, normative,
+        )
+
+
+def test_materialized_wrong_admitted_hook_attestation_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, declaration, document = _write_materialized_fixture(
+        tmp_path, monkeypatch,
+    )
+    binaries, normative = _materialized_authorities(document)
+    document["oracles"]["hook_parity_attestation_sha256"] = "0" * 64
+    document["oracles"]["b1_runtime_authority_seal"][
+        "hook_parity_attestation_sha256"
+    ] = "0" * 64
+    (paths.materialized_dir / "fixture.hook-materialization.json").write_bytes(
+        canonical_bytes(document)
+    )
+
+    with pytest.raises(B2GateError, match="hook parity differs from admitted B1"):
+        _validate_materialized(
+            paths, declaration, SHA, binaries, normative,
+        )
+
+
+def test_materialized_wrong_normative_seal_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, declaration, document = _write_materialized_fixture(
+        tmp_path, monkeypatch,
+    )
+    binaries, normative = _materialized_authorities(document)
+    document["oracles"]["b1_runtime_authority_seal"][
+        "normative_documents"
+    ]["design_sha256"] = "0" * 64
+    (paths.materialized_dir / "fixture.hook-materialization.json").write_bytes(
+        canonical_bytes(document)
+    )
+
+    with pytest.raises(
+        B2GateError, match="retained B1 normative documents differ",
+    ):
+        _validate_materialized(
+            paths, declaration, SHA, binaries, normative,
+        )
 
 
 @pytest.mark.parametrize(
@@ -383,7 +481,7 @@ def test_materialized_wrong_attested_bsp_binding_is_rejected(
 def test_materialized_immutable_compiled_inputs_remain_byte_exact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str,
 ) -> None:
-    paths, declaration, _document = _write_materialized_fixture(
+    paths, declaration, document = _write_materialized_fixture(
         tmp_path, monkeypatch,
     )
     immutable = paths.materialized_dir / f"fixture{suffix}"
@@ -393,7 +491,7 @@ def test_materialized_immutable_compiled_inputs_remain_byte_exact(
         B2GateError,
         match=r"materialized immutable input changed across stages",
     ):
-        _validate_materialized(paths, declaration, SHA)
+        _validate_materialized_fixture(paths, declaration, document)
 
 
 def _encoded_snapshot(
@@ -589,6 +687,15 @@ def test_71438_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
     assert "--glob" not in options
     assert "--generated-dir" not in options
     assert "--expected-count" not in options
+
+
+def test_gate_refuses_retired_71438_declaration_before_evidence() -> None:
+    declaration = (
+        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+    )
+
+    with pytest.raises(B2GateError, match="71438.*permanently retired"):
+        _validate_declaration(declaration)
 
 
 def test_exact_directory_membership_rejects_extra_and_symlink(tmp_path: Path) -> None:

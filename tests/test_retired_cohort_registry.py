@@ -1,0 +1,357 @@
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+
+import pytest
+
+from tools import compile_generated_cohort as compiler
+from tools import materialize_generated_cohort as materializer
+from tools import retired_cohort_registry as registry
+from tools import run_generated_atlas_campaign as atlas_campaign
+from tools import run_generator_claim_campaign as claim_campaign
+from tools import run_generator_cohort as cohort
+
+
+ROOT = Path(__file__).resolve().parents[1]
+ALIAS_71438 = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+NAMED_71438 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71438-DECLARATION.json"
+)
+
+
+def _write_fresh_declaration(path: Path) -> Path:
+    declaration, _sha256 = cohort.load_declaration(NAMED_71438)
+    declaration["cohort_id"] = "b2g26_test_fresh_99000"
+    for row in declaration["maps"]:
+        row["map"] = f"b2g26_test_fresh_{row['ordinal']:02d}"
+        row["seed"] = 99000000 + row["ordinal"]
+    path.write_bytes(cohort.canonical_bytes(declaration))
+    return path
+
+
+def _write_failed_authority(
+    root: Path,
+    number: int,
+    *,
+    duplicate_map: str | None = None,
+) -> str:
+    directory = root / "docs/multires"
+    directory.mkdir(parents=True, exist_ok=True)
+    declaration, _sha256 = cohort.load_declaration(NAMED_71438)
+    declaration["cohort_id"] = f"b2g26_final_{number}"
+    for row in declaration["maps"]:
+        row["map"] = f"retired_{number}_{row['ordinal']:02d}"
+        row["seed"] = number * 1000 + row["ordinal"]
+    if duplicate_map is not None:
+        declaration["maps"][0]["map"] = duplicate_map
+    relative = f"docs/multires/B2-GENERATED-COHORT-{number}-DECLARATION.json"
+    declaration_path = root / relative
+    declaration_path.write_bytes(cohort.canonical_bytes(declaration))
+    _loaded, declaration_sha256 = cohort.load_declaration(declaration_path)
+    authority = {
+        "admission": {
+            "older_population_reuse_allowed": False,
+            "passing_subset_allowed": False,
+            "permanently_non_admissible": True,
+            "regeneration_under_same_declaration_allowed": False,
+            "replacement_declaration_status": "pending-test",
+            "replacement_member_allowed": False,
+            "retry_under_same_declaration_allowed": False,
+            "salvage_allowed": False,
+        },
+        "cohort_id": declaration["cohort_id"],
+        "declaration": {"path": relative, "sha256": declaration_sha256},
+        "evidence": {},
+        "failure": {},
+        "schema": registry.FAILURE_SCHEMA,
+        "status": "permanently-failed-test",
+    }
+    failure_path = (
+        directory / f"B2-GENERATED-COHORT-{number}-FAILURE.json"
+    )
+    failure_path.write_bytes(cohort.canonical_bytes(authority))
+    return declaration["maps"][0]["map"]
+
+
+@pytest.mark.parametrize("declaration_path", [ALIAS_71438, NAMED_71438])
+def test_retired_71438_cannot_generate_without_creating_outputs(
+    tmp_path: Path, declaration_path: Path,
+) -> None:
+    root = tmp_path / "generated"
+
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="permanently retired"
+    ):
+        cohort.generate_source_freeze(
+            declaration_path,
+            root / "source",
+            root / "cold",
+            root / "source-freeze.json",
+            _binding={},
+        )
+
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("declaration_path", [ALIAS_71438, NAMED_71438])
+def test_retired_71438_cannot_compile_without_creating_outputs(
+    tmp_path: Path, declaration_path: Path,
+) -> None:
+    root = tmp_path / "compiled"
+
+    with pytest.raises(
+        compiler.CompileCohortError, match="permanently retired"
+    ) as refusal:
+        compiler.compile_generated_cohort(
+            declaration_path,
+            root / "source",
+            root / "staging",
+            root / "published",
+            root / "logs",
+            root / "reports/compile.json",
+            root / "q2tool",
+            root / "basedir",
+        )
+
+    assert isinstance(refusal.value.__cause__, registry.RetiredCohortRegistryError)
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("declaration_path", [ALIAS_71438, NAMED_71438])
+def test_retired_71438_cannot_materialize_without_creating_outputs(
+    tmp_path: Path, declaration_path: Path,
+) -> None:
+    root = tmp_path / "materialized"
+
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="permanently retired"
+    ):
+        materializer.materialize_cohort(
+            declaration_path=declaration_path,
+            compiled_dir=root / "compiled",
+            stage_dir=root / "staging",
+            materialized_dir=root / "published",
+            log_dir=root / "logs",
+            report_path=root / "reports/materialize.json",
+            cm_oracle=root / "cm",
+            pmove_oracle=root / "pmove",
+            hook_oracle=root / "hook",
+            fall_oracle=root / "fall",
+            hook_attestation=root / "hook-attestation.json",
+        )
+
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("declaration_path", [ALIAS_71438, NAMED_71438])
+def test_retired_71438_cannot_prepare_claims_or_build_atlas(
+    tmp_path: Path, declaration_path: Path,
+) -> None:
+    claims_root = tmp_path / "claims-campaign"
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="permanently retired"
+    ):
+        claim_campaign.prepare_claims(
+            declaration_path,
+            claims_root / "materialized",
+            claims_root / "claims",
+        )
+    assert not claims_root.exists()
+
+    atlas_root = tmp_path / "atlas-campaign"
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="permanently retired"
+    ):
+        atlas_campaign.build_atlas_campaign(
+            declaration_path,
+            atlas_root / "claims",
+            atlas_root / "analysis",
+            atlas_root / "diagnostics",
+            atlas_root / "reports/build.json",
+        )
+    assert not atlas_root.exists()
+
+
+def test_genuinely_fresh_declaration_is_admitted(tmp_path: Path) -> None:
+    declaration_path = _write_fresh_declaration(tmp_path / "fresh.json")
+    declaration, declaration_sha256 = cohort.load_declaration(declaration_path)
+
+    assert (
+        registry.require_unretired_declaration(
+            declaration_path, declaration, declaration_sha256
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("identity", "pattern"),
+    [("map", "map ID .* permanently retired"), ("seed", "seed .* permanently retired")],
+)
+def test_fresh_cohort_cannot_reuse_retired_map_or_seed(
+    tmp_path: Path, identity: str, pattern: str,
+) -> None:
+    declaration_path = _write_fresh_declaration(tmp_path / "fresh.json")
+    declaration, _sha256 = cohort.load_declaration(declaration_path)
+    retired, _retired_sha256 = cohort.load_declaration(NAMED_71438)
+    declaration["maps"][0][identity] = retired["maps"][0][identity]
+    declaration_path.write_bytes(cohort.canonical_bytes(declaration))
+    declaration, declaration_sha256 = cohort.load_declaration(declaration_path)
+
+    with pytest.raises(registry.RetiredCohortRegistryError, match=pattern):
+        registry.require_unretired_declaration(
+            declaration_path, declaration, declaration_sha256
+        )
+
+
+def test_malformed_failure_registry_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_dir = tmp_path / "docs/multires"
+    registry_dir.mkdir(parents=True)
+    (registry_dir / "B2-GENERATED-COHORT-bad-FAILURE.json").write_bytes(b"{}\n")
+    monkeypatch.setattr(registry, "ROOT", tmp_path)
+    monkeypatch.setattr(registry, "FAILURE_REGISTRY_DIR", registry_dir)
+    declaration_path = _write_fresh_declaration(tmp_path / "fresh.json")
+    declaration, declaration_sha256 = cohort.load_declaration(declaration_path)
+
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="filename is malformed"
+    ):
+        registry.require_unretired_declaration(
+            declaration_path, declaration, declaration_sha256
+        )
+
+
+def test_contradictory_failure_registry_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    duplicate_map = _write_failed_authority(tmp_path, 99001)
+    _write_failed_authority(tmp_path, 99002, duplicate_map=duplicate_map)
+    monkeypatch.setattr(registry, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        registry, "FAILURE_REGISTRY_DIR", tmp_path / "docs/multires"
+    )
+    declaration_path = _write_fresh_declaration(tmp_path / "fresh.json")
+    declaration, declaration_sha256 = cohort.load_declaration(declaration_path)
+
+    with pytest.raises(
+        registry.RetiredCohortRegistryError,
+        match="contradictory retired map ID",
+    ):
+        registry.require_unretired_declaration(
+            declaration_path, declaration, declaration_sha256
+        )
+
+
+def test_retired_declaration_remains_available_for_read_only_forensics(
+    tmp_path: Path,
+) -> None:
+    declaration, declaration_sha256 = cohort.load_declaration(NAMED_71438)
+
+    membership = cohort.verify_stage_membership(
+        declaration, tmp_path / "absent", "source"
+    )
+
+    assert declaration["cohort_id"] == "b2g26_final_71438"
+    assert declaration_sha256 == (
+        "bebe7c2c63711c399d34780f3297a622f9d28d1c9751511473ec1ed4815a58c2"
+    )
+    assert membership["passed"] is False
+    assert membership["expected_map_count"] == 28
+
+
+def test_generate_cli_reports_retirement_without_traceback_or_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "generate-cli"
+    monkeypatch.setattr(sys, "argv", [
+        "run_generator_cohort.py",
+        "generate",
+        "--declaration",
+        str(ALIAS_71438),
+        "--output-dir",
+        str(root / "source"),
+        "--cold-dir",
+        str(root / "cold"),
+        "--report",
+        str(root / "report.json"),
+    ])
+
+    assert cohort.main() == 1
+
+    captured = capsys.readouterr()
+    assert "generator cohort failed:" in captured.err
+    assert "permanently retired" in captured.err
+    assert "Traceback" not in captured.err
+    assert not root.exists()
+
+
+def test_materialize_cli_reports_retirement_without_traceback_or_outputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "materialize-cli"
+    arguments = [
+        "--declaration", str(ALIAS_71438),
+        "--compiled-dir", str(root / "compiled"),
+        "--stage-dir", str(root / "stage"),
+        "--materialized-dir", str(root / "materialized"),
+        "--log-dir", str(root / "logs"),
+        "--report", str(root / "report.json"),
+        "--cm-oracle", str(root / "cm"),
+        "--pmove-oracle", str(root / "pmove"),
+        "--hook-oracle", str(root / "hook"),
+        "--fall-oracle", str(root / "fall"),
+        "--hook-parity-attestation", str(root / "attestation.json"),
+    ]
+
+    assert materializer.main(arguments) == 1
+
+    captured = capsys.readouterr()
+    assert "generated cohort materialization failed:" in captured.err
+    assert "permanently retired" in captured.err
+    assert "Traceback" not in captured.err
+    assert not root.exists()
+
+
+def test_claim_prepare_cli_reports_retirement_without_traceback_or_outputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "claims-cli"
+
+    assert claim_campaign.main([
+        "prepare",
+        "--declaration", str(ALIAS_71438),
+        "--materialized-dir", str(root / "materialized"),
+        "--claims-dir", str(root / "claims"),
+        "--output", str(root / "report.json"),
+    ]) == 1
+
+    captured = capsys.readouterr()
+    assert "generator claim campaign failed:" in captured.err
+    assert "permanently retired" in captured.err
+    assert "Traceback" not in captured.err
+    assert not root.exists()
+
+
+def test_atlas_build_cli_reports_retirement_without_traceback_or_outputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "atlas-cli"
+
+    assert atlas_campaign.main([
+        "--declaration", str(ALIAS_71438),
+        "--claims-dir", str(root / "claims"),
+        "--analysis-dir", str(root / "analysis"),
+        "--diagnostics-dir", str(root / "diagnostics"),
+        "--output", str(root / "report.json"),
+    ]) == 1
+
+    captured = capsys.readouterr()
+    assert "generated Atlas campaign failed:" in captured.err
+    assert "permanently retired" in captured.err
+    assert "Traceback" not in captured.err
+    assert not root.exists()

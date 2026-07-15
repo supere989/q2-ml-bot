@@ -12,7 +12,13 @@ from tools import run_generator_cohort as cohort
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DECLARATION = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+AUTHORITATIVE_DECLARATION = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+)
+DECLARATION = (
+    ROOT
+    / "tests/fixtures/multires/B2-GENERATED-COHORT-FRESH-DECLARATION.json"
+)
 DECLARATION_71438 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71438-DECLARATION.json"
 )
@@ -179,8 +185,8 @@ def static_pass(map_path: Path) -> dict[str, object]:
 
 
 def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> None:
-    declaration, digest = cohort.load_declaration(DECLARATION)
-    declaration_bytes = DECLARATION.read_bytes()
+    declaration, digest = cohort.load_declaration(AUTHORITATIVE_DECLARATION)
+    declaration_bytes = AUTHORITATIVE_DECLARATION.read_bytes()
     assert declaration_bytes == DECLARATION_71438.read_bytes()
     assert declaration_bytes == cohort.canonical_bytes(declaration)
     assert hashlib.sha256(declaration_bytes).hexdigest() == (

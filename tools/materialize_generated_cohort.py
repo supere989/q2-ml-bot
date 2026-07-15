@@ -35,6 +35,7 @@ from tools.run_generator_cohort import (  # noqa: E402
     load_declaration,
     verify_stage_membership,
 )
+from tools.retired_cohort_registry import require_unretired_declaration  # noqa: E402
 from harness.hook_claims_v4 import (  # noqa: E402
     HookClaimsV4Error,
     load_materialization,
@@ -682,6 +683,9 @@ def materialize_cohort(
     fall_oracle = _absolute(fall_oracle)
     hook_attestation = _absolute(hook_attestation)
     declaration, declaration_sha256 = load_declaration(declaration_path)
+    require_unretired_declaration(
+        declaration_path, declaration, declaration_sha256
+    )
     rows = _map_rows(declaration)
     base = _base_report(
         declaration=declaration,

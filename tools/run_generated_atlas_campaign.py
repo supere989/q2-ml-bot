@@ -44,6 +44,7 @@ from tools.run_generator_cohort import (  # noqa: E402
     repository_binding,
     verify_stage_membership,
 )
+from tools.retired_cohort_registry import require_unretired_declaration  # noqa: E402
 from harness.atlas_source_closure import (  # noqa: E402
     atlas_analyzer_authority_inputs,
     atlas_analyzer_authority_sha256,
@@ -1039,6 +1040,9 @@ def build_atlas_campaign(
             "repo_root must be the canonical q2-ml-bot ROOT"
         )
     declaration, declaration_sha256 = load_declaration(declaration_path)
+    require_unretired_declaration(
+        declaration_path, declaration, declaration_sha256
+    )
     roots = (
         ("claims stage", claims_dir),
         ("analysis stage", analysis_dir),

@@ -35,6 +35,7 @@ from tools.run_generator_cohort import (  # noqa: E402
     load_declaration,
     verify_stage_membership,
 )
+from tools.retired_cohort_registry import require_unretired_declaration  # noqa: E402
 
 
 REPORT_SCHEMA = "q2-b2-generated-compile-cohort-v1"
@@ -282,6 +283,8 @@ def _base_report(paths: Mapping[str, Path]) -> dict[str, Any]:
             "atomic_publish": "renameat2(RENAME_NOREPLACE)",
             "inputs_rehashed_before_publish": True,
             "timeout_termination": "SIGKILL isolated q2tool process group",
+            "successful_prt_handling": "hash-recorded then durably removed",
+            "failure_intermediates_retained": True,
         },
         "q2tool": None,
         "assets": None,
@@ -343,6 +346,13 @@ def compile_generated_cohort(
         "q2tool": _absolute(q2tool),
         "basedir": _absolute(basedir),
     }
+    try:
+        declaration, declaration_sha256 = load_declaration(paths["declaration"])
+        require_unretired_declaration(
+            paths["declaration"], declaration, declaration_sha256
+        )
+    except GeneratorCohortError as exc:
+        raise CompileCohortError(str(exc)) from exc
     report = _base_report(paths)
     phase = "preflight"
     failed_map: Mapping[str, Any] | None = None
@@ -360,7 +370,6 @@ def compile_generated_cohort(
         )
     if not report_destination.parent.exists():
         report_destination.parent.mkdir(parents=True)
-
     try:
         if (
             isinstance(timeout_seconds, bool)
@@ -374,7 +383,6 @@ def compile_generated_cohort(
             )
         timeout_seconds = float(timeout_seconds)
         report["contract"]["per_map_timeout_seconds"] = timeout_seconds
-        declaration, declaration_sha256 = load_declaration(paths["declaration"])
         report["cohort_id"] = declaration["cohort_id"]
         report["declaration"] = {
             "path": str(paths["declaration"]),
@@ -461,6 +469,7 @@ def compile_generated_cohort(
             map_id = str(row["map"])
             map_path = paths["staging_root"] / f"{map_id}.map"
             bsp_path = paths["staging_root"] / f"{map_id}.bsp"
+            prt_path = paths["staging_root"] / f"{map_id}.prt"
             if bsp_path.exists():
                 raise CompileCohortError(f"staged BSP exists before compile: {bsp_path}")
             stdout_path = paths["log_root"] / f"{ordinal:03d}-{map_id}.stdout.log"
@@ -513,6 +522,13 @@ def compile_generated_cohort(
                     bsp = _file_record(bsp_path)
                 except CompileCohortError as exc:
                     bsp_error = str(exc)
+            prt: dict[str, Any] | None = None
+            prt_error: str | None = None
+            if prt_path.exists() or prt_path.is_symlink():
+                try:
+                    prt = _file_record(prt_path)
+                except CompileCohortError as exc:
+                    prt_error = str(exc)
             result: dict[str, Any] = {
                 **failed_map,
                 "command": command,
@@ -523,12 +539,10 @@ def compile_generated_cohort(
                 "stderr_log": _log_record(stderr_path, paths["log_root"]),
                 "bsp": bsp,
                 "bsp_error": bsp_error,
-                "passed": (
-                    invocation_error is None
-                    and exit_code == 0
-                    and bsp is not None
-                    and bsp_error is None
-                ),
+                "prt": prt,
+                "prt_error": prt_error,
+                "prt_removed_after_success": False,
+                "passed": False,
             }
             report["maps"].append(result)
             if timed_out:
@@ -552,9 +566,22 @@ def compile_generated_cohort(
                 raise CompileCohortError(
                     f"q2tool reported success but emitted no BSP for {map_id}"
                 )
+            if prt_error is not None:
+                raise CompileCohortError(
+                    f"q2tool emitted an invalid PRT for {map_id}: {prt_error}"
+                )
+            if prt is not None:
+                prt_path.unlink()
+                _fsync_directory(paths["staging_root"])
+                if prt_path.exists() or prt_path.is_symlink():
+                    raise CompileCohortError(
+                        f"q2tool PRT cleanup did not remove {prt_path}"
+                    )
+                result["prt_removed_after_success"] = True
             _check_preserved_sources(
                 declaration, paths["staging_root"], source_hashes
             )
+            result["passed"] = True
             failed_map = None
 
         phase = "postcompile-membership"
