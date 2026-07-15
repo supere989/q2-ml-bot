@@ -449,20 +449,15 @@ def test_retired_arena_open_contact_route_repairs_within_component(
 
     _assert_complete_generated_routes(routes)
     nodes = {node["id"]: node for node in routes["nodes"]}
-    stranded = next(
-        node for node in nodes.values()
-        if (node["x"], node["y"], node["z"]) == (1248, 1824, 24)
-    )
-    assert stranded["source_component"] == 2
-    survival = next(
-        route for route in routes["routes"]
-        if route["archetype"] == "survival"
-    )
-    assert survival["source_component"] == 0
-    assert stranded["id"] not in survival["node_ids"]
+    components = {
+        node["source_component"] for node in nodes.values()
+    }
+    assert None not in components
+    assert len(components) == 1
     assert all(
-        nodes[node_id]["source_component"] == survival["source_component"]
-        for node_id in survival["node_ids"]
+        nodes[node_id]["source_component"] == route["source_component"]
+        for route in routes["routes"]
+        for node_id in route["node_ids"]
     )
 
 

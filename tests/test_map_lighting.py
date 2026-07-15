@@ -1,6 +1,9 @@
 from argparse import Namespace
 import json
+from pathlib import Path
 import struct
+import subprocess
+import sys
 
 from maps.generator import (
     FloorLightRegion,
@@ -192,6 +195,60 @@ def test_horizontal_sandwich_threshold_uses_player_hull_and_safe_headroom():
     assert not unsafe_horizontal_sandwiches([lower, narrow])
 
 
+def test_room_ceiling_normalizer_terminates_on_retired_six_state_cycle(
+    monkeypatch,
+):
+    generator = MapGenerator(seed=1, style="arena_vertical")
+    generator.rooms = [
+        Room(index, 0, 0, 0, width, depth, floor_z, ceil_z, kind)
+        for index, (kind, floor_z, ceil_z, width, depth) in enumerate((
+            ("corridor", 288, 458, 512, 256),
+            ("arena", 0, 506, 768, 768),
+            ("corridor", 192, 396, 256, 512),
+            ("arena", 96, 539, 768, 768),
+            ("room", 192, 462, 512, 512),
+        ))
+    ]
+    initial = [room.ceil_z for room in generator.rooms]
+    initial_levels = set(initial)
+    rng_state = generator.rng.getstate()
+    states = []
+    original_check = unsafe_horizontal_sandwiches
+
+    def traced_check(surfaces):
+        states.append(tuple(room.ceil_z for room in generator.rooms))
+        return original_check(surfaces)
+
+    monkeypatch.setattr(
+        "maps.generator.unsafe_horizontal_sandwiches", traced_check
+    )
+
+    generator._normalize_room_ceiling_sandwiches()
+
+    assert generator.rng.getstate() == rng_state
+    assert len(states) == len(set(states))
+    assert all(
+        all(current >= previous for previous, current in zip(before, after))
+        and any(current > previous for previous, current in zip(before, after))
+        for before, after in zip(states, states[1:])
+    )
+    assert all(
+        room.ceil_z >= prior
+        for room, prior in zip(generator.rooms, initial)
+    )
+    assert any(room.ceil_z not in initial_levels for room in generator.rooms)
+    assert tuple(room.ceil_z for room in generator.rooms) == (
+        458, 512, 396, 578, 462,
+    )
+    assert unsafe_horizontal_sandwiches(
+        generator._room_overhead_surfaces()
+    ) == []
+    final = tuple(room.ceil_z for room in generator.rooms)
+    generator._normalize_room_ceiling_sandwiches()
+    assert tuple(room.ceil_z for room in generator.rooms) == final
+    assert generator.rng.getstate() == rng_state
+
+
 def test_seeded_lighting_output_is_byte_deterministic(tmp_path):
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -295,6 +352,47 @@ def test_arena_vertical_seed_71431503_rejects_low_ceiling_tower_sandwich(
         for surface in tower_surfaces
     )
     assert unsafe_horizontal_sandwiches(generator.horizontal_surfaces) == []
+    result = static_validate(first_map, _static_args())
+    assert result["unsafe_horizontal_sandwiches"] == 0
+    assert result["static_ok"] is True
+
+
+def test_arena_vertical_seed_71434500_normalizes_ceiling_bands_monotonically(
+    tmp_path,
+):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+
+    script = """
+from pathlib import Path
+import sys
+from maps.generator import generate_map
+for directory in sys.argv[1:]:
+    generate_map(
+        "ceiling_cycle_regression", 71434500, Path(directory),
+        style="arena_vertical",
+    )
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(first), str(second)],
+        cwd=Path(__file__).resolve().parents[1],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    first_map = first / "ceiling_cycle_regression.map"
+    second_map = second / "ceiling_cycle_regression.map"
+
+    assert first_map.read_bytes() == second_map.read_bytes()
+    assert (
+        first_map.with_suffix(".meta.json").read_bytes()
+        == second_map.with_suffix(".meta.json").read_bytes()
+    )
     result = static_validate(first_map, _static_args())
     assert result["unsafe_horizontal_sandwiches"] == 0
     assert result["static_ok"] is True

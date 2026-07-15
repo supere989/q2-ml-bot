@@ -708,44 +708,70 @@ class MapGenerator:
         return w, d, h
 
     def _normalize_room_ceiling_sandwiches(self):
-        """Separate unsafe overlapping ceiling bands without changing RNG.
+        """Separate unsafe overlapping ceiling bands monotonically.
 
         Room footprints deliberately overlap to make one connected arena.  A
-        96u terrace offset used to leave a second, reachable ceiling plate only
-        76--80u above the first.  Iteratively raising the lower ceiling to the
-        upper band removes that player-admitting pocket without changing the
-        seeded room graph or consuming any RNG state. The lower band is moved
-        down when it can retain 96u internally; otherwise the bands are merged.
+        96u terrace offset can leave a second, reachable ceiling plate only
+        56--95u above the first.  Moving a lower band down and later merging it
+        upward can cycle between the same room states.  Instead, keep the
+        lower authored band fixed and raise only the upper room until the
+        exact pair has 96u of free headroom. Every edit is a strict integer
+        ceiling increase, consumes no RNG, and explicit height/iteration
+        fences fail closed if a future surface model violates that invariant.
         """
-        while True:
+        initial_max_ceiling = max(
+            (room.ceil_z for room in self.rooms), default=0
+        )
+        ceiling_limit = initial_max_ceiling + max(1, len(self.rooms)) * 2 * (
+            MIN_SAFE_HEADROOM + WALL_T + 4
+        )
+        max_iterations = sum(
+            ceiling_limit - room.ceil_z for room in self.rooms
+        ) + 1
+        seen_states = set()
+        for _iteration in range(max_iterations):
+            state = tuple(room.ceil_z for room in self.rooms)
+            if state in seen_states:
+                raise RuntimeError(
+                    "room overhead normalization repeated a ceiling state"
+                )
+            seen_states.add(state)
             surfaces = self._room_overhead_surfaces()
             unsafe = unsafe_horizontal_sandwiches(surfaces)
             if not unsafe:
                 return
             first, second, _gap = unsafe[0]
-            first_index = int(first.surface_id.rsplit("_", 1)[1])
-            second_index = int(second.surface_id.rsplit("_", 1)[1])
-            if first_index == second_index:
-                raise RuntimeError("room overhead assembly contains an unsafe gap")
-            first_room = self.rooms[first_index]
-            second_room = self.rooms[second_index]
-            lower_room = first_room
-            upper_room = second_room
-            upper_surface = second
-            if lower_room.ceil_z > upper_room.ceil_z:
-                lower_room, upper_room = upper_room, lower_room
-                upper_surface = first
-            # Prefer moving the lower band downward until a full 96u gap
-            # exists. This preserves deliberately low hallway and mid-room
-            # composition; only fall back to merging upward when the lower
-            # room cannot retain a safe 96u interior of its own.
-            target_ceiling = int(
-                upper_surface.box.z0 - MIN_SAFE_HEADROOM - WALL_T
+            lower_surface, upper_surface = (
+                (first, second)
+                if first.box.z0 <= second.box.z0
+                else (second, first)
             )
-            if target_ceiling - lower_room.floor_z >= MIN_SAFE_HEADROOM:
-                lower_room.ceil_z = target_ceiling
-            else:
-                lower_room.ceil_z = upper_room.ceil_z
+            lower_index = int(lower_surface.surface_id.rsplit("_", 1)[1])
+            upper_index = int(upper_surface.surface_id.rsplit("_", 1)[1])
+            if lower_index == upper_index:
+                raise RuntimeError("room overhead assembly contains an unsafe gap")
+            upper_room = self.rooms[upper_index]
+            required_upper_bottom = (
+                lower_surface.box.z1 + MIN_SAFE_HEADROOM
+            )
+            increase = int(required_upper_bottom - upper_surface.box.z0)
+            if increase <= 0:
+                raise RuntimeError(
+                    "room overhead normalization did not require an increase"
+                )
+            prior_ceiling = upper_room.ceil_z
+            upper_room.ceil_z += increase
+            if upper_room.ceil_z <= prior_ceiling:
+                raise RuntimeError(
+                    "room overhead normalization was not monotonic"
+                )
+            if upper_room.ceil_z > ceiling_limit:
+                raise RuntimeError(
+                    "room overhead normalization exceeded its ceiling bound"
+                )
+        raise RuntimeError(
+            "room overhead normalization exceeded its finite iteration budget"
+        )
 
     def _room_overhead_surfaces(self) -> List[HorizontalSurface]:
         surfaces = []

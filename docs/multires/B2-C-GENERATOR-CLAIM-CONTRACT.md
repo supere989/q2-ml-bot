@@ -386,6 +386,20 @@ declared-before-generation policy. The current alias and immutable named copy
 are byte-identical; no 71433 source or later-stage member is an input to
 71434.
 
+The first and only 71434 source-freeze attempt was operator-terminated at
+ordinal 20, arena-vertical seed 71434500, after approximately 30 CPU-minutes
+inside ceiling-sandwich normalization. The primary population contains 20
+complete predecessors and no partial failed member; the cold pass never began
+and no freeze report was published. The exact declaration and canonical
+failure record are archived as `B2-GENERATED-COHORT-71434-DECLARATION.json`
+and `B2-GENERATED-COHORT-71434-FAILURE.json`. Cohort 71434 is permanently
+non-admissible; no member may be reused, regenerated, repaired, retried, or
+salvaged. The repair now moves only the upper room ceiling, requires a strict
+integer increase on every iteration, rejects repeated states, and fails closed
+at explicit height and iteration fences. The monotonic ceiling normalization
+preserves the 96-unit safe-headroom and low/mid/high spatial-proportion
+contracts.
+
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative

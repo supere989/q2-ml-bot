@@ -59,6 +59,12 @@ FAILURE_71433 = (
 DECLARATION_71433 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71433-DECLARATION.json"
 )
+FAILURE_71434 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71434-FAILURE.json"
+)
+DECLARATION_71434 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71434-DECLARATION.json"
+)
 SHADOW_71430 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71430-SHADOW-8CE1E75.json"
 )
@@ -119,6 +125,7 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "62-unit",
         "reserved interior",
         "spawn-bearing source component",
+        "monotonic ceiling normalization",
         "one-chunk hurt-boundary",
         "grounded origins at Z 24.03125",
         "first source-freeze attempt",
@@ -535,6 +542,74 @@ def test_71433_failure_record_is_canonical_exact_and_no_salvage() -> None:
         "regeneration_under_same_declaration_allowed",
         "replacement_member_allowed", "retry_under_same_declaration_allowed",
         "salvage_allowed",
+    ):
+        assert admission[key] is False
+
+
+def test_71434_failure_record_is_canonical_exact_and_no_salvage() -> None:
+    payload = FAILURE_71434.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71434"
+    assert failure["status"] == "permanently-failed-first-source-freeze"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71434-DECLARATION.json",
+        "sha256": hashlib.sha256(DECLARATION_71434.read_bytes()).hexdigest(),
+    }
+    assert failure["failure"]["phase"] == "primary-generation-nontermination"
+    assert failure["failure"]["first_failure"] == {
+        "map": "b2g26_arena_vertical_71434500",
+        "message": (
+            "primary generation did not terminate after approximately 30 "
+            "CPU-minutes and was interrupted inside "
+            "unsafe_horizontal_sandwiches"
+        ),
+        "ordinal": 20,
+        "seed": 71434500,
+        "style": "arena_vertical",
+    }
+    assert failure["failure"]["publication_contract"] == {
+        "failed_member_file_count": 0,
+        "last_complete_ordinal": 19,
+        "route_atomic_publication_preserved": True,
+    }
+    primary = failure["evidence"]["primary_population"]
+    assert primary == {
+        "actual_file_count": 100,
+        "complete_member_count": 20,
+        "expected_file_count": 140,
+        "missing_file_count": 40,
+        "partial_member_file_count": 0,
+        "path_from_artifact_root": "source",
+        "stage_membership_sha256": (
+            "15c6a580ec445e8ca8e3079f17e9f52d"
+            "354c51642d4f7731c8248e699bf2295f"
+        ),
+        "total_bytes": 7580131,
+    }
+    cold = failure["evidence"]["cold_population"]
+    assert cold["actual_file_count"] == 0
+    assert cold["complete_member_count"] == 0
+    assert cold["missing_file_count"] == 140
+    assert cold["partial_member_file_count"] == 0
+    assert cold["stage_membership_sha256"] == (
+        "a591cca19562899e9c3a8ce9157c9617"
+        "81351f84f537780dc297728ae992c0ea"
+    )
+    assert cold["total_bytes"] == 0
+    assert failure["evidence"]["failed_member"]["files"] == {}
+    assert failure["evidence"]["source_freeze_report"]["published"] is False
+    admission = failure["admission"]
+    assert admission["permanently_non_admissible"] is True
+    for key in (
+        "older_population_reuse_allowed", "passing_subset_allowed",
+        "regeneration_under_same_declaration_allowed",
+        "replacement_member_allowed", "retry_under_same_declaration_allowed",
+        "salvage_allowed", "source_stage_published",
+        "compiled_stage_published", "materialized_stage_published",
+        "claims_stage_published", "analysis_stage_published",
     ):
         assert admission[key] is False
 
