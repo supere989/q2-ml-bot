@@ -749,6 +749,7 @@ def _canonical_semantic_analysis_manifest(
         normalized["identity"].pop("atlas_manifest_sha256")
         atlas_manifest = normalized["artifacts"]["atlas_manifest"]
         atlas_manifest.pop("sha256")
+        atlas_manifest.pop("uncompressed_bytes")
         atlas_manifest["verification"].pop("manifest_sha256")
     except (KeyError, TypeError) as error:
         raise ClaimValidationError(

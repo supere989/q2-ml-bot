@@ -664,6 +664,29 @@ def test_full_cold_digest_and_hard_budget_tamper_rejects(
     assert expected in "\n".join(report["criteria"]["artifact_authority"]["failures"])
 
 
+def test_analysis_semantic_field_tamper_rejects_even_when_proof_maps_agree(
+    generated,
+):
+    map_path, _claims, analysis_path = generated
+    _mutate_analysis(
+        analysis_path,
+        lambda value: value["compiled_world"].update(
+            pmove_source_accounting={
+                "schema": "q2-atlas-pmove-source-accounting-v1",
+                "selected": 1,
+                "omitted": 1,
+            },
+        ),
+    )
+
+    report = validate_generated_map(map_path, analysis_path)
+
+    assert report["passed"] is False
+    assert "on-disk analysis manifest semantic digest differs" in "\n".join(
+        report["criteria"]["artifact_authority"]["failures"]
+    )
+
+
 def test_missing_seventh_artifact_rejects(generated):
     map_path, _claims, analysis_path = generated
     (analysis_path.parent / f"{map_path.stem}.atlas.manifest.json").unlink()

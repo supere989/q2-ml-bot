@@ -644,6 +644,7 @@ def test_cold_analysis_semantics_bind_authority_accounting_and_hazards() -> None
             "atlas": {"build_peak_rss_bytes": 1024},
             "atlas_manifest": {
                 "sha256": "2" * 64,
+                "uncompressed_bytes": 999,
                 "verification": {"manifest_sha256": "3" * 64},
             },
         },
@@ -657,6 +658,12 @@ def test_cold_analysis_semantics_bind_authority_accounting_and_hazards() -> None
     operationally_different["artifacts"]["atlas"]["build_peak_rss_bytes"] = 4096
     operationally_different["identity"]["atlas_manifest_sha256"] = "4" * 64
     operationally_different["artifacts"]["atlas_manifest"]["sha256"] = "5" * 64
+    # build_peak_rss_bytes is embedded in the Atlas manifest.  A different
+    # RSS digit width changes the serialized byte count but not its normalized
+    # semantics.
+    operationally_different["artifacts"]["atlas_manifest"][
+        "uncompressed_bytes"
+    ] = 1000
     operationally_different["artifacts"]["atlas_manifest"]["verification"][
         "manifest_sha256"
     ] = "6" * 64
