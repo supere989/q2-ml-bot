@@ -320,6 +320,7 @@ def _route_contract(path: Path, map_id: str) -> dict[str, Any]:
 
     nodes: dict[int, Mapping[str, Any]] = {}
     item_origins: dict[tuple[float, float, float], int] = {}
+    spawn_origins: dict[tuple[float, float, float], int] = {}
     spawn_nodes = []
     for position, value in enumerate(nodes_value):
         if not isinstance(value, Mapping):
@@ -332,6 +333,7 @@ def _route_contract(path: Path, map_id: str) -> dict[str, Any]:
         nodes[node_id] = value
         node_type = value.get("type")
         if node_type == "item":
+            _room(value.get("room"), f"{map_id} item node {node_id}")
             origin = _origin(value, f"{map_id} item node {node_id}")
             if origin in item_origins:
                 raise DevelopmentPopulationError(
@@ -341,8 +343,10 @@ def _route_contract(path: Path, map_id: str) -> dict[str, Any]:
             item_origins[origin] = node_id
         elif node_type == "spawn":
             _room(value.get("room"), f"{map_id} spawn node {node_id}")
-            _origin(value, f"{map_id} spawn node {node_id}")
+            origin = _origin(value, f"{map_id} spawn node {node_id}")
+            spawn_origins.setdefault(origin, node_id)
             spawn_nodes.append(value)
+    collision = set(item_origins).intersection(spawn_origins)
 
     archetypes = [
         route.get("archetype") if isinstance(route, Mapping) else None
@@ -373,9 +377,9 @@ def _route_contract(path: Path, map_id: str) -> dict[str, Any]:
                 f"{map_id} route {route_index} has no floor-assigned start spawn"
             )
         node_ids = value.get("node_ids")
-        if not isinstance(node_ids, list) or not node_ids:
+        if not isinstance(node_ids, list) or len(node_ids) < 2:
             raise DevelopmentPopulationError(
-                f"{map_id} route {route_index} has no endpoint nodes"
+                f"{map_id} route {route_index} requires at least two item endpoints"
             )
         if (
             any(isinstance(node_id, bool) or not isinstance(node_id, int)
@@ -396,6 +400,11 @@ def _route_contract(path: Path, map_id: str) -> dict[str, Any]:
                     f"{map_id} route {route_index} endpoint {endpoint_index} is invalid"
                 )
             node = nodes[node_id]
+            if node.get("type") != "item":
+                raise DevelopmentPopulationError(
+                    f"{map_id} route {route_index} endpoint node {node_id} "
+                    "is not an item"
+                )
             _room(
                 node.get("room"),
                 f"{map_id} route {route_index} endpoint node {node_id}",
@@ -414,9 +423,39 @@ def _route_contract(path: Path, map_id: str) -> dict[str, Any]:
             )
             if source_origin == target_origin:
                 zero_length_legs += 1
+        geometric_distance = sum(
+            math.dist(
+                _origin(
+                    source,
+                    f"{map_id} route {route_index} distance source",
+                ),
+                _origin(
+                    target,
+                    f"{map_id} route {route_index} distance target",
+                ),
+            )
+            for source, target in zip(endpoints, endpoints[1:])
+        )
+        published_distance = _number(
+            value.get("dist"), f"{map_id} route {route_index} dist"
+        )
+        if (
+            published_distance != round(published_distance)
+            or abs(published_distance - geometric_distance) > 0.5
+        ):
+            raise DevelopmentPopulationError(
+                f"{map_id} route {route_index} dist {published_distance:g} "
+                f"differs from endpoint-loop geometry {geometric_distance:.6f}"
+            )
     if zero_length_legs:
         raise DevelopmentPopulationError(
             f"{map_id} has {zero_length_legs} zero-length route legs"
+        )
+    if collision:
+        origin = min(collision)
+        raise DevelopmentPopulationError(
+            f"{map_id} item node {item_origins[origin]} overlaps spawn node "
+            f"{spawn_origins[origin]} at {origin}"
         )
 
     return {
@@ -426,6 +465,11 @@ def _route_contract(path: Path, map_id: str) -> dict[str, Any]:
         "spawn_count": len(spawn_nodes),
         "route_endpoint_count": route_endpoint_count,
         "zero_length_route_legs": 0,
+        "minimum_distinct_item_endpoints_per_route": 2,
+        "all_route_endpoints_are_items": True,
+        "published_dist_matches_endpoint_loop": True,
+        "all_item_nodes_floor_assigned": True,
+        "item_spawn_origin_collisions": 0,
         "all_spawns_and_route_endpoints_floor_assigned": True,
         "globally_unique_item_origins": True,
     }
@@ -614,6 +658,11 @@ def audit_development_population(
         "globally_unique_item_origins": True,
         "duplicate_route_endpoints": 0,
         "zero_length_route_legs": 0,
+        "minimum_distinct_item_endpoints_per_route": 2,
+        "all_route_endpoints_are_items": True,
+        "published_dist_matches_endpoint_loop": True,
+        "all_item_nodes_floor_assigned": True,
+        "item_spawn_origin_collisions": 0,
         "all_spawns_and_route_endpoints_floor_assigned": True,
         "maps": map_reports,
         "failures": [],

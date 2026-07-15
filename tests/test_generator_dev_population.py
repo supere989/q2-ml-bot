@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -111,6 +112,38 @@ def fake_generator_factory(
                 routes[3]["archetype"] = "control"
             elif defect == "unassigned_spawn":
                 nodes[4]["room"] = -1
+            elif defect == "unassigned_item":
+                nodes[0]["room"] = -1
+            elif defect == "item_spawn_collision":
+                nodes.append({
+                    "id": 5,
+                    "type": "item",
+                    "class": "item_collision",
+                    "x": nodes[4]["x"],
+                    "y": nodes[4]["y"],
+                    "z": nodes[4]["z"],
+                    "room": 0,
+                })
+            elif defect == "one_endpoint":
+                routes[0]["node_ids"] = [0]
+            elif defect == "non_item_endpoint":
+                routes[0]["node_ids"] = [4, 1]
+        by_id = {node["id"]: node for node in nodes}
+        for route in routes:
+            loop = [
+                nodes[4],
+                *(by_id[node_id] for node_id in route["node_ids"]),
+                nodes[4],
+            ]
+            route["dist"] = round(sum(
+                math.dist(
+                    (source["x"], source["y"], source["z"]),
+                    (target["x"], target["y"], target["z"]),
+                )
+                for source, target in zip(loop, loop[1:])
+            ))
+        if name == defective_map and defect == "distance_mismatch":
+            routes[0]["dist"] += 2
         (output / f"{name}.routes.json").write_text(
             json.dumps({"version": 1, "nodes": nodes, "routes": routes}) + "\n",
             encoding="utf-8",
@@ -174,6 +207,11 @@ def test_complete_double_generation_publishes_canonical_development_report(
     assert report["route_count"] == 224
     assert report["all_route_archetypes_exactly_once"] is True
     assert report["globally_unique_item_origins"] is True
+    assert report["all_item_nodes_floor_assigned"] is True
+    assert report["item_spawn_origin_collisions"] == 0
+    assert report["minimum_distinct_item_endpoints_per_route"] == 2
+    assert report["all_route_endpoints_are_items"] is True
+    assert report["published_dist_matches_endpoint_loop"] is True
     assert report["duplicate_route_endpoints"] == 0
     assert report["zero_length_route_legs"] == 0
     assert report["all_spawns_and_route_endpoints_floor_assigned"] is True
@@ -201,6 +239,11 @@ def test_complete_double_generation_publishes_canonical_development_report(
         ("zero_length_leg", "zero-length route legs"),
         ("missing_archetype", "each route archetype exactly once"),
         ("unassigned_spawn", "spawn node 4 is not floor-assigned"),
+        ("unassigned_item", "item node 0 is not floor-assigned"),
+        ("item_spawn_collision", "item node 5 overlaps spawn node 4"),
+        ("one_endpoint", "requires at least two item endpoints"),
+        ("non_item_endpoint", "endpoint node 4 is not an item"),
+        ("distance_mismatch", "differs from endpoint-loop geometry"),
     ],
 )
 def test_route_defect_rejects_population_without_report(
