@@ -20,6 +20,9 @@ DECLARATION = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
 FAILURE_71427 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71427-FAILURE.json"
 )
+DECLARATION_71427 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71427-DECLARATION.json"
+)
 NONZERO = "ab" * 32
 
 
@@ -65,7 +68,8 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "non-admissible",
         "permanently non-admissible",
         "168 of 196",
-        "replacement declaration is pending",
+        "b2g26_final_71428",
+        "declared-not-generated",
     )
     assert all(fragment in contract for fragment in required_contract)
     assert "--glob 'b2claim_*.map'" not in contract
@@ -84,6 +88,10 @@ def test_71427_failure_record_is_canonical_exact_and_no_salvage() -> None:
         "d07fd88edd4471c4b7f8acb1a36cd1a"
     )
     assert failure["status"] == "permanently-failed-first-materialization"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71427-DECLARATION.json",
+        "sha256": hashlib.sha256(DECLARATION_71427.read_bytes()).hexdigest(),
+    }
 
     first_map = failure["failure"]["first_map"]
     assert first_map == {

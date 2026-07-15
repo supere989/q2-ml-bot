@@ -212,19 +212,22 @@ regenerate it behind the same declaration, repair or substitute a member,
 select a passing subset, or feed its compiled files or an older materialized
 population into campaign v2.
 
-The authoritative declaration file still names failed cohort 71427 so its
-exact selection bytes remain visible. A replacement declaration is pending an
-implementation fix and explicit root authorization. No replacement cohort ID
-or seed is declared or authorized by this contract. After the fix is committed
-and tested, a new immutable declaration must be committed before its first
-generator invocation; declaration presence alone never claims that a member
-passes.
+The failed cohort's exact declaration bytes remain archived at
+`docs/multires/B2-GENERATED-COHORT-71427-DECLARATION.json`. The authoritative
+declaration now names replacement cohort `b2g26_final_71428`, with four maps
+per concrete style and exact seed blocks `71428000` through `71428603`. The V3
+implementation and fail-closed B2 evidence tools were committed and tested
+before this declaration, and root explicitly authorized the replacement. Its
+status is `declared-not-generated`: no seed has been invoked and no source,
+compiled, materialized, claims, analysis, or gate result is claimed. The
+declaration must be committed before the first generator invocation;
+declaration presence alone never claims that any member passes.
 
 ## Offline workflow
 
-The commands in this section are templates only while the replacement is
-pending. Set `COHORT_ID` from a future committed authoritative declaration;
-it must never name retired cohort 71426 or 71427.
+The commands in this section use `COHORT_ID=b2g26_final_71428` from the
+committed authoritative declaration. It must never name retired cohort 71426
+or 71427.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V3 hook candidates under the pinned B1 authorities. Materialization
