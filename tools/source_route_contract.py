@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-ROUTE_CONTRACT_SCHEMA = "q2-generator-source-route-contract-v1"
+ROUTE_CONTRACT_SCHEMA = "q2-generator-source-route-contract-v2"
 ROUTE_ARCHETYPES = ("offense", "survival", "control", "balanced")
 MAX_ENDPOINT_DISTANCE_ERROR = 0.5
 
@@ -69,6 +69,12 @@ def _room(value: object, label: str) -> int:
     return value
 
 
+def _component(value: object, label: str) -> int | None:
+    if value is None:
+        return None
+    return _integer(value, label)
+
+
 def _number(value: object, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SourceRouteContractError(f"{label} must be numeric")
@@ -106,9 +112,9 @@ def validate_source_route_contract(
 ) -> dict[str, Any]:
     """Validate and normalize one source route graph for freeze evidence."""
     graph = _mapping(value, f"{map_id} route graph")
-    if graph.get("version") != 1 or isinstance(graph.get("version"), bool):
+    if graph.get("version") != 2 or isinstance(graph.get("version"), bool):
         raise SourceRouteContractError(
-            f"{map_id} route graph version must be exactly 1"
+            f"{map_id} route graph version must be exactly 2"
         )
     nodes_value = graph.get("nodes")
     edges_value = graph.get("edges")
@@ -124,6 +130,7 @@ def validate_source_route_contract(
     item_origins: dict[tuple[float, float, float], int] = {}
     spawn_origins: dict[tuple[float, float, float], int] = {}
     spawn_by_room: dict[int, list[Mapping[str, Any]]] = {}
+    components_by_node: dict[int, int | None] = {}
     normalized_nodes = []
     for position, raw_node in enumerate(nodes_value):
         node = _mapping(raw_node, f"{map_id} node {position}")
@@ -138,11 +145,17 @@ def validate_source_route_contract(
             )
         room = _room(node.get("room"), f"{map_id} {node_type} node {node_id}")
         origin = _origin(node, f"{map_id} {node_type} node {node_id}")
+        source_component = _component(
+            node.get("source_component"),
+            f"{map_id} {node_type} node {node_id} source component",
+        )
+        components_by_node[node_id] = source_component
         normalized_nodes.append({
             "id": node_id,
             "type": node_type,
             "room": room,
             "origin": list(origin),
+            "source_component": source_component,
         })
         if node_type == "item":
             if origin in item_origins:
@@ -157,7 +170,6 @@ def validate_source_route_contract(
     for room_spawns in spawn_by_room.values():
         room_spawns.sort(key=lambda node: int(node["id"]))
 
-    adjacency: dict[int, set[int]] = {}
     normalized_edges = []
     edge_pairs: set[tuple[int, int]] = set()
     for edge_index, raw_edge in enumerate(edges_value):
@@ -174,8 +186,6 @@ def validate_source_route_contract(
                 f"{map_id} edge {edge_index} duplicates undirected edge {pair}"
             )
         edge_pairs.add(pair)
-        adjacency.setdefault(left, set()).add(right)
-        adjacency.setdefault(right, set()).add(left)
         normalized_edges.append(list(pair))
 
     archetypes = [
@@ -195,22 +205,6 @@ def validate_source_route_contract(
         str(route["archetype"]): _mapping(route, f"{map_id} route")
         for route in routes_value
     }
-    component_cache: dict[int, set[int]] = {}
-
-    def source_component(start_room: int) -> set[int]:
-        if start_room in component_cache:
-            return component_cache[start_room]
-        reached = {start_room}
-        pending = [start_room]
-        while pending:
-            room = pending.pop()
-            for neighbor in sorted(adjacency.get(room, ())):
-                if neighbor not in reached:
-                    reached.add(neighbor)
-                    pending.append(neighbor)
-        component_cache[start_room] = reached
-        return reached
-
     zero_length_legs = 0
     route_endpoint_count = 0
     normalized_routes = []
@@ -220,12 +214,30 @@ def validate_source_route_contract(
             route.get("start_room"),
             f"{map_id} route {route_index} start room",
         )
-        starts = spawn_by_room.get(start_room, [])
-        if not starts:
+        start_node_id = _integer(
+            route.get("start_node_id"),
+            f"{map_id} route {route_index} start node ID",
+        )
+        start = nodes.get(start_node_id)
+        if start is None or start.get("type") != "spawn":
             raise SourceRouteContractError(
-                f"{map_id} route {route_index} has no floor-assigned start spawn"
+                f"{map_id} route {route_index} start node {start_node_id} "
+                "is not a declared spawn"
             )
-        start = starts[0]
+        if start.get("room") != start_room:
+            raise SourceRouteContractError(
+                f"{map_id} route {route_index} start room does not match "
+                f"spawn node {start_node_id}"
+            )
+        source_component = _integer(
+            route.get("source_component"),
+            f"{map_id} route {route_index} source component",
+        )
+        if components_by_node[start_node_id] != source_component:
+            raise SourceRouteContractError(
+                f"{map_id} route {route_index} source component does not match "
+                f"spawn node {start_node_id}"
+            )
         node_ids = route.get("node_ids")
         if not isinstance(node_ids, list) or len(node_ids) < 2:
             raise SourceRouteContractError(
@@ -241,7 +253,6 @@ def validate_source_route_contract(
             )
 
         endpoints = [start]
-        component = source_component(start_room)
         for endpoint_index, node_id in enumerate(node_ids):
             if node_id not in nodes:
                 raise SourceRouteContractError(
@@ -253,15 +264,10 @@ def validate_source_route_contract(
                     f"{map_id} route {route_index} endpoint node {node_id} "
                     "is not an item"
                 )
-            endpoint_room = _room(
-                node.get("room"),
-                f"{map_id} route {route_index} endpoint node {node_id}",
-            )
-            if endpoint_room not in component:
+            if components_by_node[node_id] != source_component:
                 raise SourceRouteContractError(
-                    f"{map_id} route {route_index} endpoint room {endpoint_room} "
-                    f"is unreachable from start room {start_room} through "
-                    "source room edges"
+                    f"{map_id} route {route_index} endpoint node {node_id} "
+                    f"does not share source standing component {source_component}"
                 )
             endpoints.append(node)
         endpoints.append(start)
@@ -290,7 +296,8 @@ def validate_source_route_contract(
         normalized_routes.append({
             "archetype": archetype,
             "start_room": start_room,
-            "start_node_id": int(start["id"]),
+            "start_node_id": start_node_id,
+            "source_component": source_component,
             "node_ids": list(node_ids),
             "endpoint_loop_sha256": _sha256([list(origin) for origin in origins]),
             "published_dist": published_distance,
@@ -336,5 +343,7 @@ def validate_source_route_contract(
         "item_spawn_origin_collisions": 0,
         "all_spawns_and_route_endpoints_floor_assigned": True,
         "globally_unique_item_origins": True,
-        "all_selected_rooms_source_connected": True,
+        "all_selected_endpoints_share_source_standing_component": True,
+        "exact_start_nodes_declared": True,
+        "room_edges_used_as_reachability": False,
     }

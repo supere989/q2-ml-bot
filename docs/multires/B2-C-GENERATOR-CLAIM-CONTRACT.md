@@ -160,6 +160,16 @@ claims stage. The analysis file is the independently derived Atlas route
 artifact. They must remain in their respective roots; Atlas routes must never
 replace, overwrite, or be copied into the generator claims stage.
 
+Generator route sidecars now use version 2. Every node carries its explicit
+`source_component` proposal, and every route names the exact `start_node_id`
+and component used during selection. The source-freeze validator requires the
+start spawn and every selected item endpoint to share that component. Room
+connection rows remain serialized diagnostics and risk priors; they are never
+reachability evidence. These component labels are still generator claims, not
+compiled collision authority. Independent Atlas route probes must challenge
+the exact endpoint loop before admission. Version 1 sidecars are retired and
+rejected; there is no inferred start-spawn or room-edge fallback.
+
 Preparation evaluates all 28 claim documents in declaration order before it
 publishes anything. If any build fails, no claims root or passing subset is
 published. After all 28 build, the tool copies the exact materialized stage and
@@ -224,13 +234,21 @@ non-admissible; no member or V3 artifact may be repaired, converted, retried,
 or salvaged.
 
 The sparse-hurt, exact-lava, final-endpoint, standing-component route, and V4
-hook fixes were committed before the authoritative replacement declaration.
-That declaration now names `b2g26_final_71429`, with four maps per concrete
-style and exact seed blocks `71429000` through `71429603`. Its status is
-`declared-not-generated`: no seed has been invoked and no source, compiled,
-materialized, claims, analysis, or gate result is claimed. The declaration is
-committed before its first generator invocation; declaration presence alone
-never claims that any member passes.
+hook fixes were committed before replacement cohort `b2g26_final_71429` was
+declared. Its first source-freeze attempt produced complete, byte-identical
+140-file primary and cold populations, then correctly published no freeze
+report because the validator still interpreted diagnostic room edges as
+reachability. The first refusal was ordinal 5,
+`b2g26_towers_71429101`; a complete archived scan found the same stale-contract
+conflict in seven maps. The exact declaration and canonical failure record are
+archived as `B2-GENERATED-COHORT-71429-DECLARATION.json` and
+`B2-GENERATED-COHORT-71429-FAILURE.json`. Cohort 71429 is permanently
+non-admissible; its generated members may not be reused, regenerated, repaired,
+or salvaged.
+
+The version-2 route-sidecar/source-freeze fix must be committed before a fresh
+replacement declaration is issued. Until that declaration commit exists, no
+new cohort is authorized for generation.
 
 ## Offline workflow
 

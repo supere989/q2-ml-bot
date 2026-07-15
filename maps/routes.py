@@ -376,6 +376,14 @@ def build_route_graph(
     components = _standing_components(
         rooms, nodes, standing_blockers, lava_pools,
     )
+    # Source component IDs are proposal evidence, not compiled authority.  They
+    # make the exact standing-hull relation used for route selection explicit
+    # in the sidecar so the source-freeze validator never has to reinterpret
+    # diagnostic room edges as reachability.  A floor-assigned node can still
+    # be absent when its standing hull is blocked; such a node is ineligible
+    # for every published route.
+    for node in nodes:
+        node["source_component"] = components.get(node["id"])
 
     def route_metric(source, target):
         """Return a lower-bound metric only within one source component."""
@@ -499,10 +507,12 @@ def build_route_graph(
                 raise RouteGraphError(f"could not build mandatory {arch} route")
             r["id"] = len(routes)
             r["start_room"] = start["room"]
+            r["start_node_id"] = start["id"]
+            r["source_component"] = components[start["id"]]
             routes.append(r)
 
     return {
-        "version": 1,
+        "version": 2,
         "respawn_table": RESPAWN_S,
         "nodes": nodes,
         "edges": edges,

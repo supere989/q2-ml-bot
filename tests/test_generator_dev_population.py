@@ -80,6 +80,7 @@ def fake_generator_factory(
                 "y": item_id * 20,
                 "z": 24,
                 "room": 0,
+                "source_component": 0,
             }
             for item_id in range(4)
         ]
@@ -90,14 +91,15 @@ def fake_generator_factory(
             "y": 100,
             "z": 24,
             "room": 0,
+            "source_component": 0,
         })
         routes = [
-            {"archetype": "offense", "start_room": 0, "node_ids": [0, 1]},
-            {"archetype": "survival", "start_room": 0, "node_ids": [1, 2]},
-            {"archetype": "control", "start_room": 0, "node_ids": [2, 3]},
-            {"archetype": "balanced", "start_room": 0, "node_ids": [3, 0]},
+            {"archetype": "offense", "start_room": 0, "start_node_id": 4, "source_component": 0, "node_ids": [0, 1]},
+            {"archetype": "survival", "start_room": 0, "start_node_id": 4, "source_component": 0, "node_ids": [1, 2]},
+            {"archetype": "control", "start_room": 0, "start_node_id": 4, "source_component": 0, "node_ids": [2, 3]},
+            {"archetype": "balanced", "start_room": 0, "start_node_id": 4, "source_component": 0, "node_ids": [3, 0]},
         ]
-        version = 1
+        version = 2
         edges = []
         if name == defective_map:
             if defect == "duplicate_item_origin":
@@ -125,15 +127,16 @@ def fake_generator_factory(
                     "y": nodes[4]["y"],
                     "z": nodes[4]["z"],
                     "room": 0,
+                    "source_component": 0,
                 })
             elif defect == "one_endpoint":
                 routes[0]["node_ids"] = [0]
             elif defect == "non_item_endpoint":
                 routes[0]["node_ids"] = [4, 1]
             elif defect == "disconnected_endpoint_room":
-                nodes[0]["room"] = 1
+                nodes[0]["source_component"] = 1
             elif defect == "wrong_version":
-                version = 2
+                version = 1
             elif defect == "unhashable_archetype":
                 routes[0]["archetype"] = ["offense"]
             elif defect == "self_loop_edge":
@@ -144,6 +147,7 @@ def fake_generator_factory(
                 nodes.append({
                     "id": 5, "type": "teleporter", "x": base + 200,
                     "y": 200, "z": 24, "room": 0,
+                    "source_component": 0,
                 })
         by_id = {node["id"]: node for node in nodes}
         for route in routes:
@@ -236,7 +240,9 @@ def test_complete_double_generation_publishes_canonical_development_report(
     assert report["duplicate_route_endpoints"] == 0
     assert report["zero_length_route_legs"] == 0
     assert report["all_spawns_and_route_endpoints_floor_assigned"] is True
-    assert report["all_selected_rooms_source_connected"] is True
+    assert report[
+        "all_selected_endpoints_share_source_standing_component"
+    ] is True
     assert report["exact_source_file_count_per_directory"] == 280
     assert report["cold_rebuild"] == {
         "distinct_empty_directories": True,
@@ -266,8 +272,11 @@ def test_complete_double_generation_publishes_canonical_development_report(
         ("one_endpoint", "requires at least two item endpoints"),
         ("non_item_endpoint", "endpoint node 4 is not an item"),
         ("distance_mismatch", "differs from endpoint-loop geometry"),
-        ("disconnected_endpoint_room", "unreachable from start room"),
-        ("wrong_version", "route graph version must be exactly 1"),
+        (
+            "disconnected_endpoint_room",
+            "does not share source standing component",
+        ),
+        ("wrong_version", "route graph version must be exactly 2"),
         ("unhashable_archetype", "each route archetype exactly once"),
         ("self_loop_edge", "edge 0 is a self-loop"),
         ("duplicate_undirected_edge", "duplicates undirected edge"),

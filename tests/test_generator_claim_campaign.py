@@ -77,7 +77,9 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "b2g26_final_71428",
         "0/28",
         "b2g26_final_71429",
-        "declared-not-generated",
+        "first source-freeze attempt",
+        "version 2",
+        "room-edge fallback",
     )
     assert all(fragment in contract for fragment in required_contract)
     assert "--glob 'b2claim_*.map'" not in contract

@@ -490,7 +490,7 @@ def audit_development_population(
         "all_item_nodes_floor_assigned": True,
         "item_spawn_origin_collisions": 0,
         "all_spawns_and_route_endpoints_floor_assigned": True,
-        "all_selected_rooms_source_connected": True,
+        "all_selected_endpoints_share_source_standing_component": True,
         "maps": map_reports,
         "failures": [],
         "passed": True,

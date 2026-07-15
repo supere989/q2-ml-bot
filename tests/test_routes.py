@@ -171,6 +171,10 @@ def test_final_wall_splits_one_room_into_distinct_route_components() -> None:
 
     nodes = {node["id"]: node for node in graph["nodes"]}
     assert [route["archetype"] for route in graph["routes"]] == ROUTE_ARCHETYPES
+    assert nodes[0]["source_component"] is not None
+    assert nodes[0]["source_component"] == nodes[5]["source_component"]
+    assert nodes[4]["source_component"] is not None
+    assert nodes[4]["source_component"] != nodes[5]["source_component"]
     assert all(
         all(nodes[node_id]["x"] < 120 for node_id in route["node_ids"])
         for route in graph["routes"]
@@ -197,6 +201,62 @@ def test_metadata_connection_never_bridges_disjoint_floor_components() -> None:
             lava_pools=[],
             standing_blockers=[],
         )
+
+    graph = build_route_graph(
+        rooms=[
+            room(0, width=128, depth=160),
+            room(256, width=128, depth=160),
+        ],
+        connections=[connection(0, 1)],
+        items=[
+            ("weapon_supershotgun", 48, 40, 24),
+            ("weapon_rocketlauncher", 80, 40, 24),
+            ("item_health", 48, 120, 24),
+            ("item_armor_combat", 80, 120, 24),
+            ("item_quad", 304, 80, 24),
+        ],
+        spawns=[(48, 80, 24)],
+        lava_pools=[],
+        standing_blockers=[],
+    )
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    assert nodes[4]["source_component"] is not None
+    assert nodes[4]["source_component"] != nodes[5]["source_component"]
+    assert all(
+        4 not in route["node_ids"]
+        and route["source_component"] == nodes[5]["source_component"]
+        for route in graph["routes"]
+    )
+
+
+def test_lava_strip_splits_components_deterministically() -> None:
+    kwargs = {
+        "rooms": [room(0, width=256, depth=160)],
+        "connections": [],
+        "items": [
+            ("weapon_supershotgun", 48, 40, 24),
+            ("weapon_rocketlauncher", 80, 40, 24),
+            ("item_health", 48, 120, 24),
+            ("item_armor_combat", 80, 120, 24),
+            ("item_quad", 208, 80, 24),
+        ],
+        "spawns": [(48, 80, 24)],
+        "lava_pools": [blocker(120, 0, 0, 136, 160, 96)],
+        "standing_blockers": [],
+    }
+
+    first = build_route_graph(**kwargs)
+    second = build_route_graph(**kwargs)
+    nodes = {node["id"]: node for node in first["nodes"]}
+
+    assert first == second
+    assert nodes[4]["source_component"] is not None
+    assert nodes[4]["source_component"] != nodes[5]["source_component"]
+    assert all(
+        4 not in route["node_ids"]
+        and route["source_component"] == nodes[5]["source_component"]
+        for route in first["routes"]
+    )
 
 
 def test_route_graph_rejects_stacked_items_and_incomplete_archetypes() -> None:
@@ -278,6 +338,7 @@ def test_route_distance_and_risk_use_connected_endpoint_lower_bound() -> None:
 
 
 def _assert_complete_generated_routes(routes: dict) -> None:
+    assert routes["version"] == 2
     item_nodes = [node for node in routes["nodes"] if node["type"] == "item"]
     item_origins = [(node["x"], node["y"], node["z"]) for node in item_nodes]
     spawn_nodes = [node for node in routes["nodes"] if node["type"] == "spawn"]
@@ -288,13 +349,18 @@ def _assert_complete_generated_routes(routes: dict) -> None:
     assert [route["archetype"] for route in routes["routes"]] == ROUTE_ARCHETYPES
 
     nodes = {node["id"]: node for node in routes["nodes"]}
-    first_spawn_by_room = {}
-    for node in spawn_nodes:
-        first_spawn_by_room.setdefault(node["room"], node)
     for route in routes["routes"]:
         assert len(route["node_ids"]) >= 2
         assert len(set(route["node_ids"])) == len(route["node_ids"])
-        start = first_spawn_by_room[route["start_room"]]
+        start = nodes[route["start_node_id"]]
+        assert start["type"] == "spawn"
+        assert start["room"] == route["start_room"]
+        assert start["source_component"] == route["source_component"]
+        assert route["source_component"] is not None
+        assert all(
+            nodes[node_id]["source_component"] == route["source_component"]
+            for node_id in route["node_ids"]
+        )
         sequence = [start, *(nodes[node_id] for node_id in route["node_ids"]), start]
         assert all(
             (left["x"], left["y"], left["z"])

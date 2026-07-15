@@ -1,0 +1,217 @@
+from __future__ import annotations
+
+from copy import deepcopy
+import math
+from typing import Any
+
+import pytest
+
+from tools.source_route_contract import (
+    SourceRouteContractError,
+    validate_source_route_contract,
+)
+
+
+MAP_ID = "source_route_contract_test"
+ARCHETYPES = ("offense", "survival", "control", "balanced")
+
+
+def _graph() -> dict[str, Any]:
+    nodes = [
+        {
+            "id": node_id,
+            "type": "item",
+            "class": f"item_{node_id}",
+            "x": 32 + node_id * 32,
+            "y": 32 + (node_id % 2) * 64,
+            "z": 24,
+            "room": 0,
+            "source_component": 0,
+        }
+        for node_id in range(4)
+    ]
+    nodes.append(
+        {
+            "id": 4,
+            "type": "spawn",
+            "x": 192,
+            "y": 64,
+            "z": 24,
+            "room": 0,
+            "source_component": 0,
+        }
+    )
+    routes = [
+        {
+            "archetype": archetype,
+            "start_room": 0,
+            "start_node_id": 4,
+            "source_component": 0,
+            "node_ids": [index, (index + 1) % 4],
+        }
+        for index, archetype in enumerate(ARCHETYPES)
+    ]
+    graph: dict[str, Any] = {
+        "version": 2,
+        "nodes": nodes,
+        "edges": [],
+        "routes": routes,
+    }
+    _refresh_distances(graph)
+    return graph
+
+
+def _refresh_distances(graph: dict[str, Any]) -> None:
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    for route in graph["routes"]:
+        loop = [
+            nodes[route["start_node_id"]],
+            *(nodes[node_id] for node_id in route["node_ids"]),
+            nodes[route["start_node_id"]],
+        ]
+        route["dist"] = sum(
+            math.dist(
+                (source["x"], source["y"], source["z"]),
+                (target["x"], target["y"], target["z"]),
+            )
+            for source, target in zip(loop, loop[1:])
+        )
+
+
+def test_cross_room_route_needs_no_metadata_edge_when_component_matches() -> None:
+    graph = _graph()
+    nodes = graph["nodes"]
+    nodes[0]["room"] = 1
+
+    report = validate_source_route_contract(graph, MAP_ID)
+
+    assert report["all_selected_endpoints_share_source_standing_component"] is True
+    assert report["exact_start_nodes_declared"] is True
+    assert report["room_edges_used_as_reachability"] is False
+    assert report["edge_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("endpoint_room", "edges"),
+    [
+        (0, []),
+        (1, [{"a": 0, "b": 1}]),
+    ],
+    ids=("same-room", "metadata-connected-rooms"),
+)
+def test_component_mismatch_rejects_even_when_room_metadata_would_connect(
+    endpoint_room: int, edges: list[dict[str, int]],
+) -> None:
+    graph = _graph()
+    nodes = graph["nodes"]
+    nodes[0]["room"] = endpoint_room
+    nodes[0]["source_component"] = 1
+    graph["edges"] = edges
+
+    with pytest.raises(
+        SourceRouteContractError,
+        match="endpoint node 0 does not share source standing component 0",
+    ):
+        validate_source_route_contract(graph, MAP_ID)
+
+
+def test_exact_start_node_selects_component_not_first_spawn_in_room() -> None:
+    graph = _graph()
+    nodes = graph["nodes"]
+    nodes.append(
+        {
+            "id": 5,
+            "type": "spawn",
+            "x": 224,
+            "y": 96,
+            "z": 24,
+            "room": 0,
+            "source_component": 1,
+        }
+    )
+    for node in nodes[:4]:
+        node["source_component"] = 1
+    for route in graph["routes"]:
+        route["start_node_id"] = 5
+        route["source_component"] = 1
+    _refresh_distances(graph)
+
+    report = validate_source_route_contract(graph, MAP_ID)
+
+    assert {route["start_node_id"] for route in report["routes"]} == {5}
+    assert {route["source_component"] for route in report["routes"]} == {1}
+    assert report["spawn_count"] == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("start_node_id", 99, "is not a declared spawn"),
+        ("start_room", 1, "start room does not match spawn node"),
+        ("source_component", 1, "source component does not match spawn node"),
+    ],
+)
+def test_exact_start_contract_fails_closed(
+    field: str, value: int, message: str,
+) -> None:
+    graph = _graph()
+    graph["routes"][0][field] = value
+
+    with pytest.raises(SourceRouteContractError, match=message):
+        validate_source_route_contract(graph, MAP_ID)
+
+
+def test_v1_route_graph_is_rejected_without_fallback() -> None:
+    graph = _graph()
+    graph["version"] = 1
+
+    with pytest.raises(
+        SourceRouteContractError, match="route graph version must be exactly 2"
+    ):
+        validate_source_route_contract(graph, MAP_ID)
+
+
+@pytest.mark.parametrize(
+    ("mode", "value"),
+    [
+        ("missing", None),
+        ("explicit-none", None),
+        ("boolean", True),
+        ("negative", -1),
+    ],
+)
+def test_selected_endpoint_component_is_mandatory_and_valid(
+    mode: str, value: object,
+) -> None:
+    graph = _graph()
+    endpoint = graph["nodes"][0]
+    if mode == "missing":
+        del endpoint["source_component"]
+    else:
+        endpoint["source_component"] = value
+
+    with pytest.raises(
+        SourceRouteContractError, match=r"source (?:standing )?component"
+    ):
+        validate_source_route_contract(graph, MAP_ID)
+
+
+@pytest.mark.parametrize("value", [None, True, -1])
+def test_route_component_is_mandatory_nonnegative_integer(value: object) -> None:
+    graph = _graph()
+    graph["routes"][0]["source_component"] = value
+
+    with pytest.raises(SourceRouteContractError, match="source component"):
+        validate_source_route_contract(graph, MAP_ID)
+
+
+def test_route_report_is_deterministic_and_binds_component_labels() -> None:
+    graph = _graph()
+    first = validate_source_route_contract(graph, MAP_ID)
+    second = validate_source_route_contract(deepcopy(graph), MAP_ID)
+    changed = deepcopy(graph)
+    changed["nodes"][3]["source_component"] = 7
+
+    assert first == second
+    with pytest.raises(SourceRouteContractError, match="source standing component"):
+        validate_source_route_contract(changed, MAP_ID)

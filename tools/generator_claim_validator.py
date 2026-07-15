@@ -330,10 +330,11 @@ def _parse_hook_claims(path: Path) -> list[dict[str, Any]]:
 
 
 def _route_contract(routes: Mapping[str, Any]) -> tuple[list[dict], list[dict]]:
-    if routes.get("version") != 1:
-        raise ClaimValidationError("generated route sidecar must have version 1")
+    if routes.get("version") != 2:
+        raise ClaimValidationError("generated route sidecar must have version 2")
     nodes = _list(routes.get("nodes"), "route nodes")
     by_id: dict[int, Mapping[str, Any]] = {}
+    components_by_id: dict[int, int | None] = {}
     for index, value in enumerate(nodes):
         node = _mapping(value, f"route node {index}")
         node_id = _integer(node.get("id"), f"route node {index} id", minimum=0)
@@ -342,6 +343,14 @@ def _route_contract(routes: Mapping[str, Any]) -> tuple[list[dict], list[dict]]:
         _to_milliunits(
             [node.get("x"), node.get("y"), node.get("z")],
             f"route node {node_id} origin",
+        )
+        raw_component = node.get("source_component")
+        components_by_id[node_id] = (
+            None if raw_component is None else _integer(
+                raw_component,
+                f"route node {node_id} source component",
+                minimum=0,
+            )
         )
         by_id[node_id] = node
 
@@ -362,23 +371,41 @@ def _route_contract(routes: Mapping[str, Any]) -> tuple[list[dict], list[dict]]:
             route.get("dist"), f"{route_id} distance", minimum=0
         )
         start_room = _integer(route.get("start_room"), f"{route_id} start room", minimum=0)
-        spawn_nodes = sorted(
-            (
-                node
-                for node in by_id.values()
-                if node.get("type") == "spawn" and node.get("room") == start_room
-            ),
-            key=lambda node: int(node["id"]),
+        start_node_id = _integer(
+            route.get("start_node_id"), f"{route_id} start node id", minimum=0,
         )
-        if not spawn_nodes:
-            raise ClaimValidationError(f"{route_id} has no spawn in its start room")
+        start = by_id.get(start_node_id)
+        if (
+            start is None or start.get("type") != "spawn"
+            or start.get("room") != start_room
+        ):
+            raise ClaimValidationError(
+                f"{route_id} start node is not the declared spawn/room"
+            )
+        source_component = _integer(
+            route.get("source_component"),
+            f"{route_id} source component",
+            minimum=0,
+        )
+        if components_by_id[start_node_id] != source_component:
+            raise ClaimValidationError(
+                f"{route_id} source component differs from its start node"
+            )
         item_ids = [
             _integer(item, f"{route_id} node id", minimum=0)
             for item in _list(route.get("node_ids"), f"{route_id} node ids")
         ]
         if len(item_ids) < 2 or any(item not in by_id for item in item_ids):
             raise ClaimValidationError(f"{route_id} has insufficient/unknown nodes")
-        path = [spawn_nodes[0], *(by_id[item] for item in item_ids), spawn_nodes[0]]
+        if any(
+            by_id[item].get("type") != "item"
+            or components_by_id[item] != source_component
+            for item in item_ids
+        ):
+            raise ClaimValidationError(
+                f"{route_id} endpoints do not share its source standing component"
+            )
+        path = [start, *(by_id[item] for item in item_ids), start]
         origins = [
             tuple(
                 _finite(node.get(axis), f"{route_id} {axis}")

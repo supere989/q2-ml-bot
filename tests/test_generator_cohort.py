@@ -87,12 +87,13 @@ def fake_generator_factory(
                 "y": item_id * 20,
                 "z": 24,
                 "room": 0,
+                "source_component": 0,
             }
             for item_id in range(4)
         ]
         nodes.append({
             "id": 4, "type": "spawn", "x": base + 100,
-            "y": 100, "z": 24, "room": 0,
+            "y": 100, "z": 24, "room": 0, "source_component": 0,
         })
         if name == invalid_route:
             nodes[1]["x"], nodes[1]["y"], nodes[1]["z"] = (
@@ -101,10 +102,10 @@ def fake_generator_factory(
         if output.name == "cold" and name == cold_route_mismatch:
             nodes[0]["x"] += 1
         routes = [
-            {"archetype": "offense", "start_room": 0, "node_ids": [0, 1]},
-            {"archetype": "survival", "start_room": 0, "node_ids": [1, 2]},
-            {"archetype": "control", "start_room": 0, "node_ids": [2, 3]},
-            {"archetype": "balanced", "start_room": 0, "node_ids": [3, 0]},
+            {"archetype": "offense", "start_room": 0, "start_node_id": 4, "source_component": 0, "node_ids": [0, 1]},
+            {"archetype": "survival", "start_room": 0, "start_node_id": 4, "source_component": 0, "node_ids": [1, 2]},
+            {"archetype": "control", "start_room": 0, "start_node_id": 4, "source_component": 0, "node_ids": [2, 3]},
+            {"archetype": "balanced", "start_room": 0, "start_node_id": 4, "source_component": 0, "node_ids": [3, 0]},
         ]
         by_id = {node["id"]: node for node in nodes}
         for route in routes:
@@ -121,7 +122,7 @@ def fake_generator_factory(
             ))
         (output / f"{name}.routes.json").write_text(
             json.dumps({
-                "version": 1, "nodes": nodes, "edges": [], "routes": routes,
+                "version": 2, "nodes": nodes, "edges": [], "routes": routes,
             }) + "\n",
             encoding="utf-8",
         )
@@ -210,7 +211,9 @@ def test_generate_publishes_only_a_complete_double_built_source_freeze(
     assert report["unique_layout_count"] == 28
     assert report["route_contract_pass_count"] == 28
     assert all(
-        row["route_contract"]["all_selected_rooms_source_connected"] is True
+        row["route_contract"][
+            "all_selected_endpoints_share_source_standing_component"
+        ] is True
         for row in report["maps"]
     )
     assert report["style_counts"] == {

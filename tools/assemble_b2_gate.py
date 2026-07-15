@@ -498,7 +498,11 @@ def _validate_source_freeze(
             f"source-freeze route contract {declared['map']}",
         )
         _require(
-            route_contract.get("all_selected_rooms_source_connected") is True,
+            route_contract.get(
+                "all_selected_endpoints_share_source_standing_component"
+            ) is True
+            and route_contract.get("exact_start_nodes_declared") is True
+            and route_contract.get("room_edges_used_as_reachability") is False,
             f"source-freeze route contract failed for {declared['map']}",
         )
         files = _mapping(record.get("source_files"), "source-freeze file identities")
