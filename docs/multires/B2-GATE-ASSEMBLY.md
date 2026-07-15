@@ -12,9 +12,10 @@ compiled member and no compiled report, later-stage report, Atlas run, Dyn run,
 or gate. Cohort 71438 is permanently retired. Its source populations, partial
 WSL residuals, source report, and parallel release builds cannot be retried,
 reused, copied, run, salvaged, substituted, or admitted. Exact evidence is in
-`B2-GENERATED-COHORT-71438-FAILURE.json`. No replacement cohort is authorized
-or declared; the alias and assembler remain pinned to 71438 solely as a
-fail-closed historical identity.
+`B2-GENERATED-COHORT-71438-FAILURE.json`. The fresh replacement cohort
+`b2g26_final_71439` is now declared. The current alias, assembler, and gate
+schema bind its exact 28 new map/seed rows; no 71439 artifact or report has
+been generated yet.
 
 The assembler requires the repository to be clean before it reads the current
 commit, tree, generator, route generator, and complete Atlas analyzer closure.
@@ -22,21 +23,21 @@ The assembler would require a source freeze, generated Atlas build report,
 test report, every analysis manifest, and real Dyn proof that all carry the same
 implementation authority. The exact 71437 partial prefix remains archived and
 retired. The successful 71438 source freeze and failed WSL compile root are now
-also historical evidence only. They cannot satisfy a future population, and
-no 71438 producer may be invoked again under the no-retry declaration.
+also historical evidence only. They cannot satisfy cohort 71439, and no 71438
+producer may be invoked again under the no-retry declaration.
 
 ## Required producer reports
 
-- `tools/run_generator_cohort.py generate` historically wrote the exact 71438
-  source freeze from two distinct fresh directories. That successful source
-  evidence is retired with the failed cohort and cannot be retried, copied,
+- `tools/run_generator_cohort.py generate` is the only authorized producer for
+  the exact 71439 source freeze from two distinct fresh directories. The
+  historical 71438 source evidence is retired and cannot be retried, copied,
   reused, or promoted.
 - `tools/compile_generated_cohort.py` is the only authorized compiled-stage
-  producer for a future declared cohort. It writes a canonical compile report,
+  producer for declared cohort 71439. It writes a canonical compile report,
   retains per-map terminal logs and exit status, and publishes only the exact
   168-file declaration with atomic no-replace semantics. It cannot authorize
   another 71438 attempt.
-- `tools/materialize_generated_cohort.py` is the only authorized future
+- `tools/materialize_generated_cohort.py` is the only authorized 71439
   cohort-level V4 materializer. It writes a canonical materialization report
   and publishes only the exact 196-file declaration with atomic no-replace
   semantics. Its B1 authorities are explicit immutable inputs, never files
@@ -59,7 +60,7 @@ no 71438 producer may be invoked again under the no-retry declaration.
   from each analysis manifest.
 - `tools/q2-dyn-evidence` runs on `DESKTOP-RTX2080` WSL and atomically writes
   its report plus four real `Q2LAT002` snapshots. Its selected map must be a
-  member of the admitted 71438 population. The assembler binds it to the exact
+  member of the admitted 71439 population. The assembler binds it to the exact
   local Atlas manifest, raw Atlas, BSP, analyzer authority, crate commit, WSL
   identity, snapshot bytes, negative fences, and p99 measurement. Build the
   producer once from the clean committed root, retain that exact executable,
@@ -73,12 +74,12 @@ no 71438 producer may be invoked again under the no-retry declaration.
   outside the repository so its creation does not invalidate the clean Git
   binding.
 
-## Future-only compile and materialization template
+## Cohort 71439 compile and materialization template
 
-No replacement cohort is currently authorized or declared. The following
-commands are a contract for a later, separately committed declaration and
-entirely fresh artifact root; they must not be run with cohort 71438 or any of
-its source, staging, log, report, WSL, or release-build paths.
+Cohort 71439 is the current declared replacement. The following commands may
+run only from its committed clean implementation and an entirely fresh,
+authority-bound 71439 artifact root; they must not be run with cohort 71438 or
+any of its source, staging, log, report, WSL, or release-build paths.
 
 ```sh
 python tools/compile_generated_cohort.py \
@@ -127,15 +128,15 @@ compiled input, and publishes exactly 196 files only through
 logs, and report roots are terminal, non-admissible, non-reusable evidence:
 no retry, resume, subset, copy-forward, or future-cohort reuse is permitted.
 
-The WSL authority directory
-`/home/raymond/q2-multires-isolated/B1-authorities-909b1e46` is a reusable,
-future-only B1 input bundle, not a cohort artifact. Its canonical
+The reusable WSL authority directory
+`/home/raymond/q2-multires-isolated/B1-authorities-909b1e46` is an independent
+B1 input bundle, not a cohort artifact. Its canonical
 `CONTENT-MANIFEST.json` SHA-256 is
 `8d163d87a6919fc5d7f3761b17aa1aeaae7e71a5c505b80392a315802e11a92f`.
 Its exact seven filenames are `B1-GATE.json`, `CONTENT-MANIFEST.json`,
 `hook-parity-pullspeed-1700.json`, `q2-cm-oracle`, `q2-fall-oracle`,
 `q2-hook-oracle`, and `q2-pmove-oracle`. Those immutable B1 bytes may be
-referenced by a future cohort, but the directory must remain outside all
+referenced by cohort 71439, but the directory must remain outside all
 cohort roots and cannot prove cohort membership or progress.
 
 ## Assembly template

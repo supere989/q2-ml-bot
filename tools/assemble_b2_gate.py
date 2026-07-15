@@ -70,7 +70,7 @@ from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
 
 
 GATE_SCHEMA = "q2-multires-b2-gate-v1"
-EXPECTED_COHORT = "b2g26_final_71438"
+EXPECTED_COHORT = "b2g26_final_71439"
 EXPECTED_DESIGN_SHA256 = (
     "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5"
 )
@@ -413,12 +413,12 @@ def _validate_b1_and_oracles(
     }, binaries
 
 
-def _expected_71438_rows() -> list[dict[str, Any]]:
+def _expected_71439_rows() -> list[dict[str, Any]]:
     rows = []
     ordinal = 0
     for style_index, style in enumerate(CONCRETE_STYLES):
         for member in range(4):
-            seed = 71_438_000 + style_index * 100 + member
+            seed = 71_439_000 + style_index * 100 + member
             rows.append({
                 "ordinal": ordinal,
                 "map": f"b2g26_{style}_{seed}",
@@ -437,8 +437,14 @@ def _validate_declaration(path: Path) -> tuple[dict[str, Any], str]:
         require_unretired_declaration(path, declaration, digest)
     except RetiredCohortRegistryError as exc:
         raise B2GateError(f"B2 declaration admission refused: {exc}") from exc
-    _require(declaration["cohort_id"] == EXPECTED_COHORT, "B2 gate accepts only cohort 71438")
-    _require(declaration["maps"] == _expected_71438_rows(), "71438 map/seed selection differs")
+    _require(
+        declaration["cohort_id"] == EXPECTED_COHORT,
+        "B2 gate accepts only cohort 71439",
+    )
+    _require(
+        declaration["maps"] == _expected_71439_rows(),
+        "71439 map/seed selection differs",
+    )
     return declaration, digest
 
 
@@ -1588,7 +1594,10 @@ def _validate_dyn_evidence(
     _integer(authority["map_epoch"], "Dyn map epoch", minimum=1)
     _integer(authority["environment_steps"], "Dyn environment steps")
     map_id = authority["canonical_map_id"]
-    _require(map_id in {row["map"] for row in declaration["maps"]}, "Dyn map is outside cohort 71438")
+    _require(
+        map_id in {row["map"] for row in declaration["maps"]},
+        "Dyn map is outside cohort 71439",
+    )
 
     host = _mapping(report["host"], "Dyn host")
     _exact_keys(host, {"hostname", "kernel_release", "architecture"}, "Dyn host")

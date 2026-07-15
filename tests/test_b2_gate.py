@@ -26,7 +26,7 @@ from tools.assemble_b2_gate import (
     _exact_directory_files,
     _decode_dyn_snapshot,
     _dyn_source_authority,
-    _expected_71438_rows,
+    _expected_71439_rows,
     _validate_declaration,
     _validate_dyn_evidence,
     _validate_materialized,
@@ -522,7 +522,7 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
     paths.claims_dir.mkdir()
     paths.analysis_dir.mkdir()
     paths.dyn_evidence_report.parent.mkdir()
-    map_id = _expected_71438_rows()[0]["map"]
+    map_id = _expected_71439_rows()[0]["map"]
 
     bsp = b"IBSP fixture"
     (paths.claims_dir / f"{map_id}.bsp").write_bytes(bsp)
@@ -663,22 +663,22 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
         },
     }
     paths.dyn_evidence_report.write_bytes(canonical_bytes(report))
-    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71438_rows()}
+    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71439_rows()}
     return paths, declaration, report
 
 
-def test_71438_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
-    rows = _expected_71438_rows()
+def test_71439_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
+    rows = _expected_71439_rows()
     assert len(rows) == 28
     assert rows[0] == {
         "ordinal": 0,
-        "map": "b2g26_open_71438000",
-        "seed": 71438000,
+        "map": "b2g26_open_71439000",
+        "seed": 71439000,
         "style": "open",
         "grid": 5,
         "observed_heat": None,
     }
-    assert rows[-1]["map"] == "b2g26_arena_lanes_71438603"
+    assert rows[-1]["map"] == "b2g26_arena_lanes_71439603"
     options = _parser().format_help()
     assert "--declaration" in options
     assert "--source-dir" in options
@@ -691,7 +691,7 @@ def test_71438_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
 
 def test_gate_refuses_retired_71438_declaration_before_evidence() -> None:
     declaration = (
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+        ROOT / "docs/multires/B2-GENERATED-COHORT-71438-DECLARATION.json"
     )
 
     with pytest.raises(B2GateError, match="71438.*permanently retired"):

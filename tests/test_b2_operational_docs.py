@@ -24,7 +24,7 @@ B1_FILENAMES = (
 
 
 @pytest.mark.parametrize("path", DOCS)
-def test_future_producer_contract_is_complete_and_fail_closed(path: Path) -> None:
+def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
 
     for required in (
@@ -58,16 +58,17 @@ def test_future_producer_contract_is_complete_and_fail_closed(path: Path) -> Non
         "no retry",
         B1_ROOT,
         B1_MANIFEST_SHA256,
-        "future-only",
+        "b2g26_final_71439",
+        "authority-bound",
         "not a cohort artifact",
     ):
         assert required in text, f"{path.name} is missing {required!r}"
     for filename in B1_FILENAMES:
         assert filename in text
 
-    assert "No replacement cohort is authorized" in text
+    assert "No replacement cohort is authorized" not in text
+    assert "future-only" not in text
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
-    assert "71439" not in text
 
 
 def test_contract_replaces_the_hand_run_single_map_materializer() -> None:

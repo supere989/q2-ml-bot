@@ -518,8 +518,8 @@ correction commit `ac1cf95`, and the immutable 71437 declaration and failure
 archive precede the fresh replacement cohort
 `b2g26_final_71438`. Its 28 entirely new members use seeds 71438000 through
 71438603, four per concrete style, under the same all-or-nothing,
-declared-before-generation policy. The authoritative alias and immutable 71438
-named declaration are canonical and byte-identical with SHA-256
+declared-before-generation policy. The immutable 71438 named declaration is
+canonical with SHA-256
 `bebe7c2c63711c399d34780f3297a622f9d28d1c9751511473ec1ed4815a58c2`.
 No 71437 or older member, seed, artifact, stage, report, Dyn evidence, or test
 evidence is reusable. The first and only 71438 source-freeze attempt began
@@ -543,24 +543,27 @@ binaries built in parallel are also explicitly non-admissible and forbidden
 from reuse, copying, execution, or substitution. Exact evidence is archived in
 `B2-GENERATED-COHORT-71438-FAILURE.json`. Cohort 71438 and every source, WSL,
 release-build, and residual artifact associated with it are permanently
-retired. No replacement cohort is authorized or declared.
+retired. Replacement cohort `b2g26_final_71439` is now declared with entirely
+new seeds 71439000 through 71439603, four per concrete style. The authoritative
+alias and immutable 71439 named declaration are canonical and byte-identical
+with SHA-256
+`374b1052ea4a15404dfd52ebf831f9d5eccda488ea5a51d3d41d0e83ee083811`.
+No 71439 artifact or report has been generated.
 
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
 replacement declaration. It must never name retired cohort 71426, 71427,
 71428, 71429, 71430, 71431, 71432, 71433, 71434, 71435, 71436, 71437, or
-71438. The alias and assembler remain pinned to retired 71438 as a fail-closed
-historical identity; that pin does not authorize another run. The commands
-below are non-executable until a separate clean commit declares an entirely
-new replacement population and fresh authority-bound artifact and report
-paths.
+71438. The alias, assembler, and B2 gate schema now bind cohort 71439. The
+commands below remain non-executable until that declaration and implementation
+are committed and the repository is clean; every artifact and report path must
+be fresh and authority-bound to 71439.
 
-For a future authorized cohort, compile only with the declaration-aware cohort
-producer. Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every
+For the current authorized cohort, compile only with the declaration-aware
+cohort producer. Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every
 leaf path below must be absent before the single attempt; `FUTURE_ROOT` and
-`COHORT_ID` must belong to a separately committed replacement declaration,
-not retired cohort 71438:
+`COHORT_ID` must belong to committed cohort 71439, not retired cohort 71438:
 
 ```sh
 python tools/compile_generated_cohort.py \
@@ -587,7 +590,7 @@ membership error leaves no compiled publication; its staging, logs, and report
 are terminal failure evidence and cannot be resumed, retried, copied into a
 new cohort, or used as a passing subset.
 
-Materialize a successful future compiled publication only with the atomic
+Materialize a successful 71439 compiled publication only with the atomic
 cohort producer and the reusable B1 authority bundle. Materialization discovers
 the first grounded compiled Pmove landing without constraining it to the
 generator hint; independent analysis later requires the sealed exact landing
@@ -610,7 +613,7 @@ python tools/materialize_generated_cohort.py \
   --timeout-seconds 900
 ```
 
-The WSL bundle is future-only independent B1 authority, not a cohort artifact
+The WSL bundle is independent B1 authority, not a cohort artifact
 or generated stage. Its immutable path is
 `/home/raymond/q2-multires-isolated/B1-authorities-909b1e46`; its canonical
 `CONTENT-MANIFEST.json` SHA-256 is
@@ -619,7 +622,7 @@ The directory has exactly these seven filenames and no symlinks or extras:
 `B1-GATE.json`, `CONTENT-MANIFEST.json`,
 `hook-parity-pullspeed-1700.json`, `q2-cm-oracle`, `q2-fall-oracle`,
 `q2-hook-oracle`, and `q2-pmove-oracle`. It may supply those exact immutable
-B1 bytes to a future independently declared cohort, but must not be copied
+B1 bytes to cohort 71439, but must not be copied
 under a cohort root or treated as population evidence.
 
 Materialization consumes the compiled rows in declaration order and fails
