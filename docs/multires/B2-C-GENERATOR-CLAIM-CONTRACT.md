@@ -294,9 +294,28 @@ Its exact declaration and canonical failure record are archived as
 `B2-GENERATED-COHORT-71430-DECLARATION.json` and
 `B2-GENERATED-COHORT-71430-FAILURE.json`. Cohort 71430 is permanently
 non-admissible; none of its source, BSP, V4 hook, claims, or analysis artifacts
-may be reused, repaired, retried, or salvaged. A fresh declaration remains
-pending until the separate one-chunk hurt-boundary implementation and retired
-71430 shadow validation are committed.
+may be reused, repaired, retried, or salvaged.
+
+Two strictly diagnostic shadows then challenged those immutable inputs without
+publishing an analysis subset. Commit `48f5caf` passed 22/28 and exposed six
+independent late failures after the one-chunk hurt-boundary implementation:
+two low-overhead route
+probes, three over-broad hazard chunk scopes, and one L1 representative alias.
+Commit `8ce1e75` passed 27/28 with deterministic full-cold parity for every
+successful member. The sole remaining retired claim, arena-open seed 71430402,
+correctly failed because the source standing-component model had treated exact
+horizontal hull contact as clearance across a compiled wall. The corrected
+source model deterministically keeps that endpoint in its real component and
+selects a different route; it never bridges the Atlas graph or repairs the
+retired sidecar. The canonical diagnostic record is
+`B2-GENERATED-COHORT-71430-SHADOW-8CE1E75.json`.
+
+All discovered implementation fixes and their fail-closed regressions were
+committed before fresh cohort `b2g26_final_71431` was declared. Its 28 new
+members use seeds 71431000 through 71431603 under the same all-or-nothing,
+declared-before-generation policy. The current alias and immutable named copy
+are byte-identical; no 71430 source, BSP, hook, claim, or analysis member is an
+input to 71431.
 
 ## Offline workflow
 

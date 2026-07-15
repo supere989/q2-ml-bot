@@ -41,6 +41,9 @@ FAILURE_71430 = (
 DECLARATION_71430 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71430-DECLARATION.json"
 )
+SHADOW_71430 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71430-SHADOW-8CE1E75.json"
+)
 NONZERO = "ab" * 32
 
 
@@ -90,6 +93,7 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "0/28",
         "b2g26_final_71429",
         "b2g26_final_71430",
+        "b2g26_final_71431",
         "one-chunk hurt-boundary",
         "grounded origins at Z 24.03125",
         "first source-freeze attempt",
@@ -289,6 +293,36 @@ def test_71430_failure_record_is_canonical_exact_and_no_salvage() -> None:
         "salvage_allowed",
     ):
         assert admission[key] is False
+
+
+def test_71430_shadow_record_is_canonical_failed_closed_and_replacement_ready() -> None:
+    payload = SHADOW_71430.read_bytes()
+    shadow = json.loads(payload)
+    assert payload == canonical_bytes(shadow)
+
+    assert shadow["schema"] == "q2-b2-generated-cohort-shadow-v1"
+    assert shadow["cohort_id"] == "b2g26_final_71430"
+    assert shadow["status"] == "diagnostic-failed-closed-replacement-ready"
+    assert shadow["implementation"]["repository_commit"] == (
+        "8ce1e75d00f7e9a9605506a94e717fb6f5f31f84"
+    )
+    final = shadow["evidence"]["final_shadow"]
+    assert final["pass_count"] == final["cold_parity_pass_count"] == 27
+    assert final["expected_map_count"] == 28
+    assert final["published"] is False
+    assert final["sha256"] == (
+        "4600fa43d77a8b3f37eadef98f55dca2"
+        "9863a3a5a24132b30366a326cdfa40bb"
+    )
+    assert shadow["remaining_failure"]["map"] == (
+        "b2g26_arena_open_71430402"
+    )
+    admission = shadow["admission"]
+    assert admission["fresh_declaration"] == "b2g26_final_71431"
+    assert admission["analysis_stage_published"] is False
+    assert admission["retired_artifact_reuse_allowed"] is False
+    assert admission["retired_cohort_admissible"] is False
+    assert admission["shadow_passing_subset_allowed"] is False
 
 
 def write_stage(directory: Path, stage: str) -> dict:
