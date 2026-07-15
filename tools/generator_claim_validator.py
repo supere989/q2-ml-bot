@@ -1804,13 +1804,27 @@ def validate_stock_analysis(
         structural_failures.append(
             "compiled stock deathmatch-spawn count differs from pinned inventory"
         )
-    ordinals = {item.get("entity_ordinal") for item in spawns}
+    reachable_by_ordinal: dict[int, set[int]] = {}
     for item in spawns:
         if item.get("standing_clear") is not True or item.get("supported") is not True:
             failures.append(f"stock spawn {item.get('entity_ordinal')} is not clear/supported")
-        reachable = set(_list(item.get("reachable_spawn_ordinals"), "stock reachable spawns"))
-        if not (reachable & (ordinals - {item.get("entity_ordinal")})):
-            failures.append(f"stock spawn {item.get('entity_ordinal')} reaches no other spawn")
+        ordinal = _integer(
+            item.get("entity_ordinal"), "stock spawn entity ordinal", minimum=0,
+        )
+        reachable_by_ordinal[ordinal] = {
+            _integer(value, "stock reachable spawn ordinal", minimum=0)
+            for value in _list(
+                item.get("reachable_spawn_ordinals"), "stock reachable spawns",
+            )
+        }
+    if not any(
+        right in reachable_by_ordinal[left]
+        and left in reachable_by_ordinal[right]
+        for left in sorted(reachable_by_ordinal)
+        for right in sorted(reachable_by_ordinal)
+        if left < right
+    ):
+        failures.append("stock map has fewer than two mutually reachable spawns")
     design_path = analysis_path.parent / f"{map_id}.design-signature.json"
     if not design_path.is_file():
         structural_failures.append("stock design signature is missing")

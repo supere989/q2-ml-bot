@@ -1189,6 +1189,52 @@ def test_stock_analysis_requires_pinned_provenance_and_inventory(
     )
 
 
+def test_stock_analysis_allows_isolated_spawn_when_mutual_pair_exists(
+    generated, tmp_path: Path,
+):
+    bsp, analysis, provenance, inventory = _stock_fixture(generated, tmp_path)
+
+    def isolate_one_spawn(value: dict) -> None:
+        value["compiled_world"]["spawns"][-1]["reachable_spawn_ordinals"] = []
+
+    _reseal_analysis(bsp, analysis, isolate_one_spawn)
+    report = validate_stock_analysis(
+        bsp, analysis, stock_provenance_path=provenance,
+        stock_inventory_path=inventory,
+    )
+
+    assert report["passed"] is True
+    assert report["criteria"]["stock_reachable_spawns"]["passed"] is True
+
+
+@pytest.mark.parametrize("reachability", ["one-way", "isolated"])
+def test_stock_analysis_requires_mutually_reachable_spawn_pair(
+    generated, tmp_path: Path, reachability: str,
+):
+    bsp, analysis, provenance, inventory = _stock_fixture(generated, tmp_path)
+
+    def remove_mutual_pairs(value: dict) -> None:
+        spawns = value["compiled_world"]["spawns"]
+        for index, spawn in enumerate(spawns):
+            spawn["reachable_spawn_ordinals"] = (
+                [index + 1] if reachability == "one-way" and index + 1 < len(spawns)
+                else []
+            )
+
+    _reseal_analysis(bsp, analysis, remove_mutual_pairs)
+    report = validate_stock_analysis(
+        bsp, analysis, stock_provenance_path=provenance,
+        stock_inventory_path=inventory,
+    )
+
+    assert report["passed"] is False
+    assert report["criteria"]["stock_reachable_spawns"] == {
+        "passed": False,
+        "checked_count": 8,
+        "failures": ["stock map has fewer than two mutually reachable spawns"],
+    }
+
+
 def test_stock_hazard_cannot_pass_without_oracle_evidence(
     generated, tmp_path: Path,
 ):
