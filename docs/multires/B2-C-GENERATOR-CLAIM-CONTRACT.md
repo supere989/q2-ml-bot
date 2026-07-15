@@ -3,7 +3,7 @@
 Status: offline prototype contract for B2 integration
 Schemas: `q2-generator-claims-v2`,
 `q2-generator-claim-validation-v1`, and
-`q2-generator-claim-campaign-v1`
+`q2-generator-claim-campaign-v2`
 
 Generator v6 `.map`, `.meta.json`, `.lattice.json`, hook-zone,
 `.hook-materialization.json`, and route sidecars are claims to challenge. They
@@ -124,6 +124,67 @@ B1-accepted attestation.) Until the producing analyzer publishes the missing
 facts from the independent process and oracle path, B2 promotion remains red.
 No validator-side fallback or inferred success is permitted.
 
+## Exact cohort admission
+
+Campaign v2 has no directory-discovery mode. Its only membership authority is
+the exact, pre-generation declaration supplied with `--declaration`. The
+current declaration is
+`docs/multires/B2-GENERATED-COHORT-DECLARATION.json`: it names 28 maps in a
+fixed ordinal order, four for each of the seven concrete styles. A stage is
+admissible only when `tools/run_generator_cohort.py` finds every declared file
+and no unexpected regular file or symlink. A missing member plus an undeclared
+replacement still fails even when the raw file or map count remains 28.
+
+The stages are separate, non-nested directory roots:
+
+- `materialized` contains the five declared generator source files, the BSP,
+  and the hook-materialization attestation for every map (196 exact files);
+- `claims` contains an exact copy of that materialized set plus one canonical
+  `.generator-claims.json` for every map (224 exact files); and
+- `analysis` contains the eight compiled Atlas analysis artifacts for every
+  map, including the explicit `.analysis.manifest.json` consumed by campaign
+  validation (224 exact files).
+
+The generator source and Atlas output both name a file `<map>.routes.json`, but
+they have different authority. The generator file is a claim bound into the
+claims stage. The analysis file is the independently derived Atlas route
+artifact. They must remain in their respective roots; Atlas routes must never
+replace, overwrite, or be copied into the generator claims stage.
+
+Preparation evaluates all 28 claim documents in declaration order before it
+publishes anything. If any build fails, no claims root or passing subset is
+published. After all 28 build, the tool copies the exact materialized stage and
+writes the claims into a temporary sibling, verifies exact claims membership,
+then atomically renames that directory into place. The destination must not
+already exist. There is no salvage, replacement-map, adjacent-artifact, or
+fallback path.
+
+Both prepare and validate reports are canonical compact/sorted JSON with a
+trailing LF and no timestamp. The report path must be outside all exact stage
+roots and must not exist: publication uses exclusive creation and refuses to
+overwrite an earlier result (`O_CREAT | O_EXCL`). The report binds `cohort_id`,
+the canonical declaration SHA-256, exact stage-membership report SHA-256
+values, all 28 ordinal rows, and aggregate failures. `compiled_validation`
+additionally binds the B1 gate SHA-256. `pass_count` is diagnostic; only
+top-level `passed: true` for the complete declaration is admission.
+
+The retired campaign-v1 options `--generated-dir`, `--glob`,
+`--expected-count`, and `--phase` are not accepted. Glob/count equality was
+never proof that the declared cohort survived unchanged.
+
+## Current declaration status: non-admissible
+
+The first declared cohort, `b2g26_final_71426`, failed its first source-freeze
+attempt. That failure is retained as evidence; it did not authorize a source,
+materialized, claims, or analysis stage. Do not repair it by substituting maps,
+selecting its passing members, regenerating behind the same declaration, or
+feeding an older materialized population into campaign v2. The declaration
+stays unchanged and non-admissible while the generator-source defects are
+fixed. Any later attempt still requires explicit root authorization and the
+same declared-before-generation discipline; this contract does not authorize
+one. Consequently the commands below describe the required workflow, not a
+claim that the current declaration has passed.
+
 ## Offline workflow
 
 Generate and compile the BSP beside its source files first. Then materialize
@@ -141,30 +202,39 @@ python tools/materialize_hook_claims.py \
   --hook-parity-attestation /isolated/B1/hook-parity-pullspeed-1700.json
 ```
 
-Materialization fails closed unless exactly six unique geometries replay. Once
-each compiled map has its canonical attestation and admissible runtime
-sidecar, prepare the v2 claims:
+Materialization fails closed unless exactly six unique geometries replay. The
+example paths below deliberately keep every stage and report separate. Once
+all 28 declared compiled maps have canonical attestations and admissible
+runtime sidecars, prepare the v2 claims:
 
 ```sh
-python tools/run_generator_claim_campaign.py \
-  --generated-dir /isolated/B2/generated \
-  --glob 'b2claim_*.map' --expected-count 20 --phase prepare \
-  --output /isolated/B2/claims-prepare.json
+python tools/run_generator_claim_campaign.py prepare \
+  --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
+  --materialized-dir /isolated/B2/b2g26_final_71426/materialized \
+  --claims-dir /isolated/B2/b2g26_final_71426/claims \
+  --output /isolated/B2/reports/b2g26_final_71426-claims-prepare.json
 ```
 
-Run the B2-A v2 analyzer with the matching `.generator-claims.json`; the normal
-path remains `candidate`/pending until its independent full-cold rebuild and
+Run the B2-A v2 analyzer with the matching claim from the claims root and write
+all eight Atlas artifacts to the separate analysis root. The normal path
+remains `candidate`/pending until its independent full-cold rebuild and
 verifier replay succeed. Do not use `maps/compile.sh` for this gate because it
-copies BSPs into a runtime map directory. Then validate the compiled campaign:
+copies BSPs into a runtime map directory. Then validate exact claims and
+analysis membership before any per-map validator runs:
 
 ```sh
-python tools/run_generator_claim_campaign.py \
-  --generated-dir /isolated/B2/generated \
-  --glob 'b2claim_*.map' --expected-count 20 --phase validate \
-  --output /isolated/B2/compiled-claim-campaign.json
+python tools/run_generator_claim_campaign.py validate \
+  --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
+  --claims-dir /isolated/B2/b2g26_final_71426/claims \
+  --analysis-dir /isolated/B2/b2g26_final_71426/analysis \
+  --b1-gate docs/multires/B1-GATE.json \
+  --output /isolated/B2/reports/b2g26_final_71426-compiled-validation.json
 ```
 
-Campaign reports contain no timestamps and remain canonical across identical
-inputs. The full-cold proof does carry integer elapsed milliseconds because
-the frozen 300-second limit is an admission fact; semantic Atlas-manifest
-comparison excludes only the independently sampled peak-RSS field.
+Any missing or unexpected file in either root rejects the complete campaign
+before `validate_generated_map` is called. Analysis manifests are passed by
+their explicit analysis-root paths; no adjacent lookup is performed. Campaign
+reports remain canonical across identical inputs. The full-cold proof does
+carry integer elapsed milliseconds because the frozen 300-second limit is an
+admission fact; semantic Atlas-manifest comparison excludes only the
+independently sampled peak-RSS field.

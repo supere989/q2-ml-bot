@@ -20,6 +20,51 @@ DECLARATION = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
 NONZERO = "ab" * 32
 
 
+def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
+    schema_path = ROOT / "schemas/q2-generator-claim-campaign-v2.schema.json"
+    schema = json.loads(schema_path.read_text())
+    contract = (
+        ROOT / "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md"
+    ).read_text()
+
+    assert schema["$id"] == "urn:q2-ml:q2-generator-claim-campaign-v2"
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["schema"]["const"] == campaign.CAMPAIGN_SCHEMA
+    assert schema["properties"]["expected_count"]["const"] == 28
+    assert schema["properties"]["map_count"]["const"] == 28
+    assert schema["$defs"]["materialized_membership"]["allOf"][1][
+        "properties"
+    ]["expected_file_count"]["const"] == 196
+    assert schema["$defs"]["claims_membership"]["allOf"][1][
+        "properties"
+    ]["expected_file_count"]["const"] == 224
+    assert schema["$defs"]["analysis_membership"]["allOf"][1][
+        "properties"
+    ]["expected_file_count"]["const"] == 224
+    assert not (
+        ROOT / "schemas/q2-generator-claim-campaign-v1.schema.json"
+    ).exists()
+
+    required_contract = (
+        "q2-generator-claim-campaign-v2",
+        "run_generator_claim_campaign.py prepare",
+        "--declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
+        "--materialized-dir",
+        "--claims-dir",
+        "run_generator_claim_campaign.py validate",
+        "--analysis-dir",
+        "different authority",
+        "atomically renames",
+        "O_CREAT | O_EXCL",
+        "no salvage",
+        "b2g26_final_71426",
+        "non-admissible",
+    )
+    assert all(fragment in contract for fragment in required_contract)
+    assert "--glob 'b2claim_*.map'" not in contract
+    assert "--expected-count 20" not in contract
+
+
 def write_stage(directory: Path, stage: str) -> dict:
     declaration, _digest = load_declaration(DECLARATION)
     directory.mkdir()
