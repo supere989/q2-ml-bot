@@ -195,14 +195,16 @@ admissible only when `tools/run_generator_cohort.py` finds every declared file
 and no unexpected regular file or symlink. A missing member plus an undeclared
 replacement still fails even when the raw file or map count remains 28.
 
-Fresh replacement cohort `b2g26_final_71440` is explicitly authorized by that
-alias and the byte-identical immutable named declaration
+Replacement cohort `b2g26_final_71440` was explicitly authorized by that alias
+and the byte-identical immutable named declaration
 `B2-GENERATED-COHORT-71440-DECLARATION.json`, both SHA-256
 `d71b86a109bb359f927457d3904cef3116d83c59104cc85b3a87dd43ddc791b2`.
 Its 28 rows use only fresh seeds 71440000..71440003, 71440100..71440103,
 71440200..71440203, 71440300..71440303, 71440400..71440403,
-71440500..71440503, and 71440600..71440603 in declaration order. No producer
-or artifact stage has been run for 71440 yet.
+71440500..71440503, and 71440600..71440603 in declaration order. Its source,
+compile, materialization, membership, static, and claim-preparation stages all
+passed and are now archived as retired evidence. No Atlas analysis, generated
+validation, Dyn, test-suite, gate, deployment, or training stage ran.
 
 The stages are separate, non-nested directory roots:
 
@@ -589,8 +591,42 @@ materialization staging residual, reports, logs, and immutable producer
 snapshot are evidence only for this cohort. None may be retried, resumed,
 reused, copied forward, salvaged, substituted, executed for cohort purposes,
 or admitted. The immutable named declaration still fails closed through the
-retirement registry. The current alias, assembler, and gate schema have advanced
-only to fresh 71440; that authorization does not admit or revive any 71439 byte.
+retirement registry. The alias, assembler, and gate schema then advanced only
+to 71440; that authorization did not admit or revive any 71439 byte.
+
+Cohort 71440 passed its sole source freeze from clean commit `9327683` and tree
+`c33aca6`: both exact 140-file populations matched, all route and spawn bindings
+passed, and all 28 layouts were unique. The source report SHA-256 is
+`2abbb7c9de511fd4b497111317d61be439f37c96702441d6d7190e9afb5cf19c`.
+Its sole WSL compile and materialization passed 28/28 and atomically published
+the exact 168-file and 196-file stages; their report SHA-256 values are
+`94681d77f53b0514a2795865d593b6007d58bef9e9bbf1be0a7ef2f16d7e46b1`
+and `11689967027196a77443d02628da1ee72df33bfa71475a1967634e268f47afc4`.
+Local compiled membership, compiled-static, materialized membership, and claim
+preparation then passed 28/28, with report SHA-256 values
+`620ec6d827a42feb99603bc15de3f825d51335144d18b5c5d225af8650648a90`,
+`56ce7ddb048a04b21beb230d7382859b040d000355bd3effbeae192da61f448a`,
+`a8490259cc955cd02427cf9bf7be95f72fb3e66830300f5c4cc850ee65a52eda`,
+and `d30a578fbbf4ff03542809536e3f90d7314fc802fe9f15d9e659de2b330e6546`.
+
+Fresh stock analysis then exposed a contract mismatch before generated Atlas
+analysis began: q2dm6 spawn 126 is a clear, supported static-graph sink while
+other clear spawn pairs are mutually reachable. The authoritative design
+requires at least one mutually reachable clear pair, but the stock validator
+incorrectly required every spawn to reach another. Commit `8ceb5b7` corrected
+only that validator rule and added isolated, one-way, and mutual-pair regression
+coverage; all eight preserved stock analyses pass it. Generated-map all-to-all
+spawn admission and Atlas mover authority are unchanged.
+
+The 71440 declaration binds the exact repository commit and tree, so the
+validator correction makes its `9327683` evidence ineligible for promotion even
+though no artifact is defective. Exact evidence is archived in
+`B2-GENERATED-COHORT-71440-FAILURE.json`. Cohort 71440 and all of its source,
+compiled, materialized, claims, report, log, producer-snapshot, and stock-run
+bytes are permanently retired and cannot be retried, resumed, reused, copied
+forward, salvaged, substituted, or admitted. The alias and assembler remain
+bound to retired 71440 so every producer and gate entry point fails closed. No
+replacement cohort is authorized.
 
 The interpreter boundary is now a pre-declaration authority, not a check to
 discover after compilation. The exact clean immediate-predecessor
@@ -621,18 +657,15 @@ check.
 
 ## Offline workflow
 
-The alias, assembler, and B2 gate schema are bound to authorized cohort
-`b2g26_final_71440`. The current `COHORT_ID` is therefore
-`b2g26_final_71440`, but declaration publication is not producer progress and
-no 71440 artifact root exists yet. Every new output leaf must be fresh and
-absent. Commands must never name retired cohort 71426, 71427, 71428, 71429,
-71430, 71431, 71432, 71433, 71434, 71435, 71436, 71437, 71438, or 71439, and
-no retired population, report, Dyn evidence, or compiled byte may be copied
-into the 71440 path.
+The alias, assembler, and B2 gate schema remain bound to retired cohort
+`b2g26_final_71440`; there is no authorized current `COHORT_ID`. Commands must
+never name retired cohorts 71426 through 71440. No retired population, report,
+Dyn evidence, or compiled byte may be copied into a future path.
 
-The declaration-aware compiler remains the required 71440 shape.
-Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every leaf must be
-absent before the sole attempt:
+The declaration-aware compiler remains the required shape for a separately
+authorized future cohort. Do not hand-run `q2tool`, glob maps, or use
+`maps/compile.sh`. The following terminal 71440 transcript is non-executable;
+every leaf had to be absent before its sole attempt:
 
 ```sh
 python tools/compile_generated_cohort.py \
@@ -659,8 +692,9 @@ membership error leaves no compiled publication; its staging, logs, and report
 are terminal failure evidence and cannot be resumed, retried, copied into a
 new cohort, or used as a passing subset.
 
-The following pinned-runtime atomic materialization shape applies to the fresh
-71440 attempt. It must never be pointed at a 71439 path. Materialization discovers
+The following pinned-runtime atomic materialization shape records the sole
+71440 attempt and must not be run again or pointed at any retired path.
+Materialization discovers
 the first grounded compiled Pmove landing without constraining it to the
 generator hint; independent analysis later requires the sealed exact landing
 and ordered trace to replay identically:

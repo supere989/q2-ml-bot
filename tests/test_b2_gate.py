@@ -700,6 +700,14 @@ def test_71440_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
             ROOT / "docs/multires/B2-GENERATED-COHORT-71439-DECLARATION.json",
             "71439",
         ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71440-DECLARATION.json",
+            "71440",
+        ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
+            "71440",
+        ),
     ],
 )
 def test_gate_refuses_retired_declaration_before_evidence(
@@ -709,16 +717,11 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_gate_admits_current_71440_declaration() -> None:
-    declaration, digest = _validate_declaration(
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
-
-    assert declaration["cohort_id"] == EXPECTED_COHORT
-    assert declaration["maps"] == _expected_71440_rows()
-    assert digest == (
-        "d71b86a109bb359f927457d3904cef3116d83c59104cc85b3a87dd43ddc791b2"
-    )
+def test_gate_refuses_current_retired_71440_alias() -> None:
+    with pytest.raises(B2GateError, match="71440.*permanently retired"):
+        _validate_declaration(
+            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+        )
 
 
 def test_exact_directory_membership_rejects_extra_and_symlink(tmp_path: Path) -> None:

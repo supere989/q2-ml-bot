@@ -25,14 +25,41 @@ purposes, salvaged, substituted, or admitted. Its immutable named declaration
 remains pinned to its exact 28 map/seed rows, and the retirement registry still
 rejects it before any evidence can be assembled.
 
-Fresh replacement cohort `b2g26_final_71440` is explicitly authorized. Its
-canonical named declaration and current alias are byte-identical with SHA-256
+Replacement cohort `b2g26_final_71440` was explicitly authorized. Its canonical
+named declaration and current alias remain byte-identical with SHA-256
 `d71b86a109bb359f927457d3904cef3116d83c59104cc85b3a87dd43ddc791b2`.
 They declare exactly 28 new rows in ordinal order: four each for `open`,
 `towers`, `canyon`, `pits`, `arena_open`, `arena_vertical`, and `arena_lanes`,
-using disjoint seed blocks 71440000..71440003 through
-71440600..71440603. No 71440 producer, artifact, report, Dyn, deployment, or
-training path exists yet; declaration authority does not imply stage success.
+using disjoint seed blocks 71440000..71440003 through 71440600..71440603.
+
+Cohort 71440 passed its sole source freeze, WSL compile, WSL materialization,
+compiled membership/static validation, materialized membership, and claims
+preparation. Their report SHA-256 values are respectively
+`2abbb7c9de511fd4b497111317d61be439f37c96702441d6d7190e9afb5cf19c`,
+`94681d77f53b0514a2795865d593b6007d58bef9e9bbf1be0a7ef2f16d7e46b1`,
+`11689967027196a77443d02628da1ee72df33bfa71475a1967634e268f47afc4`,
+`620ec6d827a42feb99603bc15de3f825d51335144d18b5c5d225af8650648a90`,
+`56ce7ddb048a04b21beb230d7382859b040d000355bd3effbeae192da61f448a`,
+`a8490259cc955cd02427cf9bf7be95f72fb3e66830300f5c4cc850ee65a52eda`,
+and `d30a578fbbf4ff03542809536e3f90d7314fc802fe9f15d9e659de2b330e6546`.
+Generated Atlas analysis had not begun.
+
+Fresh stock validation exposed that the validator required every stock spawn
+to reach another, stronger than the design's requirement for at least one
+mutually reachable clear pair. q2dm6 already has multiple qualifying pairs;
+spawn 126 is a clear, supported sink because dynamic rotating-mover traversal
+is intentionally Unknown. Commit `8ceb5b7` aligns stock admission with the
+design and leaves Atlas authority plus generated all-to-all admission intact.
+
+The declaration binds repository commit and tree. Therefore the correction
+invalidates 71440's `9327683` implementation binding even though its artifacts
+are sound. `B2-GENERATED-COHORT-71440-FAILURE.json` archives the exact evidence.
+Cohort 71440 is permanently retired, and none of its source, compiled,
+materialized, claims, stock, report, log, or producer-snapshot bytes may be
+retried, resumed, reused, copied, salvaged, substituted, or admitted. The alias
+and assembler remain pinned to retired 71440, so the retirement registry
+rejects every producer and gate entry point. No replacement cohort is
+authorized.
 
 The exact clean immediate-predecessor implementation snapshot at commit
 `8d89df4a787e261f8a4fb935908191f8df7634b2` and tree
@@ -58,30 +85,28 @@ zstandard. These repeated checks must finish before source generation or WSL
 cohort bootstrap; a local newer-Python parse is not sufficient because Python 3.14
 accepted the PEP-701 construct that terminated 71439 on Python 3.10.
 
-The assembler's declaration check admits only the exact fresh 71440 rows. The
-immutable named 71439 declaration remains permanently retired and is rejected
-before campaign evidence. Existing clean-repository, source-freeze, Atlas,
-test, manifest, and Dyn requirements remain the frozen gate contract; the
-declaration alone cannot make B2 green. The 71437 and 71438 evidence and every
-71439 artifact are historical evidence only.
+The assembler's declaration check remains shaped for the exact 71440 rows but
+rejects both the alias and immutable named declaration as retired before it
+reads campaign evidence. Existing clean-repository, source-freeze, Atlas, test,
+manifest, and Dyn requirements remain the frozen gate contract. All evidence
+through 71440 is historical only.
 
 ## Frozen producer-report contract
 
-No 71440 producer report exists yet. The authorized, authority-bound 71440
-cohort must supply every item below from fresh roots. This authorization never
-permits a 71439 retry or reuse of any retired byte.
+No producer report is currently authorized. The list below records what a
+separately declared, authority-bound future cohort must supply; it does not
+authorize a 71440 retry or reuse of any retired byte.
 
-- `tools/run_generator_cohort.py generate` produced the exact retired 71439
+- `tools/run_generator_cohort.py generate` produced the exact retired 71440
   source freeze from two distinct fresh directories. That publication is now
   evidence only.
-- `tools/compile_generated_cohort.py` produced the retired 71439 compiled stage
+- `tools/compile_generated_cohort.py` produced the retired 71440 compiled stage
   and canonical compile report. The contract
   retains per-map terminal logs and exit status, and publishes only the exact
   168-file declaration with atomic no-replace semantics.
-- `tools/materialize_generated_cohort.py` made the sole failed 71439
-  cohort-level V4 attempt and wrote its canonical materialization report. A
-  successful future invocation would publish only the exact 196-file
-  declaration with atomic no-replace
+- `tools/materialize_generated_cohort.py` produced the retired 71440
+  cohort-level V4 stage and canonical materialization report. The contract
+  publishes only the exact 196-file declaration with atomic no-replace
   semantics. Its B1 authorities are explicit immutable inputs, never files
   discovered beside a cohort.
 - `tools/run_generator_cohort.py verify-stage` writes canonical compiled and
@@ -118,16 +143,17 @@ permits a 71439 retry or reuse of any retired byte.
   must be outside the repository so its creation does not invalidate the clean
   Git binding.
 
-## Retired cohort 71439 producer transcript
+## Retired cohort 71440 producer transcript
 
-Cohort 71439 is retired even though fresh replacement 71440 is now authorized.
-The following commands preserve the producer contract and the shape of the
-terminal 71439 attempt; they are non-executable and must not be rerun against any 71439 source,
-staging, log, report, WSL, producer-snapshot, or release-build path.
+Cohort 71440 is retired and no replacement is authorized. The following
+commands preserve the producer contract and the shape of its successful but
+now implementation-ineligible stages; they are non-executable and must not be
+rerun against any 71440 source, staging, log, report, WSL, producer-snapshot,
+or release-build path.
 
 ```sh
 python tools/compile_generated_cohort.py \
-  --declaration docs/multires/B2-GENERATED-COHORT-71439-DECLARATION.json \
+  --declaration docs/multires/B2-GENERATED-COHORT-71440-DECLARATION.json \
   --source-root "$FUTURE_ROOT/source" \
   --staging-root "$FUTURE_ROOT/compiled-staging" \
   --publish-root "$FUTURE_ROOT/compiled" \
@@ -153,7 +179,7 @@ Only an all-green population is published with
 MATERIALIZER_PY=/home/raymond/miniconda3/bin/python
 B1_AUTHORITIES=/home/raymond/q2-multires-isolated/B1-authorities-909b1e46
 "$MATERIALIZER_PY" -B tools/materialize_generated_cohort.py \
-  --declaration docs/multires/B2-GENERATED-COHORT-71439-DECLARATION.json \
+  --declaration docs/multires/B2-GENERATED-COHORT-71440-DECLARATION.json \
   --compiled-dir "$FUTURE_ROOT/compiled" \
   --stage-dir "$FUTURE_ROOT/materialized-staging" \
   --materialized-dir "$FUTURE_ROOT/materialized" \
@@ -190,9 +216,9 @@ The B1 bundle remains reusable authority; it does not authorize reuse of any
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. The alias now admits fresh 71440 identity, but this
-command still fails closed and creates no output until all newly produced
-71440 evidence is complete and green.
+clean-tree authority. The alias names retired 71440, so this command fails at
+declaration admission and creates no output. It is retained only as the frozen
+gate interface.
 
 ```sh
 python tools/assemble_b2_gate.py \

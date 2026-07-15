@@ -70,7 +70,11 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4",
         "zstandard 0.19.0",
         "permanently retired",
-        "Fresh replacement cohort `b2g26_final_71440` is explicitly authorized",
+        "B2-GENERATED-COHORT-71440-FAILURE.json",
+        "2abbb7c9de511fd4b497111317d61be439f37c96702441d6d7190e9afb5cf19c",
+        "94681d77f53b0514a2795865d593b6007d58bef9e9bbf1be0a7ef2f16d7e46b1",
+        "11689967027196a77443d02628da1ee72df33bfa71475a1967634e268f47afc4",
+        "replacement cohort",
         "authority-bound",
         "not a cohort artifact",
     ):
@@ -78,10 +82,8 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     for filename in B1_FILENAMES:
         assert filename in text
 
-    assert (
-        "Fresh replacement cohort `b2g26_final_71440` is explicitly authorized"
-        in text
-    )
+    assert "Cohort 71440" in text
+    assert "permanently retired" in text
     assert "future-only" not in text
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
