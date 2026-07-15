@@ -1406,10 +1406,14 @@ class MapGenerator:
         self.spawn_blockers.append(box)
         cx_t = tx + TOWER_BASE // 2
         cy_t = ty + TOWER_BASE // 2
-        w.add_entity("item_quad", {"origin": f"{cx_t} {cy_t} {top + 24}"})
+        quad_site = self._floor_item_spot(room, cx_t, cy_t, TOWER_BASE + 128)
+        if quad_site is None:
+            raise RuntimeError("objective tower has no standing-clear floor reward site")
+        quad_x, quad_y, quad_z = quad_site
+        w.add_entity("item_quad", {"origin": f"{quad_x} {quad_y} {quad_z}"})
         self.objectives.append({
-            "item": "item_quad", "x": cx_t, "y": cy_t, "z": top + 24,
-            "guard": "tower", "height": top - fz, "value": 1.0,
+            "item": "item_quad", "x": quad_x, "y": quad_y, "z": quad_z,
+            "guard": "tower_base", "height": top - fz, "value": 1.0,
         })
         self.tower_count += 1
 
@@ -1799,16 +1803,46 @@ class MapGenerator:
             )
         self._emit_spawn_entities(placed)
 
-    def _item_spot(self, rng, xc: int, yc: int, fz: int, spread: int):
-        """Random item position near (xc, yc) that does not intersect cover
-        blocks or other spawn blockers (droptofloor deletes startsolid items).
-        Returns None when no clear spot is found."""
-        for _ in range(12):
-            x = xc + rng.randint(-spread, spread)
-            y = yc + rng.randint(-spread, spread)
-            if not self._spawn_overlaps_blocker(x, y, fz):
-                return x, y
+    def _floor_item_spot(self, room: Room, xc: int, yc: int,
+                         spread: int) -> Optional[Tuple[int, int, int]]:
+        """Choose a deterministic standing-clear item origin on a room floor."""
+        origin_z = room.floor_z + 24
+        for _ in range(32):
+            x = xc + self.rng.randint(-spread, spread)
+            y = yc + self.rng.randint(-spread, spread)
+            if not self._inside_room_for_spawn(room, x, y):
+                continue
+            if self._spawn_overlaps_blocker(x, y, origin_z):
+                continue
+            if self._player_column_is_clear(x, y, room.floor_z):
+                return x, y, origin_z
         return None
+
+    def _materialize_floor_loot_sites(self) -> None:
+        """Relocate every structure reward to a reachable floor band.
+
+        Floating platforms, tower tops, and roofs remain traversal geometry,
+        but their rewards cannot be emitted until the exact graph proves an
+        inbound and return path.  The v1 generator therefore places those
+        rewards beside/under the structure on a standing-clear room floor.
+        """
+        materialized: List[Tuple[str, int, int, int]] = []
+        seen: set[Tuple[int, int, int]] = set()
+        for kind, x, y, z in self._loot_sites:
+            containing = [
+                (abs(z - (room.floor_z + 24)), index, room)
+                for index, room in enumerate(self.rooms)
+                if room.wx <= x <= room.wx + room.w
+                and room.wy <= y <= room.wy + room.d
+            ]
+            for _, _, room in sorted(containing):
+                site = self._floor_item_spot(room, x, y, 192)
+                if site is None or site in seen:
+                    continue
+                seen.add(site)
+                materialized.append((kind, *site))
+                break
+        self._loot_sites = materialized
 
     def _place_entities(self):
         self._place_combat_spawns()
@@ -1824,6 +1858,7 @@ class MapGenerator:
                 pz = p['z'] + p['thick'] + 24
                 self._loot_sites.append(("platform", px, py, pz))
 
+        self._materialize_floor_loot_sites()
         self._heat_place_items()
 
     def _heat_place_items(self):

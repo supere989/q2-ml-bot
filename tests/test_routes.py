@@ -1,5 +1,7 @@
 from types import SimpleNamespace
+import json
 
+from maps.generator import generate_map
 from maps.routes import build_route_graph
 
 
@@ -128,3 +130,23 @@ def test_same_room_loop_uses_local_3d_distance_deterministically() -> None:
 
     assert offense["dist"] == 140
     assert first == second
+
+
+def test_generator_places_every_published_item_on_a_route_floor_band(
+    tmp_path,
+) -> None:
+    map_path, _ = generate_map(
+        "route_floor", 91470600, tmp_path, style="arena_lanes"
+    )
+    routes = json.loads(map_path.with_suffix(".routes.json").read_text())
+    item_nodes = [node for node in routes["nodes"] if node["type"] == "item"]
+    spawn_nodes = [node for node in routes["nodes"] if node["type"] == "spawn"]
+
+    assert item_nodes
+    assert spawn_nodes
+    assert all(node["room"] >= 0 for node in [*item_nodes, *spawn_nodes])
+    assert [route["archetype"] for route in routes["routes"]] == [
+        "offense", "survival", "control", "balanced",
+    ]
+    quad = next(node for node in item_nodes if node["class"] == "item_quad")
+    assert quad["room"] >= 0
