@@ -3,6 +3,7 @@ import json
 import struct
 
 from maps.generator import (
+    FloorLightRegion,
     HorizontalSurface,
     MIN_FLOOR_LIGHT_COVERAGE,
     MIN_SAFE_HEADROOM,
@@ -130,6 +131,46 @@ def test_platform_shadow_gets_under_platform_light():
     ) >= MIN_FLOOR_LIGHT_COVERAGE
 
 
+def test_interior_anchor_rejects_sample_without_safe_headroom():
+    generator = MapGenerator(seed=1, style="towers")
+    room = Room(
+        gx=0, gy=0, wx=0, wy=0, w=256, d=256,
+        floor_z=0, ceil_z=320, kind="room",
+        platforms=[{
+            "z": 240, "thick": 16,
+            "x0": 32, "y0": 32, "x1": 224, "y1": 224,
+        }],
+    )
+    generator.rooms = [room]
+    lower_platform = SolidBox(32, 32, 88, 144, 224, 112)
+    upper_platform = SolidBox(32, 32, 232, 224, 224, 256)
+    generator.spawn_blockers.extend([lower_platform, upper_platform])
+    generator.light_occluders.extend([lower_platform, upper_platform])
+    generator.light_regions = [FloorLightRegion(
+        region_id="floor_0_0_0",
+        bounds=(0, 0, 256, 256),
+        floor_z=0,
+        # This coarse point fits a standing hull but has only 88u headroom.
+        samples=((128.0, 128.0, 1.0),),
+    )]
+
+    generator._emit_interior_lighting()
+
+    zone = next(
+        item for item in generator.interior_light_zones
+        if item.zone_id == "under_platform_0_0"
+    )
+    source = next(
+        item for item in generator.interior_light_sources
+        if item.region_id == zone.zone_id
+    )
+    assert zone.anchor == (160.0, 128.0, 1.0)
+    assert generator._player_column_is_clear(
+        zone.anchor[0], zone.anchor[1], zone.floor_z
+    )
+    assert source.origin == (160.0, 128.0, 96.0)
+
+
 def test_horizontal_sandwich_threshold_uses_player_hull_and_safe_headroom():
     lower = HorizontalSurface(
         "lower", "platform", SolidBox(0, 0, 100, 128, 128, 116)
@@ -162,6 +203,18 @@ def test_seeded_lighting_output_is_byte_deterministic(tmp_path):
     assert (first / "same.map").read_bytes() == (second / "same.map").read_bytes()
     assert ((first / "same.meta.json").read_bytes() ==
             (second / "same.meta.json").read_bytes())
+
+
+def test_towers_seed_71425107_emits_direct_interior_lights(tmp_path):
+    generate_map("towers_light_regression", 71425107, tmp_path, style="towers")
+
+    result = static_validate(
+        tmp_path / "towers_light_regression.map", _static_args()
+    )
+
+    assert result["interior_lighting_ok"] is True
+    assert result["lighting_ok"] is True
+    assert result["static_ok"] is True
 
 
 def test_validator_rejects_map_missing_a_regions_lights(tmp_path):

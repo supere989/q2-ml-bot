@@ -2405,6 +2405,13 @@ class MapGenerator:
                 for sample in region.samples
                 if x0 + PLAYER_XY_HALF <= sample[0] <= x1 - PLAYER_XY_HALF
                 and y0 + PLAYER_XY_HALF <= sample[1] <= y1 - PLAYER_XY_HALF
+                # Floor-light probes guarantee the 56u standing hull only.
+                # Interior zones promise the stronger 96u safe-headroom
+                # contract, so an overlapping platform may invalidate a
+                # coarse sample even though the player does not start solid.
+                and self._player_column_is_clear(
+                    sample[0], sample[1], floor_z
+                )
             })
             if not samples:
                 probes = [
