@@ -10,6 +10,7 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
+import zstandard
 
 from harness.atlas_analyzer import (
     AtlasAnalysisError,
@@ -32,12 +33,16 @@ from harness.atlas_analyzer import (
     _exact_landing_key,
     _ground_navigation_seeds,
     _l0_chunks,
+    _movement_edge_cost_q8,
+    _movement_edge_kind,
     _movement_edge_stance,
+    _movement_requests_for_source,
     _normalized_analysis_manifest,
     _process_tree_rss_bytes,
     _run_measured_process,
     _surface_candidate_scope,
     _surface_request_upper_bound,
+    _supported_floor_candidate,
     analyze_map,
     sha256_file,
 )
@@ -126,6 +131,19 @@ def test_q2dm5_low_ceiling_spawns_ground_from_engine_origin() -> None:
     assert [request["start"] for request in floor_requests] == [
         [-96.0, 448.0, 57.0], [-592.0, -72.0, 289.0],
     ]
+
+
+def test_q2dm5_supported_drop_floor_is_retained_without_inferred_edge() -> None:
+    source = (106, 78, 35)
+    candidate = _supported_floor_candidate(source, {
+        "startsolid": False, "fraction": 0.64,
+        "endpos": [-88.0, 504.0, 24.03125],
+        "plane": {"normal": [0.0, 0.0, 1.0]},
+    }, (-1792, -768, -512))
+    assert candidate == (
+        (-88.0, 504.0, 24.03125), (106, 79, 33),
+    )
+    assert abs(candidate[1][2] - source[2]) == 2
 
 
 def test_authored_item_destinations_include_q2_point_item_classes() -> None:
@@ -261,6 +279,29 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
     manifest = json.loads((outputs[0] / "atlas-fixture.analysis.manifest.json").read_bytes())
     assert manifest["artifacts"]["atlas"]["uncompressed_sha256"] == sha256_file(
         outputs[0] / "atlas-fixture.atlas.bin"
+    )
+    trajectory = manifest["compiled_world"]["pmove_source_accounting"][
+        "trajectory_accounting"
+    ]
+    assert trajectory["requested"]["standing_ground"] == trajectory[
+        "requested"
+    ]["crouched_ground"]
+    assert trajectory["requested_total"] > trajectory["batch_size"]
+    assert trajectory["batch_count"] == (
+        trajectory["requested_total"] + trajectory["batch_size"] - 1
+    ) // trajectory["batch_size"]
+    assert sum(trajectory["outcomes"].values()) == trajectory["requested_total"]
+    assert sum(trajectory["emitted"].values()) == trajectory["emitted_total"]
+    compressed_navigation = (
+        outputs[0] / "atlas-fixture.navigation.bin.zst"
+    ).read_bytes()
+    raw_navigation = zstandard.ZstdDecompressor().decompress(
+        compressed_navigation
+    )
+    assert raw_navigation[:8] == b"Q2NAV001"
+    navigation = json.loads(raw_navigation[16:])
+    assert not any(
+        edge["edge_type"] == "step" for edge in navigation["edges"]
     )
 
 
@@ -815,6 +856,61 @@ def test_standing_replay_cannot_invent_crouched_target_stance() -> None:
     source = _test_node((0, 0, 0), standing=True, crouched=True)
     target = _test_node((1, 0, 0), standing=False, crouched=True)
     assert _movement_edge_stance(source, target, "standing") is None
+
+
+def test_movement_edge_kind_does_not_turn_flat_ground_into_step() -> None:
+    assert _movement_edge_kind(
+        "ground", any_airborne=False, vertical=0.0,
+    ) is None
+    assert _movement_edge_kind(
+        "ground", any_airborne=False, vertical=16.0,
+    ) == "step"
+    assert _movement_edge_kind(
+        "ground", any_airborne=True, vertical=0.0,
+    ) == "controlled_drop"
+    assert _movement_edge_kind(
+        "jump", any_airborne=True, vertical=0.0,
+    ) == "jump"
+
+
+def test_movement_edge_cost_uses_exact_path_through_first_landing() -> None:
+    request = {"origin": [0.0, 0.0, 0.0]}
+    response = {"frames": [
+        {"command_index": 0, "origin": [16.0, 0.0, 0.0]},
+        {"command_index": 1, "origin": [16.0, 16.0, 0.0]},
+        {"command_index": 2, "origin": [48.0, 16.0, 0.0]},
+    ]}
+    assert _movement_edge_cost_q8(
+        request, response, landing_command_index=1,
+    ) == 32 * 256
+    assert _movement_edge_cost_q8(
+        request, response, landing_command_index=None,
+    ) == 64 * 256
+
+
+def test_dual_clear_source_builds_canonical_stance_complete_requests() -> None:
+    source = _test_node((1, 2, 3), standing=True, crouched=True)
+    records = _movement_requests_for_source(
+        (1, 2, 3), source, outgoing=0, is_spawn=False,
+        parameters={"gravity": 800, "airaccelerate": 0},
+    )
+    assert len(records) == 12
+    assert [record[1:4] for record in records].count(
+        ("ground", 0, "standing")
+    ) == 1
+    ids = [record[4]["id"] for record in records]
+    assert "drop:1:2:3:ground:0:pmove" in ids
+    assert "drop:1:2:3:ground:0:crouched:pmove" in ids
+    crouched = [record for record in records if record[3] == "crouched"]
+    assert len(crouched) == 4
+    assert all(record[4]["pm_flags"] == 5 for record in crouched)
+    assert all(
+        command["upmove"] == -300
+        for record in crouched for command in record[4]["commands"]
+    )
+    jumps = [record for record in records if record[1] == "jump"]
+    assert len(jumps) == 4
+    assert all(len(record[4]["commands"]) == 16 for record in jumps)
 
 
 def test_exact_edge_target_uses_first_landing_not_later_final_state() -> None:

@@ -79,7 +79,10 @@ EVIDENCE_PMOVE_V1 = 2
 EVIDENCE_HOOK_LAW_V1 = 4
 EVIDENCE_FALL_LAW_V1 = 8
 VALIDATION_VERSION = 1
+PMOVE_GROUND_HORIZON_FRAMES = 4
+PMOVE_JUMP_HORIZON_FRAMES = 16
 PMOVE_DROP_HORIZON_FRAMES = 40
+PMOVE_TRAJECTORY_BATCH_SIZE = 32
 MASK_PLAYERSOLID = 33_619_971
 MASK_SHOT = 100_663_299
 CONTENTS_SOLID = 1
@@ -550,6 +553,11 @@ class NavNode:
         }
 
 
+MovementRecord = tuple[
+    tuple[int, int, int], str, int, str, dict[str, Any]
+]
+
+
 @dataclass(frozen=True)
 class _MoverDependencyIndex:
     """Conservative dynamic-brush occupancy relevant to Pmove trajectories."""
@@ -839,6 +847,25 @@ def _candidate_floor_requests(
             (point[0], point[1], point[2] - 32), STANDING_MINS, STANDING_MAXS,
         ))
     return requests
+
+
+def _supported_floor_candidate(
+    source_key: tuple[int, int, int],
+    floor: Mapping[str, Any],
+    origin: tuple[int, int, int],
+) -> tuple[tuple[float, float, float], tuple[int, int, int]] | None:
+    """Retain every distinct supported cell found by the bounded floor trace."""
+
+    if (
+        floor["startsolid"] or floor["fraction"] >= 1
+        or floor["plane"]["normal"][2] < 0.7
+    ):
+        return None
+    point = tuple(floor["endpos"])
+    key = _grid_index(point, origin, 16)
+    if key == source_key:
+        return None
+    return point, key
 
 
 def _node_probe_requests(points: Sequence[tuple[float, float, float]]) -> list[dict]:
@@ -1228,14 +1255,122 @@ def _movement_edge_stance(
     return None
 
 
+def _movement_edge_kind(
+    mode: str, *, any_airborne: bool, vertical: float,
+) -> str | None:
+    """Type only the movement transition directly evidenced by Pmove."""
+
+    if mode == "jump":
+        return "jump" if any_airborne else None
+    if mode != "ground":
+        return None
+    if any_airborne:
+        return "controlled_drop"
+    if 0.5 < abs(vertical) <= 18.0:
+        return "step"
+    return None
+
+
+def _movement_edge_cost_q8(
+    request: Mapping[str, Any], response: Mapping[str, Any],
+    *, landing_command_index: int | None,
+) -> int:
+    """Encode the exact replay path length through its admitted endpoint."""
+
+    start = request.get("origin")
+    frames = response.get("frames")
+    if not isinstance(start, list) or len(start) != 3 or not isinstance(frames, list):
+        raise AtlasAnalysisError("Pmove edge cost lacks exact trajectory points")
+    points: list[Sequence[float]] = [start]
+    landing_found = landing_command_index is None
+    for frame in frames:
+        if not isinstance(frame, Mapping):
+            raise AtlasAnalysisError("Pmove edge cost frame is invalid")
+        point = frame.get("origin")
+        if not isinstance(point, list) or len(point) != 3:
+            raise AtlasAnalysisError("Pmove edge cost frame lacks origin")
+        points.append(point)
+        if landing_command_index is not None and (
+            frame.get("command_index") == landing_command_index
+        ):
+            landing_found = True
+            break
+    if not landing_found:
+        raise AtlasAnalysisError("Pmove edge cost lacks exact landing frame")
+    distance = sum(
+        math.dist(left, right) for left, right in zip(points, points[1:])
+    )
+    return min(max(round(distance * 256.0), 4096), 0xFFFFFFFF)
+
+
+def _movement_requests_for_source(
+    key: tuple[int, int, int], source: NavNode, *, outgoing: int,
+    is_spawn: bool, parameters: Mapping[str, Any],
+) -> list[MovementRecord]:
+    """Build the canonical complete stance/mode request set for one source."""
+
+    records: list[MovementRecord] = []
+    for stance in ("standing", "crouched"):
+        if stance == "standing" and not source.standing_clear:
+            continue
+        if stance == "crouched" and not source.crouched_clear:
+            continue
+        for yaw in (0, 90, 180, 270):
+            suffix = "" if stance == "standing" else ":crouched"
+            command = {
+                "msec": 50, "angles": [0, yaw, 0], "forwardmove": 300,
+            }
+            if stance == "crouched":
+                command["upmove"] = -300
+            walk_request = {
+                "id": (
+                    f"drop:{key[0]}:{key[1]}:{key[2]}:"
+                    f"ground:{yaw}{suffix}:pmove"
+                ),
+                "op": "simulate", "origin": list(source.position),
+                "velocity": [0.0, 0.0, 0.0], "pm_type": 0,
+                "pm_flags": 4 if stance == "standing" else 5,
+                "pm_time": 0, "gravity": parameters["gravity"],
+                "airaccelerate": parameters["airaccelerate"],
+                "delta_angles_short": [0, 0, 0], "snapinitial": False,
+                "commands": [
+                    dict(command) for _ in range(PMOVE_GROUND_HORIZON_FRAMES)
+                ],
+            }
+            records.append((key, "ground", yaw, stance, walk_request))
+            if stance == "standing" and (outgoing < 2 or is_spawn):
+                jump_request = {
+                    **walk_request,
+                    "id": (
+                        f"drop:{key[0]}:{key[1]}:{key[2]}:"
+                        f"jump:{yaw}:pmove"
+                    ),
+                    "commands": [
+                        {
+                            "msec": 50, "angles": [0, yaw, 0],
+                            "forwardmove": 300, "upmove": 300,
+                        },
+                        *[
+                            {
+                                "msec": 50, "angles": [0, yaw, 0],
+                                "forwardmove": 300,
+                            }
+                            for _ in range(PMOVE_JUMP_HORIZON_FRAMES - 1)
+                        ],
+                    ],
+                }
+                records.append((key, "jump", yaw, stance, jump_request))
+    return records
+
+
 def _drop_settle_request(
     request: Mapping[str, Any], response: Mapping[str, Any],
     *, horizon_frames: int = PMOVE_DROP_HORIZON_FRAMES,
 ) -> dict[str, Any] | None:
     """Extend an airborne edge exit with neutral Pmove coast frames.
 
-    The first simulation remains the bounded four-frame ground probe or
-    sixteen-frame jump probe.  Only a trajectory that became airborne without
+    The first simulation remains the bounded ground or jump probe. Only a
+    trajectory that became airborne without
     a false-to-true grounded transition is replayed from its original state
     under the same canonical ID, with neutral commands appended.  The exact
     oracle therefore returns one continuous trajectory; frames are never
@@ -1765,12 +1900,16 @@ def _build_navigation(
         floors = cm.call(_candidate_floor_requests(candidates))
         accepted: list[tuple[tuple[int, int, int], tuple[float, float, float], tuple[int, int, int], dict]] = []
         for source_key, (_, _), floor in zip(sources, candidates, floors):
-            if floor["startsolid"] or floor["fraction"] >= 1 or floor["plane"]["normal"][2] < 0.7:
+            candidate = _supported_floor_candidate(source_key, floor, origin)
+            if candidate is None:
                 continue
-            point = tuple(floor["endpos"])
-            key = _grid_index(point, origin, 16)
-            if key == source_key or abs(key[2] - source_key[2]) > 1:
-                continue
+            point, key = candidate
+            # The bounded floor trace may find a supported player-origin cell
+            # more than one L1 band above or below its neighbor. Retain that
+            # cell as a movement candidate: node materialization is not edge
+            # authority. The vertical step/jump/drop is admitted only after
+            # exact Pmove replay below. Discarding it here makes a real landing
+            # absent from the graph before Pmove can prove the traversal.
             accepted.append((source_key, point, key, floor))
         unknown = [(source, point, key, floor) for source, point, key, floor in accepted if key not in nodes]
         unknown_points = [point for _, point, _, _ in unknown]
@@ -1842,10 +1981,6 @@ def _build_navigation(
             raise AtlasAnalysisError(
                 "Pmove traversal lacks mandatory exact fall authority"
             )
-        requests: list[dict[str, Any]] = []
-        movement_metadata: list[tuple[
-            tuple[int, int, int], str, int, str, dict[str, Any]
-        ]] = []
         outgoing = defaultdict(int)
         for edge in edges:
             outgoing[tuple(edge["source"])] += 1
@@ -1854,55 +1989,27 @@ def _build_navigation(
         )
         if movement_accounting is not None:
             movement_accounting.update(source_accounting)
+        pmove_edge_start = len(edges)
+        trajectory_counts: dict[str, int] = defaultdict(int)
+        trajectory_outcomes: dict[str, int] = defaultdict(int)
+        trajectory_batches = 0
+        settle_replays = 0
         spawn_keys = set(spawn_indices.values())
-        for key in candidates:
-            source = nodes[key]
-            stance = "standing" if source.standing_clear else "crouched"
-            pm_flags = 4 if stance == "standing" else 5
-            for yaw in (0, 90, 180, 270):
-                walk_id = (
-                    f"drop:{key[0]}:{key[1]}:{key[2]}:ground:{yaw}:pmove"
+        # Reserve the full prospective trajectory authority workload before
+        # the first candidate simulation write. Both legal source stances are
+        # replayed: preferring standing at a dual-clear node would make a real
+        # crouch-only exit invisible. No cap may yield a prefix Atlas.
+        worst_case = sum(
+            4 * (
+                int(nodes[key].standing_clear)
+                + int(nodes[key].crouched_clear)
+                + int(
+                    nodes[key].standing_clear
+                    and (outgoing[key] < 2 or key in spawn_keys)
                 )
-                walk_request = {
-                    "id": walk_id, "op": "simulate",
-                    "origin": list(source.position), "velocity": [0.0, 0.0, 0.0],
-                    "pm_type": 0, "pm_flags": pm_flags, "pm_time": 0,
-                    "gravity": pmove.identity["parameters"]["gravity"],
-                    "airaccelerate": pmove.identity["parameters"]["airaccelerate"],
-                    "delta_angles_short": [0, 0, 0], "snapinitial": False,
-                    "commands": [
-                        {"msec": 50, "angles": [0, yaw, 0], "forwardmove": 300}
-                        for _ in range(4)
-                    ],
-                }
-                requests.append(walk_request)
-                movement_metadata.append((key, "ground", yaw, stance, walk_request))
-                # A crouched-only source may never create a standing jump edge.
-                if stance == "standing" and (outgoing[key] < 2 or key in spawn_keys):
-                    jump_id = (
-                        f"drop:{key[0]}:{key[1]}:{key[2]}:jump:{yaw}:pmove"
-                    )
-                    jump_request = {
-                        "id": jump_id, "op": "simulate",
-                        "origin": list(source.position), "velocity": [0.0, 0.0, 0.0],
-                        "pm_type": 0, "pm_flags": 4, "pm_time": 0,
-                        "gravity": pmove.identity["parameters"]["gravity"],
-                        "airaccelerate": pmove.identity["parameters"]["airaccelerate"],
-                        "delta_angles_short": [0, 0, 0], "snapinitial": False,
-                        "commands": [
-                            {"msec": 50, "angles": [0, yaw, 0], "forwardmove": 300, "upmove": 300},
-                            *[
-                                {"msec": 50, "angles": [0, yaw, 0], "forwardmove": 300}
-                                for _ in range(15)
-                            ],
-                        ],
-                    }
-                    requests.append(jump_request)
-                    movement_metadata.append((key, "jump", yaw, stance, jump_request))
-
-        # Reserve the full prospective trajectory authority workload before the
-        # first candidate simulation write.  No cap may yield a prefix Atlas.
-        worst_case = len(requests)
+            )
+            for key in candidates
+        )
         if pmove.requests + 3 * worst_case > limits.max_oracle_requests:
             raise AtlasAnalysisError(
                 "Pmove trajectory preflight exceeds complete oracle budget"
@@ -1912,131 +2019,210 @@ def _build_navigation(
                 "fall trajectory preflight exceeds complete oracle budget"
             )
 
-        pmove_results = pmove.call(requests)
-        settle_indices: list[int] = []
-        settle_requests: list[dict[str, Any]] = []
-        for index, ((_, _, _, _, request), result) in enumerate(zip(
-            movement_metadata, pmove_results
-        )):
-            extended = _drop_settle_request(request, result)
-            if extended is None:
-                continue
-            settle_indices.append(index)
-            settle_requests.append(extended)
-        settled_results = pmove.call(settle_requests)
-        for index, request, result in zip(
-            settle_indices, settle_requests, settled_results
-        ):
-            source_key, mode, yaw, stance, _ = movement_metadata[index]
-            movement_metadata[index] = (
-                source_key, mode, yaw, stance, request,
-            )
-            pmove_results[index] = result
+        def trajectory_identifier(request: Mapping[str, Any]) -> str:
+            identifier = request.get("id")
+            if not isinstance(identifier, str) or not identifier.endswith(":pmove"):
+                raise AtlasAnalysisError("Pmove traversal ID is not canonical")
+            return identifier.removesuffix(":pmove")
 
-        exact_candidates: list[DropTrajectory] = []
-        for (source_key, mode, yaw, stance, request), result in zip(
-            movement_metadata, pmove_results
-        ):
-            if any(not frame["grounded"] for frame in result["frames"]):
-                radians = math.radians(yaw)
-                exact_candidates.append(DropTrajectory(
-                    identifier=(
-                        f"drop:{source_key[0]}:{source_key[1]}:"
-                        f"{source_key[2]}:{mode}:{yaw}"
-                    ),
-                    source_l1=source_key,
-                    direction=(round(math.cos(radians)), round(math.sin(radians))),
-                    mode=mode,
-                    request=request,
-                    response=result,
-                    dynamic_movers=mover_dependencies.intersects_trajectory(
-                        result, request
-                    ),
-                ))
-        try:
-            drop_classifications = classify_drop_trajectories(
-                exact_candidates, bsp=bsp, pmove_process=pmove,
-                fall_process=fall,
-            )
-        except ExactDropAnalysisError as error:
-            raise AtlasAnalysisError(str(error)) from error
-        drop_by_id = {item["id"]: item for item in drop_classifications}
+        def process_movement_batch(records: list[MovementRecord]) -> None:
+            """Consume one bounded response window and release its frames."""
 
-        for (source_key, mode, yaw, source_stance, request), result in zip(
-            movement_metadata, pmove_results
-        ):
-            any_airborne = any(not frame["grounded"] for frame in result["frames"])
-            drop_record = None
-            risk = 0
-            evidence = EVIDENCE_PMOVE_V1
-            validation_version = VALIDATION_VERSION
-            if mover_dependencies.intersects_trajectory(result, request):
-                # Airborne cases are retained as explicit Unknown records by
-                # exact-drop replay; no mover-dependent traversal is emitted.
-                continue
-            if any_airborne:
-                identifier = (
-                    f"drop:{source_key[0]}:{source_key[1]}:"
-                    f"{source_key[2]}:{mode}:{yaw}"
+            nonlocal settle_replays, trajectory_batches
+            trajectory_batches += 1
+            pmove_results = pmove.call([record[4] for record in records])
+            settle_indices: list[int] = []
+            settle_requests: list[dict[str, Any]] = []
+            for index, ((_, _, _, _, request), result) in enumerate(zip(
+                records, pmove_results
+            )):
+                extended = _drop_settle_request(request, result)
+                if extended is not None:
+                    settle_indices.append(index)
+                    settle_requests.append(extended)
+            settle_replays += len(settle_requests)
+            for index, request, result in zip(
+                settle_indices, settle_requests, pmove.call(settle_requests)
+            ):
+                source_key, mode, yaw, stance, _ = records[index]
+                records[index] = (source_key, mode, yaw, stance, request)
+                pmove_results[index] = result
+
+            exact_candidates: list[DropTrajectory] = []
+            for (source_key, mode, yaw, _, request), result in zip(
+                records, pmove_results
+            ):
+                if any(not frame["grounded"] for frame in result["frames"]):
+                    radians = math.radians(yaw)
+                    exact_candidates.append(DropTrajectory(
+                        identifier=trajectory_identifier(request),
+                        source_l1=source_key,
+                        direction=(
+                            round(math.cos(radians)), round(math.sin(radians))
+                        ),
+                        mode=mode,
+                        request=request,
+                        response=result,
+                        dynamic_movers=mover_dependencies.intersects_trajectory(
+                            result, request
+                        ),
+                    ))
+            try:
+                classified = classify_drop_trajectories(
+                    exact_candidates, bsp=bsp, pmove_process=pmove,
+                    fall_process=fall,
                 )
-                drop_record = drop_by_id.get(identifier)
-                if drop_record is None:
-                    raise AtlasAnalysisError("airborne trajectory lacks complete accounting")
-                classification = drop_record["classification"]
-                if (
-                    classification.get("classification") != "Exact"
-                    or classification.get("lethal") is True
-                ):
-                    continue
-                # The exact replay validates and truncates at the first
-                # false->true grounded transition.  Later movement/final state
-                # is deliberately irrelevant to edge topology.
-                target_key = _exact_landing_key(drop_record, origin)
-                if target_key is None:
-                    continue
-                risk = {
-                    "none": 0, "footstep": 0, "short": 8192,
-                    "fall": 32768, "far": 65535,
-                }.get(classification.get("severity"), 65535)
-                evidence = drop_record["evidence"]
-                validation_version = drop_record["validation_version"]
-            else:
-                if mode != "ground" or not result["final"]["grounded"]:
-                    continue
-                target_key = _grid_index(result["final"]["origin"], origin, 16)
+            except ExactDropAnalysisError as error:
+                raise AtlasAnalysisError(str(error)) from error
+            drop_classifications.extend(classified)
+            drop_by_id = {item["id"]: item for item in classified}
 
-            target = nodes.get(target_key)
-            if target is None or target_key == source_key:
-                continue
-            vertical = target.position[2] - nodes[source_key].position[2]
-            if mode == "jump":
-                if not any_airborne:
+            for (source_key, mode, _, source_stance, request), result in zip(
+                records, pmove_results
+            ):
+                any_airborne = any(
+                    not frame["grounded"] for frame in result["frames"]
+                )
+                drop_record = None
+                risk = 0
+                evidence = EVIDENCE_PMOVE_V1
+                validation_version = VALIDATION_VERSION
+                landing_command_index = None
+                if mover_dependencies.intersects_trajectory(result, request):
+                    # Airborne cases remain explicit Unknown classifications;
+                    # mover-dependent traversal never emits a static edge.
+                    trajectory_outcomes["omitted_dynamic_mover"] += 1
                     continue
-                kind = "jump"
-            elif vertical < -18:
-                if not any_airborne or drop_record is None:
+                if any_airborne:
+                    drop_record = drop_by_id.get(trajectory_identifier(request))
+                    if drop_record is None:
+                        raise AtlasAnalysisError(
+                            "airborne trajectory lacks complete accounting"
+                        )
+                    classification = drop_record["classification"]
+                    if (
+                        classification.get("classification") != "Exact"
+                        or classification.get("lethal") is True
+                    ):
+                        outcome = (
+                            "omitted_exact_lethal"
+                            if classification.get("lethal") is True
+                            else "omitted_"
+                            + str(classification.get("reason", "unknown"))
+                        )
+                        trajectory_outcomes[outcome] += 1
+                        continue
+                    target_key = _exact_landing_key(drop_record, origin)
+                    if target_key is None:
+                        trajectory_outcomes["omitted_missing_landing"] += 1
+                        continue
+                    landing_command_index = classification["landing"][
+                        "command_index"
+                    ]
+                    risk = {
+                        "none": 0, "footstep": 0, "short": 8192,
+                        "fall": 32768, "far": 65535,
+                    }.get(classification.get("severity"), 65535)
+                    evidence = drop_record["evidence"]
+                    validation_version = drop_record["validation_version"]
+                else:
+                    if mode != "ground" or not result["final"]["grounded"]:
+                        trajectory_outcomes["omitted_untyped_motion"] += 1
+                        continue
+                    target_key = _grid_index(
+                        result["final"]["origin"], origin, 16,
+                    )
+
+                target = nodes.get(target_key)
+                if target is None:
+                    trajectory_outcomes["omitted_missing_target_node"] += 1
                     continue
-                kind = "controlled_drop"
-            elif abs(vertical) <= 18.0:
-                kind = "step"
-            else:
-                continue
-            stance = _movement_edge_stance(
-                nodes[source_key], target, source_stance,
-            )
-            if stance is None:
-                continue
-            key = (source_key, target_key, kind, stance)
-            if key in edge_keys:
-                continue
-            edge_keys.add(key)
-            edges.append({
-                "source": list(source_key), "target": list(target_key), "edge_type": kind,
-                "stance": stance, "flags": 0, "blocker": 0,
-                "cost": 4096, "risk": risk, "confidence": 65535,
-                "evidence": evidence, "validation_version": validation_version,
-                "auxiliary": 0xFFFFFFFF,
-            })
+                if target_key == source_key:
+                    trajectory_outcomes["omitted_same_cell"] += 1
+                    continue
+                vertical = target.position[2] - nodes[source_key].position[2]
+                kind = _movement_edge_kind(
+                    mode, any_airborne=any_airborne, vertical=vertical,
+                )
+                if kind is None:
+                    # Flat grounded motion is already represented by local
+                    # MASK_PLAYERSOLID walk edges. A Pmove endpoint may be
+                    # several L1 cells away and must not masquerade as a
+                    # fixed-cost step that bypasses the intervening graph.
+                    trajectory_outcomes["omitted_flat_or_untyped_ground"] += 1
+                    continue
+                stance = _movement_edge_stance(
+                    nodes[source_key], target, source_stance,
+                )
+                if stance is None:
+                    trajectory_outcomes["omitted_stance_mismatch"] += 1
+                    continue
+                edge_key = (source_key, target_key, kind, stance)
+                if edge_key in edge_keys:
+                    trajectory_outcomes["omitted_duplicate_edge"] += 1
+                    continue
+                edge_keys.add(edge_key)
+                edges.append({
+                    "source": list(source_key), "target": list(target_key),
+                    "edge_type": kind, "stance": stance, "flags": 0,
+                    "blocker": 0,
+                    "cost": _movement_edge_cost_q8(
+                        request, result,
+                        landing_command_index=landing_command_index,
+                    ),
+                    "risk": risk,
+                    "confidence": 65535, "evidence": evidence,
+                    "validation_version": validation_version,
+                    "auxiliary": 0xFFFFFFFF,
+                })
+                trajectory_outcomes[f"emitted_{stance}_{kind}"] += 1
+
+        movement_batch: list[MovementRecord] = []
+
+        def enqueue(record: MovementRecord) -> None:
+            trajectory_counts[f"{record[3]}_{record[1]}"] += 1
+            movement_batch.append(record)
+            if len(movement_batch) == PMOVE_TRAJECTORY_BATCH_SIZE:
+                process_movement_batch(movement_batch)
+                movement_batch.clear()
+
+        for key in candidates:
+            for record in _movement_requests_for_source(
+                key, nodes[key], outgoing=outgoing[key],
+                is_spawn=key in spawn_keys,
+                parameters=pmove.identity["parameters"],
+            ):
+                enqueue(record)
+        if movement_batch:
+            process_movement_batch(movement_batch)
+        if movement_accounting is not None:
+            emitted = edges[pmove_edge_start:]
+            emitted_counts: dict[str, int] = defaultdict(int)
+            for edge in emitted:
+                emitted_counts[
+                    f"{edge['stance']}_{edge['edge_type']}"
+                ] += 1
+            requested_total = sum(trajectory_counts.values())
+            movement_accounting["trajectory_accounting"] = {
+                "schema": "q2-atlas-pmove-trajectory-accounting-v1",
+                "batch_size": PMOVE_TRAJECTORY_BATCH_SIZE,
+                "batch_count": trajectory_batches,
+                "ground_horizon_frames": PMOVE_GROUND_HORIZON_FRAMES,
+                "jump_horizon_frames": PMOVE_JUMP_HORIZON_FRAMES,
+                "settle_horizon_frames": PMOVE_DROP_HORIZON_FRAMES,
+                "requested": dict(sorted(trajectory_counts.items())),
+                "requested_total": requested_total,
+                "settle_replays": settle_replays,
+                "airborne_classified": len(drop_classifications),
+                "emitted": dict(sorted(emitted_counts.items())),
+                "emitted_total": len(emitted),
+                "outcomes": dict(sorted(trajectory_outcomes.items())),
+                "requests_without_new_edge": requested_total - len(emitted),
+            }
+            if sum(trajectory_outcomes.values()) != requested_total:
+                raise AtlasAnalysisError(
+                    "Pmove trajectory outcome accounting differs from requests"
+                )
 
     _assign_directed_regions(nodes, edges)
     mutual = _mutually_reachable_spawn_pairs(edges, spawn_indices)
