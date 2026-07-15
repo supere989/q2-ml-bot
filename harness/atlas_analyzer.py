@@ -64,6 +64,11 @@ from .atlas_exact_drops import (
     classify_drop_trajectories,
     summarize_drop_classifications,
 )
+from .atlas_teleporter_edges import (
+    prove_trigger_teleporter_edges,
+    resolve_trigger_teleporters,
+    teleporter_seed_points,
+)
 
 
 SCHEMA = "q2-atlas-analysis-v1"
@@ -4188,6 +4193,11 @@ def analyze_map(
     ]
     if len(spawns) < 2:
         raise AtlasAnalysisError("map has fewer than two deathmatch spawns")
+    teleporter_resolution = resolve_trigger_teleporters(
+        metadata.entities,
+        metadata.entity_catalog.brush_submodels,
+        metadata.models,
+    )
     if generator_claims is not None:
         if generator_safety is None:
             raise AtlasAnalysisError("generated claims lack safety proposals")
@@ -4236,7 +4246,7 @@ def analyze_map(
                     claim["landing_milliunits"], f"{claim['claim_id']} landing"
                 ),
             ])
-        claim_seed_points = list(dict.fromkeys(claim_seed_points))
+    claim_seed_points = list(dict.fromkeys(claim_seed_points))
     hook = _admit_hook(hook_oracle, hook_attestation)
     with OracleProcess(cm_oracle, bsp, "cm", limits) as cm:
         if cm.identity["map_sha256"] != metadata.sha256:
@@ -4300,13 +4310,29 @@ def analyze_map(
                 _validate_materialized_oracle_identities(
                     materialized_oracles, process_identities
                 )
+            navigation_seed_points = list(dict.fromkeys((
+                *claim_seed_points,
+                *teleporter_seed_points(teleporter_resolution, cm.call),
+            )))
             nodes, edges, spawn_indices, drop_classifications = _build_navigation(
                 cm, pmove_context, fall_context, bsp, player_spawns, origin, limits,
-                claim_seed_points,
+                navigation_seed_points,
                 _dynamic_mover_dependency_index(metadata),
                 pmove_source_accounting,
                 metadata,
             )
+            teleporter_analysis = prove_trigger_teleporter_edges(
+                teleporter_resolution, nodes, origin, cm.call,
+            )
+            edges.extend(teleporter_analysis.edges)
+            if len(edges) > limits.max_l1_edges:
+                raise AtlasAnalysisError(
+                    "teleporter traversal exceeded L1 edge budget"
+                )
+            # Teleporter arcs can join otherwise separate static components.
+            # Recompute strongly-connected IDs and spawn reachability only
+            # after their exact CM evidence has been admitted.
+            _assign_directed_regions(nodes, edges)
             spawn_reachability = _spawn_reachability(edges, spawn_indices)
             visibility = _visibility(cm, nodes, limits)
             compiled_hooks = _analyze_hook_claims(
@@ -4572,6 +4598,7 @@ def analyze_map(
         "hook authority is admitted only for explicit source-bound exact replays",
         "inline mover surfaces require exact transformed CM evidence at a fixed declared pose",
         "dynamic mover envelopes remain Unknown and no mover traversal edge is emitted without state evidence",
+        "trigger teleporters require a unique target and exact transformed-CM contact/landing evidence",
     ])
     atlas_manifest_path = base.with_suffix(".atlas.manifest.json")
     generator_source = Path(__file__).resolve().parents[1] / "maps/generator.py"
@@ -4703,6 +4730,7 @@ def analyze_map(
             "entity_l0_semantics": l0_semantics,
             "lighting": compiled_non_hook["lighting"],
             "hooks": compiled_hooks,
+            "teleporters": teleporter_analysis.report(),
             "route_claims": compiled_non_hook["route_claims"],
             "pmove_source_accounting": pmove_source_accounting,
         },
@@ -4724,6 +4752,10 @@ def analyze_map(
                 "exact-engine-replayed-edges" if compiled_hooks["edges"]
                 else "attested-no-replayed-edge" if hook["authority_admitted"]
                 else "omitted"
+            ),
+            "teleporter": (
+                "exact-engine-evidenced"
+                if teleporter_analysis.edges else "omitted-or-unknown"
             ),
             "metadata": "b1-c-validated",
         },
