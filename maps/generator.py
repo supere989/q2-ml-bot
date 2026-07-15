@@ -477,6 +477,10 @@ ARMOR_CLASSES = ("item_armor_body", "item_armor_combat")
 POWER_MIN_SEPARATION = 600   # judge: spreads of 269-422u = clumped control points
 ARMOR_MIN_FROM_POWER = 350   # judge: counters answer just outside melee, never on top
 WEAPON_CLASS_CAP = 3         # judge: 7 chainguns collapsed weapon diversity
+SPAWN_ROUTE_ANCHOR_CLASSES = (
+    "weapon_supershotgun", "weapon_chaingun",
+    "item_armor_combat", "item_health_large",
+)
 
 # Demand-driven ammo pairing: each weapon class placed creates ammo demand
 # (~1 box per 2 weapons of that class) in the tier-3 pass.
@@ -1967,6 +1971,72 @@ class MapGenerator:
                 return x, y, origin_z
         return None
 
+    def _place_spawn_route_anchors(self) -> None:
+        """Seed real offense/survival routes in one spawn component.
+
+        A vertically layered layout can put every deathmatch start on a floor
+        component whose rich item economy lives elsewhere. Route archetypes
+        may not relabel unrelated loot to hide that topology. Instead, place
+        two offense and two survival pickups in an exact conservative source
+        component that owns real spawns, before the heat economy is solved
+        around them.
+        """
+        from maps.routes import source_endpoint_components
+
+        candidate_sites = sorted(
+            site for site in self._candidate_sites(TIER_CELL[3])
+            if self._item_origin_available(site)
+            and all(
+                math.dist(site, spawn) >= 64.0
+                for spawn in self.spawn_points
+            )
+        )
+        endpoints = [*self.spawn_points, *candidate_sites]
+        components = source_endpoint_components(
+            self.rooms, endpoints, self.spawn_blockers, self.lava_pools
+        )
+        spawn_groups: dict[int, List[Tuple[int, int, int]]] = {}
+        for index, spawn in enumerate(self.spawn_points):
+            component = components.get(index)
+            if component is not None:
+                spawn_groups.setdefault(component, []).append(spawn)
+        if not spawn_groups:
+            raise RuntimeError("no deathmatch spawn has a source component")
+        selected_component = min(
+            spawn_groups,
+            key=lambda component: (
+                -len(spawn_groups[component]),
+                min(spawn_groups[component]),
+                component,
+            ),
+        )
+        component_spawns = spawn_groups[selected_component]
+        candidate_offset = len(self.spawn_points)
+        component_sites = [
+            site for offset, site in enumerate(candidate_sites)
+            if components.get(candidate_offset + offset) == selected_component
+        ]
+        component_sites.sort(key=lambda site: (
+            min(math.dist(site, spawn) for spawn in component_spawns),
+            site[2], site[1], site[0],
+        ))
+        chosen: List[Tuple[int, int, int]] = []
+        for site in component_sites:
+            if all(math.dist(site, other) >= 64.0 for other in chosen):
+                chosen.append(site)
+                if len(chosen) == len(SPAWN_ROUTE_ANCHOR_CLASSES):
+                    break
+        if len(chosen) != len(SPAWN_ROUTE_ANCHOR_CLASSES):
+            raise RuntimeError(
+                "could not place offense/survival anchors in a spawn component"
+            )
+        for name, site in zip(SPAWN_ROUTE_ANCHOR_CLASSES, chosen):
+            self._reserve_item_origin(site, f"spawn route anchor {name}")
+            self._placed_loot.append((name, *site))
+            self.writer.add_entity(
+                name, {"origin": f"{site[0]} {site[1]} {site[2]}"}
+            )
+
     def _origin_has_final_standing_floor(
         self, origin: Tuple[int, int, int]
     ) -> bool:
@@ -2039,6 +2109,7 @@ class MapGenerator:
 
     def _place_entities(self):
         self._place_combat_spawns()
+        self._place_spawn_route_anchors()
 
         # Platform loot sites stay structure-positioned (rewards hook use),
         # but WHAT lands on each is heat-chosen in _heat_place_items.
@@ -3368,6 +3439,23 @@ def generate_map(name: str, seed: Optional[int], out_dir: Path, grid_n: int = 5,
     json_path = out_dir / f"{name}.json"
     meta_path = out_dir / f"{name}.meta.json"
 
+    # Prove the complete four-route contract in memory before publishing the
+    # first member file. A route refusal must leave no partial source member.
+    try:
+        from maps.routes import build_route_graph
+    except ImportError:
+        from routes import build_route_graph   # when run as a script from maps/
+    all_items = gen._placed_loot + gen._heat_placed
+    objective_items = [
+        (o["item"], o["x"], o["y"], o["z"]) for o in gen.objectives
+    ]
+    route_graph = build_route_graph(
+        rooms=gen.rooms, connections=gen.connections,
+        items=all_items + objective_items, spawns=gen.spawn_points,
+        lava_pools=gen.lava_pools,
+        standing_blockers=gen.spawn_blockers,
+    )
+
     writer.write(map_path)
 
     # Map descriptor for curriculum selection / replay analysis. Separate
@@ -3387,7 +3475,6 @@ def generate_map(name: str, seed: Optional[int], out_dir: Path, grid_n: int = 5,
     # system can preload, so the bot starts with the map sense the
     # generator already has (objectives = opportunity, lava = threat).
     lattice_path = out_dir / f"{name}.lattice.json"
-    all_items = gen._placed_loot + gen._heat_placed
     lattice = {
         "cell_size": 256,
         "objectives": gen.objectives,
@@ -3401,17 +3488,6 @@ def generate_map(name: str, seed: Optional[int], out_dir: Path, grid_n: int = 5,
     # Route-graph sidecar: item/spawn nodes, risk-weighted edges, archetype
     # routes (offense/survival/control/balanced) with respawn periods. The
     # substrate for runtime item-timing + buffed-intercept route choice.
-    try:
-        from maps.routes import build_route_graph
-    except ImportError:
-        from routes import build_route_graph   # when run as a script from maps/
-    objective_items = [(o["item"], o["x"], o["y"], o["z"]) for o in gen.objectives]
-    route_graph = build_route_graph(
-        rooms=gen.rooms, connections=gen.connections,
-        items=all_items + objective_items, spawns=gen.spawn_points,
-        lava_pools=gen.lava_pools,
-        standing_blockers=gen.spawn_blockers,
-    )
     (out_dir / f"{name}.routes.json").write_text(
         json.dumps(route_graph, indent=1) + "\n")
 

@@ -53,6 +53,12 @@ FAILURE_71432 = (
 DECLARATION_71432 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71432-DECLARATION.json"
 )
+FAILURE_71433 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71433-FAILURE.json"
+)
+DECLARATION_71433 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71433-DECLARATION.json"
+)
 SHADOW_71430 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71430-SHADOW-8CE1E75.json"
 )
@@ -111,6 +117,7 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "80 units",
         "62-unit",
         "reserved interior",
+        "spawn-bearing source component",
         "one-chunk hurt-boundary",
         "grounded origins at Z 24.03125",
         "first source-freeze attempt",
@@ -450,6 +457,70 @@ def test_71432_failure_record_is_canonical_exact_and_no_salvage() -> None:
         "static_pass_count_in_complete_archived_scan": 27,
         "unique_layout_count": 28,
     }
+    assert failure["evidence"]["source_freeze_report"]["published"] is False
+    admission = failure["admission"]
+    assert admission["permanently_non_admissible"] is True
+    assert admission["source_stage_published"] is False
+    assert admission["compiled_stage_published"] is False
+    assert admission["materialized_stage_published"] is False
+    assert admission["claims_stage_published"] is False
+    assert admission["analysis_stage_published"] is False
+    for key in (
+        "older_population_reuse_allowed", "passing_subset_allowed",
+        "regeneration_under_same_declaration_allowed",
+        "replacement_member_allowed", "retry_under_same_declaration_allowed",
+        "salvage_allowed",
+    ):
+        assert admission[key] is False
+
+
+def test_71433_failure_record_is_canonical_exact_and_no_salvage() -> None:
+    payload = FAILURE_71433.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71433"
+    assert failure["status"] == "permanently-failed-first-source-freeze"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71433-DECLARATION.json",
+        "sha256": hashlib.sha256(DECLARATION_71433.read_bytes()).hexdigest(),
+    }
+    assert failure["failure"]["phase"] == "primary-generation-route-contract"
+    assert failure["failure"]["first_failure"] == {
+        "map": "b2g26_arena_vertical_71433501",
+        "message": "no spawn component has two reachable survival items",
+        "ordinal": 21,
+        "seed": 71433501,
+        "style": "arena_vertical",
+    }
+    assert failure["failure"]["source_component_diagnostic"] == {
+        "component_count": 6,
+        "spawn_component": {
+            "item_count": 7,
+            "offense_item_count": 6,
+            "spawn_count": 8,
+            "survival_or_value_item_count": 1,
+        },
+    }
+    primary = failure["evidence"]["primary_population"]
+    assert primary == {
+        "actual_file_count": 108,
+        "complete_member_count": 21,
+        "expected_file_count": 140,
+        "missing_file_count": 32,
+        "partial_member_file_count": 3,
+        "path_from_artifact_root": "source",
+        "stage_membership_sha256": (
+            "a12354fddddede20e8dca957ee99871a"
+            "1a739e78a0bea39e4ade6c7b916231fc"
+        ),
+        "total_bytes": 8284181,
+    }
+    cold = failure["evidence"]["cold_population"]
+    assert cold["actual_file_count"] == 0
+    assert cold["missing_file_count"] == 140
+    assert cold["total_bytes"] == 0
     assert failure["evidence"]["source_freeze_report"]["published"] is False
     admission = failure["admission"]
     assert admission["permanently_non_admissible"] is True

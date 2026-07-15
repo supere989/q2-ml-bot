@@ -186,6 +186,29 @@ def test_final_wall_splits_one_room_into_distinct_route_components() -> None:
     )
 
 
+def test_split_room_retains_one_route_start_per_source_component() -> None:
+    graph = build_route_graph(
+        rooms=[room(0, width=256, depth=160)],
+        connections=[],
+        items=[
+            ("weapon_supershotgun", 176, 40, 24),
+            ("weapon_rocketlauncher", 208, 40, 24),
+            ("item_health", 176, 120, 24),
+            ("item_armor_combat", 208, 120, 24),
+        ],
+        # The canonical first spawn has no items in its half. The second spawn
+        # shares room metadata but owns the only route-capable component.
+        spawns=[(48, 80, 24), (208, 80, 24)],
+        lava_pools=[],
+        standing_blockers=[blocker(120, 0, 0, 136, 160, 96)],
+    )
+
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    assert nodes[4]["room"] == nodes[5]["room"] == 0
+    assert nodes[4]["source_component"] != nodes[5]["source_component"]
+    assert all(route["start_node_id"] == 5 for route in graph["routes"])
+
+
 def test_exact_player_width_gap_is_blocked_by_hull_contact() -> None:
     rooms = [room(0, width=256, depth=128)]
     nodes = [
@@ -426,17 +449,74 @@ def test_retired_arena_open_contact_route_repairs_within_component(
 
     _assert_complete_generated_routes(routes)
     nodes = {node["id"]: node for node in routes["nodes"]}
-    assert nodes[5]["source_component"] == 2
-    assert nodes[11]["source_component"] == 0
+    stranded = next(
+        node for node in nodes.values()
+        if (node["x"], node["y"], node["z"]) == (1248, 1824, 24)
+    )
+    assert stranded["source_component"] == 2
     survival = next(
         route for route in routes["routes"]
         if route["archetype"] == "survival"
     )
-    assert survival["node_ids"] == [11, 10, 0, 1, 14, 35]
+    assert survival["source_component"] == 0
+    assert stranded["id"] not in survival["node_ids"]
     assert all(
         nodes[node_id]["source_component"] == survival["source_component"]
         for node_id in survival["node_ids"]
     )
+
+
+def test_arena_vertical_seed_71433501_seeds_spawn_component_route_axes(
+    tmp_path,
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    map_path, _ = generate_map(
+        "spawn_route_anchor_regression", 71433501, first,
+        style="arena_vertical",
+    )
+    cold_map, _ = generate_map(
+        "spawn_route_anchor_regression", 71433501, second,
+        style="arena_vertical",
+    )
+    assert map_path.read_bytes() == cold_map.read_bytes()
+    assert (
+        map_path.with_suffix(".routes.json").read_bytes()
+        == cold_map.with_suffix(".routes.json").read_bytes()
+    )
+    routes = json.loads(map_path.with_suffix(".routes.json").read_text())
+
+    _assert_complete_generated_routes(routes)
+    spawn_components = {
+        node["source_component"] for node in routes["nodes"]
+        if node["type"] == "spawn"
+    }
+    assert None not in spawn_components
+    for axes in ({"offense", "value"}, {"survival", "value"}):
+        assert any(
+            sum(
+                node["type"] == "item"
+                and node["source_component"] == component
+                and node["axis"] in axes
+                for node in routes["nodes"]
+            ) >= 2
+            for component in spawn_components
+        )
+
+
+def test_route_refusal_publishes_no_partial_source_member(
+    tmp_path, monkeypatch,
+) -> None:
+    def refuse_route_graph(**_kwargs):
+        raise RouteGraphError("injected route refusal")
+
+    monkeypatch.setattr("maps.routes.build_route_graph", refuse_route_graph)
+    with pytest.raises(RouteGraphError, match="injected route refusal"):
+        generate_map("atomic_route_refusal", 7, tmp_path, style="open")
+
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize(

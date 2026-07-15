@@ -360,6 +360,24 @@ through 71433603 under the same all-or-nothing, declared-before-generation
 policy. The current alias and immutable named copy are byte-identical; no
 71432 source or later-stage member is an input to 71433.
 
+The first and only 71433 source-freeze attempt failed during primary
+generation at ordinal 21, arena-vertical seed 71433501. All eight starts were
+in one conservative standing component with six offense items but only one
+survival/value item; fourteen qualifying survival/value items were segregated
+in components without a spawn, so the mandatory two-distinct-endpoint
+survival route correctly refused publication. The pre-fix writer left 21
+complete predecessors and three partial failed-member files; the cold pass
+never began and no freeze report was published. The exact declaration and
+canonical failure record are archived as
+`B2-GENERATED-COHORT-71433-DECLARATION.json` and
+`B2-GENERATED-COHORT-71433-FAILURE.json`. Cohort 71433 is permanently
+non-admissible; no partial or complete member may be reused, regenerated,
+repaired, retried, or salvaged. The generator now reserves two true offense
+and two true survival pickups in one exact spawn-bearing source component,
+then solves the remaining heat economy around them. Route construction also
+runs in memory before the first member file is written, and route starts are
+keyed by both room and source component.
+
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative

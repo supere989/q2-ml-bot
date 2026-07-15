@@ -84,6 +84,26 @@ def _dist(a, b) -> float:
     return math.dist(a, b)
 
 
+def source_room_index(rooms: Sequence[object], x: float, y: float,
+                      z: float) -> int:
+    """Resolve one endpoint to the same floor-banded room used by routes."""
+    compatible = []
+    for index, current in enumerate(rooms):
+        if not (
+            current.wx <= x <= current.wx + current.w
+            and current.wy <= y <= current.wy + current.d
+        ):
+            continue
+        floor_error = abs(
+            z - (current.floor_z + PLAYER_ORIGIN_FLOOR_OFFSET)
+        )
+        if floor_error <= ROOM_FLOOR_BAND_TOLERANCE:
+            compatible.append((floor_error, index))
+    # Overlapping generated rooms are legal. Resolve vertical bands by closest
+    # floor, then stable room ordinal for exact ties.
+    return min(compatible)[1] if compatible else -1
+
+
 def _solid_bounds(value, label: str) -> Tuple[float, float, float, float, float, float]:
     """Return one ordered finite source-solid AABB."""
     try:
@@ -302,6 +322,26 @@ def _standing_components(
     }
 
 
+def source_endpoint_components(
+    rooms: Sequence[object],
+    endpoints: Sequence[Tuple[float, float, float]],
+    standing_blockers: Sequence[object],
+    lava_pools: Sequence[object],
+) -> Dict[int, int]:
+    """Return exact conservative source components for proposed endpoints."""
+    nodes = [
+        {
+            "id": index,
+            "x": x,
+            "y": y,
+            "z": z,
+            "room": source_room_index(rooms, x, y, z),
+        }
+        for index, (x, y, z) in enumerate(endpoints)
+    ]
+    return _standing_components(rooms, nodes, standing_blockers, lava_pools)
+
+
 def build_route_graph(
     rooms, connections, items, spawns, lava_pools, *, standing_blockers,
     hook_required_edges=None,
@@ -321,23 +361,6 @@ def build_route_graph(
     ]
     lava_c = [((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, (b.z0 + b.z1) / 2)
               for b in lava_pools]
-
-    def room_of(x, y, z):
-        compatible = []
-        for index, current in enumerate(rooms):
-            if not (
-                current.wx <= x <= current.wx + current.w
-                and current.wy <= y <= current.wy + current.d
-            ):
-                continue
-            floor_error = abs(
-                z - (current.floor_z + PLAYER_ORIGIN_FLOOR_OFFSET)
-            )
-            if floor_error <= ROOM_FLOOR_BAND_TOLERANCE:
-                compatible.append((floor_error, index))
-        # Overlapping generated rooms are legal.  Resolve their vertical
-        # bands by closest floor, then stable room ordinal for exact ties.
-        return min(compatible)[1] if compatible else -1
 
     def edge_risk(ca, cb) -> float:
         if not lava_c:
@@ -368,14 +391,15 @@ def build_route_graph(
         nid = len(nodes)
         node = {"id": nid, "type": "item", "class": cls,
                 "x": int(x), "y": int(y), "z": int(z),
-                "room": room_of(x, y, z), "respawn_s": _period(cls),
+                "room": source_room_index(rooms, x, y, z),
+                "respawn_s": _period(cls),
                 "axis": axis, "value": val}
         nodes.append(node)
         item_nodes.append(node)
     for x, y, z in spawns:
         nodes.append({"id": len(nodes), "type": "spawn",
                       "x": int(x), "y": int(y), "z": int(z),
-                      "room": room_of(x, y, z)})
+                      "room": source_room_index(rooms, x, y, z)})
 
     components = _standing_components(
         rooms, nodes, standing_blockers, lava_pools,
@@ -484,12 +508,15 @@ def build_route_graph(
         node for node in nodes
         if node["type"] == "spawn" and node["room"] >= 0
     ]
-    first_spawn_by_room = {}
+    first_spawn_by_start = {}
     for node in spawn_nodes:
-        first_spawn_by_room.setdefault(node["room"], node)
+        component = components.get(node["id"])
+        if component is None:
+            continue
+        first_spawn_by_start.setdefault((node["room"], component), node)
     # Retain the original spawn-room rotation, but use its canonical first
     # node because the claim normalizer resolves a route's start the same way.
-    route_starts = list(first_spawn_by_room.values())
+    route_starts = list(first_spawn_by_start.values())
     routes = []
     if route_starts:
         for i, arch in enumerate(ROUTE_ARCHETYPES):
