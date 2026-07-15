@@ -456,9 +456,9 @@ geodesics in route scoring and claims.
 Those fixes and the immutable 71435 failure record were committed before
 replacement cohort `b2g26_final_71436` was declared. Its 28 entirely new
 members use seeds 71436000 through 71436603 under the same all-or-nothing,
-declared-before-generation policy. The current alias and immutable named copy
-are byte-identical; no 71435 source or later-stage member is an input to
-71436.
+declared-before-generation policy. Its then-current alias and immutable named
+copy were byte-identical; no 71435 source or later-stage member was an input
+to 71436.
 
 The first and only 71436 source-generation attempt failed at ordinal 13,
 `b2g26_pits_71436301`, when the deterministic spawn placer could not find
@@ -467,17 +467,31 @@ Only the fresh ordinal-0-through-12 prefix was written; the cold generation
 never began and no source-freeze report or later stage was published. The
 exact evidence is archived in
 `B2-GENERATED-COHORT-71436-FAILURE.json`. Cohort 71436 is permanently retired
-pending an implementation fix. Its prefix cannot be retried, salvaged,
-reused, or substituted, and no replacement cohort has been declared.
+and its prefix cannot be retried, salvaged, reused, or substituted.
+
+Implementation fix commit `57f4082` and the immutable 71436 named declaration
+and failure archive all preceded the declaration of replacement cohort
+`b2g26_final_71437`. Its 28 entirely new members use seeds 71437000 through
+71437603 under the same all-or-nothing, declared-before-generation policy.
+The current alias and immutable 71437 named copy are byte-identical. No 71436
+artifact is reusable by 71437: all primary, cold, compiled, materialized,
+claims, analysis, validation, Dyn, and report paths must be fresh. In
+particular, never reuse archived root
+`/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71436-73d55811`;
+create a new empty authority-bound root such as
+`/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71437-${ATLAS_AUTHORITY_SHA256:0:8}`
+with new empty `source` and `source-cold` directories, and place the exclusive
+report at the fresh sibling path
+`/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71437-${ATLAS_AUTHORITY_SHA256:0:8}-report.json`.
 
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
 replacement declaration. It must never name retired cohort 71426, 71427,
 71428, 71429, 71430, 71431, 71432, 71433, 71434, 71435, or 71436. There is
-currently no declaration authorized for this workflow; the commands below
-remain a template for use only after an implementation fix and a separately
-committed fresh declaration.
+exactly one declaration authorized for this workflow:
+`b2g26_final_71437`. Generation must begin only from a clean commit containing
+that declaration and must use the fresh authority-bound paths above.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V4 hook candidates under the pinned B1 authorities. Materialization

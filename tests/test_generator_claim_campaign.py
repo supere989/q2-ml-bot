@@ -135,6 +135,7 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "b2g26_final_71434",
         "b2g26_final_71435",
         "b2g26_final_71436",
+        "b2g26_final_71437",
         "80 units",
         "62-unit",
         "reserved interior",

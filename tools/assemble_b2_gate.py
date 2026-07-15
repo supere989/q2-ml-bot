@@ -65,7 +65,7 @@ from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
 
 
 GATE_SCHEMA = "q2-multires-b2-gate-v1"
-EXPECTED_COHORT = "b2g26_final_71436"
+EXPECTED_COHORT = "b2g26_final_71437"
 EXPECTED_DESIGN_SHA256 = (
     "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5"
 )
@@ -383,12 +383,12 @@ def _validate_b1_and_oracles(
     }, binaries
 
 
-def _expected_71436_rows() -> list[dict[str, Any]]:
+def _expected_71437_rows() -> list[dict[str, Any]]:
     rows = []
     ordinal = 0
     for style_index, style in enumerate(CONCRETE_STYLES):
         for member in range(4):
-            seed = 71_436_000 + style_index * 100 + member
+            seed = 71_437_000 + style_index * 100 + member
             rows.append({
                 "ordinal": ordinal,
                 "map": f"b2g26_{style}_{seed}",
@@ -403,8 +403,8 @@ def _expected_71436_rows() -> list[dict[str, Any]]:
 
 def _validate_declaration(path: Path) -> tuple[dict[str, Any], str]:
     declaration, digest = load_declaration(path)
-    _require(declaration["cohort_id"] == EXPECTED_COHORT, "B2 gate accepts only cohort 71436")
-    _require(declaration["maps"] == _expected_71436_rows(), "71436 map/seed selection differs")
+    _require(declaration["cohort_id"] == EXPECTED_COHORT, "B2 gate accepts only cohort 71437")
+    _require(declaration["maps"] == _expected_71437_rows(), "71437 map/seed selection differs")
     return declaration, digest
 
 
@@ -1446,7 +1446,7 @@ def _validate_dyn_evidence(
     _integer(authority["map_epoch"], "Dyn map epoch", minimum=1)
     _integer(authority["environment_steps"], "Dyn environment steps")
     map_id = authority["canonical_map_id"]
-    _require(map_id in {row["map"] for row in declaration["maps"]}, "Dyn map is outside cohort 71436")
+    _require(map_id in {row["map"] for row in declaration["maps"]}, "Dyn map is outside cohort 71437")
 
     host = _mapping(report["host"], "Dyn host")
     _exact_keys(host, {"hostname", "kernel_release", "architecture"}, "Dyn host")
