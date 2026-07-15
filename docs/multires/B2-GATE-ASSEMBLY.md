@@ -5,17 +5,26 @@
 replacement, salvage, partial, overwrite, or red-report mode. A failed input
 prints one refusal to stderr and writes no gate.
 
+Current status: cohort 71436 failed during its first primary source generation
+and is permanently retired. Its cold generation never began and no
+source-freeze report exists. No replacement cohort has been declared. The
+assembler remains pinned to 71436 as a fail-closed historical boundary, so
+the producer list and command below are not currently executable as a green
+assembly workflow.
+
 The assembler requires the repository to be clean before it reads the current
 commit, tree, generator, route generator, and complete Atlas analyzer closure.
-The 71436 source freeze, generated Atlas build report, test report, every
-analysis manifest, and the real Dyn proof must carry that same implementation
-authority. An intervening commit makes all earlier implementation-bound
-evidence stale.
+The pinned 71436 source freeze, generated Atlas build report, test report,
+every analysis manifest, and the real Dyn proof would have to carry that same
+implementation authority. The source freeze was never published, so this
+requirement cannot currently be satisfied. An intervening commit also makes
+all earlier implementation-bound evidence stale.
 
 ## Required producer reports
 
-- `tools/run_generator_cohort.py generate` writes the exact 71436 source
-  freeze. The primary and cold source directories remain immutable inputs.
+- `tools/run_generator_cohort.py generate` would write the exact 71436 source
+  freeze. Its first attempt failed before cold generation, and neither its
+  partial primary prefix nor the same declaration may be retried or reused.
 - `tools/run_generator_cohort.py verify-stage` writes canonical compiled and
   materialized membership reports. `tools/run_compiled_static_campaign.py`
   writes canonical `q2-generator-v6-compiled-static-campaign-v1` evidence with

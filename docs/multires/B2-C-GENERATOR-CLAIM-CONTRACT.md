@@ -460,11 +460,24 @@ declared-before-generation policy. The current alias and immutable named copy
 are byte-identical; no 71435 source or later-stage member is an input to
 71436.
 
+The first and only 71436 source-generation attempt failed at ordinal 13,
+`b2g26_pits_71436301`, when the deterministic spawn placer could not find
+eight clear, separated, map-spanning starts in one source standing component.
+Only the fresh ordinal-0-through-12 prefix was written; the cold generation
+never began and no source-freeze report or later stage was published. The
+exact evidence is archived in
+`B2-GENERATED-COHORT-71436-FAILURE.json`. Cohort 71436 is permanently retired
+pending an implementation fix. Its prefix cannot be retried, salvaged,
+reused, or substituted, and no replacement cohort has been declared.
+
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
 replacement declaration. It must never name retired cohort 71426, 71427,
-71428, 71429, 71430, 71431, 71432, 71433, 71434, or 71435.
+71428, 71429, 71430, 71431, 71432, 71433, 71434, 71435, or 71436. There is
+currently no declaration authorized for this workflow; the commands below
+remain a template for use only after an implementation fix and a separately
+committed fresh declaration.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V4 hook candidates under the pinned B1 authorities. Materialization

@@ -849,6 +849,58 @@ class MapGenerator:
     def _register_room_overheads(self):
         self.horizontal_surfaces.extend(self._room_overhead_surfaces())
 
+    @staticmethod
+    def _room_footprints_overlap(first: Room, second: Room) -> bool:
+        return (
+            first.wx < second.wx + second.w
+            and first.wx + first.w > second.wx
+            and first.wy < second.wy + second.d
+            and first.wy + first.d > second.wy
+        )
+
+    def _normalize_spawn_arena_floor(self) -> None:
+        """Keep one full arena floor available as a standing component.
+
+        Overlapping terrace plates are intentional, but a higher ordinary
+        room can otherwise cut every large arena into a long, narrow exposed
+        strip.  Then hundreds of individually legal starts exist while no one
+        source component can satisfy the unchanged 1024-by-1024 span gate.
+
+        Select the largest, highest deterministic arena and lower only higher
+        floors that overlap its footprint, preserving each affected room's
+        authored height.  A lower room ceiling that intersects the anchor's
+        96-unit standing column is raised just to the safe boundary.  This is
+        a pre-geometry layout invariant: it consumes no RNG, creates no rescue
+        path, and leaves clearance, separation, span, and component checks
+        untouched.
+        """
+        arenas = [room for room in self.rooms if room.kind == "arena"]
+        if not arenas:
+            return
+        anchor = max(
+            arenas,
+            key=lambda room: (
+                room.w * room.d,
+                room.floor_z,
+                -room.wy,
+                -room.wx,
+            ),
+        )
+        safe_ceiling = anchor.floor_z + MIN_SAFE_HEADROOM + 8
+        for room in self.rooms:
+            if room is anchor or not self._room_footprints_overlap(anchor, room):
+                continue
+            if room.floor_z > anchor.floor_z:
+                delta = room.floor_z - anchor.floor_z
+                room.floor_z -= delta
+                room.ceil_z -= delta
+            ceiling_bottom = room.ceil_z - 8
+            ceiling_top = room.ceil_z + WALL_T
+            standing_bottom = anchor.floor_z + 1
+            standing_top = anchor.floor_z + MIN_SAFE_HEADROOM
+            if ceiling_top > standing_bottom and ceiling_bottom < standing_top:
+                room.ceil_z = max(room.ceil_z, safe_ceiling)
+
     def build_layout(self, grid_n: int = 5):
         """Generate room graph using Prim's MST + extra edges on grid_n × grid_n."""
         rng = self.rng
@@ -924,6 +976,10 @@ class MapGenerator:
                     room.kind = 'room'
                     room.w, room.d, height = self._room_params('room')
                     room.ceil_z = room.floor_z + height
+
+        # Establish one map-spanning standing-floor domain before connections,
+        # platforms, and static blockers are derived from the room geometry.
+        self._normalize_spawn_arena_floor()
 
         # 3. Connect adjacent rooms
         dirs = [(1,0),(0,1),(-1,0),(0,-1)]
@@ -2098,6 +2154,37 @@ class MapGenerator:
             for x, y, z in selected
         ]
 
+    def _spawn_component_bound_diagnostic(self) -> str:
+        """Describe the exact source components available to spawn search."""
+        from maps.routes import source_endpoint_components
+
+        candidates = self._spawn_candidate_pool()
+        components = source_endpoint_components(
+            self.rooms, candidates, self.spawn_blockers, self.lava_pools,
+        )
+        groups: dict[int, List[Tuple[int, int, int]]] = {}
+        for index, candidate in enumerate(candidates):
+            component = components.get(index)
+            if component is not None:
+                groups.setdefault(component, []).append(candidate)
+
+        bounds = []
+        for component in sorted(groups):
+            points = groups[component]
+            x_span = max(point[0] for point in points) - min(
+                point[0] for point in points
+            )
+            y_span = max(point[1] for point in points) - min(
+                point[1] for point in points
+            )
+            bounds.append(
+                f"{component}:count={len(points)},span={x_span}x{y_span}"
+            )
+        return (
+            f"legal_candidates={len(candidates)}, "
+            f"component_bounds=[{'; '.join(bounds)}]"
+        )
+
     def _emit_arena_cover(self):
         """Extra cover geometry in arenas (on top of the baseline _emit_cover):
         peek-height pillars in the fight space so
@@ -2136,10 +2223,10 @@ class MapGenerator:
     def _place_combat_spawns(self):
         """Place a validated, well-separated set of deathmatch starts.
 
-        Preferred: a wide ring in a big arena (clean opening sightlines).
-        With terracing, that arena may be partly buried under higher
-        overlapping plates or the ring may collapse inward — then fall back
-        to DISTRIBUTED placement: one spawn per room across the map."""
+        Prefer a wide ring in a big arena, then perform exact component-bound
+        selection when no ring passes.  Both paths enforce the same clearance,
+        separation, map-span, and shared-source-component gates; neither may
+        relax or rescue a failed layout."""
         arenas = sorted(
             (r for r in self.rooms if r.kind == 'arena'),
             key=lambda r: r.w * r.d, reverse=True,
@@ -2162,7 +2249,8 @@ class MapGenerator:
         if placed is None:
             raise RuntimeError(
                 f"could not place {DM_SPAWN_COUNT} clear, separated, "
-                "map-spanning deathmatch spawns in one source standing component"
+                "map-spanning deathmatch spawns in one source standing component; "
+                f"{self._spawn_component_bound_diagnostic()}"
             )
         self.spawn_points.extend((x, y, z) for x, y, z, _yaw in placed)
         if self._shared_spawn_source_component(self.spawn_points) is None:

@@ -1,18 +1,26 @@
 from __future__ import annotations
 
 import math
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 from maps.generator import (
     DM_SPAWN_COUNT,
     LAVA_DEPTH,
+    MIN_SAFE_HEADROOM,
     MIN_SPAWN_SEPARATION,
     MapGenerator,
     Room,
     SolidBox,
+    generate_map,
 )
 from maps.routes import source_endpoint_components
+from tools.source_route_contract import load_source_route_contract
+from tools.validate_maps import deathmatch_spawn_origins
 
 
 @pytest.mark.parametrize(
@@ -59,8 +67,113 @@ def test_spawn_placement_fails_when_no_component_can_span_the_map() -> None:
         Room(4, 0, 2048, 0, 1024, 1024, 0, 384, "room"),
     ]
 
-    with pytest.raises(RuntimeError, match="one source standing component"):
+    with pytest.raises(
+        RuntimeError, match="one source standing component"
+    ) as failure:
         generator._place_combat_spawns()
+
+    diagnostic = str(failure.value)
+    assert "legal_candidates=" in diagnostic
+    assert "component_bounds=[" in diagnostic
+    assert "span=" in diagnostic
+
+
+def test_spawn_arena_floor_normalization_preserves_height_and_nonoverlap() -> None:
+    generator = MapGenerator(seed=23, style="pits")
+    anchor = Room(1, 1, 512, 512, 1536, 1536, 0, 384, "arena")
+    overlapping = Room(2, 1, 1024, 512, 1024, 1024, 96, 256, "room")
+    nonoverlapping = Room(4, 1, 2560, 512, 1024, 1024, 96, 256, "room")
+    generator.rooms = [anchor, overlapping, nonoverlapping]
+    authored_height = overlapping.ceil_z - overlapping.floor_z
+
+    generator._normalize_spawn_arena_floor()
+
+    assert overlapping.floor_z == anchor.floor_z
+    assert overlapping.ceil_z - overlapping.floor_z == authored_height
+    assert overlapping.ceil_z >= anchor.floor_z + MIN_SAFE_HEADROOM + 8
+    assert (nonoverlapping.floor_z, nonoverlapping.ceil_z) == (96, 256)
+
+
+def test_spawn_arena_floor_normalization_is_noop_without_an_arena() -> None:
+    generator = MapGenerator(seed=29, style="pits")
+    generator.rooms = [
+        Room(0, 0, 0, 0, 1024, 1024, 0, 384, "room"),
+        Room(1, 0, 1024, 0, 1024, 1024, 96, 320, "corridor"),
+    ]
+    before = [
+        (room.floor_z, room.ceil_z, room.kind) for room in generator.rooms
+    ]
+
+    generator._normalize_spawn_arena_floor()
+
+    assert [
+        (room.floor_z, room.ceil_z, room.kind) for room in generator.rooms
+    ] == before
+
+
+def test_retired_71436301_pits_spawn_regression_is_temp_only_and_deterministic(
+    tmp_path: Path,
+) -> None:
+    """The retired cohort seed is a fixture only, never a retry/publication."""
+    map_id = "retired_71436301_spawn_regression"
+    primary = tmp_path / "primary"
+    primary.mkdir()
+
+    generate_map(map_id, 71436301, primary, grid_n=5, style="pits")
+    cold_runs = []
+    generate_script = (
+        "from pathlib import Path; import sys; "
+        "from maps.generator import generate_map; "
+        "generate_map(sys.argv[2], int(sys.argv[3]), Path(sys.argv[1]), "
+        "grid_n=5, style='pits')"
+    )
+    for hash_seed in (1, 31337):
+        cold = tmp_path / f"cold-{hash_seed}"
+        cold.mkdir()
+        subprocess.run(
+            [
+                sys.executable, "-c", generate_script,
+                str(cold), map_id, "71436301",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            env={**os.environ, "PYTHONHASHSEED": str(hash_seed)},
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        cold_runs.append(cold)
+
+    route_contract = load_source_route_contract(
+        primary / f"{map_id}.routes.json", map_id
+    )
+    map_origins = deathmatch_spawn_origins(primary / f"{map_id}.map")
+    route_origins = tuple(
+        tuple(origin) for origin in route_contract["spawn_origins"]
+    )
+
+    assert route_origins == map_origins
+    assert route_contract["spawn_count"] == DM_SPAWN_COUNT
+    assert route_contract["all_spawn_origins_unique"] is True
+    assert route_contract[
+        "all_spawns_share_source_standing_component"
+    ] is True
+    assert max(origin[0] for origin in map_origins) - min(
+        origin[0] for origin in map_origins
+    ) >= 1024
+    assert max(origin[1] for origin in map_origins) - min(
+        origin[1] for origin in map_origins
+    ) >= 1024
+    assert min(
+        math.hypot(left[0] - right[0], left[1] - right[1])
+        for index, left in enumerate(map_origins)
+        for right in map_origins[index + 1:]
+    ) >= MIN_SPAWN_SEPARATION
+    for suffix in (
+        ".map", ".json", ".meta.json", ".lattice.json", ".routes.json",
+    ):
+        primary_bytes = (primary / f"{map_id}{suffix}").read_bytes()
+        for cold in cold_runs:
+            assert primary_bytes == (cold / f"{map_id}{suffix}").read_bytes()
 
 
 @pytest.mark.parametrize(

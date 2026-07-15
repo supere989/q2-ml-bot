@@ -71,6 +71,12 @@ FAILURE_71435 = (
 DECLARATION_71435 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71435-DECLARATION.json"
 )
+FAILURE_71436 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71436-FAILURE.json"
+)
+DECLARATION_71436 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71436-DECLARATION.json"
+)
 SHADOW_71430 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71430-SHADOW-8CE1E75.json"
 )
@@ -759,6 +765,151 @@ def test_71435_failure_record_is_canonical_exact_and_no_salvage() -> None:
         "salvage_allowed": False,
         "source_stage_published": True,
     }
+
+
+def test_71436_failure_record_is_canonical_exact_and_no_salvage() -> None:
+    payload = FAILURE_71436.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71436"
+    assert failure["status"] == "permanently-failed-first-source-freeze"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71436-DECLARATION.json",
+        "sha256": hashlib.sha256(DECLARATION_71436.read_bytes()).hexdigest(),
+    }
+    assert failure["evidence"]["implementation"] == {
+        "atlas_analyzer_authority_file_count": 29,
+        "atlas_analyzer_authority_sha256": (
+            "73d558112b4659c8508e2c848361d5df"
+            "ba032ee9d616acd379dce73bb0fa08a4"
+        ),
+        "generator_sha256": (
+            "58d5d7e6517f158e1bf5039dd3bd43b"
+            "9fbe53d34630bd0841f20291aad68b424"
+        ),
+        "git_clean": True,
+        "repository_commit": "d28322ca520c898f1eef056cf50e8aaa87755154",
+        "repository_tree": "ee88a9153b582cbd997e5d33d79ce58dacf5e74c",
+        "routes_sha256": (
+            "406b552eb195f6f0fd6a75b689c5ee2"
+            "df141b158d7118502c07698eeddae86d7"
+        ),
+    }
+    expected_failure = {
+        "grid": 5,
+        "map": "b2g26_pits_71436301",
+        "message": (
+            "could not place 8 clear, separated, map-spanning deathmatch "
+            "spawns in one source standing component"
+        ),
+        "ordinal": 13,
+        "seed": 71436301,
+        "style": "pits",
+    }
+    assert failure["failure"]["first_failure"] == expected_failure
+    assert failure["evidence"]["failed_member"] == {
+        "files": {},
+        "grid": 5,
+        "map": expected_failure["map"],
+        "missing_suffixes": [
+            ".map", ".json", ".meta.json", ".lattice.json", ".routes.json",
+        ],
+        "ordinal": expected_failure["ordinal"],
+        "seed": expected_failure["seed"],
+        "style": expected_failure["style"],
+    }
+    assert failure["operator_transcript"] == {
+        "exception": "RuntimeError",
+        "exit_code": 1,
+        "stack_terminal": "maps/generator.py:_place_combat_spawns",
+        "stderr_terminal": expected_failure["message"],
+    }
+    assert failure["evidence"]["primary_population"] == {
+        "actual_file_count": 65,
+        "complete_member_count": 13,
+        "complete_ordinal_range": [0, 12],
+        "expected_file_count": 140,
+        "last_complete_map": "b2g26_pits_71436300",
+        "missing_file_count": 75,
+        "partial_member_file_count": 0,
+        "path_from_artifact_root": "source",
+        "stage_membership_sha256": (
+            "d0cd2e1ca8c177184a5bfa1507157e5a"
+            "727694920daf14b04ade9bb96753b658"
+        ),
+        "total_bytes": 4872994,
+    }
+    assert failure["evidence"]["prior_population_reuse_audit"] == {
+        "cohorts": [
+            f"b2g26_final_{cohort}" for cohort in range(71429, 71436)
+        ],
+        "content_sha256_overlap_count": 0,
+        "filename_overlap_count": 0,
+        "no_content_or_filename_reuse": True,
+    }
+    assert failure["failure"]["spawn_search_diagnostic"] == {
+        "component_count": 10,
+        "component_examples": [
+            {"component": 2, "span_x": 832, "span_y": 1344},
+            {"component": 5, "span_x": 1856, "span_y": 576},
+            {"component": 7, "span_x": 1344, "span_y": 448},
+            {"component": 8, "span_x": 832, "span_y": 832},
+        ],
+        "legal_candidate_count": 638,
+        "required_map_span": [1024, 1024],
+        "single_component_meeting_required_map_span": False,
+    }
+    assert failure["evidence"]["cold_population"] == {
+        "actual_file_count": 0,
+        "complete_member_count": 0,
+        "expected_file_count": 140,
+        "generation_begun": False,
+        "missing_file_count": 140,
+        "partial_member_file_count": 0,
+        "path_from_artifact_root": "source-cold",
+        "stage_membership_sha256": (
+            "539d0ec7de7365fd4411aac747eb310f1"
+            "2eeb2c726d7d30264fb889f59379e01"
+        ),
+        "total_bytes": 0,
+    }
+    assert failure["failure"]["phase"] == "primary-generation-spawn-contract"
+    assert failure["failure"]["root_cause"] == (
+        "final source geometry partitioned 638 legal spawn candidates across "
+        "10 standing components, and every component bounding box failed the "
+        "required 1024-by-1024 map span; the placer correctly refused to split "
+        "starts or weaken admission constraints"
+    )
+    assert failure["failure"]["publication_contract"] == {
+        "cold_generation_begun": False,
+        "failed_member_file_count": 0,
+        "last_complete_ordinal": 12,
+        "source_freeze_report_created": False,
+    }
+    assert failure["evidence"]["source_freeze_report"] == {
+        "exists_at_capture": False,
+        "path_from_b2_artifact_root": (
+            "generated-final-71436-73d55811-report.json"
+        ),
+        "published": False,
+    }
+    admission = failure["admission"]
+    assert admission["permanently_non_admissible"] is True
+    assert admission["replacement_declaration_status"] == (
+        "pending-implementation-fix"
+    )
+    for key in (
+        "source_stage_published", "compiled_stage_published",
+        "materialized_stage_published", "claims_stage_published",
+        "analysis_stage_published", "older_population_reuse_allowed",
+        "passing_subset_allowed", "regeneration_under_same_declaration_allowed",
+        "replacement_member_allowed", "retired_artifact_reuse_allowed",
+        "retry_under_same_declaration_allowed", "salvage_allowed",
+        "substitution_allowed",
+    ):
+        assert admission[key] is False
 
 
 def write_stage(directory: Path, stage: str) -> dict:
