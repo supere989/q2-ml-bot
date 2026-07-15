@@ -416,11 +416,39 @@ declared-before-generation policy. The current alias and immutable named copy
 are byte-identical; no 71434 source or later-stage member is an input to
 71435.
 
+Cohort 71435 completed byte-identical source freeze, compile/static
+validation, V4 materialization, claims preparation, and full-cold Atlas
+analysis for all 28 members. Its first and only compiled-promotion campaign
+then failed closed on every member. The exact declaration and canonical
+failure record are archived as `B2-GENERATED-COHORT-71435-DECLARATION.json`
+and `B2-GENERATED-COHORT-71435-FAILURE.json`. Cohort 71435 is permanently
+non-admissible; none of its source, compiled, materialized, claims, analysis,
+or passing criterion evidence may be reused or salvaged.
+
+The retained evidence exposed four independent defects. Lighting compared
+authored floor-light tile count with an unrelated count of spawn navigation
+components; nine maps also had true compiled-dark spawns because source
+coverage used floor-level horizontal reach instead of exact spawn-eye 3D LOS.
+Nine maps scattered starts across multiple standing components, and twelve
+route summaries discarded wall-detour distance after source connectivity.
+Compiled promotion remained strict. The replacement implementation now binds
+the exact compiled floor-light region-ID set, records deterministic per-spawn
+darkness diagnostics, proves spawn-eye source lighting, selects all eight
+starts from one source standing component, and retains 16-unit standing-grid
+geodesics in route scoring and claims.
+
+Those fixes and the immutable 71435 failure record were committed before
+replacement cohort `b2g26_final_71436` was declared. Its 28 entirely new
+members use seeds 71436000 through 71436603 under the same all-or-nothing,
+declared-before-generation policy. The current alias and immutable named copy
+are byte-identical; no 71435 source or later-stage member is an input to
+71436.
+
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
 replacement declaration. It must never name retired cohort 71426, 71427,
-71428, 71429, 71430, 71431, 71432, 71433, or 71434.
+71428, 71429, 71430, 71431, 71432, 71433, 71434, or 71435.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V4 hook candidates under the pinned B1 authorities. Materialization
