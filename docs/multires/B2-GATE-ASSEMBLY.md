@@ -31,6 +31,16 @@ no 71438 producer may be invoked again under the no-retry declaration.
   source freeze from two distinct fresh directories. That successful source
   evidence is retired with the failed cohort and cannot be retried, copied,
   reused, or promoted.
+- `tools/compile_generated_cohort.py` is the only authorized compiled-stage
+  producer for a future declared cohort. It writes a canonical compile report,
+  retains per-map terminal logs and exit status, and publishes only the exact
+  168-file declaration with atomic no-replace semantics. It cannot authorize
+  another 71438 attempt.
+- `tools/materialize_generated_cohort.py` is the only authorized future
+  cohort-level V4 materializer. It writes a canonical materialization report
+  and publishes only the exact 196-file declaration with atomic no-replace
+  semantics. Its B1 authorities are explicit immutable inputs, never files
+  discovered beside a cohort.
 - `tools/run_generator_cohort.py verify-stage` writes canonical compiled and
   materialized membership reports. `tools/run_compiled_static_campaign.py`
   writes canonical `q2-generator-v6-compiled-static-campaign-v1` evidence with
@@ -62,6 +72,71 @@ no 71438 producer may be invoked again under the no-retry declaration.
   `b2-test-report.json` plus seven hashed raw logs. The directory must be
   outside the repository so its creation does not invalidate the clean Git
   binding.
+
+## Future-only compile and materialization template
+
+No replacement cohort is currently authorized or declared. The following
+commands are a contract for a later, separately committed declaration and
+entirely fresh artifact root; they must not be run with cohort 71438 or any of
+its source, staging, log, report, WSL, or release-build paths.
+
+```sh
+python tools/compile_generated_cohort.py \
+  --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
+  --source-root "$FUTURE_ROOT/source" \
+  --staging-root "$FUTURE_ROOT/compiled-staging" \
+  --publish-root "$FUTURE_ROOT/compiled" \
+  --log-root "$FUTURE_ROOT/compile-logs" \
+  --report "$FUTURE_ROOT/compile-report.json" \
+  --q2tool /home/raymond/q2-rollout/q2-ml-bot/maps/q2tools/bin/q2tool \
+  --basedir "$FUTURE_ROOT/assets/baseq2" \
+  --timeout-seconds 3600
+```
+
+`--basedir` must name the `baseq2` directory that directly contains
+`pak0.pak`, not its parent `assets` directory. The producer parses the PAK
+directory and hash-binds the case-insensitive `pics/colormap.pcx` member. It
+never searches a parent or sibling for assets. Maps are invoked in declaration
+order with exactly `-bsp -vis -fast -rad -bounce 0 -threads 1 -basedir`;
+lexical glob order is forbidden. The source root must have the exact 140-file
+declaration, and successful postcompile membership must be exactly 168 files.
+The staging, publication, log, and report leaves must all be absent at start.
+Only an all-green population is published with
+`renameat2(RENAME_NOREPLACE)`.
+
+```sh
+B1_AUTHORITIES=/home/raymond/q2-multires-isolated/B1-authorities-909b1e46
+python tools/materialize_generated_cohort.py \
+  --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
+  --compiled-dir "$FUTURE_ROOT/compiled" \
+  --stage-dir "$FUTURE_ROOT/materialized-staging" \
+  --materialized-dir "$FUTURE_ROOT/materialized" \
+  --log-dir "$FUTURE_ROOT/materialize-logs" \
+  --report "$FUTURE_ROOT/materialize-report.json" \
+  --cm-oracle "$B1_AUTHORITIES/q2-cm-oracle" \
+  --pmove-oracle "$B1_AUTHORITIES/q2-pmove-oracle" \
+  --hook-oracle "$B1_AUTHORITIES/q2-hook-oracle" \
+  --fall-oracle "$B1_AUTHORITIES/q2-fall-oracle" \
+  --hook-parity-attestation "$B1_AUTHORITIES/hook-parity-pullspeed-1700.json" \
+  --timeout-seconds 900
+```
+
+Materialization also follows declaration order, requires the exact 168-file
+compiled input, and publishes exactly 196 files only through
+`renameat2(RENAME_NOREPLACE)`. Both producers fail fast. Their failed staging,
+logs, and report roots are terminal, non-admissible, non-reusable evidence:
+no retry, resume, subset, copy-forward, or future-cohort reuse is permitted.
+
+The WSL authority directory
+`/home/raymond/q2-multires-isolated/B1-authorities-909b1e46` is a reusable,
+future-only B1 input bundle, not a cohort artifact. Its canonical
+`CONTENT-MANIFEST.json` SHA-256 is
+`8d163d87a6919fc5d7f3761b17aa1aeaae7e71a5c505b80392a315802e11a92f`.
+Its exact seven filenames are `B1-GATE.json`, `CONTENT-MANIFEST.json`,
+`hook-parity-pullspeed-1700.json`, `q2-cm-oracle`, `q2-fall-oracle`,
+`q2-hook-oracle`, and `q2-pmove-oracle`. Those immutable B1 bytes may be
+referenced by a future cohort, but the directory must remain outside all
+cohort roots and cannot prove cohort membership or progress.
 
 ## Assembly template
 

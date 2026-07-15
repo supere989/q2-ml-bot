@@ -556,32 +556,82 @@ below are non-executable until a separate clean commit declares an entirely
 new replacement population and fresh authority-bound artifact and report
 paths.
 
-Generate and compile the BSP beside its source files first. Then materialize
-only the V4 hook candidates under the pinned B1 authorities. Materialization
-discovers the first grounded compiled Pmove landing without constraining it to
-the generator hint; independent analysis later requires the sealed exact
-landing and ordered trace to replay identically:
+For a future authorized cohort, compile only with the declaration-aware cohort
+producer. Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every
+leaf path below must be absent before the single attempt; `FUTURE_ROOT` and
+`COHORT_ID` must belong to a separately committed replacement declaration,
+not retired cohort 71438:
 
 ```sh
-python tools/materialize_hook_claims.py \
-  --bsp /isolated/B2/generated/b2claim_0000.bsp \
-  --meta /isolated/B2/generated/b2claim_0000.meta.json \
-  --runtime-sidecar /isolated/B2/generated/b2claim_0000.json \
-  --output-attestation /isolated/B2/generated/b2claim_0000.hook-materialization.json \
-  --cm-oracle /isolated/B1/q2-cm-oracle \
-  --pmove-oracle /isolated/B1/q2-pmove-oracle \
-  --hook-oracle /isolated/B1/q2-hook-oracle \
-  --fall-oracle /isolated/B1/q2-fall-oracle \
-  --hook-parity-attestation /isolated/B1/hook-parity-pullspeed-1700.json
+python tools/compile_generated_cohort.py \
+  --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
+  --source-root "$FUTURE_ROOT/source" \
+  --staging-root "$FUTURE_ROOT/compiled-staging" \
+  --publish-root "$FUTURE_ROOT/compiled" \
+  --log-root "$FUTURE_ROOT/compile-logs" \
+  --report "$FUTURE_ROOT/compile-report.json" \
+  --q2tool /home/raymond/q2-rollout/q2-ml-bot/maps/q2tools/bin/q2tool \
+  --basedir "$FUTURE_ROOT/assets/baseq2" \
+  --timeout-seconds 3600
 ```
 
-Materialization fails closed unless exactly six unique measured geometries
-replay, pass actual source/target L1 legality, and are atomically sealed with
-their V4 attestation. V2/V3 candidates, attestations, and runtime sidecars are
-rejected rather than converted or retried. The example paths below
-deliberately keep every stage and report separate. Once
-all 28 declared compiled maps have canonical attestations and admissible
-runtime sidecars, prepare the v3 claims:
+The `--basedir` value is the `baseq2` directory that directly contains
+`pak0.pak`; it is not the parent `assets` directory. The producer parses that
+PAK and hash-binds its case-insensitive `pics/colormap.pcx` member, then
+invokes the exact flags `-bsp -vis -fast -rad -bounce 0 -threads 1 -basedir`
+in declaration order. Work remains non-admissible in the staging root until
+all 28 commands pass, source inputs remain byte-identical, and membership is
+exactly 168 files (28 times the five source suffixes plus one BSP). Publication
+uses `renameat2(RENAME_NOREPLACE)`. A timeout, nonzero exit, changed input, or
+membership error leaves no compiled publication; its staging, logs, and report
+are terminal failure evidence and cannot be resumed, retried, copied into a
+new cohort, or used as a passing subset.
+
+Materialize a successful future compiled publication only with the atomic
+cohort producer and the reusable B1 authority bundle. Materialization discovers
+the first grounded compiled Pmove landing without constraining it to the
+generator hint; independent analysis later requires the sealed exact landing
+and ordered trace to replay identically:
+
+```sh
+B1_AUTHORITIES=/home/raymond/q2-multires-isolated/B1-authorities-909b1e46
+python tools/materialize_generated_cohort.py \
+  --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
+  --compiled-dir "$FUTURE_ROOT/compiled" \
+  --stage-dir "$FUTURE_ROOT/materialized-staging" \
+  --materialized-dir "$FUTURE_ROOT/materialized" \
+  --log-dir "$FUTURE_ROOT/materialize-logs" \
+  --report "$FUTURE_ROOT/materialize-report.json" \
+  --cm-oracle "$B1_AUTHORITIES/q2-cm-oracle" \
+  --pmove-oracle "$B1_AUTHORITIES/q2-pmove-oracle" \
+  --hook-oracle "$B1_AUTHORITIES/q2-hook-oracle" \
+  --fall-oracle "$B1_AUTHORITIES/q2-fall-oracle" \
+  --hook-parity-attestation "$B1_AUTHORITIES/hook-parity-pullspeed-1700.json" \
+  --timeout-seconds 900
+```
+
+The WSL bundle is future-only independent B1 authority, not a cohort artifact
+or generated stage. Its immutable path is
+`/home/raymond/q2-multires-isolated/B1-authorities-909b1e46`; its canonical
+`CONTENT-MANIFEST.json` SHA-256 is
+`8d163d87a6919fc5d7f3761b17aa1aeaae7e71a5c505b80392a315802e11a92f`.
+The directory has exactly these seven filenames and no symlinks or extras:
+`B1-GATE.json`, `CONTENT-MANIFEST.json`,
+`hook-parity-pullspeed-1700.json`, `q2-cm-oracle`, `q2-fall-oracle`,
+`q2-hook-oracle`, and `q2-pmove-oracle`. It may supply those exact immutable
+B1 bytes to a future independently declared cohort, but must not be copied
+under a cohort root or treated as population evidence.
+
+Materialization consumes the compiled rows in declaration order and fails
+closed unless every map seals exactly six unique V4 measured geometries with
+the pinned authorities. It revalidates all input hashes and publishes exactly
+196 files (the 168 compiled files plus 28 per-map materialization
+attestations) with `renameat2(RENAME_NOREPLACE)`. V2/V3 candidates,
+attestations, runtime sidecars, missing/extra members, and changed inputs are
+rejected rather than converted or retried. Every stage, log directory, and
+report path must be fresh. Any failed materialization root is terminal and
+non-reusable. Once all 28 declared maps have canonical attestations and
+admissible runtime sidecars, prepare the v3 claims:
 
 ```sh
 python tools/run_generator_claim_campaign.py prepare \
