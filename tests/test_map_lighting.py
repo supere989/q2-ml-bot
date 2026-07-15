@@ -13,6 +13,7 @@ from maps.generator import (
     Room,
     SolidBox,
     T_CEIL,
+    TOWER_H_MIN,
     floor_light_coverage,
     generate_map,
     unsafe_horizontal_sandwiches,
@@ -251,6 +252,51 @@ def test_arena_vertical_seed_71426502_keeps_lava_out_of_building_zone(tmp_path):
     )
     result = static_validate(map_path, _static_args())
     assert result["interior_lighting_ok"] is True
+    assert result["static_ok"] is True
+
+
+def test_arena_vertical_seed_71431503_rejects_low_ceiling_tower_sandwich(
+    tmp_path,
+):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+
+    first_map, _ = generate_map(
+        "objective_tower_regression", 71431503, first,
+        style="arena_vertical",
+    )
+    second_map, _ = generate_map(
+        "objective_tower_regression", 71431503, second,
+        style="arena_vertical",
+    )
+
+    assert first_map.read_bytes() == second_map.read_bytes()
+    assert (
+        first_map.with_suffix(".meta.json").read_bytes()
+        == second_map.with_suffix(".meta.json").read_bytes()
+    )
+    lattice = json.loads(first_map.with_suffix(".lattice.json").read_text())
+    assert lattice["objectives"]
+    assert all(
+        objective["height"] >= TOWER_H_MIN + 32
+        for objective in lattice["objectives"]
+    )
+    generator = MapGenerator(seed=71431503, style="arena_vertical")
+    generator.generate()
+    tower_surfaces = [
+        surface for surface in generator.horizontal_surfaces
+        if surface.kind == "tower"
+    ]
+    assert len(tower_surfaces) == generator.tower_count
+    assert all(
+        surface.box.z1 - surface.box.z0 >= TOWER_H_MIN
+        for surface in tower_surfaces
+    )
+    assert unsafe_horizontal_sandwiches(generator.horizontal_surfaces) == []
+    result = static_validate(first_map, _static_args())
+    assert result["unsafe_horizontal_sandwiches"] == 0
     assert result["static_ok"] is True
 
 

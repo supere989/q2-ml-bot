@@ -41,6 +41,12 @@ FAILURE_71430 = (
 DECLARATION_71430 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71430-DECLARATION.json"
 )
+FAILURE_71431 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71431-FAILURE.json"
+)
+DECLARATION_71431 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71431-DECLARATION.json"
+)
 SHADOW_71430 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71430-SHADOW-8CE1E75.json"
 )
@@ -94,6 +100,8 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "b2g26_final_71429",
         "b2g26_final_71430",
         "b2g26_final_71431",
+        "80 units",
+        "62-unit",
         "one-chunk hurt-boundary",
         "grounded origins at Z 24.03125",
         "first source-freeze attempt",
@@ -323,6 +331,68 @@ def test_71430_shadow_record_is_canonical_failed_closed_and_replacement_ready() 
     assert admission["retired_artifact_reuse_allowed"] is False
     assert admission["retired_cohort_admissible"] is False
     assert admission["shadow_passing_subset_allowed"] is False
+
+
+def test_71431_failure_record_is_canonical_exact_and_no_salvage() -> None:
+    payload = FAILURE_71431.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71431"
+    assert failure["status"] == "permanently-failed-first-source-freeze"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71431-DECLARATION.json",
+        "sha256": hashlib.sha256(DECLARATION_71431.read_bytes()).hexdigest(),
+    }
+    assert failure["failure"]["phase"] == "first-source-freeze-validation"
+    assert failure["failure"]["affected_map_count"] == 1
+    assert failure["failure"]["first_failure"] == {
+        "map": "b2g26_arena_vertical_71431503",
+        "message": (
+            "source/static validation failed: objective tower brush_195 and "
+            "room ceiling brush_17 leave an unsafe 80-unit horizontal sandwich"
+        ),
+        "ordinal": 23,
+        "seed": 71431503,
+        "style": "arena_vertical",
+    }
+    assert failure["evidence"]["primary_population"] == {
+        "actual_file_count": 140,
+        "content_manifest_sha256": (
+            "cd485a92755ef5a6ff9a5549d2013c94"
+            "2a8f98598d558b3e32e3c4e71a5df17f"
+        ),
+        "expected_file_count": 140,
+        "path_from_artifact_root": "source",
+        "total_bytes": 10858611,
+    }
+    assert (
+        failure["evidence"]["primary_population"]["content_manifest_sha256"]
+        == failure["evidence"]["cold_population"]["content_manifest_sha256"]
+    )
+    assert failure["evidence"]["validation_summary"] == {
+        "all_primary_cold_file_bytes_match": True,
+        "expected_map_count": 28,
+        "route_contract_pass_count_in_complete_archived_scan": 28,
+        "static_pass_count_in_complete_archived_scan": 27,
+        "unique_layout_count": 28,
+    }
+    assert failure["evidence"]["source_freeze_report"]["published"] is False
+    admission = failure["admission"]
+    assert admission["permanently_non_admissible"] is True
+    assert admission["source_stage_published"] is False
+    assert admission["compiled_stage_published"] is False
+    assert admission["materialized_stage_published"] is False
+    assert admission["claims_stage_published"] is False
+    assert admission["analysis_stage_published"] is False
+    for key in (
+        "older_population_reuse_allowed", "passing_subset_allowed",
+        "regeneration_under_same_declaration_allowed",
+        "replacement_member_allowed", "retry_under_same_declaration_allowed",
+        "salvage_allowed",
+    ):
+        assert admission[key] is False
 
 
 def write_stage(directory: Path, stage: str) -> dict:

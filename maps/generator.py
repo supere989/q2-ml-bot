@@ -1421,26 +1421,41 @@ class MapGenerator:
                 ty = room.wy + rng.randint(192, max(193, room.d - TOWER_BASE - 192))
                 fz = room.floor_z
                 top = min(fz + th, room.ceil_z - PLAYER_H - 24)
+                if top - fz < TOWER_H_MIN + 32:
+                    continue
                 box = SolidBox(tx, ty, fz,
                                tx + TOWER_BASE, ty + TOWER_BASE, top)
-                if self._structure_is_clear(box):
-                    self.spawn_blockers.append(box)
-                    quad_site = self._floor_item_spot(
-                        room, tx + TOWER_BASE // 2, ty + TOWER_BASE // 2,
-                        TOWER_BASE + 128,
+                surface = HorizontalSurface(
+                    "objective_tower", "tower", box
+                )
+                if (
+                    not self._structure_is_clear(box)
+                    or any(
+                        horizontal_sandwich_gap(surface, existing) is not None
+                        for existing in self.horizontal_surfaces
                     )
-                    self.spawn_blockers.pop()
-                    if quad_site is not None:
-                        chosen = (room, tx, ty, fz, top, box, quad_site)
-                        break
+                ):
+                    continue
+                self.spawn_blockers.append(box)
+                quad_site = self._floor_item_spot(
+                    room, tx + TOWER_BASE // 2, ty + TOWER_BASE // 2,
+                    TOWER_BASE + 128,
+                )
+                self.spawn_blockers.pop()
+                if quad_site is not None:
+                    chosen = (
+                        room, tx, ty, fz, top, box, surface, quad_site
+                    )
+                    break
             if chosen is not None:
                 break
         if chosen is None:
             return
-        room, tx, ty, fz, top, box, quad_site = chosen
+        room, tx, ty, fz, top, box, surface, quad_site = chosen
         w.add_brush(tx, ty, fz, tx + TOWER_BASE, ty + TOWER_BASE, top,
                     tf=self.pal['light'], tc=self.pal['metal'], tw=self.pal['metal'])
         self.spawn_blockers.append(box)
+        self.horizontal_surfaces.append(surface)
         quad_x, quad_y, quad_z = quad_site
         self._reserve_item_origin(quad_site, "item_quad objective")
         w.add_entity("item_quad", {"origin": f"{quad_x} {quad_y} {quad_z}"})
@@ -1467,13 +1482,25 @@ class MapGenerator:
                 if top > room.ceil_z - PLAYER_H - 24:
                     top = room.ceil_z - PLAYER_H - 24
                     th = top - fz
+                if th < TOWER_H_MIN:
+                    continue
                 box = SolidBox(tx, ty, fz,
                                tx + TOWER_BASE, ty + TOWER_BASE, top)
-                if not self._structure_is_clear(box):
+                surface = HorizontalSurface(
+                    f"tower_{self.tower_count}", "tower", box
+                )
+                if (
+                    not self._structure_is_clear(box)
+                    or any(
+                        horizontal_sandwich_gap(surface, existing) is not None
+                        for existing in self.horizontal_surfaces
+                    )
+                ):
                     continue
                 w.add_brush(tx, ty, fz, tx + TOWER_BASE, ty + TOWER_BASE, top,
                             tf=self.pal['metal'], tc=self.pal['metal'], tw=self.pal['wall'])
                 self.spawn_blockers.append(box)
+                self.horizontal_surfaces.append(surface)
                 cx_t = tx + TOWER_BASE // 2
                 cy_t = ty + TOWER_BASE // 2
                 # Tower-top loot site: the heat pass decides WHAT goes here —

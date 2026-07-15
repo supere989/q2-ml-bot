@@ -317,6 +317,22 @@ declared-before-generation policy. The current alias and immutable named copy
 are byte-identical; no 71430 source, BSP, hook, claim, or analysis member is an
 input to 71431.
 
+The first and only 71431 source-freeze attempt produced complete,
+byte-identical 140-file primary and cold populations, then correctly published
+no freeze report. Ordinal 23, arena-vertical seed 71431503, contained an
+objective-tower top 80 units below an overlapping room ceiling. The generator
+had not registered objective or ordinary towers with its horizontal-surface
+model; a second ordinary tower in the same source left a 62-unit cross-room
+gap that the thin-brush source classifier could not see. The exact declaration
+and canonical failure record are archived as
+`B2-GENERATED-COHORT-71431-DECLARATION.json` and
+`B2-GENERATED-COHORT-71431-FAILURE.json`. Cohort 71431 is permanently
+non-admissible; its members may not be reused, regenerated, repaired, retried,
+or salvaged. Both tower paths now reject candidates against every registered
+horizontal surface, retain their minimum semantic height, and register every
+accepted tower for the final global challenge. A replacement requires a new
+committed declaration and entirely new seeds.
+
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
