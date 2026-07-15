@@ -90,8 +90,22 @@ def test_dynamic_mover_unknown_has_no_exact_evidence_or_oracle_calls(
     assert result["validation_version"] == 0
     summary = summarize_drop_classifications([result])
     assert summary["unknown_omitted"] == 1
-    assert summary["evidence"] == 2
+    assert summary["evidence"] == 0
+    assert summary["validation_version"] == 0
     assert summary["evidence"] != 10
+
+
+def test_empty_drop_summary_has_no_attempted_authority_evidence() -> None:
+    assert summarize_drop_classifications([]) == {
+        "classification_status": "oracle",
+        "evidence": 0,
+        "validation_version": 0,
+        "candidate_count": 0,
+        "exact_safe": 0,
+        "exact_lethal": 0,
+        "unknown_omitted": 0,
+        "severity_counts": {},
+    }
 
 
 @pytest.mark.parametrize(

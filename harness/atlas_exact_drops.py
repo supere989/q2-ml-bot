@@ -381,6 +381,12 @@ def classify_drop_trajectories(
         index for index, stage in enumerate(prepared)
         if stage["classification"] == "NeedsFallAuthority"
     ]
+    # Reaching NeedsFallAuthority means the Pmove identity and complete
+    # response were validated and an exact first landing was found.  Merely
+    # issuing an identity request is not evidence: malformed trajectories,
+    # trajectories with no landing, and mover-dependent candidates remain
+    # evidence/version zero.
+    pmove_validated_indices = set(exact_indices)
     fall_requests: list[Mapping[str, Any]] = []
     for index in exact_indices:
         fall_requests.extend([
@@ -411,10 +417,7 @@ def classify_drop_trajectories(
                 map_sha256=pmove_process.identity["map_sha256"],
             )
         is_exact = exact.get("classification") == "Exact"
-        pmove_validated = (
-            index in identities_by_index
-            and exact.get("reason") != "unsupported_dynamic_mover"
-        )
+        pmove_validated = index in pmove_validated_indices
         results.append({
             "schema": DROP_CLASSIFICATION_SCHEMA,
             "id": trajectory.identifier,
@@ -449,7 +452,7 @@ def summarize_drop_classifications(
             exact_lethal += 1
         else:
             exact_safe += 1
-    aggregate_evidence = DROP_EVIDENCE_PMOVE
+    aggregate_evidence = 0
     for item in classifications:
         evidence = item.get("evidence")
         if type(evidence) is int:
@@ -457,7 +460,9 @@ def summarize_drop_classifications(
     return {
         "classification_status": "oracle",
         "evidence": aggregate_evidence,
-        "validation_version": DROP_VALIDATION_VERSION,
+        "validation_version": (
+            DROP_VALIDATION_VERSION if aggregate_evidence else 0
+        ),
         "candidate_count": len(classifications),
         "exact_safe": exact_safe,
         "exact_lethal": exact_lethal,

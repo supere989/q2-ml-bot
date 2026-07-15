@@ -622,6 +622,7 @@ def _challenge_hazards(
         "l0_expanded_cells": sum(record["expanded_l0_cells"] for record in results),
         "types": hazard_types,
         "lethal_drop_edges": lethal_count,
+        "exact_lethal_candidates_omitted": 0,
         "guarded_drop_edges": lethal_count,
         "uncontained_drop_edges": 0,
     }

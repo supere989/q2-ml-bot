@@ -23,10 +23,13 @@ from harness.atlas_analyzer import (
     _apply_stock_drop_hazards,
     _atlas_channels,
     _analyze_hook_claims,
+    _build_navigation,
     _complete_pmove_source_set,
+    _dynamic_mover_dependency_index,
     _exact_landing_key,
     _l0_chunks,
     _movement_edge_stance,
+    _normalized_analysis_manifest,
     _process_tree_rss_bytes,
     _run_measured_process,
     _surface_candidate_scope,
@@ -157,7 +160,10 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
                 atlas_manifest.pop("sha256")
                 atlas_manifest["verification"].pop("manifest_sha256")
                 proof = manifest["performance"]["full_cold_rebuild"]
-                assert proof["artifact_count"] == 7
+                assert proof["artifact_count"] == 8
+                assert ".analysis.manifest.json" in proof[
+                    "artifact_semantic_sha256"
+                ]
                 assert (
                     0 < proof["sampled_process_tree_peak_rss_bytes"]
                     <= proof["peak_rss_limit_bytes"]
@@ -558,7 +564,13 @@ def test_pmove_source_cap_has_complete_omission_accounting_before_oracle_calls()
 def test_crouched_only_source_cannot_emit_standing_movement_edge() -> None:
     source = _test_node((0, 0, 0), standing=False, crouched=True)
     target = _test_node((1, 0, 0), standing=True, crouched=True)
-    assert _movement_edge_stance(source, target) == "crouched"
+    assert _movement_edge_stance(source, target, "crouched") == "crouched"
+
+
+def test_standing_replay_cannot_invent_crouched_target_stance() -> None:
+    source = _test_node((0, 0, 0), standing=True, crouched=True)
+    target = _test_node((1, 0, 0), standing=False, crouched=True)
+    assert _movement_edge_stance(source, target, "standing") is None
 
 
 def test_exact_edge_target_uses_first_landing_not_later_final_state() -> None:
@@ -586,14 +598,91 @@ def test_dynamic_mover_swept_path_dependence_is_detected() -> None:
     assert dependency.intersects_trajectory(response, request)
 
 
+@pytest.mark.parametrize("classname", ["func_wall", "func_object", "func_explosive"])
+def test_inline_dynamic_classes_poison_intersecting_pmove(
+    classname: str,
+) -> None:
+    entity = EntityMetadata(
+        1, classname, (("classname", classname), ("model", "*1")),
+    )
+    metadata = SimpleNamespace(
+        entities=(entity,),
+        models=(
+            SimpleNamespace(mins=(-1024.0,) * 3, maxs=(1024.0,) * 3),
+            SimpleNamespace(mins=(-8.0,) * 3, maxs=(8.0,) * 3),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 1, "model_index": 1},
+        )),
+    )
+    dependency = _dynamic_mover_dependency_index(metadata)
+    request = {"origin": [0.0, 0.0, 0.0]}
+    response = {"frames": [{
+        "origin": [0.0, 0.0, 0.0],
+        "mins": [-16.0, -16.0, -24.0],
+        "maxs": [16.0, 16.0, 32.0],
+    }]}
+    assert dependency.intersects_trajectory(response, request)
+
+
+def test_navigation_rejects_missing_dynamic_mover_authority() -> None:
+    with pytest.raises(AtlasAnalysisError, match="lacks dynamic-mover authority"):
+        _build_navigation(
+            SimpleNamespace(), None, None, Path("missing.bsp"), [],
+            (0, 0, 0), AnalyzerLimits(), mover_dependencies=None,
+        )
+
+
+def test_cold_analysis_semantics_bind_authority_accounting_and_hazards() -> None:
+    manifest = {
+        "schema": "q2-atlas-analysis-v1",
+        "status": "candidate",
+        "deterministic_rebuild": False,
+        "performance": {"primary_elapsed_milliseconds": 1},
+        "identity": {"atlas_manifest_sha256": "1" * 64},
+        "artifacts": {
+            "atlas": {"build_peak_rss_bytes": 1024},
+            "atlas_manifest": {
+                "sha256": "2" * 64,
+                "verification": {"manifest_sha256": "3" * 64},
+            },
+        },
+        "compiled_world": {
+            "pmove_source_accounting": {"selected": 7, "omitted": 3},
+            "hazards": {"unknown_omitted": 5},
+        },
+    }
+    operationally_different = json.loads(json.dumps(manifest))
+    operationally_different["performance"]["primary_elapsed_milliseconds"] = 99
+    operationally_different["artifacts"]["atlas"]["build_peak_rss_bytes"] = 4096
+    operationally_different["identity"]["atlas_manifest_sha256"] = "4" * 64
+    operationally_different["artifacts"]["atlas_manifest"]["sha256"] = "5" * 64
+    operationally_different["artifacts"]["atlas_manifest"]["verification"][
+        "manifest_sha256"
+    ] = "6" * 64
+    assert _normalized_analysis_manifest(manifest) == _normalized_analysis_manifest(
+        operationally_different
+    )
+
+    semantically_different = json.loads(json.dumps(operationally_different))
+    semantically_different["compiled_world"]["pmove_source_accounting"][
+        "omitted"
+    ] = 4
+    assert _normalized_analysis_manifest(manifest) != _normalized_analysis_manifest(
+        semantically_different
+    )
+
+
 def test_unknown_and_lethal_solid_landings_do_not_invent_void_or_uncontained() -> None:
     hazards = {
         "types": ["lava"], "lethal_drop_edges": 0,
+        "exact_lethal_candidates_omitted": 0,
         "uncontained_drop_edges": 0,
     }
     _apply_stock_drop_hazards(
         hazards, {"exact_lethal": 1, "unknown_omitted": 7},
     )
-    assert hazards["lethal_drop_edges"] == 1
+    assert hazards["lethal_drop_edges"] == 0
+    assert hazards["exact_lethal_candidates_omitted"] == 1
     assert hazards["uncontained_drop_edges"] == 0
     assert "void" not in hazards["types"]

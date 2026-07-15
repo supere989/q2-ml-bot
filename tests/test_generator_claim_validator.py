@@ -20,6 +20,7 @@ from harness.hook_claims_v2 import (
 from maps.generator import generate_map
 from tools.generator_claim_validator import (
     ClaimValidationError,
+    _canonical_semantic_analysis_manifest,
     _expected_analyzer_sha256,
     build_generator_claims,
     canonical_bytes,
@@ -244,6 +245,7 @@ def _analysis(map_path: Path, claims: dict) -> dict:
                 "l0_expanded_cells": 200,
                 "types": sorted({claim["type"] for claim in claims["hazard_claims"]}),
                 "lethal_drop_edges": len(meta["safety"]["lethal_edges"]),
+                "exact_lethal_candidates_omitted": 0,
                 "guarded_drop_edges": len(meta["safety"]["lethal_edges"]),
                 "uncontained_drop_edges": 0,
                 "classification_status": "oracle",
@@ -251,8 +253,8 @@ def _analysis(map_path: Path, claims: dict) -> dict:
                 "validation_version": 1,
                 "drop_classification": {
                     "classification_status": "oracle",
-                    "evidence": 10,
-                    "validation_version": 1,
+                    "evidence": 0,
+                    "validation_version": 0,
                     "candidate_count": 0,
                     "exact_safe": 0,
                     "exact_lethal": 0,
@@ -419,18 +421,23 @@ def _write_authority_artifacts(
         ".design-signature.json": design_path, ".routes.json": routes_path,
     }
     exact = {suffix: file_sha256(path) for suffix, path in exact_paths.items()}
+    analysis["performance"] = {
+        "cm_requests": 1, "pmove_requests": 1,
+        "primary_elapsed_milliseconds": 500,
+    }
     semantic_manifest = dict(atlas_manifest)
     semantic_manifest.pop("build_peak_rss_bytes")
     semantic = {
         ".atlas.manifest.json": sha256_bytes(json.dumps(
             semantic_manifest, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
-        ).encode("ascii"))
+        ).encode("ascii")),
+        ".analysis.manifest.json": _canonical_semantic_analysis_manifest(
+            analysis
+        ),
     }
-    analysis["performance"] = {
-        "cm_requests": 1, "pmove_requests": 1,
-        "full_cold_rebuild": {
+    analysis["performance"]["full_cold_rebuild"] = {
             "schema": "q2-atlas-full-cold-proof-v1",
-            "independent_process_launches": 1, "artifact_count": 7,
+            "independent_process_launches": 1, "artifact_count": 8,
             "artifact_sha256": exact, "artifact_semantic_sha256": semantic,
             "cold_artifact_sha256": dict(exact),
             "cold_artifact_semantic_sha256": dict(semantic),
@@ -440,7 +447,6 @@ def _write_authority_artifacts(
             "peak_rss_limit_bytes": 512 * 1024 * 1024,
             "elapsed_milliseconds": 1000,
             "timeout_limit_milliseconds": 300_000,
-        },
     }
 
 
@@ -604,6 +610,17 @@ def test_self_declared_analyzer_or_collision_authority_rejects(
                 "cold_artifact_sha256"
             ].update({".atlas.bin": "aa" * 32}),
             "independent-cold artifact hashes differ",
+        ),
+        (
+            lambda value: (
+                value["performance"]["full_cold_rebuild"][
+                    "artifact_semantic_sha256"
+                ].update({".analysis.manifest.json": "aa" * 32}),
+                value["performance"]["full_cold_rebuild"][
+                    "cold_artifact_semantic_sha256"
+                ].update({".analysis.manifest.json": "aa" * 32}),
+            ),
+            "on-disk analysis manifest semantic digest differs",
         ),
         (
             lambda value: value["counts"].update(l0_chunks=1201),

@@ -630,16 +630,34 @@ def _dynamic_mover_dependency_index(metadata: BspMetadata) -> _MoverDependencyIn
     for record in metadata.entity_catalog.brush_submodels:
         entity = entities[int(record["entity_index"])]
         classname = entity.classname.casefold()
-        if not classname.startswith("func_") or classname in {
-            "func_areaportal", "func_wall", "func_object", "func_explosive",
-        }:
+        if not classname.startswith("func_") or classname == "func_areaportal":
             continue
         model = metadata.models[int(record["model_index"])]
         cmodel = Aabb(
             tuple(value - 1.0 for value in model.mins),
             tuple(value + 1.0 for value in model.maxs),
         )  # type: ignore[arg-type]
-        if classname in {"func_door", "func_button", "func_water"}:
+        if classname in {"func_wall", "func_explosive", "func_object"}:
+            # These inline models are absent from model-0 Pmove collision even
+            # though their game edicts can be solid.  A wall can toggle and an
+            # explosive can disappear, so their exact present-pose bounds are
+            # a potential-occupancy envelope.  A func_object additionally
+            # enters toss physics; without an edict-state/gravity conduit its
+            # future occupancy law is unbounded and all traversal must remain
+            # Unknown.
+            try:
+                entity_origin = _origin(entity, default=(0.0, 0.0, 0.0))
+                angles = entity_angles(entity.properties)
+            except AtlasAnalysisError:
+                globally_unknown = True
+                continue
+            if not angles.is_exact or angles.value != (0.0, 0.0, 0.0):
+                globally_unknown = True
+                continue
+            envelopes.append(translated(cmodel, entity_origin))
+            if classname == "func_object":
+                globally_unknown = True
+        elif classname in {"func_door", "func_button", "func_water"}:
             result = sliding_mover_semantics(entity, cmodel.mins, cmodel.maxs)
             if result.is_exact and result.value is not None:
                 envelopes.append(result.value.potential_envelope.bounds)
@@ -674,8 +692,15 @@ def _dynamic_mover_dependency_index(metadata: BspMetadata) -> _MoverDependencyIn
     return _MoverDependencyIndex(tuple(envelopes), globally_unknown)
 
 
-def _origin(entity: EntityMetadata) -> tuple[float, float, float]:
-    words = entity.value("origin").split()
+def _origin(
+    entity: EntityMetadata,
+    *,
+    default: tuple[float, float, float] | None = None,
+) -> tuple[float, float, float]:
+    raw = entity.value("origin")
+    if not raw and default is not None:
+        return default
+    words = raw.split()
     if len(words) != 3:
         raise AtlasAnalysisError(f"entity {entity.index} has invalid origin")
     try:
@@ -873,10 +898,20 @@ def _complete_pmove_source_set(
     }
 
 
-def _movement_edge_stance(source: NavNode, target: NavNode) -> str | None:
-    if source.standing_clear and target.standing_clear:
+def _movement_edge_stance(
+    source: NavNode, target: NavNode, replayed_stance: str,
+) -> str | None:
+    """Admit only the stance that the exact Pmove request replayed."""
+
+    if (
+        replayed_stance == "standing"
+        and source.standing_clear and target.standing_clear
+    ):
         return "standing"
-    if source.crouched_clear and target.crouched_clear:
+    if (
+        replayed_stance == "crouched"
+        and source.crouched_clear and target.crouched_clear
+    ):
         return "crouched"
     return None
 
@@ -901,7 +936,7 @@ def _apply_stock_drop_hazards(
 ) -> None:
     """Record exact lethal landings without inventing void/uncontained facts."""
 
-    hazards["lethal_drop_edges"] = int(summary["exact_lethal"])
+    hazards["exact_lethal_candidates_omitted"] = int(summary["exact_lethal"])
 
 
 def _build_navigation(
@@ -913,7 +948,7 @@ def _build_navigation(
     origin: tuple[int, int, int],
     limits: AnalyzerLimits,
     candidate_points: Sequence[tuple[float, float, float]] = (),
-    mover_dependencies: _MoverDependencyIndex = _MoverDependencyIndex(()),
+    mover_dependencies: _MoverDependencyIndex | None = None,
     movement_accounting: dict[str, Any] | None = None,
 ) -> tuple[
     dict[tuple[int, int, int], NavNode],
@@ -921,6 +956,8 @@ def _build_navigation(
     dict[int, tuple[int, int, int]],
     list[dict[str, Any]],
 ]:
+    if mover_dependencies is None:
+        raise AtlasAnalysisError("Pmove navigation lacks dynamic-mover authority")
     seeds = [
         (entity_ordinal, point, True) for entity_ordinal, point in spawns
     ] + [
@@ -1221,8 +1258,10 @@ def _build_navigation(
                 kind = "step"
             else:
                 continue
-            stance = _movement_edge_stance(nodes[source_key], target)
-            if stance is None or (source_stance == "crouched" and stance == "standing"):
+            stance = _movement_edge_stance(
+                nodes[source_key], target, source_stance,
+            )
+            if stance is None:
                 continue
             key = (source_key, target_key, kind, stance)
             if key in edge_keys:
@@ -2591,6 +2630,36 @@ def _run_measured_process(
     )
 
 
+def _normalized_analysis_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove only measured/derived fields from a candidate analysis manifest."""
+
+    normalized = json.loads(canonical_json(value))
+    if (
+        normalized.get("schema") != SCHEMA
+        or normalized.get("status") != "candidate"
+        or normalized.get("deterministic_rebuild") is not False
+    ):
+        raise AtlasAnalysisError(
+            "cold semantic comparison requires a candidate analysis manifest"
+        )
+    try:
+        normalized["performance"].pop("primary_elapsed_milliseconds")
+        if "full_cold_rebuild" in normalized["performance"]:
+            raise AtlasAnalysisError(
+                "candidate analysis manifest already contains a cold proof"
+            )
+        normalized["artifacts"]["atlas"].pop("build_peak_rss_bytes")
+        normalized["identity"].pop("atlas_manifest_sha256")
+        atlas_manifest = normalized["artifacts"]["atlas_manifest"]
+        atlas_manifest.pop("sha256")
+        atlas_manifest["verification"].pop("manifest_sha256")
+    except (KeyError, TypeError) as error:
+        raise AtlasAnalysisError(
+            "analysis manifest lacks required semantic-comparison fields"
+        ) from error
+    return normalized
+
+
 def _full_cold_rebuild(
     bsp: Path,
     primary_dir: Path,
@@ -2609,6 +2678,7 @@ def _full_cold_rebuild(
     generator_claims: Mapping[str, Any] | None,
     generator_safety: Mapping[str, Any] | None,
     hook_materialization: Mapping[str, Any] | None,
+    primary_analysis_manifest: Mapping[str, Any],
 ) -> dict:
     """Re-run the complete analyzer in a fresh process and compare artifacts."""
     worker = Path(__file__).resolve().parents[1] / "tools/atlas_cold_worker.py"
@@ -2709,6 +2779,37 @@ def _full_cold_rebuild(
                 digests[suffix] = primary_digest
                 cold_digests[suffix] = cold_digest
 
+        analysis_suffix = ".analysis.manifest.json"
+        cold_analysis_path = cold_dir / f"{canonical_map_id}{analysis_suffix}"
+        if not cold_analysis_path.is_file():
+            raise AtlasAnalysisError(
+                "independent cold artifact missing: " + analysis_suffix
+            )
+        try:
+            cold_analysis_manifest = json.loads(cold_analysis_path.read_bytes())
+        except json.JSONDecodeError as error:
+            raise AtlasAnalysisError(
+                "independent cold analysis manifest is invalid JSON"
+            ) from error
+        primary_analysis_semantics = _normalized_analysis_manifest(
+            primary_analysis_manifest
+        )
+        cold_analysis_semantics = _normalized_analysis_manifest(
+            cold_analysis_manifest
+        )
+        if primary_analysis_semantics != cold_analysis_semantics:
+            raise AtlasAnalysisError(
+                "independent cold artifact semantic mismatch: " + analysis_suffix
+            )
+        analysis_semantic_sha256 = sha256_bytes(
+            canonical_json(primary_analysis_semantics)
+        )
+        cold_analysis_semantic_sha256 = sha256_bytes(
+            canonical_json(cold_analysis_semantics)
+        )
+        semantic_digests[analysis_suffix] = analysis_semantic_sha256
+        cold_semantic_digests[analysis_suffix] = cold_analysis_semantic_sha256
+
         verifier_summaries = []
         for directory in (primary_dir, cold_dir):
             verified = subprocess.run(
@@ -2744,7 +2845,7 @@ def _full_cold_rebuild(
     return {
         "schema": "q2-atlas-full-cold-proof-v1",
         "independent_process_launches": 1,
-        "artifact_count": len(artifact_suffixes),
+        "artifact_count": len(artifact_suffixes) + 1,
         "artifact_sha256": digests,
         "artifact_semantic_sha256": semantic_digests,
         "cold_artifact_sha256": cold_digests,
@@ -3623,6 +3724,7 @@ def analyze_map(
                             | ({"slime"} if any(node.contents & CONTENTS_SLIME for node in nodes.values()) else set())
                         ),
                         "lethal_drop_edges": 0,
+                        "exact_lethal_candidates_omitted": 0,
                         "guarded_drop_edges": 0,
                         "uncontained_drop_edges": 0,
                     },
@@ -3645,6 +3747,9 @@ def analyze_map(
                 "evidence": EVIDENCE_CM_TRACE_V1 | drop_summary["evidence"],
                 "validation_version": DROP_VALIDATION_VERSION,
                 "drop_classification": drop_summary,
+                "exact_lethal_candidates_omitted": int(
+                    drop_summary["exact_lethal"]
+                ),
             })
             if generator_claims is None:
                 _apply_stock_drop_hazards(
@@ -3994,6 +4099,7 @@ def analyze_map(
             generator_claims=generator_claims,
             generator_safety=generator_safety,
             hook_materialization=hook_materialization,
+            primary_analysis_manifest=manifest,
         )
         manifest["status"] = "passed"
         manifest["deterministic_rebuild"] = True

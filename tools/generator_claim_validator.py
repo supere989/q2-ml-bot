@@ -67,7 +67,9 @@ FULL_COLD_EXACT_SUFFIXES = (
     ".atlas.bin", ".atlas.bin.zst", ".navigation.bin.zst",
     ".visibility.bin.zst", ".design-signature.json", ".routes.json",
 )
-FULL_COLD_SEMANTIC_SUFFIXES = (".atlas.manifest.json",)
+FULL_COLD_SEMANTIC_SUFFIXES = (
+    ".atlas.manifest.json", ".analysis.manifest.json",
+)
 FULL_COLD_SUFFIXES = FULL_COLD_EXACT_SUFFIXES + FULL_COLD_SEMANTIC_SUFFIXES
 STOCK_PROVENANCE = ROOT / "docs/multires/stock-q2dm1-q2dm8.provenance.json"
 STOCK_INVENTORY = ROOT / "tests/fixtures/corpus/stock-q2dm1-q2dm8.json"
@@ -723,6 +725,41 @@ def _canonical_semantic_manifest(path: Path) -> str:
     return sha256_bytes(payload)
 
 
+def _canonical_semantic_analysis_manifest(
+    analysis: Mapping[str, Any],
+) -> str:
+    """Independently reconstruct the candidate manifest compared by cold build."""
+
+    normalized = json.loads(json.dumps(analysis, allow_nan=False))
+    if (
+        normalized.get("status") != "passed"
+        or normalized.get("deterministic_rebuild") is not True
+    ):
+        raise ClaimValidationError(
+            "final analysis manifest lacks a passing independent-cold state"
+        )
+    normalized["status"] = "candidate"
+    normalized["deterministic_rebuild"] = False
+    normalized["confidence"] = "pending-independent-cold-rebuild"
+    try:
+        performance = normalized["performance"]
+        performance.pop("full_cold_rebuild", None)
+        performance.pop("primary_elapsed_milliseconds")
+        normalized["artifacts"]["atlas"].pop("build_peak_rss_bytes")
+        normalized["identity"].pop("atlas_manifest_sha256")
+        atlas_manifest = normalized["artifacts"]["atlas_manifest"]
+        atlas_manifest.pop("sha256")
+        atlas_manifest["verification"].pop("manifest_sha256")
+    except (KeyError, TypeError) as error:
+        raise ClaimValidationError(
+            "analysis manifest lacks semantic cold-comparison fields"
+        ) from error
+    return sha256_bytes(json.dumps(
+        normalized, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+        allow_nan=False,
+    ).encode("ascii"))
+
+
 def _atlas_header(path: Path) -> tuple[int, tuple[int, int, int, int, int]]:
     with path.open("rb") as handle:
         header = handle.read(136)
@@ -783,7 +820,7 @@ def _full_cold_authority(
         if proof.get("independent_process_launches") != 1:
             failures.append("full-cold proof did not use exactly one independent launch")
         if proof.get("artifact_count") != len(FULL_COLD_SUFFIXES):
-            failures.append("full-cold proof does not cover seven artifacts")
+            failures.append("full-cold proof does not cover eight artifacts")
         if proof.get("sample_interval_milliseconds") != 10:
             failures.append("full-cold RSS sample interval is not the frozen 10 ms")
         _digest(proof.get("verifier_sha256"), "full-cold verifier")
@@ -803,9 +840,13 @@ def _full_cold_authority(
         if set(cold_exact) != set(FULL_COLD_EXACT_SUFFIXES):
             failures.append("cold exact digest set does not cover six byte-stable artifacts")
         if set(semantic) != set(FULL_COLD_SEMANTIC_SUFFIXES):
-            failures.append("primary semantic digest set does not cover Atlas manifest")
+            failures.append(
+                "primary semantic digest set does not cover Atlas and analysis manifests"
+            )
         if set(cold_semantic) != set(FULL_COLD_SEMANTIC_SUFFIXES):
-            failures.append("cold semantic digest set does not cover Atlas manifest")
+            failures.append(
+                "cold semantic digest set does not cover Atlas and analysis manifests"
+            )
         for label, values in (
             ("primary artifact", exact), ("cold artifact", cold_exact),
             ("primary semantic artifact", semantic),
@@ -859,6 +900,13 @@ def _full_cold_authority(
             atlas_manifest_path
         ):
             failures.append("on-disk Atlas manifest semantic digest differs")
+        analysis_semantic_digest = _canonical_semantic_analysis_manifest(analysis)
+        if semantic.get(".analysis.manifest.json") != analysis_semantic_digest:
+            failures.append("on-disk analysis manifest semantic digest differs")
+        if cold_semantic.get(".analysis.manifest.json") != analysis_semantic_digest:
+            failures.append(
+                "independent-cold analysis-manifest semantic digest differs"
+            )
 
         atlas_path = Path(f"{base}.atlas.bin")
         atlas_zst_path = Path(f"{base}.atlas.bin.zst")
@@ -1161,7 +1209,8 @@ def _validate_hazards(
         hazards,
         {
             "l0_raw_cells", "l0_expanded_cells", "types",
-            "lethal_drop_edges", "guarded_drop_edges",
+            "lethal_drop_edges", "exact_lethal_candidates_omitted",
+            "guarded_drop_edges",
             "uncontained_drop_edges", "classification_status", "evidence",
             "validation_version", "drop_classification",
         },
@@ -1191,10 +1240,16 @@ def _validate_hazards(
     }, "exact drop classification")
     if drop.get("classification_status") != ORACLE_STATUS:
         failures.append("drop classification is not oracle-authoritative")
-    if _integer(drop.get("evidence"), "drop evidence", minimum=0) <= 0:
-        failures.append("drop classification has no exact authority evidence")
-    if _integer(drop.get("validation_version"), "drop validation version", minimum=0) <= 0:
-        failures.append("drop classification has no validation version")
+    drop_evidence = _integer(drop.get("evidence"), "drop evidence", minimum=0)
+    drop_version = _integer(
+        drop.get("validation_version"), "drop validation version", minimum=0,
+    )
+    if drop_evidence not in {0, 2, 10}:
+        failures.append("drop classification evidence bits differ from admitted stages")
+    if (drop_evidence == 0) != (drop_version == 0):
+        failures.append("drop validation version does not match admitted evidence")
+    if drop_evidence and drop_version != 1:
+        failures.append("drop classification validation version differs")
     drop_counts = [
         _integer(drop.get(name), f"drop {name}", minimum=0)
         for name in ("exact_safe", "exact_lethal", "unknown_omitted")
@@ -1203,6 +1258,16 @@ def _validate_hazards(
         drop.get("candidate_count"), "drop candidate count", minimum=0
     ):
         failures.append("drop classification counts do not cover every candidate")
+    exact_count = drop_counts[0] + drop_counts[1]
+    if exact_count and drop_evidence != 10:
+        failures.append("exact drop classifications lack Pmove+fall evidence")
+    if not drop_evidence and exact_count:
+        failures.append("zero-evidence drop summary contains exact candidates")
+    if _integer(
+        hazards.get("exact_lethal_candidates_omitted"),
+        "exact lethal candidates omitted", minimum=0,
+    ) != drop_counts[1]:
+        failures.append("omitted exact-lethal candidate count differs from replay summary")
     severity_counts = _mapping(drop.get("severity_counts"), "drop severity counts")
     if not set(severity_counts).issubset({"none", "footstep", "short", "fall", "far"}):
         failures.append("drop severity classes differ from fall oracle")
@@ -1612,6 +1677,7 @@ def validate_stock_analysis(
     hazards = _mapping(compiled.get("hazards"), "compiled stock hazards")
     required_hazard_keys = {
         "l0_raw_cells", "l0_expanded_cells", "types", "lethal_drop_edges",
+        "exact_lethal_candidates_omitted",
         "guarded_drop_edges", "uncontained_drop_edges", "classification_status",
         "evidence", "validation_version", "drop_classification",
     }
@@ -1628,7 +1694,8 @@ def validate_stock_analysis(
             hazard_failures.append("compiled stock hazard types are not canonical")
         for name in (
             "l0_raw_cells", "l0_expanded_cells", "lethal_drop_edges",
-            "guarded_drop_edges", "uncontained_drop_edges",
+            "exact_lethal_candidates_omitted", "guarded_drop_edges",
+            "uncontained_drop_edges",
         ):
             _integer(hazards.get(name), f"compiled stock {name}", minimum=0)
         if hazards.get("classification_status") != ORACLE_STATUS:
@@ -1649,15 +1716,39 @@ def validate_stock_analysis(
         }
         if set(drop) != required_drop_keys:
             hazard_failures.append("stock drop classification contract differs")
-        elif (
-            drop.get("classification_status") != ORACLE_STATUS
-            or _integer(drop.get("evidence"), "stock drop evidence", minimum=0) <= 0
-            or _integer(
+        else:
+            stock_drop_evidence = _integer(
+                drop.get("evidence"), "stock drop evidence", minimum=0,
+            )
+            stock_drop_version = _integer(
                 drop.get("validation_version"),
                 "stock drop validation version", minimum=0,
-            ) <= 0
-        ):
-            hazard_failures.append("stock drop classification lacks oracle authority")
+            )
+            if drop.get("classification_status") != ORACLE_STATUS:
+                hazard_failures.append("stock drop classification is not oracle-authoritative")
+            if stock_drop_evidence not in {0, 2, 10}:
+                hazard_failures.append("stock drop evidence bits differ from admitted stages")
+            if (stock_drop_evidence == 0) != (stock_drop_version == 0):
+                hazard_failures.append("stock drop evidence/version relation differs")
+            if stock_drop_evidence and stock_drop_version != 1:
+                hazard_failures.append("stock drop validation version differs")
+            stock_counts = [
+                _integer(drop.get(name), f"stock drop {name}", minimum=0)
+                for name in ("exact_safe", "exact_lethal", "unknown_omitted")
+            ]
+            if sum(stock_counts) != _integer(
+                drop.get("candidate_count"), "stock drop candidate count", minimum=0,
+            ):
+                hazard_failures.append("stock drop counts do not cover every candidate")
+            if sum(stock_counts[:2]) and stock_drop_evidence != 10:
+                hazard_failures.append("stock exact drops lack Pmove+fall evidence")
+            if _integer(
+                hazards.get("exact_lethal_candidates_omitted"),
+                "stock exact lethal candidates omitted", minimum=0,
+            ) != stock_counts[1]:
+                hazard_failures.append(
+                    "stock omitted exact-lethal candidate count differs from replay summary"
+                )
     criteria = {
         "analysis_quality": quality,
         "artifact_authority": artifact_authority,

@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from harness import atlas_drop_replay as drop
+from harness import atlas_exact_drops as exact
 
 
 def digest(value: str) -> str:
@@ -386,6 +387,80 @@ class DropReplayTests(unittest.TestCase):
                 self.assertTrue(result["omit_controlled_drop_edge"])
                 self.assertNotIn("safe", result)
                 self.assertEqual([kind for kind, _ in fixture.calls], ["pmove"])
+
+    def test_batched_no_landing_has_zero_stage_evidence(self) -> None:
+        fixture = OracleFixture(
+            [state(0, -600, False), state(1, -650, False)],
+            pmove_sha256=self.pmove_sha256,
+            fall_sha256=self.fall_sha256,
+            map_sha256=self.map_sha256,
+        )
+
+        class PmoveProcess:
+            binary = self.pmove
+            requests = 0
+            max_requests = 100
+            identity = {
+                "parameters": {"gravity": 800, "airaccelerate": 0.0},
+                "tool_identity": fixture.pmove_tool_identity,
+                "physics_identity": fixture.pmove_physics_identity,
+                "map_sha256": self.map_sha256,
+            }
+
+            def call(process_self, requests):
+                process_self.requests += len(requests)
+                return [fixture._pmove_identity(request) for request in requests]
+
+        default_fall = {
+            "fall_damagemod": 1.0, "deathmatch": True, "dmflags": 0,
+        }
+
+        class FallProcess:
+            binary = self.fall
+            requests = 0
+            max_requests = 100
+            identity = {
+                "tool_identity": fixture.fall_tool_identity,
+                "physics_identity": fixture.fall_physics_identity(default_fall),
+            }
+
+            def call(process_self, requests):
+                process_self.requests += len(requests)
+                if not requests:
+                    return []
+                raise AssertionError("no-landing trajectory reached fall authority")
+
+        pmove_process = PmoveProcess()
+        fall_process = FallProcess()
+        request = fixture.manifest(
+            self.map, replay_id="batched-no-landing",
+        )["pmove"]
+        provisional = exact.DropTrajectory(
+            identifier="batched-no-landing", source_l1=(0, 0, 0),
+            direction=(1, 0), mode="ground", request=request, response={},
+        )
+        replay_manifest = exact._drop_manifest(
+            provisional, bsp=self.map, pmove_process=pmove_process,
+            fall_process=fall_process,
+        )
+        stage = drop.pmove_requests_for_drop_manifest(replay_manifest)
+        trajectory = exact.DropTrajectory(
+            identifier=provisional.identifier, source_l1=provisional.source_l1,
+            direction=provisional.direction, mode=provisional.mode,
+            request=request,
+            response=fixture._pmove_response(stage["simulate_request"]),
+        )
+        result = exact.classify_drop_trajectories(
+            [trajectory], bsp=self.map, pmove_process=pmove_process,
+            fall_process=fall_process,
+        )[0]
+        self.assertEqual(result["classification"]["reason"], "no_landing")
+        self.assertEqual(result["evidence"], 0)
+        self.assertEqual(result["validation_version"], 0)
+        self.assertEqual(fall_process.requests, 0)
+        summary = exact.summarize_drop_classifications([result])
+        self.assertEqual(summary["evidence"], 0)
+        self.assertEqual(summary["validation_version"], 0)
 
     def test_first_landing_is_authoritative_when_final_reaches_another_floor(self) -> None:
         frames = [
