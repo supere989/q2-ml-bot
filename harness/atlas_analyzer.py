@@ -52,6 +52,7 @@ from .hook_claims_v2 import (
     validation_trace_sha256,
 )
 from .atlas_b1_authority import B1AuthorityError, admit_b1_runtime_authorities
+from .atlas_source_closure import atlas_analyzer_authority_sha256
 from .atlas_exact_drops import (
     DROP_EVIDENCE_EXACT,
     DROP_VALIDATION_VERSION,
@@ -3877,32 +3878,9 @@ def analyze_map(
         },
         "routes": {"sha256": sha256_bytes(routes_bytes), "uncompressed_bytes": len(routes_bytes)},
     }
-    analyzer_inputs = [
-        Path(__file__),
-        Path(__file__).resolve().with_name("atlas_b1_authority.py"),
-        Path(__file__).resolve().with_name("atlas_drop_replay.py"),
-        Path(__file__).resolve().with_name("atlas_exact_drops.py"),
-        Path(__file__).resolve().with_name("atlas_entity_semantics.py"),
-        Path(__file__).resolve().with_name("atlas_surface_bands.py"),
-        Path(__file__).resolve().with_name("generated_claim_probes.py"),
-        Path(__file__).resolve().with_name("hook_claims_v2.py"),
-        Path(__file__).resolve().with_name("ibsp38.py"),
-        Path(__file__).resolve().parents[1] / "tools/atlas_cold_worker.py",
-        Path(__file__).resolve().parents[1] / "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md",
-        Path(__file__).resolve().parents[1] / "docs/MULTIRES-LATTICE-MAP-ATLAS-PLAN-2026-07-14.md",
-        Path(__file__).resolve().parents[1] / "docs/multires/B1-GATE.json",
-        Path(__file__).resolve().parents[1] / "docs/multires/B2-EXACT-DROP-REPLAY.md",
-    ]
-    analyzer_inputs.extend(sorted(
-        (Path(__file__).resolve().parents[1] / "crates/q2-lattice/src").rglob("*.rs")
-    ))
-    analyzer_sha256 = sha256_bytes(canonical_json([
-        {
-            "path": str(path.relative_to(Path(__file__).resolve().parents[1])),
-            "sha256": sha256_file(path),
-        }
-        for path in sorted(analyzer_inputs)
-    ]))
+    analyzer_sha256 = atlas_analyzer_authority_sha256(
+        Path(__file__).resolve().parents[1]
+    )
     limitations = sorted([
         "L0 is a reachable surface/hazard/spawn narrow band, never dense free-space fill",
         "areaportal summaries use declared map-static state only",

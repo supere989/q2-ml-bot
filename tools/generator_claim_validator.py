@@ -38,6 +38,9 @@ from harness.hook_claims_v2 import (  # noqa: E402
     validate_runtime_sidecar,
     validation_trace_sha256,
 )
+from harness.atlas_source_closure import (  # noqa: E402
+    atlas_analyzer_authority_sha256,
+)
 from tools.validate_maps import (  # noqa: E402
     POINT_RE,
     _origin,
@@ -73,16 +76,6 @@ FULL_COLD_SEMANTIC_SUFFIXES = (
 FULL_COLD_SUFFIXES = FULL_COLD_EXACT_SUFFIXES + FULL_COLD_SEMANTIC_SUFFIXES
 STOCK_PROVENANCE = ROOT / "docs/multires/stock-q2dm1-q2dm8.provenance.json"
 STOCK_INVENTORY = ROOT / "tests/fixtures/corpus/stock-q2dm1-q2dm8.json"
-ANALYZER_AUTHORITY_INPUTS = (
-    ROOT / "harness/atlas_analyzer.py",
-    ROOT / "harness/generated_claim_probes.py",
-    ROOT / "tools/atlas_cold_worker.py",
-    ROOT / "crates/q2-lattice/src/bin/q2_atlas_pack.rs",
-    ROOT / "crates/q2-lattice/src/atlas/admission.rs",
-    ROOT / "crates/q2-lattice/src/atlas/manifest.rs",
-    ROOT / "crates/q2-lattice/src/atlas/storage.rs",
-    ROOT / "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md",
-)
 CLAIM_ID_RE = re.compile(r"^[a-z0-9:_-]{1,127}$")
 HEX = frozenset("0123456789abcdef")
 
@@ -117,19 +110,9 @@ def file_sha256(path: Path) -> str:
 
 
 def _expected_analyzer_sha256() -> str:
-    """Reproduce the analyzer's source-closure authority identity."""
+    """Use the analyzer's shared source-closure authority identity."""
 
-    records = [
-        {
-            "path": str(path.relative_to(ROOT)),
-            "sha256": file_sha256(path),
-        }
-        for path in sorted(ANALYZER_AUTHORITY_INPUTS)
-    ]
-    payload = json.dumps(
-        records, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
-    ).encode("ascii")
-    return sha256_bytes(payload)
+    return atlas_analyzer_authority_sha256(ROOT)
 
 
 def _no_duplicates(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
