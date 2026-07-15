@@ -378,11 +378,19 @@ then solves the remaining heat economy around them. Route construction also
 runs in memory before the first member file is written, and route starts are
 keyed by both room and source component.
 
+The spawn-component economy fix, exact 71433501 regression, atomic route
+refusal regression, and immutable 71433 failure record were committed before
+replacement cohort `b2g26_final_71434` was declared. Its 28 entirely new
+members use seeds 71434000 through 71434603 under the same all-or-nothing,
+declared-before-generation policy. The current alias and immutable named copy
+are byte-identical; no 71433 source or later-stage member is an input to
+71434.
+
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
 replacement declaration. It must never name retired cohort 71426, 71427,
-71428, 71429, 71430, 71431, or 71432.
+71428, 71429, 71430, 71431, 71432, or 71433.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V4 hook candidates under the pinned B1 authorities. Materialization
