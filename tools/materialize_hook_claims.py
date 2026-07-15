@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize six compiled, source-bound hook-v3 claims atomically."""
+"""Materialize six compiled, source-bound hook-v4 claims atomically."""
 
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ from harness.atlas_b1_authority import (  # noqa: E402
     B1AuthorityError,
     admit_b1_runtime_authorities,
 )
-from harness.hook_claims_v3 import (  # noqa: E402
-    HookClaimsV3Error,
+from harness.hook_claims_v4 import (  # noqa: E402
+    HookClaimsV4Error,
     LANDING_POLICY,
     MATERIALIZATION_SCHEMA,
     RUNTIME_RECORD_COUNT,
@@ -48,9 +48,11 @@ from harness.hook_claims_v3 import (  # noqa: E402
     load_materialization,
     render_runtime_sidecar,
     runtime_records_sha256,
+    selected_records_sha256,
     sha256_bytes,
     validate_materialization,
     validate_runtime_sidecar,
+    validation_traces_sha256,
 )
 from harness.ibsp38 import parse_ibsp38  # noqa: E402
 
@@ -115,7 +117,7 @@ def _publish_materialization_pair(
     bsp_sha256: str,
     records: list[dict],
 ) -> None:
-    """Stage, cross-check, and fail-closed publish one V3 artifact pair.
+    """Stage, cross-check, and fail-closed publish one V4 artifact pair.
 
     The attestation is an exclusive new artifact. The runtime sidecar is the
     one source projection intentionally upgraded in place. If the second
@@ -254,6 +256,82 @@ def _measured_target_rejection(
     return None
 
 
+def _fresh_strict_replay(
+    *,
+    bsp: Path,
+    cm_oracle: Path,
+    pmove_oracle: Path,
+    hook_oracle: Path,
+    hook_physics_identity: str,
+    metadata: Any,
+    records: list[dict],
+    traces: list[dict],
+    limits: AnalyzerLimits,
+) -> dict:
+    """Reproduce the sealed V4 records in wholly fresh oracle processes."""
+
+    replayed_records: list[dict] = []
+    replayed_traces: list[dict] = []
+    with OracleProcess(cm_oracle, bsp, "cm", limits) as cm:
+        with OracleProcess(pmove_oracle, bsp, "pmove", limits) as pmove:
+            with HookOracleProcess(
+                hook_oracle, hook_physics_identity, limits,
+            ) as hook:
+                if (
+                    cm.identity["map_sha256"] != metadata.sha256
+                    or pmove.identity["map_sha256"] != metadata.sha256
+                ):
+                    raise AtlasAnalysisError(
+                        "fresh strict hook replay loaded different BSP bytes"
+                    )
+                origin = _oracle_atlas_origin(metadata, cm.identity)
+                for index, record in enumerate(records):
+                    measured, reason, trace = _replay_hook_record_exact(
+                        cm, pmove, hook, record,
+                        request_prefix=f"fresh-sealed-hook:{index:04d}",
+                        atlas_origin=origin,
+                        expected_landing=True,
+                    )
+                    if measured is None or trace is None:
+                        raise AtlasAnalysisError(
+                            f"{record['claim_id']} fresh strict hook replay rejected: {reason}"
+                        )
+                    replayed_records.append(measured)
+                    replayed_traces.append(trace)
+                if replayed_records != records or replayed_traces != traces:
+                    raise AtlasAnalysisError(
+                        "fresh strict hook replay differs from discovery seal"
+                    )
+                oracle_records = {
+                    "collision": {
+                        "executable_sha256": sha256_file(cm.binary),
+                        "tool_identity": cm.identity["tool_identity"],
+                        "physics_identity": cm.identity["physics_identity"],
+                        "requests": cm.requests,
+                    },
+                    "pmove": {
+                        "executable_sha256": sha256_file(pmove.binary),
+                        "tool_identity": pmove.identity["tool_identity"],
+                        "physics_identity": pmove.identity["physics_identity"],
+                        "requests": pmove.requests,
+                    },
+                    "hook": {
+                        "executable_sha256": sha256_file(hook.binary),
+                        "tool_identity": hook.identity["tool_identity"],
+                        "physics_identity": hook.identity["physics_identity"],
+                        "requests": hook.requests,
+                    },
+                }
+    return {
+        "schema": "q2-hook-fresh-strict-replay-v4",
+        "passed": True,
+        "record_count": len(replayed_records),
+        "selected_records_sha256": selected_records_sha256(replayed_records),
+        "validation_traces_sha256": validation_traces_sha256(replayed_traces),
+        "oracles": oracle_records,
+    }
+
+
 def materialize(
     *,
     bsp: Path,
@@ -370,6 +448,17 @@ def materialize(
                             raise AtlasAnalysisError(
                                 f"persistent {name} identity differs from retained B1 seal"
                             )
+        fresh_strict_replay = _fresh_strict_replay(
+            bsp=bsp, cm_oracle=cm_oracle, pmove_oracle=pmove_oracle,
+            hook_oracle=hook_oracle,
+            hook_physics_identity=str(hook_admission["physics_identity"]),
+            metadata=metadata, records=document["selected_records"],
+            traces=document["validation_traces"], limits=limits,
+        )
+        if fresh_strict_replay != document["fresh_strict_replay"]:
+            raise AtlasAnalysisError(
+                "existing hook materialization fresh strict replay changed"
+            )
         for name, binary, expected in (
             ("collision", cm_oracle, b1_seal.cm_executable_sha256),
             ("pmove", pmove_oracle, b1_seal.pmove_executable_sha256),
@@ -452,7 +541,7 @@ def materialize(
                         rejection_counts[target_rejection] += 1
                         continue
                     geometry = (
-                        tuple(measured["anchor_milliunits"]),
+                        tuple(measured["measured_anchor_milliunits"]),
                         tuple(measured["landing_milliunits"]),
                         measured["flags"],
                     )
@@ -501,6 +590,13 @@ def materialize(
             f"{len(selected)}/{RUNTIME_RECORD_COUNT} unique geometries; "
             f"rejections={dict(sorted(rejection_counts.items()))}"
         )
+    fresh_strict_replay = _fresh_strict_replay(
+        bsp=bsp, cm_oracle=cm_oracle, pmove_oracle=pmove_oracle,
+        hook_oracle=hook_oracle,
+        hook_physics_identity=str(hook_admission["physics_identity"]),
+        metadata=metadata, records=selected, traces=selected_traces,
+        limits=limits,
+    )
     # Refuse a time-of-check/time-of-use substitution before publishing either
     # admissible artifact. A stale attestation alone remains fail-closed.
     if (
@@ -535,15 +631,19 @@ def materialize(
         "selected_records": selected,
         "validation_traces": selected_traces,
         "oracles": oracle_records,
+        "fresh_strict_replay": fresh_strict_replay,
         "replay": {
             "analyzer": "q2-hook-claim-materializer",
-            "analyzer_version": "b2-c-v3",
+            "analyzer_version": "b2-c-v4",
             "verifier": "q2-atlas-analyzer-exact-hook-replay",
-            "verifier_version": "b2-a-v3",
+            "verifier_version": "b2-a-v4",
         },
         "request_count": sum(
             oracle_records[name]["requests"]
             for name in ("collision", "pmove", "hook", "fall")
+        ) + sum(
+            fresh_strict_replay["oracles"][name]["requests"]
+            for name in ("collision", "pmove", "hook")
         ),
     }
     document = validate_materialization(document)
@@ -588,11 +688,11 @@ def main() -> int:
             hook_parity_attestation=args.hook_parity_attestation,
             limits=AnalyzerLimits(),
         )
-    except (AtlasAnalysisError, HookClaimsV3Error, OSError, ValueError) as error:
+    except (AtlasAnalysisError, HookClaimsV4Error, OSError, ValueError) as error:
         print(f"hook materialization failed: {error}", file=sys.stderr)
         return 1
     print(json.dumps({
-        "schema": "q2-hook-materialization-result-v3",
+        "schema": "q2-hook-materialization-result-v4",
         "map": document["map"], "passed": True,
         "selected_count": len(document["selected_records"]),
         "attestation_sha256": sha256_file(args.output_attestation),

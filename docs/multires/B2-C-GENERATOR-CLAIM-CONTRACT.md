@@ -5,9 +5,9 @@ Schemas: `q2-generator-claims-v3`,
 `q2-generator-claim-validation-v1`, and
 `q2-generator-claim-campaign-v2`
 
-Nested hook authority uses only `q2-hook-claim-candidates-v3`,
-`q2-hook-claim-materialization-v3`, and `q2-hook-runtime-sidecar-v3` as defined
-by `B2-HOOK-CANDIDATES-V3.md`. Hook V2 is retired historical evidence. It is
+Nested hook authority uses only `q2-hook-claim-candidates-v4`,
+`q2-hook-claim-materialization-v4`, and `q2-hook-runtime-sidecar-v4` as defined
+by `B2-HOOK-CANDIDATES-V4.md`. Hook V2/V3 is retired historical evidence. It is
 not a fallback or alternate input to any current claim, analysis, campaign,
 bundle, or runtime path.
 
@@ -24,17 +24,17 @@ canonical compact/sorted JSON document with a trailing LF. Its SHA-256 binds:
 
 - all eight source and lattice spawn origins;
 - every lava and generated `trigger_hurt` volume;
-- every V3-materialized source, anchor, measured landing, release schedule,
-  distance, and flag;
+- every V4-materialized source, trace target, measured anchor, measured
+  landing, release schedule, distance, and flag;
 - every route segment endpoint and each route's normalized cost claim; and
 - SHA-256 identities for all six source files.
 
-The V3 hook materialization is a separate canonical record. It binds the exact
-BSP and V3 candidate metadata, the original non-admissible projection, six
+The V4 hook materialization is a separate canonical record. It binds the exact
+BSP and V4 candidate metadata, the original non-admissible projection, six
 selected records whose landing is the compiled first-grounded Pmove origin,
 ordered Pmove traces, executable/tool/physics identities, and the pinned parity
 attestation. The generator's landing hint is never an expected-cell constraint
-or compiled-world claim. A final V3 runtime hook sidecar is admissible only
+or compiled-world claim. A final V4 runtime hook sidecar is admissible only
 when its canonical header and eight-field rows match this record exactly.
 
 The legacy room graph can report zero cost between different locations in one
@@ -84,15 +84,15 @@ The generated path requires every criterion below:
 8. qrad lightdata is nonempty and at most 2 MiB, has a nonzero digest and
    lightmapped faces, the compiled spawn-region count matches the v6 lighting
    contract, and no dark spawn region remains.
-9. Hook authority is admitted under the sole V3 contract, the B1 hook physics
+9. Hook authority is admitted under the sole V4 contract, the B1 hook physics
    identity, and the exact SHA-256 of the accepted B1 hook-parity attestation.
    The analysis and
    hook materialization must independently carry that same attestation digest;
    matching physics text alone is insufficient. Every claim has exactly one
-   source-bound, spawn-reachable edge whose exact source, anchor, release ticks,
-   first grounded 1/8-unit landing, and ordered Pmove trajectory reproduce the
-   materialization independently. L0 hook corridors contain only those
-   replayed trajectory frames.
+   source-bound, spawn-reachable edge whose exact source, preserved trace
+   target, measured anchor, release ticks, first grounded 1/8-unit landing,
+   and ordered Pmove trajectory reproduce the materialization independently.
+   L0 hook corridors contain only those replayed trajectory frames.
 10. Every route segment has positive oracle/validation evidence, exact claimed
    endpoints, finite cost, and compiled connectivity. A route fails cost
    consistency only when its total differs by more than 1024 units **and** by
@@ -212,25 +212,31 @@ regenerate it behind the same declaration, repair or substitute a member,
 select a passing subset, or feed its compiled files or an older materialized
 population into campaign v2.
 
-The failed cohort's exact declaration bytes remain archived at
-`docs/multires/B2-GENERATED-COHORT-71427-DECLARATION.json`. The authoritative
-declaration now names replacement cohort `b2g26_final_71428`, with four maps
-per concrete style and exact seed blocks `71428000` through `71428603`. The V3
-implementation and fail-closed B2 evidence tools were committed and tested
-before this declaration, and root explicitly authorized the replacement. Its
-status is `declared-not-generated`: no seed has been invoked and no source,
-compiled, materialized, claims, analysis, or gate result is claimed. The
-declaration must be committed before the first generator invocation;
-declaration presence alone never claims that any member passes.
+The next replacement, `b2g26_final_71428`, passed its source freeze, compile,
+V3 hook materialization, and claims preparation, then failed exact compiled
+Atlas analysis 0/28. The failure classes were five unsupported route
+endpoints, eight routes without evidenced connectivity, eight dense L0 hurt
+fills, six lava claims without compiled hits, and one non-idempotent V3 hook
+replay. Its exact declaration and canonical failure record are archived as
+`B2-GENERATED-COHORT-71428-DECLARATION.json` and
+`B2-GENERATED-COHORT-71428-FAILURE.json`. Cohort 71428 is permanently
+non-admissible; no member or V3 artifact may be repaired, converted, retried,
+or salvaged.
+
+The sparse-hurt, exact-lava, final-endpoint, standing-component route, and V4
+hook fixes must be committed before a fresh replacement declaration. That
+declaration must use a new cohort ID and seed block and be committed before its
+first generator invocation. Declaration presence alone never claims that any
+member passes.
 
 ## Offline workflow
 
-The commands in this section use `COHORT_ID=b2g26_final_71428` from the
-committed authoritative declaration. It must never name retired cohort 71426
-or 71427.
+The commands in this section use `COHORT_ID` from the committed authoritative
+replacement declaration. It must never name retired cohort 71426, 71427, or
+71428.
 
 Generate and compile the BSP beside its source files first. Then materialize
-only the V3 hook candidates under the pinned B1 authorities. Materialization
+only the V4 hook candidates under the pinned B1 authorities. Materialization
 discovers the first grounded compiled Pmove landing without constraining it to
 the generator hint; independent analysis later requires the sealed exact
 landing and ordered trace to replay identically:
@@ -250,7 +256,7 @@ python tools/materialize_hook_claims.py \
 
 Materialization fails closed unless exactly six unique measured geometries
 replay, pass actual source/target L1 legality, and are atomically sealed with
-their V3 attestation. V2 candidates, attestations, and runtime sidecars are
+their V4 attestation. V2/V3 candidates, attestations, and runtime sidecars are
 rejected rather than converted or retried. The example paths below
 deliberately keep every stage and report separate. Once
 all 28 declared compiled maps have canonical attestations and admissible

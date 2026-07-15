@@ -64,7 +64,8 @@ def _claims_fixture(tmp_path: Path) -> tuple[Path, dict]:
             {
                 "claim_id": f"hook:{index:04d}:candidate:0000",
                 "source_milliunits": [index * 32_000, 0, 24_000],
-                "anchor_milliunits": [index * 32_000 + 16_000, 0, 200_000],
+                "trace_target_milliunits": [index * 32_000 + 16_000, 0, 200_000],
+                "measured_anchor_milliunits": [index * 32_000 + 16_000, 0, 200_000],
                 "landing_milliunits": [index * 32_000 + 16_000, 0, 24_000],
                 "release_after_ticks": 2,
                 "distance_milliunits": round((16_000 ** 2 + 154_000 ** 2) ** 0.5),
@@ -98,6 +99,7 @@ def _claims_fixture(tmp_path: Path) -> tuple[Path, dict]:
 
 class _Entity:
     classname = "trigger_hurt"
+    index = 1
 
     def __init__(self, *, origin: str = "", spawnflags: str = "") -> None:
         self.origin = origin
@@ -220,6 +222,10 @@ def _safety_fixture() -> dict:
     }
 
 
+def _l0_semantics_fixture() -> dict[str, int]:
+    return {"hurt:1:raw": 144, "hurt:1:expanded": 384}
+
+
 def test_strict_load_provenance_and_non_hook_challenges(tmp_path: Path) -> None:
     path, expected = _claims_fixture(tmp_path)
     claims, digest = load_generator_claims(path, "generated_fixture")
@@ -234,7 +240,7 @@ def test_strict_load_provenance_and_non_hook_challenges(tmp_path: Path) -> None:
     cm = _FakeCm()
     result = analyze_non_hook_claims(
         cm, metadata, nodes, edges, (0, 0, 0), spawns, claims,
-        _safety_fixture(),
+        _safety_fixture(), _l0_semantics_fixture(),
     )
     assert [item["status"] for item in result["hazard_claims"]] == ["oracle", "oracle"]
     assert [item["cost_q8"] for item in result["route_claims"]] == [4096, 4096]
@@ -262,7 +268,7 @@ def test_lethal_floor_uses_a_bounded_alternate_segment_witness(tmp_path: Path) -
     cm = _FakeCm(blocked_inward_samples={0})
     result = analyze_non_hook_claims(
         cm, metadata, nodes, edges, (0, 0, 0), spawns, claims,
-        _safety_fixture(),
+        _safety_fixture(), _l0_semantics_fixture(),
     )
     assert result["hazards"]["lethal_drop_edges"] == 1
     requests = {request["id"]: request for request in cm.requests}
@@ -296,6 +302,7 @@ def test_lethal_probe_preserves_world_units_and_side_orientation(
     cm = _FakeCm()
     analyze_non_hook_claims(
         cm, metadata, nodes, edges, (0, 0, 0), spawns, claims, safety,
+        _l0_semantics_fixture(),
     )
     requests = {request["id"]: request for request in cm.requests}
     assert requests["lethal-inward:0:0"]["start"] == inward
@@ -311,7 +318,7 @@ def test_lethal_floor_rejects_when_every_segment_witness_is_blocked(
         analyze_non_hook_claims(
             _FakeCm(blocked_inward_samples=set(range(11))),
             metadata, nodes, edges, (0, 0, 0), spawns, claims,
-            _safety_fixture(),
+            _safety_fixture(), _l0_semantics_fixture(),
         )
 
 
@@ -331,6 +338,21 @@ def test_trigger_hurt_runtime_bounds_bind_entity_origin() -> None:
     assert standing == [97_000, -27_000, -31_000, 199_000, 75_000, 47_000]
 
 
+def test_hurt_claim_rejects_missing_retained_sparse_atlas_evidence(
+    tmp_path: Path,
+) -> None:
+    _, claims = _claims_fixture(tmp_path)
+    metadata, nodes, edges, spawns = _compiled_fixture()
+    with pytest.raises(
+        GeneratedClaimProbeError,
+        match="no retained sparse Atlas hurt evidence",
+    ):
+        analyze_non_hook_claims(
+            _FakeCm(), metadata, nodes, edges, (0, 0, 0), spawns, claims,
+            _safety_fixture(), {},
+        )
+
+
 @pytest.mark.parametrize("spawnflags", ["1", "2", "3"])
 def test_stateful_trigger_hurt_is_potential_unknown(
     tmp_path: Path, spawnflags: str,
@@ -340,7 +362,7 @@ def test_stateful_trigger_hurt_is_potential_unknown(
     metadata.entities[1] = _Entity(spawnflags=spawnflags)
     result = analyze_non_hook_claims(
         _FakeCm(), metadata, nodes, edges, (0, 0, 0), spawns, claims,
-        _safety_fixture(),
+        _safety_fixture(), _l0_semantics_fixture(),
     )
     hurt = result["hazard_claims"][0]
     assert hurt["status"] == "unknown"
@@ -365,12 +387,12 @@ def test_claims_and_probes_fail_closed(tmp_path: Path) -> None:
     with pytest.raises(GeneratedClaimProbeError, match="no compiled lava hit"):
         analyze_non_hook_claims(
             _FakeCm(lava=False), metadata, nodes, edges, (0, 0, 0), spawns, claims,
-            _safety_fixture(),
+            _safety_fixture(), _l0_semantics_fixture(),
         )
     with pytest.raises(GeneratedClaimProbeError, match="no evidenced Atlas route"):
         analyze_non_hook_claims(
             _FakeCm(), metadata, nodes, edges[:1], (0, 0, 0), spawns, claims,
-            _safety_fixture(),
+            _safety_fixture(), _l0_semantics_fixture(),
         )
 
     unlit = deepcopy(metadata)
@@ -378,7 +400,7 @@ def test_claims_and_probes_fail_closed(tmp_path: Path) -> None:
     with pytest.raises(GeneratedClaimProbeError, match="no admitted qrad lighting"):
         analyze_non_hook_claims(
             _FakeCm(), unlit, nodes, edges, (0, 0, 0), spawns, claims,
-            _safety_fixture(),
+            _safety_fixture(), _l0_semantics_fixture(),
         )
 
 
@@ -389,7 +411,7 @@ def test_low_intensity_light_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(GeneratedClaimProbeError, match="no qualified v6 light"):
         analyze_non_hook_claims(
             _FakeCm(), metadata, nodes, edges, (0, 0, 0), spawns, claims,
-            _safety_fixture(),
+            _safety_fixture(), _l0_semantics_fixture(),
         )
 
 
@@ -399,7 +421,7 @@ def test_far_light_cannot_clear_spawn_regions(tmp_path: Path) -> None:
     metadata.entities[-1] = _LightEntity(origin="5000 5000 128", radius="448")
     result = analyze_non_hook_claims(
         _FakeCm(), metadata, nodes, edges, (0, 0, 0), spawns, claims,
-        _safety_fixture(),
+        _safety_fixture(), _l0_semantics_fixture(),
     )
     assert result["lighting"]["dark_spawn_regions"] == 1
 
@@ -412,4 +434,5 @@ def test_removed_lethal_guard_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(GeneratedClaimProbeError, match="no exact guard proposal"):
         analyze_non_hook_claims(
             _FakeCm(), metadata, nodes, edges, (0, 0, 0), spawns, claims, safety,
+            _l0_semantics_fixture(),
         )

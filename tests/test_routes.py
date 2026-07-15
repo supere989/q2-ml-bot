@@ -19,19 +19,26 @@ def connection(left: int, right: int) -> SimpleNamespace:
     return SimpleNamespace(a=left, b=right, kind="hall")
 
 
+def blocker(x0: int, y0: int, z0: int,
+            x1: int, y1: int, z1: int) -> SimpleNamespace:
+    return SimpleNamespace(x0=x0, y0=y0, z0=z0, x1=x1, y1=y1, z1=z1)
+
+
 def test_unreachable_high_value_item_does_not_suppress_reachable_routes() -> None:
     graph = build_route_graph(
-        rooms=[room(0), room(200), room(1000)],
+        rooms=[room(0, width=128, depth=128),
+               room(64, width=160, depth=128), room(1000)],
         connections=[connection(0, 1)],
         items=[
             ("item_health", 20, 20, 24),
             ("item_armor_combat", 40, 20, 24),
-            ("weapon_supershotgun", 220, 20, 24),
-            ("weapon_rocketlauncher", 240, 20, 24),
+            ("weapon_supershotgun", 140, 20, 24),
+            ("weapon_rocketlauncher", 160, 20, 24),
             ("item_quad", 1020, 20, 24),
         ],
-        spawns=[(30, 30, 24)],
+        spawns=[(50, 50, 24)],
         lava_pools=[],
+        standing_blockers=[],
     )
 
     assert graph["routes"]
@@ -49,6 +56,7 @@ def test_outside_point_remains_unassigned() -> None:
         items=[("item_health", 900, 300, 24)],
         spawns=[],
         lava_pools=[],
+        standing_blockers=[],
     )
 
     assert graph["nodes"][0]["room"] == -1
@@ -64,6 +72,7 @@ def test_unassigned_spawn_does_not_fallback_to_room_zero() -> None:
         ],
         spawns=[(50, 50, 285)],
         lava_pools=[],
+        standing_blockers=[],
     )
 
     assert graph["nodes"][-1]["room"] == -1
@@ -84,8 +93,9 @@ def test_elevated_same_xy_item_never_enters_routes() -> None:
         rooms=[room(0)],
         connections=[],
         items=items,
-        spawns=[(10, 10, 24)],
+        spawns=[(50, 50, 24)],
         lava_pools=[],
+        standing_blockers=[],
     )
 
     assert graph["nodes"][4]["room"] == -1
@@ -111,6 +121,7 @@ def test_overlapping_rooms_choose_closest_compatible_floor_band() -> None:
         ],
         spawns=[],
         lava_pools=[],
+        standing_blockers=[],
     )
 
     assert [node["room"] for node in graph["nodes"]] == [0, 1, 0, -1]
@@ -118,16 +129,17 @@ def test_overlapping_rooms_choose_closest_compatible_floor_band() -> None:
 
 def test_same_room_loop_uses_local_3d_distance_deterministically() -> None:
     kwargs = {
-        "rooms": [room(0)],
+        "rooms": [room(0, width=128, depth=128)],
         "connections": [],
         "items": [
-            ("weapon_supershotgun", 20, 10, 24),
-            ("weapon_rocketlauncher", 80, 10, 24),
-            ("item_health", 20, 80, 24),
-            ("item_armor_combat", 80, 80, 24),
+            ("weapon_supershotgun", 36, 26, 24),
+            ("weapon_rocketlauncher", 96, 26, 24),
+            ("item_health", 36, 96, 24),
+            ("item_armor_combat", 96, 96, 24),
         ],
-        "spawns": [(10, 10, 24)],
+        "spawns": [(26, 26, 24)],
         "lava_pools": [],
+        "standing_blockers": [],
     }
 
     first = build_route_graph(**kwargs)
@@ -140,6 +152,53 @@ def test_same_room_loop_uses_local_3d_distance_deterministically() -> None:
     assert first == second
 
 
+def test_final_wall_splits_one_room_into_distinct_route_components() -> None:
+    graph = build_route_graph(
+        rooms=[room(0, width=256, depth=160)],
+        connections=[],
+        items=[
+            ("weapon_supershotgun", 48, 40, 24),
+            ("weapon_rocketlauncher", 80, 40, 24),
+            ("item_health", 48, 120, 24),
+            ("item_armor_combat", 80, 120, 24),
+            # Same source room, but physically isolated behind the final wall.
+            ("item_quad", 208, 80, 24),
+        ],
+        spawns=[(48, 80, 24)],
+        lava_pools=[],
+        standing_blockers=[blocker(120, 0, 0, 136, 160, 96)],
+    )
+
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    assert [route["archetype"] for route in graph["routes"]] == ROUTE_ARCHETYPES
+    assert all(
+        all(nodes[node_id]["x"] < 120 for node_id in route["node_ids"])
+        for route in graph["routes"]
+    )
+
+
+def test_metadata_connection_never_bridges_disjoint_floor_components() -> None:
+    with pytest.raises(RouteGraphError, match="two reachable offense items"):
+        build_route_graph(
+            rooms=[
+                room(0, width=128, depth=128),
+                room(256, width=128, depth=128),
+            ],
+            # This row remains useful diagnostic metadata, but emits no floor
+            # or standing-hull witness and therefore grants no reachability.
+            connections=[connection(0, 1)],
+            items=[
+                ("weapon_supershotgun", 48, 48, 24),
+                ("weapon_rocketlauncher", 304, 48, 24),
+                ("item_health", 48, 80, 24),
+                ("item_armor_combat", 304, 80, 24),
+            ],
+            spawns=[(80, 80, 24)],
+            lava_pools=[],
+            standing_blockers=[],
+        )
+
+
 def test_route_graph_rejects_stacked_items_and_incomplete_archetypes() -> None:
     with pytest.raises(RouteGraphError, match="stacked item origins"):
         build_route_graph(
@@ -148,7 +207,7 @@ def test_route_graph_rejects_stacked_items_and_incomplete_archetypes() -> None:
                 ("weapon_supershotgun", 20, 20, 24),
                 ("weapon_rocketlauncher", 20, 20, 24),
             ],
-            spawns=[(10, 10, 24)], lava_pools=[],
+            spawns=[(50, 50, 24)], lava_pools=[], standing_blockers=[],
         )
 
     with pytest.raises(RouteGraphError, match="two reachable offense items"):
@@ -159,25 +218,27 @@ def test_route_graph_rejects_stacked_items_and_incomplete_archetypes() -> None:
                 ("item_health", 40, 20, 24),
                 ("item_armor_combat", 60, 20, 24),
             ],
-            spawns=[(10, 10, 24)], lava_pools=[],
+            spawns=[(50, 50, 24)], lava_pools=[], standing_blockers=[],
         )
 
 
 def test_mandatory_route_repairs_isolated_rotated_start() -> None:
     graph = build_route_graph(
-        rooms=[room(0), room(200), room(1000)],
+        rooms=[room(0, width=128, depth=128),
+               room(64, width=192, depth=128), room(1000, width=128, depth=128)],
         connections=[connection(0, 1)],
         items=[
-            ("weapon_supershotgun", 20, 20, 24),
-            ("weapon_rocketlauncher", 220, 20, 24),
-            ("item_health", 40, 20, 24),
-            ("item_armor_combat", 240, 20, 24),
+            ("weapon_supershotgun", 32, 32, 24),
+            ("weapon_rocketlauncher", 160, 32, 24),
+            ("item_health", 64, 64, 24),
+            ("item_armor_combat", 192, 64, 24),
             ("item_adrenaline", 1020, 20, 24),
         ],
         # Control initially rotates to isolated room 2.  It must choose a
         # connected source component rather than publishing no route.
-        spawns=[(10, 10, 24), (210, 10, 24), (1010, 10, 24)],
+        spawns=[(48, 96, 24), (144, 96, 24), (1050, 50, 24)],
         lava_pools=[],
+        standing_blockers=[],
     )
 
     assert [route["archetype"] for route in graph["routes"]] == ROUTE_ARCHETYPES
@@ -190,10 +251,12 @@ def test_mandatory_route_repairs_isolated_rotated_start() -> None:
     assert {nodes[node_id]["room"] for node_id in control["node_ids"]} <= {0, 1}
 
 
-def test_route_distance_matches_endpoints_and_risk_follows_closed_dijkstra() -> None:
-    lava = SimpleNamespace(x0=140, x1=160, y0=40, y1=60, z0=14, z1=34)
+def test_route_distance_and_risk_use_connected_endpoint_lower_bound() -> None:
+    lava = blocker(1020, 40, 14, 1040, 60, 34)
     graph = build_route_graph(
-        rooms=[room(0), room(200), room(2000)],
+        rooms=[room(0, width=800, depth=128),
+               room(700, width=800, depth=128),
+               room(1400, width=800, depth=128)],
         connections=[connection(0, 1), connection(1, 2)],
         items=[
             ("weapon_rocketlauncher", 2020, 50, 24),
@@ -201,16 +264,16 @@ def test_route_distance_matches_endpoints_and_risk_follows_closed_dijkstra() -> 
             ("item_health", 2020, 80, 24),
             ("item_armor_combat", 2080, 80, 24),
         ],
-        spawns=[(10, 50, 24)],
+        spawns=[(50, 50, 24)],
         lava_pools=[lava],
+        standing_blockers=[],
     )
 
     offense = next(route for route in graph["routes"]
                    if route["archetype"] == "offense")
-    # The published cost is the exact endpoint-loop geometry (the room-centre
-    # path stays internal), while both opening and closing legs traverse the
-    # predecessor path and contribute nonzero lava exposure.
-    assert offense["dist"] == 4140
+    # Published cost remains exact endpoint-loop geometry. The source component
+    # only filters impossible legs; it is not a compiled route/cost authority.
+    assert offense["dist"] == 4060
     assert 0.0 < offense["risk"] < 1.0
 
 

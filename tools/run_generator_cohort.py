@@ -454,11 +454,11 @@ def _validate_metadata(path: Path, row: Mapping[str, Any]) -> dict[str, Any]:
                 f"{row['map']} metadata {key} differs from declaration"
             )
     hooks = _mapping(
-        meta.get("hook_claim_candidates_v3"),
+        meta.get("hook_claim_candidates_v4"),
         f"{row['map']} hook candidate metadata",
     )
     if (
-        hooks.get("schema") != "q2-hook-claim-candidates-v3"
+        hooks.get("schema") != "q2-hook-claim-candidates-v4"
         or hooks.get("status") != "unproven"
         or hooks.get("bundle_admissible") is not False
         or not isinstance(hooks.get("records"), list)

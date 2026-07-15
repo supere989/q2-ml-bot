@@ -35,9 +35,9 @@ from harness.atlas_source_closure import (  # noqa: E402
     atlas_analyzer_authority_inputs,
     atlas_analyzer_authority_sha256,
 )
-from harness.hook_claims_v3 import (  # noqa: E402
-    HookClaimsV3Error,
-    validate_materialization as validate_hook_materialization_v3,
+from harness.hook_claims_v4 import (  # noqa: E402
+    HookClaimsV4Error,
+    validate_materialization as validate_hook_materialization_v4,
 )
 from tools.generator_claim_validator import (  # noqa: E402
     ClaimValidationError,
@@ -582,9 +582,9 @@ def _validate_materialized(
     for row in declaration["maps"]:
         path = paths.materialized_dir / f"{row['map']}.hook-materialization.json"
         try:
-            value = validate_hook_materialization_v3(dict(_mapping(_load_json(path), "hook materialization")))
-        except HookClaimsV3Error as exc:
-            raise B2GateError(f"invalid V3 materialization for {row['map']}: {exc}") from exc
+            value = validate_hook_materialization_v4(dict(_mapping(_load_json(path), "hook materialization")))
+        except HookClaimsV4Error as exc:
+            raise B2GateError(f"invalid V4 materialization for {row['map']}: {exc}") from exc
         _require(value["map"] == row["map"], "materialization map differs")
         _require(len(value["selected_records"]) == 6, "materialization does not seal exactly six hooks")
         attestations.append(_file_record(path)["sha256"])
@@ -1757,7 +1757,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except (
         B2GateError, GeneratorCohortError, ClaimValidationError,
-        HookClaimsV3Error, OSError, subprocess.CalledProcessError,
+        HookClaimsV4Error, OSError, subprocess.CalledProcessError,
     ) as exc:
         print(f"B2 gate refused: {exc}", file=sys.stderr)
         return 1

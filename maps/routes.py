@@ -17,9 +17,9 @@ node respawn periods to predict availability; the policy consumes route value
 is that substrate.
 """
 from __future__ import annotations
-import heapq
 import math
-from typing import Dict, List, Tuple
+from collections import defaultdict
+from typing import Dict, List, Mapping, Sequence, Tuple
 
 # Item respawn periods (game-seconds). Quake-2 DM defaults; runes use Lithium
 # spawn timing and are marked separately (period 0 = event-driven, not fixed).
@@ -51,6 +51,10 @@ PLAYER_ORIGIN_FLOOR_OFFSET = 24.0
 # admissible band below Quake's 18-unit stair step so a distinct ledge or
 # platform cannot inherit the room below through an XY-only match.
 ROOM_FLOOR_BAND_TOLERANCE = 8.0
+SOURCE_NAV_CELL = 16
+PLAYER_XY_HALF = 16
+PLAYER_STANDING_HEIGHT = 56
+MAX_SOURCE_NAV_CELLS = 250_000
 
 
 class RouteGraphError(ValueError):
@@ -80,8 +84,224 @@ def _dist(a, b) -> float:
     return math.dist(a, b)
 
 
-def build_route_graph(rooms, connections, items, spawns, lava_pools,
-                      hook_required_edges=None) -> dict:
+def _solid_bounds(value, label: str) -> Tuple[float, float, float, float, float, float]:
+    """Return one ordered finite source-solid AABB."""
+    try:
+        bounds = tuple(float(getattr(value, axis)) for axis in (
+            "x0", "y0", "z0", "x1", "y1", "z1",
+        ))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RouteGraphError(f"{label} has invalid bounds") from exc
+    if (
+        not all(math.isfinite(number) for number in bounds)
+        or any(bounds[axis] >= bounds[axis + 3] for axis in range(3))
+    ):
+        raise RouteGraphError(f"{label} has unordered/non-finite bounds")
+    return bounds  # type: ignore[return-value]
+
+
+def _standing_components(
+    rooms: Sequence[object],
+    nodes: Sequence[Mapping[str, object]],
+    standing_blockers: Sequence[object],
+    lava_pools: Sequence[object],
+) -> Dict[int, int]:
+    """Build conservative final-source standing components for route proposals.
+
+    This is deliberately not collision authority.  It rejects proposals that
+    are already contradicted by the generator's final room floors, blockers, or
+    lava, while the compiled Atlas independently challenges every surviving
+    endpoint and segment.  Room IDs and declared connection records never join
+    components.
+    """
+    room_records = []
+    rooms_by_floor: Dict[float, List[Tuple[float, float, float, float, float]]] = (
+        defaultdict(list)
+    )
+    for index, room in enumerate(rooms):
+        try:
+            x0 = float(getattr(room, "wx"))
+            y0 = float(getattr(room, "wy"))
+            x1 = x0 + float(getattr(room, "w"))
+            y1 = y0 + float(getattr(room, "d"))
+            floor_z = float(getattr(room, "floor_z"))
+            ceiling_z = float(getattr(room, "ceil_z", math.inf))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RouteGraphError(f"room {index} has invalid source geometry") from exc
+        if (
+            not all(math.isfinite(value) for value in (x0, y0, x1, y1, floor_z))
+            or x0 >= x1 or y0 >= y1
+            or ceiling_z < floor_z + PLAYER_STANDING_HEIGHT
+        ):
+            raise RouteGraphError(f"room {index} cannot support a standing component")
+        record = (x0, y0, x1, y1, ceiling_z)
+        room_records.append((floor_z, *record))
+        rooms_by_floor[floor_z].append(record)
+
+    obstacles = [
+        *(
+            _solid_bounds(value, f"standing blocker {index}")
+            for index, value in enumerate(standing_blockers)
+        ),
+        *(
+            _solid_bounds(value, f"lava pool {index}")
+            for index, value in enumerate(lava_pools)
+        ),
+    ]
+
+    def supported(
+        floor_z: float, x0: float, y0: float, x1: float, y1: float,
+    ) -> bool:
+        """Require the complete swept hull footprint on one authored floor."""
+        return any(
+            room_x0 <= x0 and x1 <= room_x1
+            and room_y0 <= y0 and y1 <= room_y1
+            and floor_z + PLAYER_STANDING_HEIGHT <= ceiling_z
+            for room_x0, room_y0, room_x1, room_y1, ceiling_z
+            in rooms_by_floor.get(floor_z, ())
+        )
+
+    def clear(
+        floor_z: float, x0: float, y0: float, x1: float, y1: float,
+    ) -> bool:
+        if not supported(floor_z, x0, y0, x1, y1):
+            return False
+        z0 = floor_z
+        z1 = floor_z + PLAYER_STANDING_HEIGHT
+        return not any(
+            obstacle_x1 > x0 and obstacle_x0 < x1
+            and obstacle_y1 > y0 and obstacle_y0 < y1
+            and obstacle_z1 > z0 and obstacle_z0 < z1
+            for obstacle_x0, obstacle_y0, obstacle_z0,
+            obstacle_x1, obstacle_y1, obstacle_z1 in obstacles
+        )
+
+    cells = set()
+    half = PLAYER_XY_HALF
+    center_offset = SOURCE_NAV_CELL / 2.0
+    for floor_z, x0, y0, x1, y1, _ceiling_z in room_records:
+        first_x = math.ceil((x0 + half - center_offset) / SOURCE_NAV_CELL)
+        last_x = math.floor((x1 - half - center_offset) / SOURCE_NAV_CELL)
+        first_y = math.ceil((y0 + half - center_offset) / SOURCE_NAV_CELL)
+        last_y = math.floor((y1 - half - center_offset) / SOURCE_NAV_CELL)
+        for cell_x in range(first_x, last_x + 1):
+            center_x = cell_x * SOURCE_NAV_CELL + center_offset
+            for cell_y in range(first_y, last_y + 1):
+                key = (cell_x, cell_y, floor_z)
+                if key in cells:
+                    continue
+                center_y = cell_y * SOURCE_NAV_CELL + center_offset
+                if clear(
+                    floor_z,
+                    center_x - half, center_y - half,
+                    center_x + half, center_y + half,
+                ):
+                    cells.add(key)
+                    if len(cells) > MAX_SOURCE_NAV_CELLS:
+                        raise RouteGraphError(
+                            "final-source standing component exceeds cell budget"
+                        )
+
+    ordered_cells = sorted(cells, key=lambda key: (key[2], key[1], key[0]))
+    cell_vertex = {key: index for index, key in enumerate(ordered_cells)}
+    parent = list(range(len(ordered_cells) + len(nodes)))
+
+    def find(vertex: int) -> int:
+        while parent[vertex] != vertex:
+            parent[vertex] = parent[parent[vertex]]
+            vertex = parent[vertex]
+        return vertex
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return
+        # Root choice is deterministic and independent of insertion order.
+        if left_root > right_root:
+            left_root, right_root = right_root, left_root
+        parent[right_root] = left_root
+
+    for key in ordered_cells:
+        source = cell_vertex[key]
+        for delta_x, delta_y in ((1, 0), (0, 1)):
+            neighbor = (key[0] + delta_x, key[1] + delta_y, key[2])
+            target = cell_vertex.get(neighbor)
+            if target is None:
+                continue
+            source_x = key[0] * SOURCE_NAV_CELL + center_offset
+            source_y = key[1] * SOURCE_NAV_CELL + center_offset
+            target_x = neighbor[0] * SOURCE_NAV_CELL + center_offset
+            target_y = neighbor[1] * SOURCE_NAV_CELL + center_offset
+            if clear(
+                key[2],
+                min(source_x, target_x) - half,
+                min(source_y, target_y) - half,
+                max(source_x, target_x) + half,
+                max(source_y, target_y) + half,
+            ):
+                union(source, target)
+
+    endpoint_offset = len(ordered_cells)
+    admitted_endpoints = set()
+    for node_index, node in enumerate(nodes):
+        room_index = node.get("room")
+        if (
+            isinstance(room_index, bool) or not isinstance(room_index, int)
+            or room_index < 0 or room_index >= len(room_records)
+        ):
+            continue
+        floor_z = room_records[room_index][0]
+        try:
+            point_x = float(node["x"])
+            point_y = float(node["y"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RouteGraphError(f"route node {node_index} has invalid origin") from exc
+        if not clear(
+            floor_z,
+            point_x - half, point_y - half,
+            point_x + half, point_y + half,
+        ):
+            continue
+        endpoint = endpoint_offset + node_index
+        for cell_x in range(
+            math.floor(point_x / SOURCE_NAV_CELL) - 1,
+            math.floor(point_x / SOURCE_NAV_CELL) + 2,
+        ):
+            center_x = cell_x * SOURCE_NAV_CELL + center_offset
+            for cell_y in range(
+                math.floor(point_y / SOURCE_NAV_CELL) - 1,
+                math.floor(point_y / SOURCE_NAV_CELL) + 2,
+            ):
+                key = (cell_x, cell_y, floor_z)
+                target = cell_vertex.get(key)
+                if target is None:
+                    continue
+                center_y = cell_y * SOURCE_NAV_CELL + center_offset
+                if clear(
+                    floor_z,
+                    min(point_x, center_x) - half,
+                    min(point_y, center_y) - half,
+                    max(point_x, center_x) + half,
+                    max(point_y, center_y) + half,
+                ):
+                    union(endpoint, target)
+                    admitted_endpoints.add(node_index)
+
+    component_roots = sorted({
+        find(endpoint_offset + index) for index in admitted_endpoints
+    })
+    component_ids = {root: index for index, root in enumerate(component_roots)}
+    return {
+        index: component_ids[find(endpoint_offset + index)]
+        for index in sorted(admitted_endpoints)
+    }
+
+
+def build_route_graph(
+    rooms, connections, items, spawns, lava_pools, *, standing_blockers,
+    hook_required_edges=None,
+) -> dict:
     """items: list of (cls, x, y, z). spawns: list of (x, y, z)."""
     item_origins = [(int(x), int(y), int(z)) for _cls, x, y, z in items]
     if len(item_origins) != len(set(item_origins)):
@@ -122,20 +342,16 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
         d = min(_dist(mid, lc) for lc in lava_c)
         return round(max(0.0, 1.0 - d / 768.0), 3)   # within ~768u of lava = risky
 
-    # --- room adjacency graph (undirected) ---
-    adj: Dict[int, List[Tuple[int, float, float]]] = {i: [] for i in range(len(rooms))}
+    # Connection rows remain source metadata for diagnostics and risk priors.
+    # They are not reachability evidence and never join standing components.
     edges = []
     for c in connections:
         if not (0 <= c.a < len(rc) and 0 <= c.b < len(rc)):
             continue
         dist = _dist(rc[c.a], rc[c.b])
         risk = edge_risk(rc[c.a], rc[c.b])
-        adj[c.a].append((c.b, dist, risk))
-        adj[c.b].append((c.a, dist, risk))
         edges.append({"a": c.a, "b": c.b, "kind": c.kind,
                       "dist": round(dist), "risk": risk})
-    for neighbors in adj.values():
-        neighbors.sort(key=lambda value: (value[0], value[1], value[2]))
     edges.sort(key=lambda value: (
         value["a"], value["b"], value["kind"], value["dist"], value["risk"]
     ))
@@ -157,70 +373,23 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
                       "x": int(x), "y": int(y), "z": int(z),
                       "room": room_of(x, y, z)})
 
-    # --- all-pairs deterministic paths over rooms (Dijkstra; rooms are few) ---
-    def dijkstra(src):
-        # The search minimizes risk-weighted distance and retains the exact
-        # room-centre predecessor path for selection and risk exposure.  Those
-        # hidden centres are not part of the published endpoint cost claim.
-        best = {
-            src: (0.0, 0.0, (src,), 0.0, ()),
-        }
-        pq = [(0.0, 0.0, (src,), src, 0.0, ())]
-        while pq:
-            weighted, physical, path, u, exposure, path_edges = heapq.heappop(pq)
-            current = best.get(u)
-            if current is None or (weighted, physical, path) != current[:3]:
-                continue
-            for v, w, risk in adj[u]:
-                candidate = (
-                    weighted + w * (1.0 + risk),
-                    physical + w,
-                    path + (v,),
-                    exposure + w * risk,
-                    path_edges + ((u, v, w, risk),),
-                )
-                previous = best.get(v)
-                if previous is None or candidate[:3] < previous[:3]:
-                    best[v] = candidate
-                    heapq.heappush(
-                        pq,
-                        (
-                            candidate[0], candidate[1], candidate[2], v,
-                            candidate[3], candidate[4],
-                        ),
-                    )
-        return best
-
-    room_paths = {i: dijkstra(i) for i in range(len(rooms))}
+    components = _standing_components(
+        rooms, nodes, standing_blockers, lava_pools,
+    )
 
     def route_metric(source, target):
-        """Return physical distance, risk exposure, and selection cost."""
-        ra = source["room"]
-        rb = target["room"]
-        if ra < 0 or rb < 0 or ra >= len(rooms) or rb >= len(rooms):
+        """Return a lower-bound metric only within one source component."""
+        source_component = components.get(source["id"])
+        target_component = components.get(target["id"])
+        if (
+            source_component is None or target_component is None
+            or source_component != target_component
+        ):
             return None
         source_point = (source["x"], source["y"], source["z"])
         target_point = (target["x"], target["y"], target["z"])
-        if ra == rb:
-            physical = _dist(source_point, target_point)
-            exposure = physical * edge_risk(source_point, target_point)
-            return physical, exposure, physical + exposure
-        room_path = room_paths[ra].get(rb)
-        if room_path is None:
-            return None
-        legs = [
-            (
-                _dist(source_point, rc[ra]),
-                edge_risk(source_point, rc[ra]),
-            ),
-            *((edge[2], edge[3]) for edge in room_path[4]),
-            (
-                _dist(rc[rb], target_point),
-                edge_risk(rc[rb], target_point),
-            ),
-        ]
-        physical = sum(distance for distance, _risk in legs)
-        exposure = sum(distance * risk for distance, risk in legs)
+        physical = _dist(source_point, target_point)
+        exposure = physical * edge_risk(source_point, target_point)
         return physical, exposure, physical + exposure
 
     def archetype_pool(archetype):

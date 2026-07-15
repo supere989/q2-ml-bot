@@ -51,7 +51,7 @@ HOOK_EYE_Z  = 22           # hook trace starts at player origin + view height
 HOOK_RELEASE_TICK_MSEC = 100
 HOOK_RELEASE_TICKS = tuple(range(1, 7))
 MAX_HOOK_SOURCES_PER_GEOMETRY = 2
-MAX_HOOK_CANDIDATES_V3 = 512
+MAX_HOOK_CANDIDATES_V4 = 512
 HOOK_RELEASES_PER_SOURCE = 4        # two ranks x four schedules x 64 cells
 HOOK_COORDINATE_GEOMETRY_FLOOR = 43  # complete former 512/(2*6) prefix
 MAX_RUNTIME_HOOK_ZONES = 256  # must match ml_bridge.c MAX_HOOK_ZONES
@@ -182,11 +182,11 @@ class HookZone:
 
 
 @dataclass(frozen=True)
-class HookClaimCandidateV3:
+class HookClaimCandidateV4:
     """Unproven source-bound hook schedule with a desired landing proposal."""
 
     source: Tuple[float, float, float]
-    anchor: Tuple[float, float, float]
+    trace_target: Tuple[float, float, float]
     landing: Tuple[float, float, float]
     release_after_ticks: int
     distance_milliunits: int
@@ -586,7 +586,7 @@ class MapGenerator:
         self.rooms: List[Room] = []
         self.connections: List[Connection] = []
         self.hook_zones: List[HookZone] = []
-        self.hook_claim_candidates_v3: List[Tuple[str, HookClaimCandidateV3]] = []
+        self.hook_claim_candidates_v4: List[Tuple[str, HookClaimCandidateV4]] = []
         self.spawn_points: List[Tuple[int, int, int]] = []
         self.spawn_blockers: List[SolidBox] = []
         self.light_occluders: List[SolidBox] = []
@@ -1131,8 +1131,24 @@ class MapGenerator:
         )
 
     def _structure_is_clear(self, box: SolidBox) -> bool:
-        return not any(self._boxes_overlap(box, blocker)
-                       for blocker in self.spawn_blockers)
+        if any(self._boxes_overlap(box, blocker)
+               for blocker in self.spawn_blockers):
+            return False
+        # A late structure must not invalidate an already-emitted reward.
+        # Reserve the exact standing hull around each item origin in addition
+        # to its zero-volume point identity.
+        return not any(
+            self._boxes_overlap(
+                box,
+                SolidBox(
+                    x - PLAYER_XY_HALF, y - PLAYER_XY_HALF,
+                    z + PLAYER_MINS_Z,
+                    x + PLAYER_XY_HALF, y + PLAYER_XY_HALF,
+                    z + PLAYER_MAXS_Z,
+                ),
+            )
+            for x, y, z in self._item_origins
+        )
 
     def _hazard_overlaps_reserved_interior(self, box: SolidBox) -> bool:
         """Protect every promised interior's traversable light volume."""
@@ -1385,14 +1401,12 @@ class MapGenerator:
             self.stair_count += 1
 
     def _place_objectives(self):
-        """Objective-first (lattice-seeded) generation, stage 1.
+        """Place one lattice-seeded objective after static geometry settles.
 
-        Sample a high-value site BEFORE structure generation and build the
-        guard geometry around it: the map is shaped by the objective rather
-        than the objective scattered onto the map. The site is exported in
-        the .lattice.json sidecar so the spatial-memory system can preload
-        it as an opportunity prior — the bot spawns knowing value exists
-        there, and the geometry controls how it can be reached."""
+        The objective still owns its guard geometry, but both the tower and
+        pickup are selected against the complete blocker set.  This keeps the
+        exported opportunity prior honest: no later cover pass can turn the
+        promised pickup into a startsolid endpoint."""
         rng = self.rng
         w = self.writer
         arenas = sorted((r for r in self.rooms if r.kind == 'arena'),
@@ -1535,7 +1549,10 @@ class MapGenerator:
                     px - 16, py - 16, fz,
                     px + size + 16, py + size + 16, fz + 64,
                 )
-                if self._hazard_overlaps_reserved_interior(candidate):
+                if (
+                    self._hazard_overlaps_reserved_interior(candidate)
+                    or not self._structure_is_clear(candidate)
+                ):
                     continue
                 placement = (size, px, py, candidate)
                 break
@@ -1550,26 +1567,30 @@ class MapGenerator:
                         surf_flags=SURF_LIGHT | SURF_WARP, value=120,
                         contents=CONTENTS_LAVA)
             self.spawn_blockers.append(box)
-            self.lava_pools.append(box)
+            # The padded rim/clearance box is a placement blocker, not the
+            # hazardous volume.  Claims and Dyn priors bind the exact emitted
+            # CONTENTS_LAVA brush so compiled-world probes do not inherit 16u
+            # of solid rim or 44u of empty air.
+            self.lava_pools.append(SolidBox(
+                px, py, fz + 12,
+                px + size, py + size, fz + 12 + LAVA_DEPTH,
+            ))
             # Mega health on the rim: worth the burn risk
             left = px - 48
             right = px + size + 48
-            primary, secondary = ((left, right) if rng.random() < 0.5
-                                  else (right, left))
-            mega_origin = next(
-                (
-                    (mx, py + size // 2, fz + 24)
-                    for mx in (primary, secondary)
-                    if self._item_origin_available(
-                        (mx, py + size // 2, fz + 24)
-                    )
-                ),
-                None,
+            primary, secondary = (
+                (left, right) if rng.random() < 0.5 else (right, left)
             )
-            if mega_origin is None:
+            # Uniqueness alone is insufficient: a nominal rim point can be
+            # inside a lane wall or lack a full standing column.  Route both
+            # preferences through the final-geometry floor validator.
+            mega_origin = None
+            for preferred_x in (primary, secondary):
                 mega_origin = self._floor_item_spot(
-                    room, primary, py + size // 2, 192
+                    room, preferred_x, py + size // 2, 192
                 )
+                if mega_origin is not None:
+                    break
             if mega_origin is None:
                 raise RuntimeError("could not place a unique lava-rim reward")
             self._reserve_item_origin(mega_origin, "lava-rim mega health")
@@ -1610,6 +1631,17 @@ class MapGenerator:
                 continue
             return True
         return False
+
+    def _standing_hull_overlaps_blocker(self, x: int, y: int, z: int) -> bool:
+        """Match the exact Quake standing hull used by compiled claim probes."""
+        hull = SolidBox(
+            x - PLAYER_XY_HALF, y - PLAYER_XY_HALF, z + PLAYER_MINS_Z,
+            x + PLAYER_XY_HALF, y + PLAYER_XY_HALF, z + PLAYER_MAXS_Z,
+        )
+        return any(
+            self._boxes_overlap(hull, blocker)
+            for blocker in self.spawn_blockers
+        )
 
     def _player_column_is_clear(self, x: float, y: float, floor_z: int) -> bool:
         """Check the full 96u safe-headroom column for a standing hull."""
@@ -1786,7 +1818,6 @@ class MapGenerator:
             if room.kind != 'arena':
                 continue
             fz = room.floor_z
-            fz_check = fz + 32   # probe above the floor brush, like spawns/items
             target = rng.randint(*self.arena_cover_range)
             placed = 0
             for _ in range(target * 6):
@@ -1796,10 +1827,10 @@ class MapGenerator:
                 # the walls, so it shapes the open fighting area.
                 cx = room.wx + rng.randint(room.w // 4, max(room.w // 4 + 1, 3 * room.w // 4))
                 cy = room.wy + rng.randint(room.d // 4, max(room.d // 4 + 1, 3 * room.d // 4))
-                if self._spawn_overlaps_blocker(cx, cy, fz_check):
-                    continue
                 box = SolidBox(cx - COVER_W // 2, cy - COVER_W // 2, fz,
                                cx + COVER_W // 2, cy + COVER_W // 2, fz + COVER_H)
+                if not self._structure_is_clear(box):
+                    continue
                 w.add_brush(box.x0, box.y0, box.z0, box.x1, box.y1, box.z1,
                             tf=self.pal['trim'], tc=self.pal['trim'], tw=self.pal['wall'])
                 self.spawn_blockers.append(box)
@@ -1905,6 +1936,48 @@ class MapGenerator:
             if self._player_column_is_clear(x, y, room.floor_z):
                 return x, y, origin_z
         return None
+
+    def _origin_has_final_standing_floor(
+        self, origin: Tuple[int, int, int]
+    ) -> bool:
+        """Return whether an endpoint has a final source standing witness.
+
+        This mirrors the compiled claim's standing hull, not the generator's
+        larger 96u comfort/headroom rule used when choosing new spawns.  A
+        legal 56u Quake standing pocket is valid evidence here.
+        """
+        x, y, z = origin
+        for room in self.rooms:
+            if z != room.floor_z + 24:
+                continue
+            if not (
+                room.wx <= x <= room.wx + room.w
+                and room.wy <= y <= room.wy + room.d
+            ):
+                continue
+            if not self._standing_hull_overlaps_blocker(x, y, z):
+                return True
+        return False
+
+    def _assert_final_route_endpoints_standing_clear(self) -> None:
+        """Reject any source endpoint invalidated by final static geometry."""
+        item_endpoints = [
+            *((item, x, y, z) for item, x, y, z in self._placed_loot),
+            *((item, x, y, z) for item, x, y, z in self._heat_placed),
+            *((o["item"], o["x"], o["y"], o["z"]) for o in self.objectives),
+        ]
+        for item, x, y, z in item_endpoints:
+            if not self._origin_has_final_standing_floor((x, y, z)):
+                raise RuntimeError(
+                    "published item lacks a final standing-floor witness: "
+                    f"{item} at {(x, y, z)}"
+                )
+        for origin in self.spawn_points:
+            if not self._origin_has_final_standing_floor(origin):
+                raise RuntimeError(
+                    "published spawn lacks a final standing-floor witness: "
+                    f"{origin}"
+                )
 
     def _materialize_floor_loot_sites(self) -> None:
         """Relocate every structure reward to a reachable floor band.
@@ -2822,7 +2895,7 @@ class MapGenerator:
         return HOOK_RELEASE_TICKS[-HOOK_RELEASES_PER_SOURCE:]
 
     def _annotate_hook_zones(self):
-        """Publish source-bound V3 proposals, never traversal authority.
+        """Publish source-bound V4 proposals, never traversal authority.
 
         The pool is deliberately overcomplete. A compiled-world preflight must
         replay one exact source/release schedule, materialize the first six
@@ -2830,7 +2903,7 @@ class MapGenerator:
         """
 
         self.hook_zones = []
-        self.hook_claim_candidates_v3 = []
+        self.hook_claim_candidates_v4 = []
         source_origins = self._authored_floor_origins()
         grouped: dict[
             Tuple[Tuple[float, float, float], Tuple[float, float, float], int],
@@ -2873,7 +2946,7 @@ class MapGenerator:
         # replay rows steering the selection.
         geometry_limit = min(
             len(diverse_order),
-            MAX_HOOK_CANDIDATES_V3
+            MAX_HOOK_CANDIDATES_V4
             // (MAX_HOOK_SOURCES_PER_GEOMETRY * HOOK_RELEASES_PER_SOURCE),
             MAX_RUNTIME_HOOK_ZONES,
         )
@@ -2894,7 +2967,7 @@ class MapGenerator:
         ]
         extra_release_budget = max(
             0,
-            MAX_HOOK_CANDIDATES_V3 - sum(
+            MAX_HOOK_CANDIDATES_V4 - sum(
                 len(sources) * HOOK_RELEASES_PER_SOURCE
                 for _geometry, sources in selected_geometry_sources
             ),
@@ -2921,14 +2994,14 @@ class MapGenerator:
                         release_window.append(release_after_ticks)
                         extra_release_budget -= 1
                 candidates.extend(
-                    HookClaimCandidateV3(
-                        source=source, anchor=anchor, landing=landing,
+                    HookClaimCandidateV4(
+                        source=source, trace_target=anchor, landing=landing,
                         release_after_ticks=release_after_ticks,
                         distance_milliunits=distance_milliunits, flags=flags,
                     )
                     for release_after_ticks in release_window
                 )
-            remaining = MAX_HOOK_CANDIDATES_V3 - len(self.hook_claim_candidates_v3)
+            remaining = MAX_HOOK_CANDIDATES_V4 - len(self.hook_claim_candidates_v4)
             if remaining <= 0:
                 break
             candidates = candidates[:remaining]
@@ -2938,10 +3011,10 @@ class MapGenerator:
                 claim_id = (
                     f"hook:{geometry_ordinal:04d}:candidate:{candidate_ordinal:04d}"
                 )
-                self.hook_claim_candidates_v3.append((claim_id, candidate))
+                self.hook_claim_candidates_v4.append((claim_id, candidate))
             projection = candidates[0]
             self.hook_zones.append(HookZone(
-                anchor=projection.anchor,
+                anchor=projection.trace_target,
                 landing=projection.landing,
                 distance=projection.distance_milliunits / 1000.0,
                 flags=projection.flags,
@@ -3057,7 +3130,6 @@ class MapGenerator:
         self._emit_hallways()
         self._emit_large_buildings()
 
-        self._place_objectives()
         self._emit_stairs()
         self._emit_towers()
         self._emit_lane_walls()
@@ -3066,6 +3138,12 @@ class MapGenerator:
         # Corners are placed last so later towers, lane walls, lava rims, and
         # cover cannot silently occupy a pocket already promised as enterable.
         self._emit_corner_pockets()
+
+        # Objective geometry and its pickup are selected after every other
+        # static blocker is known.  This preserves the objective-shaped tower
+        # while preventing later cover, lanes, stairs, or hazards from making
+        # the reserved pickup origin startsolid in the compiled BSP.
+        self._place_objectives()
 
         unsafe_surfaces = unsafe_horizontal_sandwiches(
             self.horizontal_surfaces
@@ -3078,6 +3156,7 @@ class MapGenerator:
             )
 
         self._place_entities()
+        self._assert_final_route_endpoints_standing_clear()
         self._emit_floor_lighting()
         self._emit_interior_lighting()
         self._annotate_hook_zones()
@@ -3099,7 +3178,7 @@ class MapGenerator:
             "connections": len(self.connections),
             "platforms": sum(len(r.platforms) for r in self.rooms),
             "hook_zones": len(self.hook_zones),
-            "hook_claim_candidates_v3_count": len(self.hook_claim_candidates_v3),
+            "hook_claim_candidates_v4_count": len(self.hook_claim_candidates_v4),
             "hook_required": sum(1 for z in self.hook_zones if z.flags & HOOK_REQUIRED),
             "arenas": sum(1 for r in self.rooms if r.kind == 'arena'),
             "kill_planes": 1 if self.rooms else 0,
@@ -3206,11 +3285,11 @@ class MapGenerator:
             ],
         }
 
-    def hook_claim_candidates_v3_manifest(self) -> dict:
+    def hook_claim_candidates_v4_manifest(self) -> dict:
         """Return non-admissible proposals for exact compiled-world replay."""
 
         return {
-            "schema": "q2-hook-claim-candidates-v3",
+            "schema": "q2-hook-claim-candidates-v4",
             "tick_msec": HOOK_RELEASE_TICK_MSEC,
             "status": "unproven",
             "bundle_admissible": False,
@@ -3218,13 +3297,15 @@ class MapGenerator:
                 {
                     "claim_id": claim_id,
                     "source_milliunits": list(self._hook_milliunits(candidate.source)),
-                    "anchor_milliunits": list(self._hook_milliunits(candidate.anchor)),
+                    "trace_target_milliunits": list(
+                        self._hook_milliunits(candidate.trace_target)
+                    ),
                     "landing_milliunits": list(self._hook_milliunits(candidate.landing)),
                     "release_after_ticks": candidate.release_after_ticks,
                     "distance_milliunits": candidate.distance_milliunits,
                     "flags": candidate.flags,
                 }
-                for claim_id, candidate in self.hook_claim_candidates_v3
+                for claim_id, candidate in self.hook_claim_candidates_v4
             ],
         }
 
@@ -3259,7 +3340,7 @@ def generate_map(name: str, seed: Optional[int], out_dir: Path, grid_n: int = 5,
         **gen.stats(),
         "lighting": gen.lighting_manifest(),
         "safety": gen.safety_manifest(),
-        "hook_claim_candidates_v3": gen.hook_claim_candidates_v3_manifest(),
+        "hook_claim_candidates_v4": gen.hook_claim_candidates_v4_manifest(),
     }
     meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
@@ -3289,7 +3370,9 @@ def generate_map(name: str, seed: Optional[int], out_dir: Path, grid_n: int = 5,
     route_graph = build_route_graph(
         rooms=gen.rooms, connections=gen.connections,
         items=all_items + objective_items, spawns=gen.spawn_points,
-        lava_pools=gen.lava_pools)
+        lava_pools=gen.lava_pools,
+        standing_blockers=gen.spawn_blockers,
+    )
     (out_dir / f"{name}.routes.json").write_text(
         json.dumps(route_graph, indent=1) + "\n")
 

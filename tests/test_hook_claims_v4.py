@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -10,21 +11,28 @@ from types import SimpleNamespace
 import pytest
 
 from harness.atlas_analyzer import (
+    AnalyzerLimits,
     AtlasAnalysisError,
+    HookOracleProcess,
+    OracleProcess,
+    _oracle_atlas_origin,
     _replay_hook_record_exact,
     _validate_hook_materialization_binding,
     _validate_materialized_oracle_identities,
 )
-from harness.hook_claims_v3 import (
-    HookClaimsV3Error,
+from harness.ibsp38 import parse_ibsp38
+from harness.hook_claims_v4 import (
+    HookClaimsV4Error,
     canonical_json,
     render_runtime_sidecar,
     runtime_records_sha256,
+    selected_records_sha256,
     validate_candidates,
     validate_materialization,
     validate_runtime_sidecar,
     validate_trace,
     validation_trace_sha256,
+    validation_traces_sha256,
 )
 from tools.materialize_hook_claims import (
     _measured_target_rejection,
@@ -32,14 +40,14 @@ from tools.materialize_hook_claims import (
 )
 
 
-def _record(index: int = 0) -> dict:
+def _candidate(index: int = 0) -> dict:
     source = [index * 32_000, 0, 24_125]
     anchor = [source[0] + 16_000, 0, 200_000]
     eye = [source[0], source[1], source[2] + 22_000]
     return {
         "claim_id": f"hook:{index:04d}:candidate:0000",
         "source_milliunits": source,
-        "anchor_milliunits": anchor,
+        "trace_target_milliunits": anchor,
         "landing_milliunits": [source[0] + 16_000, 0, 24_000],
         "release_after_ticks": 2,
         "distance_milliunits": round(math.sqrt(sum(
@@ -49,19 +57,26 @@ def _record(index: int = 0) -> dict:
     }
 
 
-def test_v3_candidate_schema_rejects_retired_v2_identity() -> None:
+def _record(index: int = 0) -> dict:
+    candidate = _candidate(index)
+    return candidate | {
+        "measured_anchor_milliunits": list(candidate["trace_target_milliunits"]),
+    }
+
+
+def test_v4_candidate_schema_rejects_retired_v3_identity() -> None:
     value = {
-        "schema": "q2-hook-claim-candidates-v3",
+        "schema": "q2-hook-claim-candidates-v4",
         "tick_msec": 100,
         "status": "unproven",
         "bundle_admissible": False,
-        "records": [_record()],
+        "records": [_candidate()],
     }
     assert validate_candidates(value) == value
 
     retired = deepcopy(value)
-    retired["schema"] = "q2-hook-claim-candidates-v2"
-    with pytest.raises(HookClaimsV3Error, match="not frozen v3"):
+    retired["schema"] = "q2-hook-claim-candidates-v3"
+    with pytest.raises(HookClaimsV4Error, match="not frozen v4"):
         validate_candidates(retired)
 
 
@@ -84,7 +99,13 @@ class _ExactCm:
     def call(self, requests):
         output = []
         source = [value / 1000.0 for value in self.record["source_milliunits"]]
-        anchor = [value / 1000.0 for value in self.record["anchor_milliunits"]]
+        anchor = [
+            value / 1000.0
+            for value in self.record.get(
+                "measured_anchor_milliunits",
+                self.record["trace_target_milliunits"],
+            )
+        ]
         for request in requests:
             if request["id"].endswith("source-clear"):
                 output.append({
@@ -168,8 +189,8 @@ def test_exact_replay_uses_first_grounded_fixed_origin_and_seals_trace() -> None
     assert validate_trace(trace, "trace") == trace
 
 
-def test_anchor_materializes_the_exact_cm_contact_and_distance() -> None:
-    record = _record()
+def test_discovery_preserves_trace_target_and_materializes_exact_cm_contact() -> None:
+    candidate = _candidate()
 
     class ContactCm(_ExactCm):
         def call(self, requests):
@@ -181,18 +202,19 @@ def test_anchor_materializes_the_exact_cm_contact_and_distance() -> None:
             return output
 
     measured, reason, trace = _replay_hook_record_exact(
-        ContactCm(record), _ExactPmove(record), _ExactHook(), record,
+        ContactCm(candidate), _ExactPmove(_record()), _ExactHook(), candidate,
         request_prefix="test-hook", atlas_origin=(0, 0, 0),
-        expected_landing=True,
+        expected_landing=False, discover_landing=True,
     )
     assert reason is None and measured is not None and trace is not None
-    assert measured["anchor_milliunits"] == [15_957, 0, 199_969]
+    assert measured["trace_target_milliunits"] == [16_000, 0, 200_000]
+    assert measured["measured_anchor_milliunits"] == [15_957, 0, 199_969]
     eye = [
         measured["source_milliunits"][0], measured["source_milliunits"][1],
         measured["source_milliunits"][2] + 22_000,
     ]
     assert measured["distance_milliunits"] == round(math.sqrt(sum(
-        (measured["anchor_milliunits"][axis] - eye[axis]) ** 2
+        (measured["measured_anchor_milliunits"][axis] - eye[axis]) ** 2
         for axis in range(3)
     )))
 
@@ -200,7 +222,7 @@ def test_anchor_materializes_the_exact_cm_contact_and_distance() -> None:
 def test_source_and_release_tick_tampering_reject() -> None:
     source_tamper = _record()
     source_tamper["source_milliunits"][0] += 125
-    anchor = source_tamper["anchor_milliunits"]
+    anchor = source_tamper["measured_anchor_milliunits"]
     eye = [
         source_tamper["source_milliunits"][0], 0,
         source_tamper["source_milliunits"][2] + 22_000,
@@ -260,12 +282,12 @@ def test_desired_l1_and_exact_measured_landing_tampering_reject() -> None:
 
     other_cell = _record()
     other_cell["landing_milliunits"][0] += 16_000
-    measured, reason, _ = _replay(other_cell, expected_landing=False)
+    measured, reason, _ = _replay(other_cell, expected_landing=True)
     assert measured is None and reason == "measured_landing_outside_desired_l1"
 
 
 def test_discovery_binds_measured_landing_then_exact_replay_remains_strict() -> None:
-    proposal = _record()
+    proposal = _candidate()
     proposal["landing_milliunits"][0] += 16_000
 
     measured, reason, trace = _replay(
@@ -286,9 +308,90 @@ def test_discovery_binds_measured_landing_then_exact_replay_remains_strict() -> 
 def test_discovery_and_exact_landing_modes_are_mutually_exclusive() -> None:
     with pytest.raises(
         AtlasAnalysisError,
-        match="cannot discover and expect a landing simultaneously",
+        match="exactly one of discovery or strict expectation",
     ):
         _replay(_record(), expected_landing=True, discover_landing=True)
+
+
+def test_towers_71428103_preserved_trace_target_replays_exactly() -> None:
+    """Regression for the 71428 collision-epsilon V3 failure."""
+
+    root = Path(
+        os.environ.get(
+            "Q2_B2_71428_ARTIFACT_ROOT",
+            "/home/raymondj/multires-artifacts/atlas-v1/B2/"
+            "generated-final-71428-24780570/claims",
+        )
+    )
+    map_id = "b2g26_towers_71428103"
+    bsp = root / f"{map_id}.bsp"
+    meta_path = root / f"{map_id}.meta.json"
+    materialization_path = root / f"{map_id}.hook-materialization.json"
+    cm_binary = Path(
+        "/home/raymondj/multires-worktrees/integration/"
+        "q2-ml-client/release/q2-cm-oracle"
+    )
+    pmove_binary = cm_binary.with_name("q2-pmove-oracle")
+    hook_binary = Path(
+        "/home/raymondj/multires-worktrees/integration/"
+        "q2-lithium-3zb2/tools/q2-hook-oracle"
+    )
+    required = (bsp, meta_path, materialization_path, cm_binary, pmove_binary, hook_binary)
+    if not all(path.is_file() for path in required):
+        pytest.skip("71428 exact regression authorities are not installed")
+
+    metadata = json.loads(meta_path.read_text())
+    materialization = json.loads(materialization_path.read_text())
+    claim_id = "hook:0001:candidate:0003"
+    candidate_v3 = next(
+        record for record in metadata["hook_claim_candidates_v3"]["records"]
+        if record["claim_id"] == claim_id
+    )
+    selected_v3 = next(
+        record for record in materialization["selected_records"]
+        if record["claim_id"] == claim_id
+    )
+    selected_v4 = {
+        "claim_id": claim_id,
+        "source_milliunits": selected_v3["source_milliunits"],
+        "trace_target_milliunits": candidate_v3["anchor_milliunits"],
+        "measured_anchor_milliunits": selected_v3["anchor_milliunits"],
+        "landing_milliunits": selected_v3["landing_milliunits"],
+        "release_after_ticks": selected_v3["release_after_ticks"],
+        "distance_milliunits": selected_v3["distance_milliunits"],
+        "flags": selected_v3["flags"],
+    }
+    limits = AnalyzerLimits()
+    with OracleProcess(cm_binary, bsp, "cm", limits) as cm:
+        with OracleProcess(pmove_binary, bsp, "pmove", limits) as pmove:
+            with HookOracleProcess(
+                hook_binary, materialization["oracles"]["hook"]["physics_identity"],
+                limits,
+            ) as hook:
+                origin = _oracle_atlas_origin(parse_ibsp38(bsp), cm.identity)
+                measured, reason, trace = _replay_hook_record_exact(
+                    cm, pmove, hook, selected_v4,
+                    request_prefix="towers-71428103-v4",
+                    atlas_origin=origin, expected_landing=True,
+                )
+                assert reason is None and measured == selected_v4 and trace is not None
+                assert trace["first_grounded_frame_index"] == 13
+                assert trace["sha256"] == (
+                    "be28cf0116f16b10e07d07cd57a2f478"
+                    "af1977c08355125eb1f87ba2c09dbb1f"
+                )
+
+                legacy_feedback = deepcopy(selected_v4)
+                legacy_feedback["trace_target_milliunits"] = list(
+                    legacy_feedback["measured_anchor_milliunits"]
+                )
+                measured, reason, _ = _replay_hook_record_exact(
+                    cm, pmove, hook, legacy_feedback,
+                    request_prefix="towers-71428103-v3-feedback",
+                    atlas_origin=origin, expected_landing=True,
+                )
+                assert measured is None
+                assert reason == "measured_anchor_fixed_mismatch"
 
 
 def test_materializer_rejects_same_source_or_unsafe_measured_target() -> None:
@@ -361,9 +464,9 @@ def _materialization() -> dict:
         },
     }
     return {
-        "schema": "q2-hook-claim-materialization-v3",
+        "schema": "q2-hook-claim-materialization-v4",
         "map": "fixture", "passed": True,
-        "landing_policy": "compiled-first-grounded-exact-v3",
+        "landing_policy": "compiled-first-grounded-exact-v4",
         "bsp": {"sha256": "1" * 64, "size_bytes": 1234},
         "candidates": {
             "meta_sha256": "2" * 64, "records_sha256": "3" * 64,
@@ -377,13 +480,24 @@ def _materialization() -> dict:
             "hook_parity_attestation_sha256": "c" * 64,
             "b1_runtime_authority_seal": seal,
         },
+        "fresh_strict_replay": {
+            "schema": "q2-hook-fresh-strict-replay-v4",
+            "passed": True,
+            "record_count": 6,
+            "selected_records_sha256": selected_records_sha256(records),
+            "validation_traces_sha256": validation_traces_sha256(traces),
+            "oracles": {
+                name: oracle_records[name] | {"requests": 1}
+                for name in ("collision", "pmove", "hook")
+            },
+        },
         "replay": {
             "analyzer": "q2-hook-claim-materializer",
-            "analyzer_version": "b2-c-v3",
+            "analyzer_version": "b2-c-v4",
             "verifier": "q2-atlas-analyzer-exact-hook-replay",
-            "verifier_version": "b2-a-v3",
+            "verifier_version": "b2-a-v4",
         },
-        "request_count": 10,
+        "request_count": 13,
     }
 
 
@@ -391,24 +505,39 @@ def test_trace_runtime_rows_and_six_unique_geometry_tampering_reject() -> None:
     document = _materialization()
     assert validate_materialization(document) == document
 
+    retired = deepcopy(document)
+    retired["schema"] = "q2-hook-claim-materialization-v3"
+    with pytest.raises(HookClaimsV4Error, match="not a passed v4"):
+        validate_materialization(retired)
+
+    missing_fresh = deepcopy(document)
+    del missing_fresh["fresh_strict_replay"]
+    with pytest.raises(HookClaimsV4Error, match="keys differ"):
+        validate_materialization(missing_fresh)
+
+    strict_tamper = deepcopy(document)
+    strict_tamper["fresh_strict_replay"]["validation_traces_sha256"] = "0" * 64
+    with pytest.raises(HookClaimsV4Error, match="validation traces differ"):
+        validate_materialization(strict_tamper)
+
     trace_tamper = deepcopy(document)
     trace_tamper["validation_traces"][0]["origin_fixed_frames"][0][0] += 1
-    with pytest.raises(HookClaimsV3Error, match="sha256 differs"):
+    with pytest.raises(HookClaimsV4Error, match="sha256 differs"):
         validate_materialization(trace_tamper)
 
     fewer = deepcopy(document)
     fewer["selected_records"].pop()
-    with pytest.raises(HookClaimsV3Error, match="exactly six"):
+    with pytest.raises(HookClaimsV4Error, match="exactly six"):
         validate_materialization(fewer)
 
     wrong_policy = deepcopy(document)
     wrong_policy["landing_policy"] = "generator-hint-v2"
-    with pytest.raises(HookClaimsV3Error, match="landing policy differs"):
+    with pytest.raises(HookClaimsV4Error, match="landing policy differs"):
         validate_materialization(wrong_policy)
 
     duplicate = deepcopy(document)
-    duplicate["selected_records"][1]["anchor_milliunits"] = list(
-        duplicate["selected_records"][0]["anchor_milliunits"]
+    duplicate["selected_records"][1]["measured_anchor_milliunits"] = list(
+        duplicate["selected_records"][0]["measured_anchor_milliunits"]
     )
     duplicate["selected_records"][1]["landing_milliunits"] = list(
         duplicate["selected_records"][0]["landing_milliunits"]
@@ -419,7 +548,10 @@ def test_trace_runtime_rows_and_six_unique_geometry_tampering_reject() -> None:
     duplicate["selected_records"][1]["distance_milliunits"] = duplicate[
         "selected_records"
     ][0]["distance_milliunits"]
-    with pytest.raises(HookClaimsV3Error, match="runtime geometries are not unique"):
+    duplicate["fresh_strict_replay"]["selected_records_sha256"] = (
+        selected_records_sha256(duplicate["selected_records"])
+    )
+    with pytest.raises(HookClaimsV4Error, match="runtime geometries are not unique"):
         validate_materialization(duplicate)
 
     payload = render_runtime_sidecar(
@@ -429,7 +561,7 @@ def test_trace_runtime_rows_and_six_unique_geometry_tampering_reject() -> None:
         payload, map_id="fixture", bsp_sha256="1" * 64,
         materialization_sha256="9" * 64, records=document["selected_records"],
     )
-    with pytest.raises(HookClaimsV3Error, match="header/rows differ"):
+    with pytest.raises(HookClaimsV4Error, match="header/rows differ"):
         validate_runtime_sidecar(
             payload[:-2] + b"9\n", map_id="fixture", bsp_sha256="1" * 64,
             materialization_sha256="9" * 64, records=document["selected_records"],
@@ -523,6 +655,10 @@ def _binding_fixture(tmp_path: Path) -> tuple[dict, dict, dict[str, Path]]:
         document["oracles"][name]["executable_sha256"] = hashlib.sha256(
             paths[name].read_bytes()
         ).hexdigest()
+        if name != "fall":
+            document["fresh_strict_replay"]["oracles"][name][
+                "executable_sha256"
+            ] = document["oracles"][name]["executable_sha256"]
         seal_name = "cm_sha256" if name == "collision" else f"{name}_sha256"
         document["oracles"]["b1_runtime_authority_seal"]["executables"][seal_name] = (
             document["oracles"][name]["executable_sha256"]
@@ -574,7 +710,7 @@ def test_materialization_binds_canonical_bsp_meta_executables_and_parity(
 
     changed = deepcopy(document)
     changed["request_count"] += 1
-    with pytest.raises(AtlasAnalysisError, match="canonical identity"):
+    with pytest.raises(AtlasAnalysisError, match="request count differs"):
         _bind(changed, claims, paths)
 
     changed_claims = deepcopy(claims)

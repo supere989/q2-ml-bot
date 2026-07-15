@@ -7,15 +7,17 @@ import struct
 
 import pytest
 
-from harness.hook_claims_v3 import (
-    HookClaimsV3Error,
+from harness.hook_claims_v4 import (
+    HookClaimsV4Error,
     canonical_json as hook_canonical_json,
     load_candidates,
     render_runtime_sidecar,
     runtime_records_sha256,
+    selected_records_sha256,
     sha256_bytes,
     validate_materialization,
     validation_trace_sha256,
+    validation_traces_sha256,
 )
 from maps.generator import generate_map
 from tools.generator_claim_validator import (
@@ -65,13 +67,15 @@ def _fake_materialize(map_path: Path) -> None:
     geometries = set()
     for record in candidates["records"]:
         geometry = (
-            tuple(record["anchor_milliunits"]),
+            tuple(record["trace_target_milliunits"]),
             tuple(record["landing_milliunits"]), record["flags"],
         )
         if geometry in geometries:
             continue
         geometries.add(geometry)
-        selected.append(record)
+        selected.append(record | {
+            "measured_anchor_milliunits": list(record["trace_target_milliunits"]),
+        })
         if len(selected) == 6:
             break
     assert len(selected) == 6
@@ -120,9 +124,9 @@ def _fake_materialize(map_path: Path) -> None:
         },
     }
     document = validate_materialization({
-        "schema": "q2-hook-claim-materialization-v3",
+        "schema": "q2-hook-claim-materialization-v4",
         "map": map_path.stem, "passed": True,
-        "landing_policy": "compiled-first-grounded-exact-v3",
+        "landing_policy": "compiled-first-grounded-exact-v4",
         "bsp": {"sha256": file_sha256(bsp_path), "size_bytes": bsp_path.stat().st_size},
         "candidates": {
             "meta_sha256": meta_digest, "records_sha256": candidate_digest,
@@ -136,13 +140,24 @@ def _fake_materialize(map_path: Path) -> None:
             "hook_parity_attestation_sha256": accepted_hook_attestation,
             "b1_runtime_authority_seal": b1_seal,
         },
+        "fresh_strict_replay": {
+            "schema": "q2-hook-fresh-strict-replay-v4",
+            "passed": True,
+            "record_count": 6,
+            "selected_records_sha256": selected_records_sha256(selected),
+            "validation_traces_sha256": validation_traces_sha256(traces),
+            "oracles": {
+                name: oracle_records[name]
+                for name in ("collision", "pmove", "hook")
+            },
+        },
         "replay": {
             "analyzer": "q2-hook-claim-materializer",
-            "analyzer_version": "b2-c-v3",
+            "analyzer_version": "b2-c-v4",
             "verifier": "q2-atlas-analyzer-exact-hook-replay",
-            "verifier_version": "b2-a-v3",
+            "verifier_version": "b2-a-v4",
         },
-        "request_count": 4,
+        "request_count": 7,
     })
     payload = hook_canonical_json(document) + b"\n"
     digest = sha256_bytes(payload)
@@ -292,7 +307,10 @@ def _analysis(map_path: Path, claims: dict) -> dict:
                         "source_l1": [index, 0, 0],
                         "target_l1": [index + 1, 0, 0],
                         "source_milliunits": claim["source_milliunits"],
-                        "anchor_milliunits": claim["anchor_milliunits"],
+                        "trace_target_milliunits": claim["trace_target_milliunits"],
+                        "measured_anchor_milliunits": claim[
+                            "measured_anchor_milliunits"
+                        ],
                         "landing_milliunits": claim["landing_milliunits"],
                         "release_after_ticks": claim["release_after_ticks"],
                         "distance_milliunits": claim["distance_milliunits"],
@@ -907,7 +925,7 @@ def test_claim_materialization_cannot_carry_non_b1_hook_parity(generated):
     materialization_path = Path(f"{stem}.hook-materialization.json")
     materialization = json.loads(materialization_path.read_text())
     materialization["oracles"]["hook_parity_attestation_sha256"] = "aa" * 32
-    with pytest.raises(HookClaimsV3Error, match="B1 seal binding differs"):
+    with pytest.raises(HookClaimsV4Error, match="B1 seal binding differs"):
         validate_materialization(materialization)
 
 
@@ -1184,7 +1202,7 @@ def test_materialization_source_mutation_rejects_before_claim_publish(
         if mutation == "meta":
             metadata["tampered_after_materialization"] = True
         else:
-            metadata["hook_claim_candidates_v3"]["records"][0][
+            metadata["hook_claim_candidates_v4"]["records"][0][
                 "release_after_ticks"
             ] += 1
         meta_path.write_bytes(canonical_bytes(metadata))

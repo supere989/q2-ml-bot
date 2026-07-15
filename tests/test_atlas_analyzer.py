@@ -51,7 +51,7 @@ from harness.atlas_analyzer import (
     analyze_map,
     sha256_file,
 )
-from harness.atlas_entity_semantics import Aabb
+from harness.atlas_entity_semantics import Aabb, L0BudgetState
 from harness.ibsp38 import EntityMetadata
 
 
@@ -303,7 +303,7 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
     assert candidate["status"] == "candidate"
     assert candidate["deterministic_rebuild"] is False
     assert candidate["confidence"] == "pending-independent-cold-rebuild"
-    assert candidate["analyzer_version"] == "b2-a-v3"
+    assert candidate["analyzer_version"] == "b2-a-v4"
     assert candidate["confidence_summary"]["hook"] == "attested-no-replayed-edge"
     outputs = []
     for name in ("first", "second"):
@@ -708,10 +708,20 @@ def test_l0_trigger_hurt_uses_runtime_linked_contact_bounds(
             {"entity_index": 1, "model_index": 1},
         )),
     )
+    nodes = {
+        (x, y, 0): NavNode(
+            (x, y, 0), (x * 16.0 + 8.0, y * 16.0 + 8.0, 24.0),
+            True, True, True, 0, (0.0, 0.0, 1.0),
+        )
+        for x in range(5, 12)
+        for y in range(-2, 6)
+    }
+    retained = _surface_candidate_scope(nodes, (0, 0, 0)).authorized_chunks
     semantics = {}
     chunks = _l0_chunks(
-        {}, [], (0, 0, 0), metadata=metadata, semantic_summary=semantics
+        nodes, [], (0, 0, 0), metadata=metadata, semantic_summary=semantics
     )
+    assert {tuple(chunk["key"]) for chunk in chunks}.issubset(retained)
     counts = {}
     scalar_counts = {}
     for chunk in chunks:
@@ -720,19 +730,216 @@ def test_l0_trigger_hurt_uses_runtime_linked_contact_bounds(
         for name, cells in chunk["scalars"].items():
             scalar_counts[name] = scalar_counts.get(name, 0) + len(cells)
     if state == "toggle":
-        assert counts == {"unknown": 13_520}
+        assert counts["unknown"] > 0
         assert scalar_counts == {}
-        assert semantics == {"hurt_potential": 13_520}
+        assert semantics["hurt_potential"] == counts["unknown"]
+        assert semantics["hurt:1:potential"] == counts["unknown"]
     elif state == "active":
-        assert counts["hurt"] == 1_944
-        assert counts["standing_forbidden_origin"] == 13_520
-        assert counts["crouched_forbidden_origin"] == 8_788
-        assert scalar_counts["hazard_severity"] == 13_520
-        assert semantics == {"hurt_expanded": 13_520}
+        assert 0 < counts["hurt"] <= 1_944
+        assert 0 < counts["standing_forbidden_origin"] <= 13_520
+        assert 0 < counts["crouched_forbidden_origin"] <= 8_788
+        assert scalar_counts["hazard_severity"] > 0
+        assert semantics["hurt:1:raw"] == counts["hurt"]
+        assert semantics["hurt:1:expanded"] == semantics["hurt_expanded"]
     else:
         assert counts == {}
         assert scalar_counts == {}
         assert semantics == {}
+
+
+def test_map_wide_hurt_is_clipped_to_sparse_reachable_permit() -> None:
+    trigger = EntityMetadata(
+        index=7,
+        classname="trigger_hurt",
+        properties=(("model", "*1"), ("spawnflags", "12")),
+    )
+    metadata = SimpleNamespace(
+        entities=(trigger,),
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0)),
+            SimpleNamespace(
+                mins=(-4096, -4096, -240), maxs=(4096, 4096, -64),
+            ),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 7, "model_index": 1},
+        )),
+    )
+    nodes = {
+        (0, 0, 0): NavNode(
+            (0, 0, 0), (8.0, 8.0, 24.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        ),
+    }
+    retained = _surface_candidate_scope(nodes, (0, 0, 0)).authorized_chunks
+    semantics: dict[str, int] = {}
+    chunks = _l0_chunks(
+        nodes, [], (0, 0, 0), metadata=metadata,
+        semantic_summary=semantics,
+    )
+    assert chunks
+    assert {tuple(chunk["key"]) for chunk in chunks}.issubset(retained)
+    assert 0 < semantics["hurt:7:raw"] < 2_000_000
+    assert 0 < semantics["hurt:7:expanded"] < 2_000_000
+
+
+def test_hurt_inclusive_upper_grid_boundary_is_retained() -> None:
+    trigger = EntityMetadata(
+        index=8, classname="trigger_hurt",
+        properties=(("model", "*1"), ("spawnflags", "12")),
+    )
+    metadata = SimpleNamespace(
+        entities=(trigger,),
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0)),
+            # Runtime linking expands this to [-1, -1, -1]..[64, 64, 16].
+            # The exact upper values lie on 4u grid planes and are inclusive.
+            SimpleNamespace(mins=(0, 0, 0), maxs=(63, 63, 15)),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 8, "model_index": 1},
+        )),
+    )
+    nodes = {
+        (x, y, 0): NavNode(
+            (x, y, 0), (x * 16.0 + 8.0, y * 16.0 + 8.0, 24.0),
+            True, True, True, 0, (0.0, 0.0, 1.0),
+        )
+        for x in range(-1, 6)
+        for y in range(-1, 6)
+    }
+    chunks = _l0_chunks(nodes, [], (0, 0, 0), metadata=metadata)
+
+    def marked(index: tuple[int, int, int]) -> bool:
+        chunk_key = tuple(value // 16 for value in index)
+        local = tuple(value % 16 for value in index)
+        linear = local[0] + 16 * local[1] + 256 * local[2]
+        return any(
+            tuple(chunk["key"]) == chunk_key
+            and linear in chunk["bits"].get("hurt", ())
+            for chunk in chunks
+        )
+
+    assert marked((-1, -1, -1))
+    assert marked((16, 16, 4))
+
+
+def test_retained_hurt_above_two_million_cells_uses_authoritative_budget() -> None:
+    trigger = EntityMetadata(
+        index=12, classname="trigger_hurt",
+        properties=(("model", "*1"), ("spawnflags", "12")),
+    )
+    metadata = SimpleNamespace(
+        entities=(trigger,),
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0)),
+            SimpleNamespace(
+                mins=(-4096, -4096, -256), maxs=(4096, 4096, 256),
+            ),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 12, "model_index": 1},
+        )),
+    )
+    nodes = {
+        (x, y, 0): NavNode(
+            (x, y, 0), (x * 16.0 + 8.0, y * 16.0 + 8.0, 24.0),
+            True, True, True, 0, (0.0, 0.0, 1.0),
+        )
+        for x in range(100)
+        for y in range(80)
+    }
+    semantics: dict[str, int] = {}
+
+    chunks = _l0_chunks(
+        nodes, [], (0, 0, 0), metadata=metadata,
+        semantic_summary=semantics,
+    )
+
+    assert len(chunks) == 677
+    assert semantics["hurt:12:raw"] == 2_772_992
+    assert semantics["hurt:12:expanded"] == 2_772_992
+
+
+def test_overlapping_hurts_keep_distinct_deterministic_sparse_counts() -> None:
+    triggers = (
+        EntityMetadata(
+            index=3, classname="trigger_hurt",
+            properties=(("model", "*1"), ("spawnflags", "12")),
+        ),
+        EntityMetadata(
+            index=9, classname="trigger_hurt",
+            properties=(("model", "*2"), ("spawnflags", "12")),
+        ),
+    )
+    metadata = SimpleNamespace(
+        entities=triggers,
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0)),
+            SimpleNamespace(mins=(-64, -64, -16), maxs=(32, 32, 16)),
+            SimpleNamespace(mins=(-16, -16, -16), maxs=(80, 80, 16)),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 3, "model_index": 1},
+            {"entity_index": 9, "model_index": 2},
+        )),
+    )
+    nodes = {
+        (x, y, 0): NavNode(
+            (x, y, 0), (x * 16.0 + 8.0, y * 16.0 + 8.0, 24.0),
+            True, True, True, 0, (0.0, 0.0, 1.0),
+        )
+        for x in range(-6, 7)
+        for y in range(-6, 7)
+    }
+
+    first_semantics: dict[str, int] = {}
+    second_semantics: dict[str, int] = {}
+    first = _l0_chunks(
+        nodes, [], (0, 0, 0), metadata=metadata,
+        semantic_summary=first_semantics,
+    )
+    second = _l0_chunks(
+        nodes, [], (0, 0, 0), metadata=metadata,
+        semantic_summary=second_semantics,
+    )
+
+    assert first == second
+    assert first_semantics == second_semantics
+    for entity_index in (3, 9):
+        assert first_semantics[f"hurt:{entity_index}:raw"] > 0
+        assert first_semantics[f"hurt:{entity_index}:expanded"] > 0
+
+
+def test_hurt_sparse_planes_reserve_all_chunks_before_materialization() -> None:
+    trigger = EntityMetadata(
+        index=4, classname="trigger_hurt",
+        properties=(("model", "*1"), ("spawnflags", "12")),
+    )
+    metadata = SimpleNamespace(
+        entities=(trigger,),
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0)),
+            SimpleNamespace(mins=(-1024, -64, -64), maxs=(1024, 64, 64)),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 4, "model_index": 1},
+        )),
+    )
+    nodes = {
+        index: NavNode(
+            index,
+            (index[0] * 16.0 + 8.0, 8.0, 24.0),
+            True, True, True, 0, (0.0, 0.0, 1.0),
+        )
+        for index in ((-32, 0, 0), (32, 0, 0))
+    }
+
+    with pytest.raises(AtlasAnalysisError, match="L0 chunk count"):
+        _l0_chunks(
+            nodes, [], (0, 0, 0), metadata=metadata,
+            budget_state=L0BudgetState(max_chunks=1),
+        )
 
 
 def test_process_tree_rss_rejects_unreadable_root() -> None:

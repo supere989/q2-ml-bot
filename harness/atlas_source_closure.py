@@ -17,7 +17,7 @@ ATLAS_ANALYZER_FIXED_INPUTS = (
     "harness/atlas_surface_bands.py",
     "harness/atlas_teleporter_edges.py",
     "harness/generated_claim_probes.py",
-    "harness/hook_claims_v3.py",
+    "harness/hook_claims_v4.py",
     "harness/ibsp38.py",
     "tools/atlas_cold_worker.py",
     "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md",

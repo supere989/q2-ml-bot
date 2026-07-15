@@ -48,10 +48,11 @@ from .generated_claim_probes import (
     GeneratedClaimProbeError,
     analyze_non_hook_claims,
 )
-from .hook_claims_v3 import (
-    HookClaimsV3Error,
-    validate_materialization as validate_hook_materialization_v3,
-    validate_record as validate_hook_record_v3,
+from .hook_claims_v4 import (
+    HookClaimsV4Error,
+    validate_candidate_record as validate_hook_candidate_record_v4,
+    validate_materialization as validate_hook_materialization_v4,
+    validate_selected_record as validate_hook_selected_record_v4,
     validation_trace_sha256,
 )
 from .atlas_b1_authority import B1AuthorityError, admit_b1_runtime_authorities
@@ -2983,6 +2984,25 @@ def _l0_chunks(
         budget = reservation.state
         accounted_bits.add(account)
 
+    def admit_scalarplane(chunk: tuple[int, int, int], plane: str) -> None:
+        """Reserve one immutable scalar plane before material allocation."""
+
+        nonlocal budget
+        account = (chunk, plane)
+        if account in accounted_scalars:
+            return
+        reservation_result = budget.reserve(chunk, L0PlaneKind.SCALAR, plane)
+        if not reservation_result.is_exact or reservation_result.value is None:
+            raise AtlasAnalysisError(
+                reservation_result.reason
+                or "L0 scalar-plane budget authority is unknown"
+            )
+        reservation = reservation_result.value
+        if not reservation.accepted:
+            raise AtlasAnalysisError(reservation.rejection)
+        budget = reservation.state
+        accounted_scalars.add(account)
+
     def item_for(l0: tuple[int, int, int]) -> tuple[dict[str, Any], int]:
         chunk = tuple(value // 16 for value in l0)
         local = tuple(value % 16 for value in l0)
@@ -3006,18 +3026,7 @@ def _l0_chunks(
             return
         l0 = _grid_index(point, origin, 4)
         chunk = _l0_chunk_key(l0)
-        account = (chunk, plane)
-        if account not in accounted_scalars:
-            reservation_result = budget.reserve(chunk, L0PlaneKind.SCALAR, plane)
-            if not reservation_result.is_exact or reservation_result.value is None:
-                raise AtlasAnalysisError(
-                    reservation_result.reason or "L0 scalar-plane budget authority is unknown"
-                )
-            reservation = reservation_result.value
-            if not reservation.accepted:
-                raise AtlasAnalysisError(reservation.rejection)
-            budget = reservation.state
-            accounted_scalars.add(account)
+        admit_scalarplane(chunk, plane)
         item, linear = item_for(l0)
         values = item["scalars"].setdefault(plane, {})
         values[linear] = max(value, values.get(linear, 0))
@@ -3036,10 +3045,17 @@ def _l0_chunks(
         upper = _grid_index(tuple(value - 1e-6 for value in maxs), origin, 4)
         fill_indices(lower, upper, plane, scalar=scalar, semantic=semantic)
 
+    def semantic_names(value: str | Sequence[str] | None) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            return (value,)
+        return tuple(value)
+
     def fill_indices(
         lower: Sequence[int], upper: Sequence[int], plane: str,
         *, scalar: tuple[str, int] | None = None,
-        semantic: str | None = None,
+        semantic: str | Sequence[str] | None = None,
     ) -> None:
         if any(upper[axis] < lower[axis] for axis in range(3)):
             return
@@ -3051,8 +3067,8 @@ def _l0_chunks(
                 for x in range(lower[0], upper[0] + 1):
                     index = (x, y, z)
                     set_index(index, plane)
-                    if semantic is not None:
-                        semantic_cells[semantic].add(index)
+                    for name in semantic_names(semantic):
+                        semantic_cells[name].add(index)
                     if scalar is not None:
                         point = _center(index, origin, 4)
                         set_scalar(point, scalar[0], scalar[1])
@@ -3250,13 +3266,65 @@ def _l0_chunks(
         def fill_inclusive_aabb(
             bounds: Aabb, plane: str,
             *, scalar: tuple[str, int] | None = None,
-            semantic: str | None = None,
+            semantic: str | Sequence[str] | None = None,
         ) -> None:
             fill_indices(
                 _grid_index(bounds.mins, origin, 4),
                 _grid_index(bounds.maxs, origin, 4),
                 plane, scalar=scalar, semantic=semantic,
             )
+
+        def fill_retained_inclusive_aabb(
+            bounds: Aabb, plane: str,
+            *, scalar: tuple[str, int] | None = None,
+            semantic: str | Sequence[str] | None = None,
+        ) -> None:
+            """Materialize entity fields only inside the sparse L0 permit.
+
+            Large generated kill planes and authored trigger volumes are exact
+            engine hazards, but their full AABBs are not permission to allocate
+            dense map-wide L0.  Intersect them with the same retained chunk set
+            used by reachable surface discovery, while preserving inclusive
+            linked-AABB contact at the clipped boundaries.
+            """
+
+            lower = _grid_index(bounds.mins, origin, 4)
+            upper = _grid_index(bounds.maxs, origin, 4)
+            clips: list[
+                tuple[
+                    tuple[int, int, int],
+                    tuple[int, int, int],
+                    tuple[int, int, int],
+                ]
+            ] = []
+            for chunk in sorted(retained_chunks, key=_zyx):
+                chunk_low = tuple(value * 16 for value in chunk)
+                chunk_high = tuple(value + 15 for value in chunk_low)
+                clipped_low = tuple(
+                    max(lower[axis], chunk_low[axis]) for axis in range(3)
+                )
+                clipped_high = tuple(
+                    min(upper[axis], chunk_high[axis]) for axis in range(3)
+                )
+                if any(
+                    clipped_high[axis] < clipped_low[axis]
+                    for axis in range(3)
+                ):
+                    continue
+                clips.append((chunk, clipped_low, clipped_high))
+
+            # Reserve this field's complete affected plane set before its first
+            # cell is allocated. The authoritative 1,200-chunk/16-MiB budget,
+            # not an unrelated dense-cell cap, bounds retained sparse storage.
+            for chunk, _clipped_low, _clipped_high in clips:
+                admit_bitplane(chunk, plane)
+                if scalar is not None:
+                    admit_scalarplane(chunk, scalar[0])
+            for _chunk, clipped_low, clipped_high in clips:
+                fill_indices(
+                    clipped_low, clipped_high, plane,
+                    scalar=scalar, semantic=semantic,
+                )
 
         def fill_potential_envelope(bounds: Aabb, semantic: str) -> None:
             """Stream a conservative dynamic envelope through retained chunks.
@@ -3443,30 +3511,34 @@ def _l0_chunks(
                     and runtime_crouched.authority is Authority.EXACT
                 ):
                     if runtime_standing.value is not None:
-                        fill_inclusive_aabb(
+                        fill_retained_inclusive_aabb(
                             hurt.linked_touch_bounds, "hurt",
                             scalar=("hazard_severity", 255),
+                            semantic=f"hurt:{entity.index}:raw",
                         )
-                        fill_inclusive_aabb(
+                        fill_retained_inclusive_aabb(
                             runtime_standing.value, "standing_forbidden_origin",
-                            scalar=("hazard_severity", 255), semantic="hurt_expanded",
+                            scalar=("hazard_severity", 255),
+                            semantic=("hurt_expanded", f"hurt:{entity.index}:expanded"),
                         )
                         if runtime_crouched.value is not None:
-                            fill_inclusive_aabb(
+                            fill_retained_inclusive_aabb(
                                 runtime_crouched.value, "crouched_forbidden_origin",
-                                scalar=("hazard_severity", 255), semantic="hurt_expanded",
+                                scalar=("hazard_severity", 255),
+                                semantic=("hurt_expanded", f"hurt:{entity.index}:expanded"),
                             )
                 else:
-                    fill_inclusive_aabb(
-                        hurt.linked_touch_bounds, "unknown", semantic="hurt_potential"
+                    fill_retained_inclusive_aabb(
+                        hurt.linked_touch_bounds, "unknown",
+                        semantic=("hurt_potential", f"hurt:{entity.index}:potential"),
                     )
-                    fill_inclusive_aabb(
+                    fill_retained_inclusive_aabb(
                         hurt.standing_forbidden_origins, "unknown",
-                        semantic="hurt_potential",
+                        semantic=("hurt_potential", f"hurt:{entity.index}:potential"),
                     )
-                    fill_inclusive_aabb(
+                    fill_retained_inclusive_aabb(
                         hurt.crouched_forbidden_origins, "unknown",
-                        semantic="hurt_potential",
+                        semantic=("hurt_potential", f"hurt:{entity.index}:potential"),
                     )
                 continue
             if classname in {"trigger_push", "trigger_gravity"}:
@@ -3625,7 +3697,7 @@ def _l0_chunks(
     # in this analyzer process. No caller-supplied coordinates are accepted.
     for hook in admitted_hooks:
         anchor = _world_milliunits(
-            hook.get("anchor_milliunits", []), "admitted hook anchor"
+            hook.get("measured_anchor_milliunits", []), "admitted hook anchor"
         )
         set_bit(anchor, "hookable_surface")
         fixed_frames = hook.get("trajectory_origin_fixed")
@@ -3792,7 +3864,7 @@ def _write_canonical_atlas_manifest(
         },
         "analyzer": {
             "name": "q2-atlas-analyzer",
-            "version": "b2-a-v3",
+            "version": "b2-a-v4",
             "sha256": analyzer_sha256,
         },
         "oracles": oracle_records,
@@ -4344,23 +4416,24 @@ def _replay_hook_record_exact(
 ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any] | None]:
     """Replay one exact source/release schedule and return measured landing.
 
-    Candidate desired landing is normally used as a same-L1 constraint.  An
-    authority performing initial materialization sets ``discover_landing`` to
-    bind the first post-release false-to-true grounded Pmove fixed origin
-    without pretending that generator-authored geometry predicted its compiled
-    landing cell.  Independent analysis leaves discovery disabled, sets
-    ``expected_landing``, and additionally requires exact fixed-origin equality
-    with the sealed record.
+    Discovery traces toward the generator-authored ``trace_target_milliunits``
+    and seals the distinct compiled ``measured_anchor_milliunits``. Independent
+    analysis uses the same preserved trace target and requires exact measured
+    anchor, landing, and ordered fixed-origin trajectory reproduction.
     """
 
-    if discover_landing and expected_landing:
+    if discover_landing == expected_landing:
         raise AtlasAnalysisError(
-            "hook replay cannot discover and expect a landing simultaneously"
+            "hook replay must select exactly one of discovery or strict expectation"
         )
 
     try:
-        record = validate_hook_record_v3(dict(record_value), request_prefix)
-    except HookClaimsV3Error as error:
+        record = (
+            validate_hook_candidate_record_v4(dict(record_value), request_prefix)
+            if discover_landing
+            else validate_hook_selected_record_v4(dict(record_value), request_prefix)
+        )
+    except HookClaimsV4Error as error:
         raise AtlasAnalysisError(str(error)) from error
     pmove_identity = getattr(pmove, "identity", None)
     pmove_parameters = (
@@ -4380,10 +4453,11 @@ def _replay_hook_record_exact(
     ):
         raise AtlasAnalysisError("hook replay Pmove parameters are invalid")
     source_mu = record["source_milliunits"]
-    anchor_mu = record["anchor_milliunits"]
+    trace_target_mu = record["trace_target_milliunits"]
+    expected_measured_anchor_mu = record.get("measured_anchor_milliunits")
     desired_landing_mu = record["landing_milliunits"]
     source = tuple(value / 1000.0 for value in source_mu)
-    anchor = tuple(value / 1000.0 for value in anchor_mu)
+    trace_target = tuple(value / 1000.0 for value in trace_target_mu)
     if (
         not discover_landing
         and _grid_index(source, atlas_origin, 16) == _grid_index(
@@ -4402,7 +4476,7 @@ def _replay_hook_record_exact(
             (source[0], source[1], source[2] - 96.0),
             STANDING_MINS, STANDING_MAXS,
         ),
-        _hook_trace_request(f"{request_prefix}:anchor", source, anchor),
+        _hook_trace_request(f"{request_prefix}:anchor", source, trace_target),
     ])
     support_plane = source_support.get("plane")
     support_end = source_support.get("endpos")
@@ -4421,12 +4495,17 @@ def _replay_hook_record_exact(
         or _ceil_pmove_fixed(support_end, "hook source support") != source_fixed
     ):
         return None, "source_not_exactly_supported", None
-    if not _hook_trace_admits(anchor_trace, anchor):
+    if not _hook_trace_admits(anchor_trace, trace_target):
         return None, "anchor_not_exactly_attachable", None
     measured_anchor_mu = _milliunits(
         anchor_trace.get("endpos", []), "hook anchor trace"
     )
     measured_anchor = tuple(value / 1000.0 for value in measured_anchor_mu)
+    if (
+        expected_landing
+        and measured_anchor_mu != expected_measured_anchor_mu
+    ):
+        return None, "measured_anchor_fixed_mismatch", None
 
     source_ground = pmove.call([{
         "id": f"{request_prefix}:source-ground",
@@ -4559,13 +4638,22 @@ def _replay_hook_record_exact(
         return None, "measured_landing_outside_desired_l1", None
     if expected_landing and measured_landing_mu != desired_landing_mu:
         return None, "measured_landing_fixed_mismatch", None
-    measured = dict(record)
-    measured["anchor_milliunits"] = measured_anchor_mu
-    measured["landing_milliunits"] = measured_landing_mu
     eye_mu = [source_mu[0], source_mu[1], source_mu[2] + 22_000]
-    measured["distance_milliunits"] = round(math.sqrt(sum(
+    measured_distance = round(math.sqrt(sum(
         (measured_anchor_mu[axis] - eye_mu[axis]) ** 2 for axis in range(3)
     )))
+    measured = {
+        "claim_id": record["claim_id"],
+        "source_milliunits": source_mu,
+        "trace_target_milliunits": trace_target_mu,
+        "measured_anchor_milliunits": measured_anchor_mu,
+        "landing_milliunits": measured_landing_mu,
+        "release_after_ticks": record["release_after_ticks"],
+        "distance_milliunits": measured_distance,
+        "flags": record["flags"],
+    }
+    if expected_landing and measured != record:
+        return None, "sealed_hook_record_fixed_mismatch", None
     first_grounded_frame_index = len(trajectory_fixed) - 1
     trace = {
         "claim_id": measured["claim_id"],
@@ -4601,7 +4689,7 @@ def _analyze_hook_claims(
         }
     proposed = claims.get("hook_claims")
     if not isinstance(proposed, list) or len(proposed) != 6:
-        raise AtlasAnalysisError("generated claims require six exact hook-v3 records")
+        raise AtlasAnalysisError("generated claims require six exact hook-v4 records")
     if (
         hook_admission.get("authority_admitted") is not True
         or pmove is None
@@ -4649,7 +4737,8 @@ def _analyze_hook_claims(
             "source_l1": list(source_key),
             "target_l1": list(target_key),
             "source_milliunits": measured["source_milliunits"],
-            "anchor_milliunits": measured["anchor_milliunits"],
+            "trace_target_milliunits": measured["trace_target_milliunits"],
+            "measured_anchor_milliunits": measured["measured_anchor_milliunits"],
             "landing_milliunits": measured["landing_milliunits"],
             "release_after_ticks": measured["release_after_ticks"],
             "distance_milliunits": measured["distance_milliunits"],
@@ -4686,8 +4775,8 @@ def _validate_hook_materialization_binding(
 ) -> dict[str, Any]:
     """Bind a valid materialization to claims, BSP, and executable bytes."""
     try:
-        document = validate_hook_materialization_v3(dict(value))
-    except HookClaimsV3Error as error:
+        document = validate_hook_materialization_v4(dict(value))
+    except HookClaimsV4Error as error:
         raise AtlasAnalysisError(str(error)) from error
     if generator_claims.get("schema") != "q2-generator-claims-v3":
         raise AtlasAnalysisError("generated claims schema mismatch")
@@ -5034,11 +5123,24 @@ def analyze_map(
                     "reachable_spawn_ordinals": reachable,
                     "cost_to_safety_q8": 0 if node else 0xFFFFFFFF,
                 })
+            l0_semantics: dict[str, int] = {}
+            surface_evidence: dict[str, Any] = {}
+            l0_chunks = _l0_chunks(
+                nodes, player_spawns, origin, cm=cm, metadata=metadata,
+                admitted_hooks=compiled_hooks["edges"],
+                semantic_summary=l0_semantics,
+                surface_summary=surface_evidence,
+            )
+            l0_plane_counts: dict[str, int] = defaultdict(int)
+            for chunk in l0_chunks:
+                for plane, cells in chunk["bits"].items():
+                    l0_plane_counts[plane] += len(cells)
+            l0_plane_counts = dict(sorted(l0_plane_counts.items()))
             if generator_claims is not None:
                 try:
                     compiled_non_hook = analyze_non_hook_claims(
                         cm, metadata, nodes, edges, origin, spawn_records,
-                        generator_claims, generator_safety,
+                        generator_claims, generator_safety, l0_semantics,
                     )
                 except GeneratedClaimProbeError as error:
                     reasons: dict[str, int] = defaultdict(int)
@@ -5096,19 +5198,6 @@ def analyze_map(
                 _apply_stock_drop_hazards(
                     compiled_non_hook["hazards"], drop_summary,
                 )
-            l0_semantics: dict[str, int] = {}
-            surface_evidence: dict[str, Any] = {}
-            l0_chunks = _l0_chunks(
-                nodes, player_spawns, origin, cm=cm, metadata=metadata,
-                admitted_hooks=compiled_hooks["edges"],
-                semantic_summary=l0_semantics,
-                surface_summary=surface_evidence,
-            )
-            l0_plane_counts: dict[str, int] = defaultdict(int)
-            for chunk in l0_chunks:
-                for plane, cells in chunk["bits"].items():
-                    l0_plane_counts[plane] += len(cells)
-            l0_plane_counts = dict(sorted(l0_plane_counts.items()))
             admissions = _admissions(
                 metadata.sha256, provenance_sha256, cm, pmove_context, fall_context,
                 hook_context if compiled_hooks["edges"] else None,
@@ -5299,7 +5388,7 @@ def analyze_map(
         "status": "candidate",
         "deterministic_rebuild": False,
         "confidence": "pending-independent-cold-rebuild",
-        "analyzer_version": "b2-a-v3",
+        "analyzer_version": "b2-a-v4",
         "canonical_map_id": canonical_map_id,
         "bsp": {
             "sha256": metadata.sha256, "bytes": metadata.byte_count, "ibsp_version": metadata.version,

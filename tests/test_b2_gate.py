@@ -140,7 +140,7 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
         "bsp": {"canonical_map_id": map_id, "sha256": _sha256(bsp)},
         "analyzer": {
             "name": "q2-atlas-analyzer",
-            "version": "b2-a-v3",
+            "version": "b2-a-v4",
             "sha256": SHA,
         },
     })
@@ -189,7 +189,7 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
         "authority": {
             "specification_sha256": EXPECTED_DESIGN_SHA256,
             "analyzer_name": "q2-atlas-analyzer",
-            "analyzer_version": "b2-a-v3",
+            "analyzer_version": "b2-a-v4",
             "analyzer_authority_sha256": SHA,
             "crate_commit": COMMIT,
             "executable_sha256": _sha256(executable),

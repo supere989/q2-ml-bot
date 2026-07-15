@@ -3,7 +3,7 @@
 Generator records are proposals.  This module validates their frozen wire
 contract and source identities, then admits only facts reproduced from the
 compiled BSP through B1 metadata/collision authority and evidenced Atlas
-navigation. Hook-v3 claims are independently replayed by the Atlas analyzer.
+navigation. Hook-v4 claims are independently replayed by the Atlas analyzer.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ from pathlib import Path
 import re
 from typing import Any
 
-from .hook_claims_v3 import (
-    HookClaimsV3Error,
+from .hook_claims_v4 import (
+    HookClaimsV4Error,
     load_materialization,
-    validate_record as validate_hook_record_v3,
+    validate_selected_record as validate_hook_record_v4,
 )
 
 
@@ -166,8 +166,8 @@ def validate_generator_claims(value: Any) -> dict[str, Any]:
 
     for index, item in enumerate(_list(claims["hook_claims"], "hooks", minimum=6)):
         try:
-            record = validate_hook_record_v3(item, f"hook {index}")
-        except HookClaimsV3Error as error:
+            record = validate_hook_record_v4(item, f"hook {index}")
+        except HookClaimsV4Error as error:
             raise GeneratedClaimProbeError(str(error)) from error
         unique(record["claim_id"], f"hook {index} claim_id")
     if len(claims["hook_claims"]) != 6:
@@ -324,7 +324,7 @@ def load_generator_hook_materialization(
     )
     try:
         document, digest = load_materialization(materialization_path)
-    except (HookClaimsV3Error, OSError) as error:
+    except (HookClaimsV4Error, OSError) as error:
         raise GeneratedClaimProbeError(str(error)) from error
     if digest != claims["source_files"]["hook_materialization_sha256"]:
         raise GeneratedClaimProbeError("hook materialization identity differs")
@@ -446,8 +446,11 @@ def _challenge_hazards(
     metadata: Any,
     claims: Mapping[str, Any],
     safety: Mapping[str, Any],
+    l0_semantics: Mapping[str, int],
 ) -> tuple[list[dict], dict]:
-    hurt_models: dict[tuple[int, ...], tuple[list[int], list[int], bool]] = {}
+    hurt_models: dict[
+        tuple[int, ...], tuple[int, list[int], list[int], bool]
+    ] = {}
     for entity in metadata.entities:
         if entity.classname != "trigger_hurt":
             continue
@@ -467,7 +470,7 @@ def _challenge_hazards(
         if tuple(raw) in hurt_models:
             raise GeneratedClaimProbeError("compiled trigger_hurt raw bounds are duplicated")
         hurt_models[tuple(raw)] = (
-            linked, standing_contact, bool(spawnflags & (1 | 2))
+            entity.index, linked, standing_contact, bool(spawnflags & (1 | 2))
         )
 
     results: list[dict] = []
@@ -479,9 +482,15 @@ def _challenge_hazards(
             matched = hurt_models.get(tuple(bounds))
             if matched is None:
                 raise GeneratedClaimProbeError(f"{claim['claim_id']} has no exact compiled hurt model")
-            linked_bounds, standing_contact, stateful = matched
-            raw_cells = _l0_intersecting_cell_count(linked_bounds)
-            expanded_cells = _l0_intersecting_cell_count(standing_contact)
+            entity_index, _linked_bounds, _standing_contact, stateful = matched
+            raw_cells = int(l0_semantics.get(f"hurt:{entity_index}:raw", 0))
+            expanded_cells = int(
+                l0_semantics.get(f"hurt:{entity_index}:expanded", 0)
+            )
+            if raw_cells <= 0 or expanded_cells <= 0:
+                raise GeneratedClaimProbeError(
+                    f"{claim['claim_id']} has no retained sparse Atlas hurt evidence"
+                )
             evidence = EVIDENCE_LINKED_AABB_V1
         else:
             x = (world_bounds[0] + world_bounds[3]) / 2
@@ -887,10 +896,13 @@ def analyze_non_hook_claims(
     spawn_records: Sequence[Mapping[str, Any]],
     claims: Mapping[str, Any],
     safety: Mapping[str, Any],
+    l0_semantics: Mapping[str, int],
 ) -> dict[str, Any]:
     """Challenge every generated non-hook claim; unknown evidence raises."""
     validate_generator_claims(claims)
-    hazard_claims, hazards = _challenge_hazards(cm, metadata, claims, safety)
+    hazard_claims, hazards = _challenge_hazards(
+        cm, metadata, claims, safety, l0_semantics
+    )
     return {
         "hazard_claims": hazard_claims,
         "hazards": hazards,

@@ -47,7 +47,7 @@
     },
     "hook_claims": {
       "type": "array", "minItems": 6, "maxItems": 6,
-      "items": {"$ref": "#/$defs/hook_v3"}
+      "items": {"$ref": "#/$defs/hook_v4"}
     },
     "route_claims": {
       "type": "array", "minItems": 1,
@@ -81,13 +81,14 @@
     "claim_id": {"type": "string", "pattern": "^[a-z0-9:_-]{1,127}$"},
     "vec3_i64": {"type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}, {"type": "integer"}], "minItems": 3, "maxItems": 3},
     "bounds_i64": {"type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}, {"type": "integer"}, {"type": "integer"}, {"type": "integer"}, {"type": "integer"}], "minItems": 6, "maxItems": 6},
-    "hook_v3": {
+    "hook_v4": {
       "type": "object", "additionalProperties": false,
-      "required": ["claim_id", "source_milliunits", "anchor_milliunits", "landing_milliunits", "release_after_ticks", "distance_milliunits", "flags"],
+      "required": ["claim_id", "source_milliunits", "trace_target_milliunits", "measured_anchor_milliunits", "landing_milliunits", "release_after_ticks", "distance_milliunits", "flags"],
       "properties": {
         "claim_id": {"type": "string", "pattern": "^hook:[0-9]{4}:candidate:[0-9]{4}$"},
         "source_milliunits": {"$ref": "#/$defs/vec3_i64"},
-        "anchor_milliunits": {"$ref": "#/$defs/vec3_i64"},
+        "trace_target_milliunits": {"$ref": "#/$defs/vec3_i64"},
+        "measured_anchor_milliunits": {"$ref": "#/$defs/vec3_i64"},
         "landing_milliunits": {"$ref": "#/$defs/vec3_i64"},
         "release_after_ticks": {"type": "integer", "minimum": 1, "maximum": 49},
         "distance_milliunits": {"type": "integer", "minimum": 1},

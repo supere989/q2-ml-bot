@@ -3,7 +3,7 @@
 Status: retired historical contract; non-admissible
 
 V2 is preserved only to explain historical artifacts and failed campaigns. It
-is superseded in one direction by `B2-HOOK-CANDIDATES-V3.md`. No current
+is superseded in one direction by `B2-HOOK-CANDIDATES-V4.md`. No current
 materializer, claim builder, analyzer, campaign, bundle, or runtime accepts V2,
 and there is no parser fallback, conversion, or dual-acceptance path. The
 present-tense descriptions below describe the retired V2 protocol only; they

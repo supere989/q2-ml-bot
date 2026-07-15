@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Challenge generator-v6 claims with a hash-bound compiled Atlas report.
 
-Source and V3 hook sidecar metadata are claims only. Generated-map promotion
+Source and V4 hook sidecar metadata are claims only. Generated-map promotion
 requires positive oracle-derived evidence from q2-atlas-analysis-v1 for every
 claim.  Missing, failed, or unknown compiled facts always reject promotion.
 Stock-map analysis uses a separate criteria path and never inherits v6 tags.
@@ -29,12 +29,12 @@ from maps.generator import (  # noqa: E402
     MIN_FLOOR_LIGHT_COVERAGE,
     MIN_SPAWN_SEPARATION,
 )
-from harness.hook_claims_v3 import (  # noqa: E402
-    HookClaimsV3Error,
+from harness.hook_claims_v4 import (  # noqa: E402
+    HookClaimsV4Error,
     load_candidates,
     load_materialization,
     runtime_records_sha256,
-    validate_record as validate_hook_record_v3,
+    validate_selected_record as validate_hook_record_v4,
     validate_runtime_sidecar,
     validation_trace_sha256,
 )
@@ -314,7 +314,9 @@ def _parse_hook_claims(path: Path) -> list[dict[str, Any]]:
         claims.append(
             {
                 "claim_id": f"hook:{len(claims):04d}",
-                "anchor_milliunits": _to_milliunits(numbers[:3], "hook anchor"),
+                "measured_anchor_milliunits": _to_milliunits(
+                    numbers[:3], "hook measured anchor"
+                ),
                 "landing_milliunits": _to_milliunits(numbers[3:6], "hook landing"),
                 "distance_milliunits": _to_milliunits(
                     numbers[6:7], "hook distance"
@@ -514,7 +516,7 @@ def build_generator_claims(map_path: Path) -> dict[str, Any]:
             paths["hook_materialization"]
         )
         candidates, candidates_sha256, meta_sha256 = load_candidates(paths["meta"])
-    except HookClaimsV3Error as error:
+    except HookClaimsV4Error as error:
         raise ClaimValidationError(str(error)) from error
     bsp_path = stem.with_suffix(".bsp")
     if not bsp_path.is_file():
@@ -537,7 +539,7 @@ def build_generator_claims(map_path: Path) -> dict[str, Any]:
             bsp_sha256=materialization["bsp"]["sha256"],
             materialization_sha256=materialization_sha256, records=hooks,
         )
-    except HookClaimsV3Error as error:
+    except HookClaimsV4Error as error:
         raise ClaimValidationError(str(error)) from error
     if len(runtime_hooks) != len(hooks) or runtime_records_sha256(hooks) != materialization[
         "runtime_records_sha256"
@@ -545,10 +547,11 @@ def build_generator_claims(map_path: Path) -> dict[str, Any]:
         raise ClaimValidationError("runtime hook rows differ from materialized records")
     for runtime, selected in zip(runtime_hooks, hooks):
         for field in (
-            "anchor_milliunits", "landing_milliunits", "distance_milliunits", "flags",
+            "measured_anchor_milliunits", "landing_milliunits",
+            "distance_milliunits", "flags",
         ):
             if runtime[field] != selected[field]:
-                raise ClaimValidationError("runtime hook geometry differs from selected v3 record")
+                raise ClaimValidationError("runtime hook geometry differs from selected v4 record")
     route_claims, route_records = _route_contract(routes)
     claims = {
         "schema": CLAIMS_SCHEMA,
@@ -631,11 +634,11 @@ def validate_generator_claims(value: object) -> dict[str, Any]:
 
     hooks = _unique_claims(claims["hook_claims"], "hook claims")
     if len(hooks) != 6:
-        raise ClaimValidationError("generated claims require exactly six hook-v3 claims")
+        raise ClaimValidationError("generated claims require exactly six hook-v4 claims")
     for hook in hooks:
         try:
-            validate_hook_record_v3(dict(hook), "hook claim")
-        except HookClaimsV3Error as error:
+            validate_hook_record_v4(dict(hook), "hook claim")
+        except HookClaimsV4Error as error:
             raise ClaimValidationError(str(error)) from error
 
     route_claims = _unique_claims(claims["route_claims"], "route claims")
@@ -1403,7 +1406,8 @@ def _validate_hooks(
             edge,
             {
                 "claim_id", "source_l1", "target_l1", "source_milliunits",
-                "anchor_milliunits", "landing_milliunits",
+                "trace_target_milliunits", "measured_anchor_milliunits",
+                "landing_milliunits",
                 "release_after_ticks", "distance_milliunits", "flags",
                 "trajectory_origin_fixed", "trajectory_sha256",
                 "first_grounded_frame_index",
@@ -1411,9 +1415,10 @@ def _validate_hooks(
             },
             "compiled hook edge",
         )
-        if tuple(_vec3_int(edge.get("anchor_milliunits"), "hook edge anchor")) != tuple(claim["anchor_milliunits"]):
-            failures.append(f"{claim['claim_id']} anchor differs")
-        for field in ("source_milliunits", "landing_milliunits"):
+        for field in (
+            "source_milliunits", "trace_target_milliunits",
+            "measured_anchor_milliunits", "landing_milliunits",
+        ):
             if tuple(_vec3_int(edge.get(field), f"hook edge {field}")) != tuple(claim[field]):
                 failures.append(f"{claim['claim_id']} {field} differs")
         for field in ("release_after_ticks", "distance_milliunits", "flags"):
@@ -1540,7 +1545,7 @@ def validate_generated_map(
         materialization, _materialization_digest = load_materialization(
             materialization_path
         )
-    except (HookClaimsV3Error, OSError) as error:
+    except (HookClaimsV4Error, OSError) as error:
         raise ClaimValidationError(str(error)) from error
 
     analysis_quality, compiled = _analysis_quality(

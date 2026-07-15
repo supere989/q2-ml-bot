@@ -11,7 +11,7 @@ from maps.generator import (
     HOOK_EYE_Z,
     HOOK_RELEASES_PER_SOURCE,
     HOOK_RELEASE_TICKS,
-    MAX_HOOK_CANDIDATES_V3,
+    MAX_HOOK_CANDIDATES_V4,
     MAX_HOOK_SOURCES_PER_GEOMETRY,
     PMOVE_FIXED_QUANTUM,
     PLAYER_MINS_Z,
@@ -92,8 +92,8 @@ def test_missing_distinct_source_emits_no_fabricated_candidate() -> None:
     generator._annotate_hook_zones()
 
     assert generator.hook_zones == []
-    assert generator.hook_claim_candidates_v3 == []
-    assert generator.hook_claim_candidates_v3_manifest()["records"] == []
+    assert generator.hook_claim_candidates_v4 == []
+    assert generator.hook_claim_candidates_v4_manifest()["records"] == []
 
 
 def test_generated_hook_candidate_schema_order_and_distance_are_stable(tmp_path) -> None:
@@ -106,26 +106,26 @@ def test_generated_hook_candidate_schema_order_and_distance_are_stable(tmp_path)
 
     first_meta = json.loads((first / "same.meta.json").read_text())
     second_meta = json.loads((second / "same.meta.json").read_text())
-    first_pool = first_meta["hook_claim_candidates_v3"]
-    second_pool = second_meta["hook_claim_candidates_v3"]
+    first_pool = first_meta["hook_claim_candidates_v4"]
+    second_pool = second_meta["hook_claim_candidates_v4"]
 
     assert first_pool == second_pool
     assert set(first_pool) == {
         "schema", "tick_msec", "status", "bundle_admissible", "records",
     }
-    assert first_pool["schema"] == "q2-hook-claim-candidates-v3"
+    assert first_pool["schema"] == "q2-hook-claim-candidates-v4"
     assert first_pool["tick_msec"] == 100
     assert first_pool["status"] == "unproven"
     assert first_pool["bundle_admissible"] is False
     records = first_pool["records"]
-    assert 6 <= len(records) <= MAX_HOOK_CANDIDATES_V3
+    assert 6 <= len(records) <= MAX_HOOK_CANDIDATES_V4
     assert [record["claim_id"] for record in records] == sorted(
         record["claim_id"] for record in records
     )
     assert len({record["claim_id"] for record in records}) == len(records)
 
     expected_record_keys = {
-        "claim_id", "source_milliunits", "anchor_milliunits",
+        "claim_id", "source_milliunits", "trace_target_milliunits",
         "landing_milliunits", "release_after_ticks", "distance_milliunits",
         "flags",
     }
@@ -134,7 +134,7 @@ def test_generated_hook_candidate_schema_order_and_distance_are_stable(tmp_path)
         assert _l1(record["source_milliunits"]) != _l1(record["landing_milliunits"])
         eye = list(record["source_milliunits"])
         eye[2] += HOOK_EYE_Z * 1000
-        expected_distance = round(math.dist(eye, record["anchor_milliunits"]))
+        expected_distance = round(math.dist(eye, record["trace_target_milliunits"]))
         assert record["distance_milliunits"] == expected_distance
         assert record["landing_milliunits"][2] in {
             (region["floor_z"] - PLAYER_MINS_Z) * 1000
@@ -150,19 +150,19 @@ def test_generated_hook_candidate_schema_order_and_distance_are_stable(tmp_path)
 def test_hook_pool_has_bounded_map_source_and_release_diversity(tmp_path) -> None:
     generate_map("diverse", 91470500, tmp_path, style="arena_vertical")
     metadata = json.loads((tmp_path / "diverse.meta.json").read_text())
-    records = metadata["hook_claim_candidates_v3"]["records"]
+    records = metadata["hook_claim_candidates_v4"]["records"]
     grouped: dict[str, list[dict]] = {}
     for record in records:
         geometry_id = record["claim_id"].split(":candidate:", 1)[0]
         grouped.setdefault(geometry_id, []).append(record)
 
-    expected_geometries = MAX_HOOK_CANDIDATES_V3 // (
+    expected_geometries = MAX_HOOK_CANDIDATES_V4 // (
         MAX_HOOK_SOURCES_PER_GEOMETRY * HOOK_RELEASES_PER_SOURCE
     )
-    assert len(records) == MAX_HOOK_CANDIDATES_V3
+    assert len(records) == MAX_HOOK_CANDIDATES_V4
     assert len(grouped) == expected_geometries
     assert len({
-        (tuple(rows[0]["anchor_milliunits"]),
+        (tuple(rows[0]["trace_target_milliunits"]),
          tuple(rows[0]["landing_milliunits"]), rows[0]["flags"])
         for rows in grouped.values()
     }) == expected_geometries
@@ -232,7 +232,7 @@ def test_hook_primary_source_prefers_exact_spawn_proposals() -> None:
          round((z + PMOVE_FIXED_QUANTUM) * 1000))
         for x, y, z in generator.spawn_points
     }
-    records = generator.hook_claim_candidates_v3_manifest()["records"]
+    records = generator.hook_claim_candidates_v4_manifest()["records"]
     primary_records = [
         record for record in records
         if record["claim_id"].endswith("candidate:0000")
@@ -257,7 +257,7 @@ def test_exact_spawn_outranks_closer_shared_floor_sample_deterministically() -> 
         )
         generator.spawn_points = [(64, 64, 24), (320, 64, 24)]
         generator._annotate_hook_zones()
-        return generator.hook_claim_candidates_v3_manifest()
+        return generator.hook_claim_candidates_v4_manifest()
 
     first_pool = candidate_pool()
     second_pool = candidate_pool()
@@ -294,7 +294,7 @@ def test_runtime_sidecar_is_unique_eight_field_unproven_projection(tmp_path) -> 
     geometries = [tuple(record[:6] + record[7:8]) for record in records]
     assert len(geometries) == len(set(geometries))
     assert len(records) == metadata["hook_zones"]
-    assert len(metadata["hook_claim_candidates_v3"]["records"]) > len(records)
+    assert len(metadata["hook_claim_candidates_v4"]["records"]) > len(records)
 
 
 def test_seeded_styles_publish_only_real_ceiling_geometry() -> None:
