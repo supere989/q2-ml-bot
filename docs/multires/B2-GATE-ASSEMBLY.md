@@ -27,13 +27,19 @@ them before any evidence can be assembled.
 No replacement cohort is authorized.
 
 Before any later replacement declaration may be committed, an exact clean
-producer snapshot must pass the no-write syntax floor under the deployment
-interpreter itself. On `DESKTOP-RTX2080` this means CPython 3.10 and
-`python3 -B tools/check_python_syntax_floor.py --root SNAPSHOT`, followed by a
-no-write import/CLI preflight for `tools/materialize_hook_claims.py`. Both must
-finish before source generation or WSL cohort bootstrap; a local newer-Python
-parse is not sufficient because Python 3.14 accepted the PEP-701 construct that
-terminated 71439 on Python 3.10.
+producer snapshot must pass the no-write language floor under WSL CPython 3.10
+with `python3.10 -B tools/check_python_syntax_floor.py --root SNAPSHOT`.
+Materializer import/CLI preflights must then pass under the actual pinned
+runtime, `/home/raymond/miniconda3/bin/python` (CPython 3.11.4, executable
+SHA-256 `b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4`).
+That runtime supplies zstandard 0.19.0 through `__init__.py` SHA-256
+`8a65cd4ab44112e1433a097daee7ce8600047995f3289f13d758bb001c06a553`
+and the active C backend SHA-256
+`40ece7fa91097e53ee4785cef01baae3f220f8dc891e20d94d4e07a1d77c9120`.
+The system Python 3.10 interpreter is syntax authority only because it lacks
+zstandard. Both checks must finish before source generation or WSL cohort
+bootstrap; a local newer-Python parse is not sufficient because Python 3.14
+accepted the PEP-701 construct that terminated 71439 on Python 3.10.
 
 The assembler's declaration check rejects the pinned 71439 alias as
 permanently retired before it reads or admits campaign evidence. Its existing
@@ -126,8 +132,9 @@ Only an all-green population is published with
 `renameat2(RENAME_NOREPLACE)`.
 
 ```sh
+MATERIALIZER_PY=/home/raymond/miniconda3/bin/python
 B1_AUTHORITIES=/home/raymond/q2-multires-isolated/B1-authorities-909b1e46
-python tools/materialize_generated_cohort.py \
+"$MATERIALIZER_PY" -B tools/materialize_generated_cohort.py \
   --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
   --compiled-dir "$FUTURE_ROOT/compiled" \
   --stage-dir "$FUTURE_ROOT/materialized-staging" \

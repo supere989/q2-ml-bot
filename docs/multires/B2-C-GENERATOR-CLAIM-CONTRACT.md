@@ -584,11 +584,18 @@ registry. No replacement cohort is authorized.
 
 The interpreter boundary is now a pre-declaration authority, not a check to
 discover after compilation. Before any later replacement may be declared, an
-exact clean producer snapshot must be checked on `DESKTOP-RTX2080` by its
-deployment CPython 3.10 with
-`python3 -B tools/check_python_syntax_floor.py --root SNAPSHOT`, and the
-single-map materializer's import/CLI preflight must also succeed without
-creating bytecode or cohort paths. Python 3.14's
+exact clean producer snapshot must pass the language-floor scan on
+`DESKTOP-RTX2080` with
+`/usr/bin/python3.10 -B tools/check_python_syntax_floor.py --root SNAPSHOT`.
+Its materializer imports must then pass under the pinned execution runtime
+`/home/raymond/miniconda3/bin/python`: CPython 3.11.4, executable SHA-256
+`b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4`,
+with zstandard 0.19.0 init/backend SHA-256 values
+`8a65cd4ab44112e1433a097daee7ce8600047995f3289f13d758bb001c06a553`
+and `40ece7fa91097e53ee4785cef01baae3f220f8dc891e20d94d4e07a1d77c9120`.
+The system Python lacks zstandard and must not run materialization. Both checks
+use `-B`, create no bytecode or cohort paths, and finish before generation.
+Python 3.14's
 `ast.parse(feature_version=(3,10))` did not reject the PEP-701 f-string that
 failed 71439, so a newer local interpreter cannot substitute for this WSL
 check.
@@ -640,8 +647,9 @@ generator hint; independent analysis later requires the sealed exact landing
 and ordered trace to replay identically:
 
 ```sh
+MATERIALIZER_PY=/home/raymond/miniconda3/bin/python
 B1_AUTHORITIES=/home/raymond/q2-multires-isolated/B1-authorities-909b1e46
-python tools/materialize_generated_cohort.py \
+"$MATERIALIZER_PY" -B tools/materialize_generated_cohort.py \
   --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
   --compiled-dir "$FUTURE_ROOT/compiled" \
   --stage-dir "$FUTURE_ROOT/materialized-staging" \
