@@ -21,6 +21,7 @@ from harness.atlas_analyzer import (
     FROZEN_L0_BIT_PLANE_NAMES,
     FROZEN_L0_SCALAR_PLANE_NAMES,
     NavNode,
+    OracleProcess,
     _MoverDependencyIndex,
     _apply_stock_drop_hazards,
     _add_exact_platform_navigation,
@@ -82,6 +83,97 @@ def _replace_entities(path: Path, entities: bytes) -> None:
     data.extend(entities)
     struct.pack_into("<2i", data, 8, entity_offset, len(entities))
     path.write_bytes(data)
+
+
+class _RecordingOracleStdin:
+    def __init__(self) -> None:
+        self.batches: list[list[dict]] = []
+
+    def write(self, payload: bytes) -> int:
+        self.batches.append([
+            json.loads(line) for line in payload.splitlines()
+        ])
+        return len(payload)
+
+    def flush(self) -> None:
+        pass
+
+
+def _transport_only_oracle(kind: str) -> tuple[OracleProcess, _RecordingOracleStdin]:
+    oracle = OracleProcess.__new__(OracleProcess)
+    oracle.kind = kind
+    oracle.limits = AnalyzerLimits(oracle_batch=32, max_oracle_requests=1_000)
+    oracle.requests = 0
+    stdin = _RecordingOracleStdin()
+    oracle.process = SimpleNamespace(stdin=stdin)
+
+    def read_lines(count: int) -> list[dict]:
+        batch = stdin.batches[-1]
+        assert len(batch) == count
+        return [{
+            "id": request["id"], "ok": True, "op": request["op"],
+        } for request in batch]
+
+    oracle._read_lines = read_lines
+    return oracle, stdin
+
+
+def _pmove_request(index: int, frame_count: int) -> dict:
+    return {
+        "id": f"pmove-{index}", "op": "simulate",
+        "commands": [{"msec": 100} for _ in range(frame_count)],
+    }
+
+
+def test_multiframe_pmove_transport_uses_singleton_leaf_batches() -> None:
+    oracle, stdin = _transport_only_oracle("pmove")
+    requests = [_pmove_request(index, 52) for index in range(17)]
+
+    responses = oracle.call(requests)
+
+    assert [[request["id"] for request in batch] for batch in stdin.batches] == [
+        [request["id"]] for request in requests
+    ]
+    assert [response["id"] for response in responses] == [
+        request["id"] for request in requests
+    ]
+    assert oracle.requests == len(requests)
+
+
+def test_mixed_pmove_transport_never_shares_a_multiframe_batch() -> None:
+    oracle, stdin = _transport_only_oracle("pmove")
+    requests = [
+        _pmove_request(0, 1), _pmove_request(1, 1),
+        _pmove_request(2, 40),
+        _pmove_request(3, 1), _pmove_request(4, 52),
+        _pmove_request(5, 1), _pmove_request(6, 1),
+    ]
+
+    oracle.call(requests)
+
+    assert [[request["id"] for request in batch] for batch in stdin.batches] == [
+        ["pmove-0", "pmove-1"], ["pmove-2"], ["pmove-3"],
+        ["pmove-4"], ["pmove-5", "pmove-6"],
+    ]
+
+    leaf, leaf_stdin = _transport_only_oracle("pmove")
+    with pytest.raises(
+        AtlasAnalysisError,
+        match="multi-frame pmove request entered a shared transport batch",
+    ):
+        leaf._call_batch([_pmove_request(7, 1), _pmove_request(8, 40)])
+    assert leaf_stdin.batches == []
+    assert leaf.requests == 0
+
+
+@pytest.mark.parametrize("kind", ["cm", "pmove"])
+def test_small_oracle_traffic_retains_batch_limit(kind: str) -> None:
+    oracle, stdin = _transport_only_oracle(kind)
+    requests = [_pmove_request(index, 1) for index in range(40)]
+
+    oracle.call(requests)
+
+    assert [len(batch) for batch in stdin.batches] == [32, 8]
 
 
 class _Q2dm5LowCeilingSeedCm:

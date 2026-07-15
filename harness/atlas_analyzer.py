@@ -271,17 +271,40 @@ class OracleProcess:
     def call(self, requests: Sequence[dict]) -> list[dict]:
         if not requests:
             return []
-        batch_limit = self.limits.oracle_batch
-        if self.kind == "pmove" and any(len(request.get("commands", [])) > 4 for request in requests):
-            # Multi-frame Pmove responses are large enough that even 32 can
-            # fill a pipe before the parent reads. Keep trajectory batches
-            # below the measured pipe capacity.
-            batch_limit = min(batch_limit, 4)
-        if len(requests) > batch_limit:
-            output: list[dict] = []
-            for start in range(0, len(requests), batch_limit):
-                output.extend(self.call(requests[start:start + batch_limit]))
-            return output
+        output: list[dict] = []
+        batch: list[dict] = []
+        for request in requests:
+            multi_frame_pmove = (
+                self.kind == "pmove"
+                and len(request.get("commands", [])) > 1
+            )
+            if multi_frame_pmove:
+                # A trajectory response can exceed the duplex pipe capacity.
+                # Drain any preceding small requests, then write and read this
+                # request alone so parent and child cannot block while each is
+                # writing the opposite pipe.
+                if batch:
+                    output.extend(self._call_batch(batch))
+                    batch = []
+                output.extend(self._call_batch([request]))
+                continue
+            batch.append(request)
+            if len(batch) == self.limits.oracle_batch:
+                output.extend(self._call_batch(batch))
+                batch = []
+        if batch:
+            output.extend(self._call_batch(batch))
+        return output
+
+    def _call_batch(self, requests: Sequence[dict]) -> list[dict]:
+        if (
+            self.kind == "pmove"
+            and len(requests) > 1
+            and any(len(request.get("commands", [])) > 1 for request in requests)
+        ):
+            raise AtlasAnalysisError(
+                "multi-frame pmove request entered a shared transport batch"
+            )
         self.requests += len(requests)
         if self.requests > self.limits.max_oracle_requests:
             raise AtlasAnalysisError(f"{self.kind} oracle request budget exceeded")
