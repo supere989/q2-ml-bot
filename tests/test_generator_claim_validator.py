@@ -556,7 +556,7 @@ def _reseal_analysis(
 
 def _inflate_first_route(value: dict) -> None:
     first = value["compiled_world"]["route_claims"][0]
-    first["cost_q8"] += 10000 * 256
+    first["cost_q8"] += 1_000_000 * 256
 
 
 def test_generator_claims_are_canonical_and_byte_deterministic(tmp_path: Path):

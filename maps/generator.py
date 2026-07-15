@@ -1394,21 +1394,23 @@ class MapGenerator:
                 box = SolidBox(tx, ty, fz,
                                tx + TOWER_BASE, ty + TOWER_BASE, top)
                 if self._structure_is_clear(box):
-                    chosen = (room, tx, ty, fz, top, box)
-                    break
+                    self.spawn_blockers.append(box)
+                    quad_site = self._floor_item_spot(
+                        room, tx + TOWER_BASE // 2, ty + TOWER_BASE // 2,
+                        TOWER_BASE + 128,
+                    )
+                    self.spawn_blockers.pop()
+                    if quad_site is not None:
+                        chosen = (room, tx, ty, fz, top, box, quad_site)
+                        break
             if chosen is not None:
                 break
         if chosen is None:
             return
-        room, tx, ty, fz, top, box = chosen
+        room, tx, ty, fz, top, box, quad_site = chosen
         w.add_brush(tx, ty, fz, tx + TOWER_BASE, ty + TOWER_BASE, top,
                     tf=self.pal['light'], tc=self.pal['metal'], tw=self.pal['metal'])
         self.spawn_blockers.append(box)
-        cx_t = tx + TOWER_BASE // 2
-        cy_t = ty + TOWER_BASE // 2
-        quad_site = self._floor_item_spot(room, cx_t, cy_t, TOWER_BASE + 128)
-        if quad_site is None:
-            raise RuntimeError("objective tower has no standing-clear floor reward site")
         quad_x, quad_y, quad_z = quad_site
         w.add_entity("item_quad", {"origin": f"{quad_x} {quad_y} {quad_z}"})
         self.objectives.append({
@@ -1807,9 +1809,27 @@ class MapGenerator:
                          spread: int) -> Optional[Tuple[int, int, int]]:
         """Choose a deterministic standing-clear item origin on a room floor."""
         origin_z = room.floor_z + 24
+        candidates = []
         for _ in range(32):
             x = xc + self.rng.randint(-spread, spread)
             y = yc + self.rng.randint(-spread, spread)
+            candidates.append((x, y))
+        x_start = room.wx + SPAWN_EDGE_MARGIN
+        x_stop = room.wx + room.w - SPAWN_EDGE_MARGIN
+        y_start = room.wy + SPAWN_EDGE_MARGIN
+        y_stop = room.wy + room.d - SPAWN_EDGE_MARGIN
+        candidates.extend(sorted(
+            (
+                (x, y)
+                for x in range(x_start, x_stop + 1, 32)
+                for y in range(y_start, y_stop + 1, 32)
+            ),
+            key=lambda point: (
+                (point[0] - xc) ** 2 + (point[1] - yc) ** 2,
+                point[1], point[0],
+            ),
+        ))
+        for x, y in dict.fromkeys(candidates):
             if not self._inside_room_for_spawn(room, x, y):
                 continue
             if self._spawn_overlaps_blocker(x, y, origin_z):
