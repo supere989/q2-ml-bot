@@ -6,30 +6,29 @@ replacement, salvage, partial, overwrite, or red-report mode. A failed input
 prints one refusal to stderr and writes no gate.
 
 Current status: cohort 71437 failed during its first primary source generation
-at ordinal 10 and is permanently retired. Its cold generation never began and
-no source-freeze report or later stage was published. No replacement cohort
-has been declared. The assembler remains pinned to 71437 as a fail-closed
-historical boundary, so the producer list and command below are not currently
-executable as a green assembly workflow.
+at ordinal 10 and is permanently retired. Fresh replacement cohort 71438 is
+declared with 28 new members and the assembler is pinned to that exact
+population. No 71438 source-freeze report or later-stage evidence has been
+published. The producer list and command below become executable only from the
+clean 71438 declaration commit with new authority-bound paths.
 
 The assembler requires the repository to be clean before it reads the current
 commit, tree, generator, route generator, and complete Atlas analyzer closure.
-The 71437 source freeze, generated Atlas build report, test report, every
-analysis manifest, and the real Dyn proof would all have had to carry that
-same implementation authority. The source freeze was never published, so
-this requirement cannot be satisfied. The exact partial primary prefix and
-empty cold root are archived at
+The 71438 source freeze, generated Atlas build report, test report, every
+analysis manifest, and the real Dyn proof must all carry that same
+implementation authority. The exact 71437 partial primary prefix and empty
+cold root remain archived at
 `/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71437-73d55811`.
 Neither that root, its members, nor its reserved sibling report path may be
-retried or reused. An intervening commit also makes all earlier
-implementation-bound evidence stale.
+retried or reused. The 71438 declaration commit makes all earlier
+implementation-bound evidence stale, and every 71438 stage and report path
+must be absent before its first producer invocation.
 
 ## Required producer reports
 
-- `tools/run_generator_cohort.py generate` would have written the exact 71437
-  source freeze. Its first attempt failed before cold generation, and neither
-  its partial primary prefix nor the same declaration or paths may be retried
-  or reused.
+- `tools/run_generator_cohort.py generate` writes the exact 71438 source
+  freeze from two distinct fresh directories. No 71437 member, artifact,
+  declaration alias, stage, or report may be retried, copied, or reused.
 - `tools/run_generator_cohort.py verify-stage` writes canonical compiled and
   materialized membership reports. `tools/run_compiled_static_campaign.py`
   writes canonical `q2-generator-v6-compiled-static-campaign-v1` evidence with
@@ -48,8 +47,7 @@ implementation-bound evidence stale.
   from each analysis manifest.
 - `tools/q2-dyn-evidence` runs on `DESKTOP-RTX2080` WSL and atomically writes
   its report plus four real `Q2LAT002` snapshots. Its selected map must be a
-  member of the admitted 71437 population. No such population was published;
-  the assembler would otherwise bind it to the exact
+  member of the admitted 71438 population. The assembler binds it to the exact
   local Atlas manifest, raw Atlas, BSP, analyzer authority, crate commit, WSL
   identity, snapshot bytes, negative fences, and p99 measurement. Build the
   producer once from the clean committed root, retain that exact executable,

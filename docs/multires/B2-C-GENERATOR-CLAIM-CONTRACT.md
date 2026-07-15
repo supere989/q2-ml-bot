@@ -474,9 +474,10 @@ Implementation fix commit `57f4082` and the immutable 71436 named declaration
 and failure archive all preceded the declaration of replacement cohort
 `b2g26_final_71437`. Its 28 entirely new members use seeds 71437000 through
 71437603 under the same all-or-nothing, declared-before-generation policy.
-The alias and immutable 71437 named copy were byte-identical when declared and
-remain so as a fail-closed historical boundary. No 71436 artifact was reusable
-by 71437: all primary, cold, compiled, materialized, claims, analysis,
+The alias and immutable 71437 named copy were byte-identical when declared.
+The named copy remains the fail-closed historical boundary; the alias advances
+only through a separately committed fresh declaration. No 71436 artifact was
+reusable by 71437: all primary, cold, compiled, materialized, claims, analysis,
 validation, Dyn, and report paths had to be fresh. In particular, generation
 did not reuse archived root
 `/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71436-73d55811`;
@@ -497,7 +498,7 @@ prefix was written. Cold generation never began, no source-freeze report or
 later stage was published, and exact evidence is archived in
 `B2-GENERATED-COHORT-71437-FAILURE.json`. Cohort 71437 is permanently retired.
 Its prefix and every associated artifact and path cannot be retried, salvaged,
-reused, or substituted. No replacement cohort has been declared.
+reused, or substituted.
 
 Before any replacement may be declared, source construction reserves four
 connected standing-volume bands around one deterministic arena perimeter and
@@ -508,18 +509,36 @@ final selector consumes the certified witnesses only after rechecking local
 clearance and escape, separation, dual-axis span, and one exact source standing
 component. Lane-wall endpoints begin at the ring's inner boundary, preserving
 the two sight-blocking walls and central gaps that define lane arenas without
-entering the reserved circulation volume. These implementation invariants do
-not authorize generation; a separate clean commit must still declare an
-entirely fresh cohort and artifact root.
+entering the reserved circulation volume. These implementation invariants did
+not themselves authorize generation; a separate clean declaration commit was
+still required before an entirely fresh cohort and artifact root could begin.
+
+Protected-ring and lane implementation fix commit `f9e6e4f`, producer-contract
+correction commit `ac1cf95`, and the immutable 71437 declaration and failure
+archive precede the fresh replacement cohort
+`b2g26_final_71438`. Its 28 entirely new members use seeds 71438000 through
+71438603, four per concrete style, under the same all-or-nothing,
+declared-before-generation policy. The authoritative alias and immutable 71438
+named declaration are canonical and byte-identical with SHA-256
+`bebe7c2c63711c399d34780f3297a622f9d28d1c9751511473ec1ed4815a58c2`.
+No 71437 or older member, seed, artifact, stage, report, Dyn evidence, or test
+evidence is reusable. The first and only 71438 source-freeze attempt must begin
+from the clean declaration commit in the absent authority-bound root
+`/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71438-${ATLAS_AUTHORITY_SHA256:0:8}`,
+with distinct fresh `source` and `source-cold` directories and the absent
+exclusive sibling report
+`/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71438-${ATLAS_AUTHORITY_SHA256:0:8}-report.json`.
+Any WSL compilation and later-stage root must likewise be new and bound to
+`b2g26_final_71438` plus the same authority suffix.
 
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
 replacement declaration. It must never name retired cohort 71426, 71427,
-71428, 71429, 71430, 71431, 71432, 71433, 71434, 71435, 71436, or 71437. There
-is currently no declaration authorized for this workflow; the commands below
-remain a template for use only after an implementation fix and a separately
-committed fresh declaration with entirely new members and paths.
+71428, 71429, 71430, 71431, 71432, 71433, 71434, 71435, 71436, or 71437. Fresh
+replacement cohort `b2g26_final_71438` is now declared for this workflow. The
+commands become executable only from its clean declaration commit with
+entirely new members and absent authority-bound artifact and report paths.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V4 hook candidates under the pinned B1 authorities. Materialization

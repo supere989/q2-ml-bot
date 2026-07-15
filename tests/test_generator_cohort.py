@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -12,8 +13,12 @@ from tools import run_generator_cohort as cohort
 
 ROOT = Path(__file__).resolve().parents[1]
 DECLARATION = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-DECLARATION_71437 = (
-    ROOT / "docs/multires/B2-GENERATED-COHORT-71437-DECLARATION.json"
+DECLARATION_71438 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71438-DECLARATION.json"
+)
+HISTORICAL_DECLARATIONS = tuple(
+    ROOT / f"docs/multires/B2-GENERATED-COHORT-{number}-DECLARATION.json"
+    for number in range(71427, 71438)
 )
 HEX64 = "a" * 64
 GIT40 = "b" * 40
@@ -175,15 +180,20 @@ def static_pass(map_path: Path) -> dict[str, object]:
 
 def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> None:
     declaration, digest = cohort.load_declaration(DECLARATION)
-    assert DECLARATION.read_bytes() == DECLARATION_71437.read_bytes()
+    declaration_bytes = DECLARATION.read_bytes()
+    assert declaration_bytes == DECLARATION_71438.read_bytes()
+    assert declaration_bytes == cohort.canonical_bytes(declaration)
+    assert hashlib.sha256(declaration_bytes).hexdigest() == (
+        "bebe7c2c63711c399d34780f3297a622f9d28d1c9751511473ec1ed4815a58c2"
+    )
     style_bases = (
-        ("open", 71437000),
-        ("towers", 71437100),
-        ("canyon", 71437200),
-        ("pits", 71437300),
-        ("arena_open", 71437400),
-        ("arena_vertical", 71437500),
-        ("arena_lanes", 71437600),
+        ("open", 71438000),
+        ("towers", 71438100),
+        ("canyon", 71438200),
+        ("pits", 71438300),
+        ("arena_open", 71438400),
+        ("arena_vertical", 71438500),
+        ("arena_lanes", 71438600),
     )
     expected = [
         {
@@ -199,7 +209,7 @@ def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> Non
     ]
 
     assert len(digest) == 64
-    assert declaration["cohort_id"] == "b2g26_final_71437"
+    assert declaration["cohort_id"] == "b2g26_final_71438"
     assert declaration["maps"] == expected
     assert declaration["selection"] == {
         "timing": "declared-before-generation",
@@ -217,6 +227,18 @@ def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> Non
     assert len({row["map"] for row in declaration["maps"]}) == 28
     assert all(row["grid"] == 5 for row in declaration["maps"])
     assert all(row["observed_heat"] is None for row in declaration["maps"])
+
+    historical_rows = [
+        row
+        for path in HISTORICAL_DECLARATIONS
+        for row in cohort.load_declaration(path)[0]["maps"]
+    ]
+    assert {row["seed"] for row in declaration["maps"]}.isdisjoint(
+        row["seed"] for row in historical_rows
+    )
+    assert {row["map"] for row in declaration["maps"]}.isdisjoint(
+        row["map"] for row in historical_rows
+    )
 
 
 def test_generate_publishes_only_a_complete_double_built_source_freeze(
