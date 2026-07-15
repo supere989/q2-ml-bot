@@ -224,10 +224,13 @@ non-admissible; no member or V3 artifact may be repaired, converted, retried,
 or salvaged.
 
 The sparse-hurt, exact-lava, final-endpoint, standing-component route, and V4
-hook fixes must be committed before a fresh replacement declaration. That
-declaration must use a new cohort ID and seed block and be committed before its
-first generator invocation. Declaration presence alone never claims that any
-member passes.
+hook fixes were committed before the authoritative replacement declaration.
+That declaration now names `b2g26_final_71429`, with four maps per concrete
+style and exact seed blocks `71429000` through `71429603`. Its status is
+`declared-not-generated`: no seed has been invoked and no source, compiled,
+materialized, claims, analysis, or gate result is claimed. The declaration is
+committed before its first generator invocation; declaration presence alone
+never claims that any member passes.
 
 ## Offline workflow
 

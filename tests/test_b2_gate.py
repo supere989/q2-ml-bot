@@ -16,7 +16,7 @@ from tools.assemble_b2_gate import (
     _exact_directory_files,
     _decode_dyn_snapshot,
     _dyn_source_authority,
-    _expected_71428_rows,
+    _expected_71429_rows,
     _validate_dyn_evidence,
     _validate_test_report,
     _parser,
@@ -122,7 +122,7 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
     paths.claims_dir.mkdir()
     paths.analysis_dir.mkdir()
     paths.dyn_evidence_report.parent.mkdir()
-    map_id = _expected_71428_rows()[0]["map"]
+    map_id = _expected_71429_rows()[0]["map"]
 
     bsp = b"IBSP fixture"
     (paths.claims_dir / f"{map_id}.bsp").write_bytes(bsp)
@@ -263,22 +263,22 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
         },
     }
     paths.dyn_evidence_report.write_bytes(canonical_bytes(report))
-    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71428_rows()}
+    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71429_rows()}
     return paths, declaration, report
 
 
-def test_71428_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
-    rows = _expected_71428_rows()
+def test_71429_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
+    rows = _expected_71429_rows()
     assert len(rows) == 28
     assert rows[0] == {
         "ordinal": 0,
-        "map": "b2g26_open_71428000",
-        "seed": 71428000,
+        "map": "b2g26_open_71429000",
+        "seed": 71429000,
         "style": "open",
         "grid": 5,
         "observed_heat": None,
     }
-    assert rows[-1]["map"] == "b2g26_arena_lanes_71428603"
+    assert rows[-1]["map"] == "b2g26_arena_lanes_71429603"
     options = _parser().format_help()
     assert "--declaration" in options
     assert "--source-dir" in options

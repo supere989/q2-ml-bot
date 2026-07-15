@@ -7,14 +7,14 @@ prints one refusal to stderr and writes no gate.
 
 The assembler requires the repository to be clean before it reads the current
 commit, tree, generator, route generator, and complete Atlas analyzer closure.
-The 71428 source freeze, generated Atlas build report, test report, every
+The 71429 source freeze, generated Atlas build report, test report, every
 analysis manifest, and the real Dyn proof must carry that same implementation
 authority. An intervening commit makes all earlier implementation-bound
 evidence stale.
 
 ## Required producer reports
 
-- `tools/run_generator_cohort.py generate` writes the exact 71428 source
+- `tools/run_generator_cohort.py generate` writes the exact 71429 source
   freeze. The primary and cold source directories remain immutable inputs.
 - `tools/run_generator_cohort.py verify-stage` writes canonical compiled and
   materialized membership reports. `tools/run_compiled_static_campaign.py`
@@ -34,7 +34,7 @@ evidence stale.
   from each analysis manifest.
 - `tools/q2-dyn-evidence` runs on `DESKTOP-RTX2080` WSL and atomically writes
   its report plus four real `Q2LAT002` snapshots. Its selected map must be a
-  member of the admitted 71428 population. The assembler binds it to the exact
+  member of the admitted 71429 population. The assembler binds it to the exact
   local Atlas manifest, raw Atlas, BSP, analyzer authority, crate commit, WSL
   identity, snapshot bytes, negative fences, and p99 measurement. Build the
   producer once from the clean committed root, retain that exact executable,

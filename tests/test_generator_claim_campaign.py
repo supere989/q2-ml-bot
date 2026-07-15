@@ -23,6 +23,12 @@ FAILURE_71427 = (
 DECLARATION_71427 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71427-DECLARATION.json"
 )
+FAILURE_71428 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71428-FAILURE.json"
+)
+DECLARATION_71428 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71428-DECLARATION.json"
+)
 NONZERO = "ab" * 32
 
 
@@ -69,6 +75,8 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "permanently non-admissible",
         "168 of 196",
         "b2g26_final_71428",
+        "0/28",
+        "b2g26_final_71429",
         "declared-not-generated",
     )
     assert all(fragment in contract for fragment in required_contract)
@@ -149,6 +157,40 @@ def test_71427_failure_record_is_canonical_exact_and_no_salvage() -> None:
     assert admission["replacement_declaration_status"] == (
         "pending-implementation-fix"
     )
+
+
+def test_71428_failure_record_is_canonical_exact_and_no_salvage() -> None:
+    payload = FAILURE_71428.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71428"
+    assert failure["status"] == "permanently-failed-analysis"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71428-DECLARATION.json",
+        "sha256": hashlib.sha256(DECLARATION_71428.read_bytes()).hexdigest(),
+    }
+    assert failure["failure"]["classified_map_count"] == 28
+    assert sum(failure["failure"]["classification"].values()) == 28
+    assert failure["evidence"]["failed_analysis_campaign"] == {
+        "diagnostics_directory": "analysis-diagnostics-v3",
+        "expected_map_count": 28,
+        "pass_count": 0,
+        "passed": False,
+        "path_from_artifact_root": "reports/generated-atlas-campaign-v3.json",
+        "published": False,
+        "sha256": "f74680dca9386920b51b9b38c6b8b6f147369c249a06fefa719eccf658ee9bc1",
+    }
+    admission = failure["admission"]
+    assert admission["permanently_non_admissible"] is True
+    for key in (
+        "older_population_reuse_allowed", "passing_subset_allowed",
+        "regeneration_under_same_declaration_allowed",
+        "replacement_member_allowed", "retry_under_same_declaration_allowed",
+        "salvage_allowed",
+    ):
+        assert admission[key] is False
 
 
 def write_stage(directory: Path, stage: str) -> dict:
