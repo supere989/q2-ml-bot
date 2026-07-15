@@ -129,10 +129,9 @@ mod tests {
         AtlasOrigin, B1AuthorityExecutables, B1AuthorityIdentities, B1AuthorityIdentity,
         B1NormativeDocuments, B1RuntimeAuthoritySeal, BspIdentity, COLLISION_ORACLE_NAME,
         COLLISION_ORACLE_SCHEMA, CollisionOracleAdmission, CollisionParameters,
-        CollisionSourceClosure, GridManifest, HullManifest, MASK_PLAYERSOLID_V1, MASK_SHOT_V1,
-        FALL_ORACLE_NAME, FALL_ORACLE_SCHEMA, FallOracleAdmission, FallParameters,
-        FallSourceClosure,
-        ManifestBudgets, ORACLE_SEMANTIC_VERSION, OracleAdmissions, OracleBspBinding,
+        CollisionSourceClosure, FALL_ORACLE_NAME, FALL_ORACLE_SCHEMA, FallOracleAdmission,
+        FallParameters, FallSourceClosure, GridManifest, HullManifest, MASK_PLAYERSOLID_V1,
+        MASK_SHOT_V1, ManifestBudgets, ORACLE_SEMANTIC_VERSION, OracleAdmissions, OracleBspBinding,
         OracleToolIdentity, PMOVE_ORACLE_NAME, PMOVE_ORACLE_SCHEMA, PmoveOracleAdmission,
         PmoveParameters, PmoveSourceClosure, ToolIdentity,
     };
@@ -178,8 +177,10 @@ mod tests {
                 name: COLLISION_ORACLE_NAME.to_owned(),
                 schema: COLLISION_ORACLE_SCHEMA.to_owned(),
                 version: ORACLE_SEMANTIC_VERSION,
-                executable_sha256: "781edaee1b9317766dbf831ad5edc8b5fdebe696969ca1efe0e54e2f3e5c7d1e".to_owned(),
-                tool_identity_sha256: "50fd0df0a296c54d0060dc2406977b1c78f9392ea1643e010f6759622557cfdf".to_owned(),
+                executable_sha256:
+                    "781edaee1b9317766dbf831ad5edc8b5fdebe696969ca1efe0e54e2f3e5c7d1e".to_owned(),
+                tool_identity_sha256:
+                    "50fd0df0a296c54d0060dc2406977b1c78f9392ea1643e010f6759622557cfdf".to_owned(),
                 physics_identity_sha256: digest(0x13),
             },
             bsp: OracleBspBinding {
@@ -204,8 +205,10 @@ mod tests {
                 name: PMOVE_ORACLE_NAME.to_owned(),
                 schema: PMOVE_ORACLE_SCHEMA.to_owned(),
                 version: ORACLE_SEMANTIC_VERSION,
-                executable_sha256: "66b481e924ec3d0a5e4eaf5458dd34cfe3c0927d5b7650455bceb368666718e4".to_owned(),
-                tool_identity_sha256: "50fd0df0a296c54d0060dc2406977b1c78f9392ea1643e010f6759622557cfdf".to_owned(),
+                executable_sha256:
+                    "66b481e924ec3d0a5e4eaf5458dd34cfe3c0927d5b7650455bceb368666718e4".to_owned(),
+                tool_identity_sha256:
+                    "50fd0df0a296c54d0060dc2406977b1c78f9392ea1643e010f6759622557cfdf".to_owned(),
                 physics_identity_sha256: digest(0x1a),
             },
             bsp: OracleBspBinding {
@@ -233,9 +236,12 @@ mod tests {
                 name: FALL_ORACLE_NAME.to_owned(),
                 schema: FALL_ORACLE_SCHEMA.to_owned(),
                 version: ORACLE_SEMANTIC_VERSION,
-                executable_sha256: "dfdcf7ed74cc3ad7b8aa73df86986a8a4a31207da98ccffb4dd61673c324bef8".to_owned(),
-                tool_identity_sha256: "8f6706edf203bb75451fd148943fb9d0425a1b112f086b6886788434973117d5".to_owned(),
-                physics_identity_sha256: "8b1f06550cb546d329bbce209f2b13248810fc10e0e19799616a338c0f633582".to_owned(),
+                executable_sha256:
+                    "dfdcf7ed74cc3ad7b8aa73df86986a8a4a31207da98ccffb4dd61673c324bef8".to_owned(),
+                tool_identity_sha256:
+                    "8f6706edf203bb75451fd148943fb9d0425a1b112f086b6886788434973117d5".to_owned(),
+                physics_identity_sha256:
+                    "8b1f06550cb546d329bbce209f2b13248810fc10e0e19799616a338c0f633582".to_owned(),
             },
             parameters: FallParameters {
                 fall_damagemod_f32_bits: 1.0_f32.to_bits(),
@@ -244,16 +250,23 @@ mod tests {
                 constants: fall_constants.to_owned(),
             },
             source: FallSourceClosure {
-                shared_c_sha256: "6d30c143e359e18784615ad0f4b21a85b3b4b9b2d4b841792685b19a88a7b6d8".to_owned(),
-                shared_h_sha256: "debd12ca5315cfa9e6cff714bad2d2c2fe708e378a37776e6665793aa3967357".to_owned(),
-                integration_sha256: "326f59b12ee60bd93252a9d5a39428c535097ed6bc7a6258f2326a3cdb12ed62".to_owned(),
-                game_header_sha256: "da27f13498fb7120b037b2a6b6ce0a36f4e90a90d1caf0c09c7aaeb1c8310877".to_owned(),
-                constants_sha256: "6274fdec332e9d51db6f1b8ca8a836835902e5269957f62c72e3d63a3a54c703".to_owned(),
+                shared_c_sha256: "6d30c143e359e18784615ad0f4b21a85b3b4b9b2d4b841792685b19a88a7b6d8"
+                    .to_owned(),
+                shared_h_sha256: "debd12ca5315cfa9e6cff714bad2d2c2fe708e378a37776e6665793aa3967357"
+                    .to_owned(),
+                integration_sha256:
+                    "326f59b12ee60bd93252a9d5a39428c535097ed6bc7a6258f2326a3cdb12ed62".to_owned(),
+                game_header_sha256:
+                    "da27f13498fb7120b037b2a6b6ce0a36f4e90a90d1caf0c09c7aaeb1c8310877".to_owned(),
+                constants_sha256:
+                    "6274fdec332e9d51db6f1b8ca8a836835902e5269957f62c72e3d63a3a54c703".to_owned(),
                 build_contract: "lithium-linux-c99-o1-f32-shared-fall-v1".to_owned(),
-                tool_closure_sha256: "8f6706edf203bb75451fd148943fb9d0425a1b112f086b6886788434973117d5".to_owned(),
+                tool_closure_sha256:
+                    "8f6706edf203bb75451fd148943fb9d0425a1b112f086b6886788434973117d5".to_owned(),
             },
             contract_sha256: String::new(),
-        }.seal();
+        }
+        .seal();
         let artifact = AtlasArtifact::empty(AtlasOrigin([0, 0, 0]));
         let raw = artifact.encode_uncompressed(&limits).unwrap();
         let counts = AtlasCounts::from_artifact(&artifact);
@@ -281,16 +294,26 @@ mod tests {
                 b1_runtime_authority_seal: B1RuntimeAuthoritySeal {
                     schema: "q2-b1-runtime-authority-seal-v1".to_owned(),
                     normative_documents: B1NormativeDocuments {
-                        design_sha256: "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5".to_owned(),
-                        plan_sha256: "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b".to_owned(),
+                        design_sha256:
+                            "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5"
+                                .to_owned(),
+                        plan_sha256:
+                            "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b"
+                                .to_owned(),
                     },
-                    hook_parity_attestation_sha256: "2e473d8face6b89f5b32798ddc5264bb8cc406e8dc29fd837e85bbd11b53d5ab".to_owned(),
-                    fixture_bsp_sha256: "ed6c3ae52dffce93b932756486fdaea3992f6a8ce68dddf2fbfd4281e4515b3f".to_owned(),
+                    hook_parity_attestation_sha256:
+                        "2e473d8face6b89f5b32798ddc5264bb8cc406e8dc29fd837e85bbd11b53d5ab"
+                            .to_owned(),
+                    fixture_bsp_sha256:
+                        "ed6c3ae52dffce93b932756486fdaea3992f6a8ce68dddf2fbfd4281e4515b3f"
+                            .to_owned(),
                     analysis_bsp_sha256: bsp.sha256.clone(),
                     executables: B1AuthorityExecutables {
                         cm_sha256: collision.tool.executable_sha256.clone(),
                         pmove_sha256: pmove.tool.executable_sha256.clone(),
-                        hook_sha256: "cd8bc4107ae2e9f4ac006fbe469b360832db80b96a5597c2e5dfe12c32dc9284".to_owned(),
+                        hook_sha256:
+                            "cd8bc4107ae2e9f4ac006fbe469b360832db80b96a5597c2e5dfe12c32dc9284"
+                                .to_owned(),
                         fall_sha256: fall.tool.executable_sha256.clone(),
                     },
                     identities: B1AuthorityIdentities {
@@ -303,8 +326,12 @@ mod tests {
                             physics_identity: pmove.tool.physics_identity_sha256.clone(),
                         },
                         hook: B1AuthorityIdentity {
-                            tool_identity: "9c47e3339df3f194c7729ea95c1955708540411d8baffc8208aa92349e1d2e78".to_owned(),
-                            physics_identity: "38f441106d653997466f8ace13baebe5e5515d6b77a7edf535a1d93576eef9d3".to_owned(),
+                            tool_identity:
+                                "9c47e3339df3f194c7729ea95c1955708540411d8baffc8208aa92349e1d2e78"
+                                    .to_owned(),
+                            physics_identity:
+                                "38f441106d653997466f8ace13baebe5e5515d6b77a7edf535a1d93576eef9d3"
+                                    .to_owned(),
                         },
                         fall: B1AuthorityIdentity {
                             tool_identity: fall.tool.tool_identity_sha256.clone(),

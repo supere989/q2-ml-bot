@@ -18,17 +18,28 @@ pub const B1_RUNTIME_AUTHORITY_SEAL_SCHEMA: &str = "q2-b1-runtime-authority-seal
 
 const B1_DESIGN_SHA256: &str = "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5";
 const B1_PLAN_SHA256: &str = "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b";
-const B1_HOOK_ATTESTATION_SHA256: &str = "2e473d8face6b89f5b32798ddc5264bb8cc406e8dc29fd837e85bbd11b53d5ab";
-const B1_FIXTURE_BSP_SHA256: &str = "ed6c3ae52dffce93b932756486fdaea3992f6a8ce68dddf2fbfd4281e4515b3f";
-const B1_CM_EXECUTABLE_SHA256: &str = "781edaee1b9317766dbf831ad5edc8b5fdebe696969ca1efe0e54e2f3e5c7d1e";
-const B1_PMOVE_EXECUTABLE_SHA256: &str = "66b481e924ec3d0a5e4eaf5458dd34cfe3c0927d5b7650455bceb368666718e4";
-const B1_HOOK_EXECUTABLE_SHA256: &str = "cd8bc4107ae2e9f4ac006fbe469b360832db80b96a5597c2e5dfe12c32dc9284";
-const B1_FALL_EXECUTABLE_SHA256: &str = "dfdcf7ed74cc3ad7b8aa73df86986a8a4a31207da98ccffb4dd61673c324bef8";
-const B1_COLLISION_PMOVE_TOOL_IDENTITY: &str = "50fd0df0a296c54d0060dc2406977b1c78f9392ea1643e010f6759622557cfdf";
-const B1_HOOK_TOOL_IDENTITY: &str = "9c47e3339df3f194c7729ea95c1955708540411d8baffc8208aa92349e1d2e78";
-const B1_HOOK_PHYSICS_IDENTITY: &str = "38f441106d653997466f8ace13baebe5e5515d6b77a7edf535a1d93576eef9d3";
-const B1_FALL_TOOL_IDENTITY: &str = "8f6706edf203bb75451fd148943fb9d0425a1b112f086b6886788434973117d5";
-const B1_FALL_PHYSICS_IDENTITY: &str = "8b1f06550cb546d329bbce209f2b13248810fc10e0e19799616a338c0f633582";
+const B1_HOOK_ATTESTATION_SHA256: &str =
+    "2e473d8face6b89f5b32798ddc5264bb8cc406e8dc29fd837e85bbd11b53d5ab";
+const B1_FIXTURE_BSP_SHA256: &str =
+    "ed6c3ae52dffce93b932756486fdaea3992f6a8ce68dddf2fbfd4281e4515b3f";
+const B1_CM_EXECUTABLE_SHA256: &str =
+    "781edaee1b9317766dbf831ad5edc8b5fdebe696969ca1efe0e54e2f3e5c7d1e";
+const B1_PMOVE_EXECUTABLE_SHA256: &str =
+    "66b481e924ec3d0a5e4eaf5458dd34cfe3c0927d5b7650455bceb368666718e4";
+const B1_HOOK_EXECUTABLE_SHA256: &str =
+    "cd8bc4107ae2e9f4ac006fbe469b360832db80b96a5597c2e5dfe12c32dc9284";
+const B1_FALL_EXECUTABLE_SHA256: &str =
+    "dfdcf7ed74cc3ad7b8aa73df86986a8a4a31207da98ccffb4dd61673c324bef8";
+const B1_COLLISION_PMOVE_TOOL_IDENTITY: &str =
+    "50fd0df0a296c54d0060dc2406977b1c78f9392ea1643e010f6759622557cfdf";
+const B1_HOOK_TOOL_IDENTITY: &str =
+    "9c47e3339df3f194c7729ea95c1955708540411d8baffc8208aa92349e1d2e78";
+const B1_HOOK_PHYSICS_IDENTITY: &str =
+    "38f441106d653997466f8ace13baebe5e5515d6b77a7edf535a1d93576eef9d3";
+const B1_FALL_TOOL_IDENTITY: &str =
+    "8f6706edf203bb75451fd148943fb9d0425a1b112f086b6886788434973117d5";
+const B1_FALL_PHYSICS_IDENTITY: &str =
+    "8b1f06550cb546d329bbce209f2b13248810fc10e0e19799616a338c0f633582";
 
 pub const MASK_PLAYERSOLID_V1: u32 = 33_619_971;
 pub const MASK_SHOT_V1: u32 = 100_663_299;
@@ -87,7 +98,10 @@ impl OracleToolIdentity {
             )));
         }
         validate_digest(&format!("{field} executable"), &self.executable_sha256)?;
-        validate_digest(&format!("{field} tool identity"), &self.tool_identity_sha256)?;
+        validate_digest(
+            &format!("{field} tool identity"),
+            &self.tool_identity_sha256,
+        )?;
         validate_digest(
             &format!("{field} physics identity"),
             &self.physics_identity_sha256,
@@ -143,11 +157,16 @@ impl FallSourceClosure {
             validate_digest(name, digest)?;
         }
         validate_text("fall build contract", &self.build_contract)?;
-        if self.shared_c_sha256 != "6d30c143e359e18784615ad0f4b21a85b3b4b9b2d4b841792685b19a88a7b6d8"
-            || self.shared_h_sha256 != "debd12ca5315cfa9e6cff714bad2d2c2fe708e378a37776e6665793aa3967357"
-            || self.integration_sha256 != "326f59b12ee60bd93252a9d5a39428c535097ed6bc7a6258f2326a3cdb12ed62"
-            || self.game_header_sha256 != "da27f13498fb7120b037b2a6b6ce0a36f4e90a90d1caf0c09c7aaeb1c8310877"
-            || self.constants_sha256 != "6274fdec332e9d51db6f1b8ca8a836835902e5269957f62c72e3d63a3a54c703"
+        if self.shared_c_sha256
+            != "6d30c143e359e18784615ad0f4b21a85b3b4b9b2d4b841792685b19a88a7b6d8"
+            || self.shared_h_sha256
+                != "debd12ca5315cfa9e6cff714bad2d2c2fe708e378a37776e6665793aa3967357"
+            || self.integration_sha256
+                != "326f59b12ee60bd93252a9d5a39428c535097ed6bc7a6258f2326a3cdb12ed62"
+            || self.game_header_sha256
+                != "da27f13498fb7120b037b2a6b6ce0a36f4e90a90d1caf0c09c7aaeb1c8310877"
+            || self.constants_sha256
+                != "6274fdec332e9d51db6f1b8ca8a836835902e5269957f62c72e3d63a3a54c703"
             || self.build_contract != "lithium-linux-c99-o1-f32-shared-fall-v1"
             || self.tool_closure_sha256 != tool.tool_identity_sha256
             || sha256_hex(constants.as_bytes()) != self.constants_sha256
@@ -191,9 +210,11 @@ impl FallOracleAdmission {
     }
 
     fn validate(&self) -> AtlasResult<()> {
-        self.tool.validate(FALL_ORACLE_NAME, FALL_ORACLE_SCHEMA, "fall oracle")?;
+        self.tool
+            .validate(FALL_ORACLE_NAME, FALL_ORACLE_SCHEMA, "fall oracle")?;
         self.parameters.validate()?;
-        self.source.validate(&self.tool, &self.parameters.constants)?;
+        self.source
+            .validate(&self.tool, &self.parameters.constants)?;
         validate_digest("fall oracle contract", &self.contract_sha256)?;
         if self.contract_sha256 != self.canonical_contract_sha256() {
             return Err(AtlasError::InvalidFormat(
