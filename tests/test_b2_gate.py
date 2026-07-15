@@ -965,7 +965,23 @@ def test_test_report_recomputes_log_hash_and_rejects_tamper(tmp_path: Path) -> N
     report_path = tmp_path / "b2-test-report.json"
     runs = []
     for name, command in _commands("python3"):
-        if name == "python":
+        if name == "python-syntax-floor":
+            payload = canonical_bytes({
+                "enumeration": "git-tracked",
+                "failures": [],
+                "file_count": 5,
+                "files_sha256": "ab" * 32,
+                "interpreter": {
+                    "executable": "/usr/bin/python3",
+                    "implementation": "cpython",
+                    "sha256": "cd" * 32,
+                    "version": [3, 14, 6],
+                },
+                "passed": True,
+                "schema": "q2-python-syntax-floor-v1",
+            })
+            counts = (5, 0, 0)
+        elif name == "python":
             payload = b"3 passed\n"
             counts = (3, 0, 0)
         elif name in {"rust-tests", "dyn-tests"}:
@@ -999,7 +1015,7 @@ def test_test_report_recomputes_log_hash_and_rejects_tamper(tmp_path: Path) -> N
         "passed": True,
     }
     report_path.write_bytes(canonical_bytes(report))
-    assert _validate_test_report(report_path, _implementation())["passed_count"] == 11
+    assert _validate_test_report(report_path, _implementation())["passed_count"] == 16
     log = tmp_path / "python.log"
     log.write_text("changed\n")
     with pytest.raises(B2GateError, match="identity differs"):
@@ -1022,10 +1038,13 @@ def test_b2_gate_schemas_are_strict() -> None:
     ]["exclusiveMaximum"] == 500000
     assert test_schema["additionalProperties"] is False
     assert test_schema["properties"]["passed"]["const"] is True
+    assert test_schema["properties"]["runs"]["minItems"] == 8
+    assert test_schema["properties"]["runs"]["maxItems"] == 8
 
 
 def test_test_evidence_adapter_has_fixed_suites_and_parses_counts() -> None:
     assert [name for name, _command in _commands("python3")] == [
+        "python-syntax-floor",
         "python",
         "rust-fmt",
         "rust-clippy",
@@ -1034,6 +1053,21 @@ def test_test_evidence_adapter_has_fixed_suites_and_parses_counts() -> None:
         "dyn-clippy",
         "dyn-tests",
     ]
+    syntax = canonical_bytes({
+        "enumeration": "git-tracked",
+        "failures": [],
+        "file_count": 17,
+        "files_sha256": "ab" * 32,
+        "interpreter": {
+            "executable": "/usr/bin/python3",
+            "implementation": "cpython",
+            "sha256": "cd" * 32,
+            "version": [3, 14, 6],
+        },
+        "passed": True,
+        "schema": "q2-python-syntax-floor-v1",
+    })
+    assert _parse_counts("python-syntax-floor", syntax, 0) == (17, 0, 0)
     assert _parse_counts("python", b"422 passed, 11 skipped in 3.0s\n", 0) == (
         422,
         11,

@@ -10,8 +10,8 @@
     "implementation": {"$ref": "q2-generated-atlas-build-campaign-v1.schema.json#/$defs/implementation"},
     "runs": {
       "type": "array",
-      "minItems": 7,
-      "maxItems": 7,
+      "minItems": 8,
+      "maxItems": 8,
       "items": {
         "type": "object",
         "additionalProperties": false,

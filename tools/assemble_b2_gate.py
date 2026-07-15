@@ -1826,6 +1826,7 @@ def _validate_test_report(path: Path, implementation: Mapping[str, Any]) -> dict
     _require(report["implementation"] == implementation, "B2 test report implementation is stale")
     runs = _list(report["runs"], "B2 test runs")
     expected_commands: list[tuple[str, list[str] | None]] = [
+        ("python-syntax-floor", None),
         ("python", None),
         ("rust-fmt", ["cargo", "fmt", "--all", "--", "--check"]),
         (
@@ -1865,7 +1866,15 @@ def _validate_test_report(path: Path, implementation: Mapping[str, Any]) -> dict
         _require(isinstance(run["name"], str) and run["name"], "test run name is missing")
         _require(isinstance(run["command"], list) and run["command"] and all(isinstance(v, str) and v for v in run["command"]), "test command differs")
         _require(run["name"] == expected_name, "B2 test suite order/name differs")
-        if expected_command is None:
+        if expected_name == "python-syntax-floor":
+            _require(
+                len(run["command"]) == 3
+                and Path(run["command"][0]).name.startswith("python")
+                and run["command"][1:]
+                == ["-B", "tools/check_python_syntax_floor.py"],
+                "B2 Python syntax-floor command differs",
+            )
+        elif expected_command is None:
             _require(
                 len(run["command"]) == 4
                 and Path(run["command"][0]).name.startswith("python")

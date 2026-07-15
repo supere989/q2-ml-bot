@@ -26,6 +26,15 @@ remain pinned to its exact 28 map/seed rows so the retirement registry rejects
 them before any evidence can be assembled.
 No replacement cohort is authorized.
 
+Before any later replacement declaration may be committed, an exact clean
+producer snapshot must pass the no-write syntax floor under the deployment
+interpreter itself. On `DESKTOP-RTX2080` this means CPython 3.10 and
+`python3 -B tools/check_python_syntax_floor.py --root SNAPSHOT`, followed by a
+no-write import/CLI preflight for `tools/materialize_hook_claims.py`. Both must
+finish before source generation or WSL cohort bootstrap; a local newer-Python
+parse is not sufficient because Python 3.14 accepted the PEP-701 construct that
+terminated 71439 on Python 3.10.
+
 The assembler's declaration check rejects the pinned 71439 alias as
 permanently retired before it reads or admits campaign evidence. Its existing
 clean-repository, source-freeze, Atlas, test, manifest, and Dyn requirements
@@ -77,11 +86,13 @@ does not authorize a 71439 retry or a replacement declaration.
   every header and zstd payload, validates the payload digest/cells/derived L3,
   and requires a byte-identical semantic and canonical-zstd re-encode. A magic
   prefix alone is never evidence.
-- `tools/run_b2_test_suite.py --output NEW_DIRECTORY` executes the fixed Python,
-  Rust, and standalone Dyn-helper suites and atomically writes
-  `b2-test-report.json` plus seven hashed raw logs. The directory must be
-  outside the repository so its creation does not invalidate the clean Git
-  binding.
+- `tools/run_b2_test_suite.py --output NEW_DIRECTORY` executes the fixed Python
+  syntax-floor, pytest, Rust, and standalone Dyn-helper suites and atomically
+  writes `b2-test-report.json` plus eight hashed raw logs. The syntax-floor log
+  binds the exact interpreter used by that suite; it complements rather than
+  replaces the mandatory WSL Python 3.10 pre-declaration check. The directory
+  must be outside the repository so its creation does not invalidate the clean
+  Git binding.
 
 ## Retired cohort 71439 producer transcript
 

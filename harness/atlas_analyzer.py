@@ -5399,11 +5399,12 @@ def analyze_map(
                     reasons: dict[str, int] = defaultdict(int)
                     for rejection in hook_rejections:
                         reasons[str(rejection["reason"])] += 1
+                    accepted_hook_claims = [
+                        edge["claim_id"] for edge in compiled_hooks["edges"]
+                    ]
                     raise AtlasAnalysisError(
                         f"{error}; accepted_hook_edges={len(compiled_hooks['edges'])}; "
-                        f"accepted_hook_claims={[
-                            edge['claim_id'] for edge in compiled_hooks['edges']
-                        ]}; "
+                        f"accepted_hook_claims={accepted_hook_claims}; "
                         f"hook_rejections={dict(sorted(reasons.items()))}"
                     ) from error
             else:

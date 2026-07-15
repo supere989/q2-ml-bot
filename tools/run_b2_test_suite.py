@@ -31,6 +31,7 @@ CARGO_SUMMARY = re.compile(
     r"test result: ok\. (?P<passed>\d+) passed; 0 failed; "
     r"(?P<ignored>\d+) ignored"
 )
+SHA256 = re.compile(r"[0-9a-f]{64}")
 RENAME_NOREPLACE = 1
 AT_FDCWD = -100
 
@@ -107,6 +108,44 @@ def _write_new(path: Path, payload: bytes) -> None:
 
 def _parse_counts(name: str, payload: bytes, exit_code: int) -> tuple[int, int, int]:
     text = payload.decode("utf-8", errors="replace")
+    if name == "python-syntax-floor":
+        try:
+            report = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise B2TestSuiteError(
+                "syntax-floor log is not one canonical JSON document"
+            ) from exc
+        if payload != canonical_bytes(report):
+            raise B2TestSuiteError("syntax-floor log is not canonical JSON")
+        if set(report) != {
+            "enumeration", "failures", "file_count", "files_sha256",
+            "interpreter", "passed", "schema",
+        } or report["schema"] != "q2-python-syntax-floor-v1":
+            raise B2TestSuiteError("syntax-floor report schema differs")
+        interpreter = report["interpreter"]
+        if not isinstance(interpreter, dict) or set(interpreter) != {
+            "executable", "implementation", "sha256", "version",
+        }:
+            raise B2TestSuiteError("syntax-floor interpreter identity differs")
+        file_count = report["file_count"]
+        valid_success = (
+            report["passed"] is True
+            and report["failures"] == []
+            and isinstance(file_count, int)
+            and not isinstance(file_count, bool)
+            and file_count > 0
+            and isinstance(report["files_sha256"], str)
+            and SHA256.fullmatch(report["files_sha256"]) is not None
+            and isinstance(interpreter["sha256"], str)
+            and SHA256.fullmatch(interpreter["sha256"]) is not None
+        )
+        if exit_code == 0:
+            if not valid_success:
+                raise B2TestSuiteError("syntax-floor success report is not green")
+            return file_count, 0, 0
+        if report["passed"] is not False or not report["failures"]:
+            raise B2TestSuiteError("syntax-floor failure report is incoherent")
+        return 0, 0, 0
     if name == "python":
         matches = list(PYTEST_SUMMARY.finditer(text))
         if len(matches) != 1:
@@ -133,6 +172,10 @@ def _parse_counts(name: str, payload: bytes, exit_code: int) -> tuple[int, int, 
 def _commands(python: str) -> tuple[tuple[str, list[str]], ...]:
     dyn_manifest = "tools/q2-dyn-evidence/Cargo.toml"
     return (
+        (
+            "python-syntax-floor",
+            [python, "-B", "tools/check_python_syntax_floor.py"],
+        ),
         ("python", [python, "-m", "pytest", "-q"]),
         ("rust-fmt", ["cargo", "fmt", "--all", "--", "--check"]),
         ("rust-clippy", ["cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"]),

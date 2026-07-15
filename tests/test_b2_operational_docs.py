@@ -64,6 +64,8 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "fc6435e81ac1d10f8a32602169df68cc34103c4b64a2cdbcf96be55260a3733d",
         "b171b2ee4ab02f8b960684544e49471dcfc5e11cdef105687a77938e1dcafe69",
         "harness/atlas_analyzer.py:5404",
+        "tools/check_python_syntax_floor.py",
+        "Python 3.10",
         "permanently retired",
         "No replacement cohort is authorized",
         "authority-bound",

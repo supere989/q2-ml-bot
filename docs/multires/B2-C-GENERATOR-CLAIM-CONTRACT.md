@@ -582,6 +582,17 @@ or admitted. The alias and assembler remain deliberately pinned to retired
 71439 so all producer and gate entry points fail closed through the retirement
 registry. No replacement cohort is authorized.
 
+The interpreter boundary is now a pre-declaration authority, not a check to
+discover after compilation. Before any later replacement may be declared, an
+exact clean producer snapshot must be checked on `DESKTOP-RTX2080` by its
+deployment CPython 3.10 with
+`python3 -B tools/check_python_syntax_floor.py --root SNAPSHOT`, and the
+single-map materializer's import/CLI preflight must also succeed without
+creating bytecode or cohort paths. Python 3.14's
+`ast.parse(feature_version=(3,10))` did not reject the PEP-701 f-string that
+failed 71439, so a newer local interpreter cannot substitute for this WSL
+check.
+
 ## Offline workflow
 
 The alias, assembler, and B2 gate schema remain bound to retired cohort 71439.
