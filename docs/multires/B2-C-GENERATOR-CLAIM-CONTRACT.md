@@ -543,27 +543,59 @@ binaries built in parallel are also explicitly non-admissible and forbidden
 from reuse, copying, execution, or substitution. Exact evidence is archived in
 `B2-GENERATED-COHORT-71438-FAILURE.json`. Cohort 71438 and every source, WSL,
 release-build, and residual artifact associated with it are permanently
-retired. Replacement cohort `b2g26_final_71439` is now declared with entirely
+retired. Replacement cohort `b2g26_final_71439` was then declared with entirely
 new seeds 71439000 through 71439603, four per concrete style. The authoritative
-alias and immutable 71439 named declaration are canonical and byte-identical
+alias and immutable 71439 named declaration remain canonical and byte-identical
 with SHA-256
 `374b1052ea4a15404dfd52ebf831f9d5eccda488ea5a51d3d41d0e83ee083811`.
-No 71439 artifact or report has been generated.
+
+The sole 71439 source freeze, from clean commit `3568b18` and tree `22a685f`,
+passed all 28 members: both exact 140-file populations matched, all route and
+spawn bindings passed, and all 28 layouts were unique. Its source report has
+SHA-256
+`fbcbca7c134c2d2595ab98cfe939f615b226cab4a5e28e836f824d41e4f76255`.
+The sole WSL compile then passed 28/28 and atomically published the exact
+168-file compiled stage; its report has SHA-256
+`fc6435e81ac1d10f8a32602169df68cc34103c4b64a2cdbcf96be55260a3733d`.
+
+The sole materialization attempt failed closed on ordinal 0,
+`b2g26_open_71439000`, before any hook materialization. CPython 3.10.12 raised
+`SyntaxError: unterminated string literal (detected at line 5404)` while
+importing the immutable producer snapshot's `harness/atlas_analyzer.py:5404`.
+The canonical materialization report has SHA-256
+`b171b2ee4ab02f8b960684544e49471dcfc5e11cdef105687a77938e1dcafe69`;
+the 421-byte stderr has SHA-256
+`2b97e7f8c13cc822a4f26d31119aa0266178f000fbaa502a9c07936791f09dbc`,
+and stdout is the empty SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+The wrapper stopped after one attempt, with 27 members not attempted, a
+byte-identical 168-file `materialized.staging` residual, and no materialized
+publication.
+
+Exact evidence is archived in
+`B2-GENERATED-COHORT-71439-FAILURE.json`. Cohort 71439 is permanently retired.
+Its local source and cold populations, WSL source and compiled publication,
+materialization staging residual, reports, logs, and immutable producer
+snapshot are evidence only for this cohort. None may be retried, resumed,
+reused, copied forward, salvaged, substituted, executed for cohort purposes,
+or admitted. The alias and assembler remain deliberately pinned to retired
+71439 so all producer and gate entry points fail closed through the retirement
+registry. No replacement cohort is authorized.
 
 ## Offline workflow
 
-The commands in this section use `COHORT_ID` from the committed authoritative
-replacement declaration. It must never name retired cohort 71426, 71427,
-71428, 71429, 71430, 71431, 71432, 71433, 71434, 71435, 71436, 71437, or
-71438. The alias, assembler, and B2 gate schema now bind cohort 71439. The
-commands below remain non-executable until that declaration and implementation
-are committed and the repository is clean; every artifact and report path must
-be fresh and authority-bound to 71439.
+The alias, assembler, and B2 gate schema remain bound to retired cohort 71439.
+There is no current authorized `COHORT_ID`. The commands below preserve the
+producer contract and terminal 71439 invocation shape for forensics only; they
+are non-executable while that binding remains. They must never name retired
+cohort 71426, 71427, 71428, 71429, 71430, 71431, 71432, 71433, 71434, 71435,
+71436, 71437, 71438, or 71439. This closure does not authorize a replacement,
+new artifact root, or producer invocation.
 
-For the current authorized cohort, compile only with the declaration-aware
-cohort producer. Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every
-leaf path below must be absent before the single attempt; `FUTURE_ROOT` and
-`COHORT_ID` must belong to committed cohort 71439, not retired cohort 71438:
+The declaration-aware compiler remains the required shape for a separately
+authorized future cohort. Do not hand-run `q2tool`, glob maps, or use
+`maps/compile.sh`. Every leaf would have to be absent before a single attempt;
+the following retired-71439 transcript must not be run:
 
 ```sh
 python tools/compile_generated_cohort.py \
@@ -590,8 +622,8 @@ membership error leaves no compiled publication; its staging, logs, and report
 are terminal failure evidence and cannot be resumed, retried, copied into a
 new cohort, or used as a passing subset.
 
-Materialize a successful 71439 compiled publication only with the atomic
-cohort producer and the reusable B1 authority bundle. Materialization discovers
+The following atomic materialization shape records the sole terminal 71439
+attempt and must not be run again. Materialization discovers
 the first grounded compiled Pmove landing without constraining it to the
 generator hint; independent analysis later requires the sealed exact landing
 and ordered trace to replay identically:
@@ -621,9 +653,11 @@ or generated stage. Its immutable path is
 The directory has exactly these seven filenames and no symlinks or extras:
 `B1-GATE.json`, `CONTENT-MANIFEST.json`,
 `hook-parity-pullspeed-1700.json`, `q2-cm-oracle`, `q2-fall-oracle`,
-`q2-hook-oracle`, and `q2-pmove-oracle`. It may supply those exact immutable
-B1 bytes to cohort 71439, but must not be copied
-under a cohort root or treated as population evidence.
+`q2-hook-oracle`, and `q2-pmove-oracle`. Those exact immutable B1 bytes were
+independently supplied to the terminal 71439 attempt, but they must not be
+copied under a cohort root or treated as population evidence. The B1 bundle
+itself is not retired; its independence does not authorize any reuse or retry
+of cohort 71439.
 
 Materialization consumes the compiled rows in declaration order and fails
 closed unless every map seals exactly six unique V4 measured geometries with

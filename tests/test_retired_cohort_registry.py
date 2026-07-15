@@ -21,6 +21,7 @@ NAMED_71438 = (
 NAMED_71439 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71439-DECLARATION.json"
 )
+RETIRED_DECLARATIONS = (NAMED_71438, NAMED_71439)
 
 
 def _write_fresh_declaration(path: Path) -> Path:
@@ -77,8 +78,8 @@ def _write_failed_authority(
     return declaration["maps"][0]["map"]
 
 
-@pytest.mark.parametrize("declaration_path", [NAMED_71438])
-def test_retired_71438_cannot_generate_without_creating_outputs(
+@pytest.mark.parametrize("declaration_path", RETIRED_DECLARATIONS)
+def test_retired_cohort_cannot_generate_without_creating_outputs(
     tmp_path: Path, declaration_path: Path,
 ) -> None:
     root = tmp_path / "generated"
@@ -97,8 +98,8 @@ def test_retired_71438_cannot_generate_without_creating_outputs(
     assert not root.exists()
 
 
-@pytest.mark.parametrize("declaration_path", [NAMED_71438])
-def test_retired_71438_cannot_compile_without_creating_outputs(
+@pytest.mark.parametrize("declaration_path", RETIRED_DECLARATIONS)
+def test_retired_cohort_cannot_compile_without_creating_outputs(
     tmp_path: Path, declaration_path: Path,
 ) -> None:
     root = tmp_path / "compiled"
@@ -121,8 +122,8 @@ def test_retired_71438_cannot_compile_without_creating_outputs(
     assert not root.exists()
 
 
-@pytest.mark.parametrize("declaration_path", [NAMED_71438])
-def test_retired_71438_cannot_materialize_without_creating_outputs(
+@pytest.mark.parametrize("declaration_path", RETIRED_DECLARATIONS)
+def test_retired_cohort_cannot_materialize_without_creating_outputs(
     tmp_path: Path, declaration_path: Path,
 ) -> None:
     root = tmp_path / "materialized"
@@ -147,8 +148,8 @@ def test_retired_71438_cannot_materialize_without_creating_outputs(
     assert not root.exists()
 
 
-@pytest.mark.parametrize("declaration_path", [NAMED_71438])
-def test_retired_71438_cannot_prepare_claims_or_build_atlas(
+@pytest.mark.parametrize("declaration_path", RETIRED_DECLARATIONS)
+def test_retired_cohort_cannot_prepare_claims_or_build_atlas(
     tmp_path: Path, declaration_path: Path,
 ) -> None:
     claims_root = tmp_path / "claims-campaign"
@@ -189,18 +190,18 @@ def test_genuinely_fresh_declaration_is_admitted(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("declaration_path", [CURRENT_ALIAS, NAMED_71439])
-def test_current_71439_declarations_are_admitted(
+def test_alias_and_named_71439_are_retired(
     declaration_path: Path,
 ) -> None:
     declaration, declaration_sha256 = cohort.load_declaration(declaration_path)
 
     assert declaration["cohort_id"] == "b2g26_final_71439"
-    assert (
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71439.*permanently retired"
+    ):
         registry.require_unretired_declaration(
             declaration_path, declaration, declaration_sha256
         )
-        is None
-    )
 
 
 @pytest.mark.parametrize(
@@ -212,7 +213,7 @@ def test_fresh_cohort_cannot_reuse_retired_map_or_seed(
 ) -> None:
     declaration_path = _write_fresh_declaration(tmp_path / "fresh.json")
     declaration, _sha256 = cohort.load_declaration(declaration_path)
-    retired, _retired_sha256 = cohort.load_declaration(NAMED_71438)
+    retired, _retired_sha256 = cohort.load_declaration(NAMED_71439)
     declaration["maps"][0][identity] = retired["maps"][0][identity]
     declaration_path.write_bytes(cohort.canonical_bytes(declaration))
     declaration, declaration_sha256 = cohort.load_declaration(declaration_path)
@@ -263,19 +264,35 @@ def test_contradictory_failure_registry_fails_closed(
         )
 
 
+@pytest.mark.parametrize(
+    ("declaration_path", "cohort_id", "declaration_sha256"),
+    [
+        (
+            NAMED_71438,
+            "b2g26_final_71438",
+            "bebe7c2c63711c399d34780f3297a622f9d28d1c9751511473ec1ed4815a58c2",
+        ),
+        (
+            NAMED_71439,
+            "b2g26_final_71439",
+            "374b1052ea4a15404dfd52ebf831f9d5eccda488ea5a51d3d41d0e83ee083811",
+        ),
+    ],
+)
 def test_retired_declaration_remains_available_for_read_only_forensics(
     tmp_path: Path,
+    declaration_path: Path,
+    cohort_id: str,
+    declaration_sha256: str,
 ) -> None:
-    declaration, declaration_sha256 = cohort.load_declaration(NAMED_71438)
+    declaration, actual_sha256 = cohort.load_declaration(declaration_path)
 
     membership = cohort.verify_stage_membership(
         declaration, tmp_path / "absent", "source"
     )
 
-    assert declaration["cohort_id"] == "b2g26_final_71438"
-    assert declaration_sha256 == (
-        "bebe7c2c63711c399d34780f3297a622f9d28d1c9751511473ec1ed4815a58c2"
-    )
+    assert declaration["cohort_id"] == cohort_id
+    assert actual_sha256 == declaration_sha256
     assert membership["passed"] is False
     assert membership["expected_map_count"] == 28
 
@@ -290,7 +307,7 @@ def test_generate_cli_reports_retirement_without_traceback_or_outputs(
         "run_generator_cohort.py",
         "generate",
         "--declaration",
-        str(NAMED_71438),
+        str(CURRENT_ALIAS),
         "--output-dir",
         str(root / "source"),
         "--cold-dir",
@@ -313,7 +330,7 @@ def test_materialize_cli_reports_retirement_without_traceback_or_outputs(
 ) -> None:
     root = tmp_path / "materialize-cli"
     arguments = [
-        "--declaration", str(NAMED_71438),
+        "--declaration", str(CURRENT_ALIAS),
         "--compiled-dir", str(root / "compiled"),
         "--stage-dir", str(root / "stage"),
         "--materialized-dir", str(root / "materialized"),
@@ -342,7 +359,7 @@ def test_claim_prepare_cli_reports_retirement_without_traceback_or_outputs(
 
     assert claim_campaign.main([
         "prepare",
-        "--declaration", str(NAMED_71438),
+        "--declaration", str(CURRENT_ALIAS),
         "--materialized-dir", str(root / "materialized"),
         "--claims-dir", str(root / "claims"),
         "--output", str(root / "report.json"),
@@ -361,7 +378,7 @@ def test_atlas_build_cli_reports_retirement_without_traceback_or_outputs(
     root = tmp_path / "atlas-cli"
 
     assert atlas_campaign.main([
-        "--declaration", str(NAMED_71438),
+        "--declaration", str(CURRENT_ALIAS),
         "--claims-dir", str(root / "claims"),
         "--analysis-dir", str(root / "analysis"),
         "--diagnostics-dir", str(root / "diagnostics"),

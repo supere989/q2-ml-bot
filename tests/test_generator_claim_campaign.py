@@ -92,6 +92,12 @@ FAILURE_71438 = (
 DECLARATION_71438 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71438-DECLARATION.json"
 )
+FAILURE_71439 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71439-FAILURE.json"
+)
+DECLARATION_71439 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71439-DECLARATION.json"
+)
 SHADOW_71430 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71430-SHADOW-8CE1E75.json"
 )
@@ -155,9 +161,11 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "b2g26_final_71439",
         "B2-GENERATED-COHORT-71437-FAILURE.json",
         "B2-GENERATED-COHORT-71438-FAILURE.json",
+        "B2-GENERATED-COHORT-71439-FAILURE.json",
         "lane-wall static blockers",
-        "now declared",
         "fresh replacement cohort",
+        "No replacement cohort is authorized",
+        "unterminated string literal",
         "Full-cold producer closure",
         "tools/atlas_cold_worker.py",
         ".analysis.manifest.json",
@@ -1358,6 +1366,220 @@ def test_71438_failure_record_is_canonical_exact_and_no_salvage() -> None:
     for key, value in admission.items():
         if key not in {"permanently_non_admissible", "replacement_declaration_status"}:
             assert value is False, key
+
+
+def test_71439_failure_record_is_canonical_exact_and_no_replacement() -> None:
+    payload = FAILURE_71439.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "9d0507b6124ec84da7564e9b6b2a7dd5"
+        "004a497ea4bc1e00079752dd07a588a7"
+    )
+
+    declaration_sha256 = hashlib.sha256(
+        DECLARATION_71439.read_bytes()
+    ).hexdigest()
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71439"
+    assert failure["status"] == "permanently-failed-first-materialization"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71439-DECLARATION.json",
+        "sha256": declaration_sha256,
+    }
+    assert failure["admission"] == {
+        "analysis_stage_published": False,
+        "claims_stage_published": False,
+        "compiled_stage_published": True,
+        "dyn_execution_allowed": False,
+        "materialized_stage_published": False,
+        "older_population_reuse_allowed": False,
+        "passing_subset_allowed": False,
+        "permanently_non_admissible": True,
+        "regeneration_under_same_declaration_allowed": False,
+        "release_artifact_copy_allowed": False,
+        "release_artifact_execution_allowed": False,
+        "release_artifact_reuse_allowed": False,
+        "replacement_declaration_status": "not-authorized",
+        "replacement_member_allowed": False,
+        "retired_artifact_reuse_allowed": False,
+        "retry_under_same_declaration_allowed": False,
+        "salvage_allowed": False,
+        "source_stage_published": True,
+        "substitution_allowed": False,
+    }
+
+    evidence = failure["evidence"]
+    assert evidence["implementation"] == {
+        "atlas_analyzer_authority_file_count": 29,
+        "atlas_analyzer_authority_sha256": (
+            "73d558112b4659c8508e2c848361d5df"
+            "ba032ee9d616acd379dce73bb0fa08a4"
+        ),
+        "generator_sha256": (
+            "dd2d52b3b4fb466f66ab0993a4ecae94"
+            "a16389f4bc69653a974f8edf3a4546ed"
+        ),
+        "git_clean": True,
+        "repository_commit": "3568b18d8373f3a965f2bdd106ca2b64e0c16fd7",
+        "repository_tree": "22a685fa93e775c10c77761ac96e5152edc686b0",
+        "routes_sha256": (
+            "406b552eb195f6f0fd6a75b689c5ee2"
+            "df141b158d7118502c07698eeddae86d7"
+        ),
+    }
+    assert evidence["source_freeze"] == {
+        "all_file_bytes_match": True,
+        "atlas_admissible": False,
+        "bundle_admissible": False,
+        "cold_file_count": 140,
+        "declaration_sha256": declaration_sha256,
+        "exists_at_capture": True,
+        "map_count": 28,
+        "passed": True,
+        "path_from_b2_artifact_root": (
+            "generated-final-71439-73d55811-report.json"
+        ),
+        "primary_file_count": 140,
+        "report_sha256": (
+            "fbcbca7c134c2d2595ab98cfe939f615"
+            "b226cab4a5e28e836f824d41e4f76255"
+        ),
+        "report_size_bytes": 137234,
+        "route_contract_pass_count": 28,
+        "source_total_bytes": 10911304,
+        "spawn_origin_binding_pass_count": 28,
+        "status": "source-frozen-pre-compile",
+        "unique_layout_count": 28,
+    }
+
+    compile_evidence = evidence["wsl_compile"]
+    assert compile_evidence["host"] == "DESKTOP-RTX2080"
+    assert compile_evidence["report"] == {
+        "passed": True,
+        "path_from_wsl_root": "reports/compiled.json",
+        "sha256": (
+            "fc6435e81ac1d10f8a32602169df68cc"
+            "34103c4b64a2cdbcf96be55260a3733d"
+        ),
+        "size_bytes": 82970,
+        "status": "compiled-stage-published-non-admissible",
+    }
+    assert compile_evidence["compiled_publication"] == {
+        "actual_file_count": 168,
+        "expected_file_count": 168,
+        "expected_map_count": 28,
+        "map_pass_count": 28,
+        "published": True,
+        "relative_sha256_manifest_sha256": (
+            "93e4166e0a0e64a70f0d30a6b5bce927"
+            "95c3e33bffe8b91bdc8d6e8301c2e9d9"
+        ),
+        "total_bytes": 59581688,
+    }
+
+    materialization = evidence["wsl_materialization"]
+    assert materialization["report"] == {
+        "attempted_count": 1,
+        "not_attempted_count": 27,
+        "pass_count": 0,
+        "path_from_wsl_root": "reports/materialized.json",
+        "sha256": (
+            "b171b2ee4ab02f8b960684544e49471dc"
+            "fc5e11cdef105687a77938e1dcafe69"
+        ),
+        "size_bytes": 6851,
+    }
+    assert materialization["logs"] == {
+        "stderr": {
+            "path_from_wsl_root": (
+                "logs/materialize/"
+                "0000-b2g26_open_71439000.materialize.stderr.log"
+            ),
+            "sha256": (
+                "2b97e7f8c13cc822a4f26d31119aa026"
+                "6178f000fbaa502a9c07936791f09dbc"
+            ),
+            "size_bytes": 421,
+        },
+        "stdout": {
+            "path_from_wsl_root": (
+                "logs/materialize/"
+                "0000-b2g26_open_71439000.materialize.stdout.json"
+            ),
+            "sha256": (
+                "e3b0c44298fc1c149afbf4c8996fb924"
+                "27ae41e4649b934ca495991b7852b855"
+            ),
+            "size_bytes": 0,
+        },
+    }
+    assert materialization["materialized_residual"] == {
+        "expected_file_count": 196,
+        "materialized_publish_path_exists": False,
+        "materialized_staging_file_count": 168,
+        "materialized_staging_matches_compiled": True,
+        "materialized_staging_relative_sha256_manifest_sha256": (
+            "93e4166e0a0e64a70f0d30a6b5bce927"
+            "95c3e33bffe8b91bdc8d6e8301c2e9d9"
+        ),
+        "materialized_staging_total_bytes": 59581688,
+    }
+    assert materialization["failed_runtime"]["interpreter"] == {
+        "path": "/usr/bin/python3.10",
+        "sha256": (
+            "7d51cd6b48b521277f5caa4610a82126"
+            "e315fa2be4df069823a8b1eeb5bd4a86"
+        ),
+        "size_bytes": 5917224,
+        "version": "Python 3.10.12",
+    }
+    assert materialization["failed_runtime"]["atlas_analyzer"] == {
+        "path_from_producer_snapshot": "harness/atlas_analyzer.py",
+        "sha256": (
+            "5f6923ede36e1aa1cacd3aa87973c927"
+            "463e1b04a48cf071b2223b1bb8ec22bb"
+        ),
+        "size_bytes": 253841,
+    }
+    assert materialization["producer_snapshot"] == {
+        "path": "/home/raymond/q2-multires-isolated/B2/producer-3568b18d8373",
+        "relative_sha256_manifest_file_count": 277,
+        "relative_sha256_manifest_sha256": (
+            "461f6b93fadd74cd0f90cdb9194265e10"
+            "23f726f2cadb251ebb9723d4b3c9c2a"
+        ),
+    }
+    assert materialization["root_relative_sha256_manifest"] == {
+        "file_count": 539,
+        "sha256": (
+            "a08c9c8d77f2c8ec1f0cf48352b557ce"
+            "2d356ee9d3d8ce6250fca5fc88cdf618"
+        ),
+    }
+
+    assert failure["failure"]["first_failure"] == {
+        "grid": 5,
+        "map": "b2g26_open_71439000",
+        "message": "materializer exited 1 before hook materialization",
+        "ordinal": 0,
+        "phase": "map-materialization",
+        "seed": 71439000,
+        "style": "open",
+    }
+    root_cause = failure["failure"]["root_cause"]
+    assert "harness/atlas_analyzer.py" in root_cause
+    assert "line 5404" in root_cause
+    assert "before any hook materialization" in root_cause
+    assert "No retry, repair, reuse, salvage, or substitution" in root_cause
+    transcript = failure["operator_transcript"]
+    assert transcript["first_map_returncode"] == 1
+    assert transcript["wrapper_exit_code"] == 1
+    assert transcript["stdout_empty"] is True
+    assert transcript["stderr_terminal"] == (
+        "SyntaxError: unterminated string literal (detected at line 5404)"
+    )
+    assert "transcript_sha256" not in transcript
 
 
 def write_stage(directory: Path, stage: str) -> dict:

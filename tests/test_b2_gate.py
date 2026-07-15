@@ -689,12 +689,24 @@ def test_71439_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
     assert "--expected-count" not in options
 
 
-def test_gate_refuses_retired_71438_declaration_before_evidence() -> None:
-    declaration = (
-        ROOT / "docs/multires/B2-GENERATED-COHORT-71438-DECLARATION.json"
-    )
-
-    with pytest.raises(B2GateError, match="71438.*permanently retired"):
+@pytest.mark.parametrize(
+    ("declaration", "number"),
+    [
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71438-DECLARATION.json",
+            "71438",
+        ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71439-DECLARATION.json",
+            "71439",
+        ),
+        (ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json", "71439"),
+    ],
+)
+def test_gate_refuses_retired_declaration_before_evidence(
+    declaration: Path, number: str,
+) -> None:
+    with pytest.raises(B2GateError, match=rf"{number}.*permanently retired"):
         _validate_declaration(declaration)
 
 
