@@ -607,6 +607,10 @@ class MapGenerator:
         self.objectives: List[dict] = []             # lattice-seeded value sites
         self._placed_loot: List[Tuple[str, int, int, int]] = []  # heat emitters
         self._heat_placed: List[Tuple[str, int, int, int]] = []
+        # One physical origin may publish at most one item entity.  Keep this
+        # reservation set authoritative through objectives, authored rewards,
+        # heat placement, and relaxation so later passes cannot stack items.
+        self._item_origins: set[Tuple[int, int, int]] = set()
         self._loot_sites: List[Tuple[str, int, int, int]] = []  # (kind, x, y, z)
         self._observed_heat: List[dict] = []   # play-telemetry deposits
         self.relax_moves = 0
@@ -1130,6 +1134,18 @@ class MapGenerator:
         return not any(self._boxes_overlap(box, blocker)
                        for blocker in self.spawn_blockers)
 
+    def _hazard_overlaps_reserved_interior(self, box: SolidBox) -> bool:
+        """Protect every promised interior's traversable light volume."""
+        for _zone_id, _kind, bounds, floor_z, ceiling_z in self._interior_zone_specs:
+            x0, y0, x1, y1 = bounds
+            protected = SolidBox(
+                x0, y0, floor_z, x1, y1,
+                max(ceiling_z, floor_z + MIN_SAFE_HEADROOM),
+            )
+            if self._boxes_overlap(box, protected):
+                return True
+        return False
+
     def _emit_hallways(self):
         """Turn corridor rooms into recognizable low-ceiling through-halls.
 
@@ -1412,6 +1428,7 @@ class MapGenerator:
                     tf=self.pal['light'], tc=self.pal['metal'], tw=self.pal['metal'])
         self.spawn_blockers.append(box)
         quad_x, quad_y, quad_z = quad_site
+        self._reserve_item_origin(quad_site, "item_quad objective")
         w.add_entity("item_quad", {"origin": f"{quad_x} {quad_y} {quad_z}"})
         self.objectives.append({
             "item": "item_quad", "x": quad_x, "y": quad_y, "z": quad_z,
@@ -1508,10 +1525,23 @@ class MapGenerator:
                 continue
             if min(room.w, room.d) < 640 or rng.random() > self.lava_prob:
                 continue
-            size = rng.randint(LAVA_MIN, LAVA_MAX)
-            px = room.wx + rng.randint(96, max(97, room.w - size - 96))
-            py = room.wy + rng.randint(96, max(97, room.d - size - 96))
             fz = room.floor_z
+            placement = None
+            for _ in range(24):
+                size = rng.randint(LAVA_MIN, LAVA_MAX)
+                px = room.wx + rng.randint(96, max(97, room.w - size - 96))
+                py = room.wy + rng.randint(96, max(97, room.d - size - 96))
+                candidate = SolidBox(
+                    px - 16, py - 16, fz,
+                    px + size + 16, py + size + 16, fz + 64,
+                )
+                if self._hazard_overlaps_reserved_interior(candidate):
+                    continue
+                placement = (size, px, py, candidate)
+                break
+            if placement is None:
+                continue
+            size, px, py, box = placement
             # Pool sits on the floor with a low rim so it reads as terrain
             w.add_brush(px - 16, py - 16, fz, px + size + 16, py + size + 16, fz + 12,
                         tf=self.pal['trim'], tc=self.pal['trim'], tw=self.pal['trim'])
@@ -1519,16 +1549,46 @@ class MapGenerator:
                         tf=T_LAVA, tc=T_LAVA, tw=T_LAVA,
                         surf_flags=SURF_LIGHT | SURF_WARP, value=120,
                         contents=CONTENTS_LAVA)
-            box = SolidBox(px - 16, py - 16, fz, px + size + 16, py + size + 16, fz + 64)
             self.spawn_blockers.append(box)
             self.lava_pools.append(box)
             # Mega health on the rim: worth the burn risk
-            mx = px - 48 if rng.random() < 0.5 else px + size + 48
+            left = px - 48
+            right = px + size + 48
+            primary, secondary = ((left, right) if rng.random() < 0.5
+                                  else (right, left))
+            mega_origin = next(
+                (
+                    (mx, py + size // 2, fz + 24)
+                    for mx in (primary, secondary)
+                    if self._item_origin_available(
+                        (mx, py + size // 2, fz + 24)
+                    )
+                ),
+                None,
+            )
+            if mega_origin is None:
+                mega_origin = self._floor_item_spot(
+                    room, primary, py + size // 2, 192
+                )
+            if mega_origin is None:
+                raise RuntimeError("could not place a unique lava-rim reward")
+            self._reserve_item_origin(mega_origin, "lava-rim mega health")
+            mx, my, mz = mega_origin
             w.add_entity("item_health_mega",
-                         {"origin": f"{mx} {py + size // 2} {fz + 24}"})
-            self._placed_loot.append(("item_health_mega", mx, py + size // 2, fz + 24))
+                         {"origin": f"{mx} {my} {mz}"})
+            self._placed_loot.append(("item_health_mega", mx, my, mz))
 
     # ----- entity placement -----
+
+    def _item_origin_available(self, origin: Tuple[int, int, int]) -> bool:
+        """Return whether an item can exclusively claim this exact origin."""
+        return origin not in self._item_origins and origin not in self.spawn_points
+
+    def _reserve_item_origin(self, origin: Tuple[int, int, int], label: str) -> None:
+        """Reserve an emitted item origin, failing closed on any collision."""
+        if not self._item_origin_available(origin):
+            raise RuntimeError(f"duplicate item origin for {label}: {origin}")
+        self._item_origins.add(origin)
 
     def _inside_room_for_spawn(self, room: Room, x: int, y: int) -> bool:
         return (
@@ -1608,6 +1668,8 @@ class MapGenerator:
         if self._spawn_overlaps_blocker(x, y, z):
             return False
         if not self._spawn_has_escape(room, x, y):
+            return False
+        if (x, y, z) in self._item_origins:
             return False
         for sx, sy, _ in self.spawn_points:
             if math.hypot(x - sx, y - sy) < MIN_SPAWN_SEPARATION:
@@ -1806,7 +1868,9 @@ class MapGenerator:
         self._emit_spawn_entities(placed)
 
     def _floor_item_spot(self, room: Room, xc: int, yc: int,
-                         spread: int) -> Optional[Tuple[int, int, int]]:
+                         spread: int, *,
+                         excluded: Optional[set[Tuple[int, int, int]]] = None,
+                         ) -> Optional[Tuple[int, int, int]]:
         """Choose a deterministic standing-clear item origin on a room floor."""
         origin_z = room.floor_z + 24
         candidates = []
@@ -1829,7 +1893,11 @@ class MapGenerator:
                 point[1], point[0],
             ),
         ))
+        excluded = excluded or set()
         for x, y in dict.fromkeys(candidates):
+            origin = (x, y, origin_z)
+            if origin in excluded or not self._item_origin_available(origin):
+                continue
             if not self._inside_room_for_spawn(room, x, y):
                 continue
             if self._spawn_overlaps_blocker(x, y, origin_z):
@@ -1856,7 +1924,9 @@ class MapGenerator:
                 and room.wy <= y <= room.wy + room.d
             ]
             for _, _, room in sorted(containing):
-                site = self._floor_item_spot(room, x, y, 192)
+                site = self._floor_item_spot(
+                    room, x, y, 192, excluded=seen
+                )
                 if site is None or site in seen:
                     continue
                 seen.add(site)
@@ -1922,7 +1992,10 @@ class MapGenerator:
                     self._placed_loot + self._heat_placed if c in ARMOR_CLASSES]
 
         for tier in (1, 2):
-            cands = candidate_sites(TIER_CELL[tier])
+            cands = [
+                site for site in candidate_sites(TIER_CELL[tier])
+                if self._item_origin_available(site)
+            ]
             for _ in range(budget[tier]):
                 if not cands:
                     break
@@ -1958,6 +2031,7 @@ class MapGenerator:
                 x, y, z = best
                 for ch, amt in t["emit"].items():
                     field.deposit(ch, x, y, z, amt, t["radius"])
+                self._reserve_item_origin(best, f"heat tier {tier} {name}")
                 self._heat_placed.append((name, x, y, z))
                 cands.remove(best)
 
@@ -1978,7 +2052,10 @@ class MapGenerator:
         demand += ["item_health_large", "item_adrenaline"]
         rng.shuffle(demand)
 
-        cands = candidate_sites(TIER_CELL[3])
+        cands = [
+            site for site in candidate_sites(TIER_CELL[3])
+            if self._item_origin_available(site)
+        ]
         for name in demand:
             if not cands:
                 break
@@ -1989,6 +2066,7 @@ class MapGenerator:
             x, y, z = best
             for ch, amt in t["emit"].items():
                 field.deposit(ch, x, y, z, amt, t["radius"])
+            self._reserve_item_origin(best, f"heat tier 3 {name}")
             self._heat_placed.append((name, x, y, z))
             cands.remove(best)
 
@@ -2003,14 +2081,21 @@ class MapGenerator:
             rune_cands = candidate_sites(TIER_CELL[2])
             runes = ("rune_strength", "rune_haste", "rune_regen",
                      "rune_vampire", "rune_resist")
+            offs = [(-48, 0), (48, 0), (0, -48), (0, 48), (0, 0)]
+            rune_cands = [
+                center for center in rune_cands
+                if all(self._item_origin_available(
+                    (center[0] + dx, center[1] + dy, center[2])
+                ) for dx, dy in offs)
+            ]
             if rune_cands:
                 cx, cy, cz = rng.choice(rune_cands)   # one central rack site
-                offs = [(-48, 0), (48, 0), (0, -48), (0, 48), (0, 0)]
                 for name, (dx, dy) in zip(runes, offs):
                     x, y, z = cx + dx, cy + dy, cz
                     t = ITEM_TEMPLATES[name]
                     for ch, amt in t["emit"].items():
                         field.deposit(ch, x, y, z, amt, t["radius"])
+                    self._reserve_item_origin((x, y, z), f"rune rack {name}")
                     self._heat_placed.append((name, x, y, z))
 
         # Radiative sanity check: with every source placed, re-evaluate each
@@ -2072,6 +2157,7 @@ class MapGenerator:
             t = ITEM_TEMPLATES[name]
             for ch, amt in t["emit"].items():
                 field.deposit(ch, x, y, z, amt, t["radius"])
+            self._reserve_item_origin((x, y, z), f"structure loot {name}")
             self.writer.add_entity(name, {"origin": f"{x} {y} {z}"})
             self._placed_loot.append((name, x, y, z))
 
@@ -2117,14 +2203,20 @@ class MapGenerator:
                 stride = TIER_CELL[t["tier"]]
                 if stride not in sites_cache:
                     sites_cache[stride] = self._candidate_sites(stride)
-                pool = rng.sample(sites_cache[stride],
-                                  min(48, len(sites_cache[stride])))
+                available = [
+                    site for site in sites_cache[stride]
+                    if self._item_origin_available(site)
+                ]
+                if not available:
+                    continue
+                pool = rng.sample(available, min(48, len(available)))
                 # Relocation honours the same hard floors as placement —
                 # without them the relax pass walked armour right back
                 # onto the weapon heat it is meant to answer from afar.
-                others = [(c, px, py, pz) for c, px, py, pz in
-                          self._placed_loot + self._heat_placed
-                          if (c, px, py, pz) != self._heat_placed[idx]]
+                others = [*self._placed_loot, *(
+                    placement for other_idx, placement
+                    in enumerate(self._heat_placed) if other_idx != idx
+                )]
                 held_p = [(px, py, pz) for c, px, py, pz in others
                           if c in POWER_WEAPONS]
                 held_a = [(px, py, pz) for c, px, py, pz in others
@@ -2142,6 +2234,9 @@ class MapGenerator:
                     pool = spaced or pool
                 best = max(pool, key=lambda p: field.score(t["pull"], *p))
                 if field.score(t["pull"], *best) > cur + eps:
+                    previous = (x, y, z)
+                    self._item_origins.remove(previous)
+                    self._reserve_item_origin(best, f"relaxed {name}")
                     self._heat_placed[idx] = (name, best[0], best[1], best[2])
                     moved_this_sweep += 1
             moves += moved_this_sweep
@@ -2161,7 +2256,9 @@ class MapGenerator:
                         out.append((x, y, fz))
                     y += stride
                 x += stride
-        return out
+        # Overlapping generated rooms may contribute the same physical floor
+        # point.  Preserve first-seen order while exposing it only once.
+        return list(dict.fromkeys(out))
 
     # ----- measurable base-floor lighting -----
 

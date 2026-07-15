@@ -53,6 +53,10 @@ PLAYER_ORIGIN_FLOOR_OFFSET = 24.0
 ROOM_FLOOR_BAND_TOLERANCE = 8.0
 
 
+class RouteGraphError(ValueError):
+    """Raised when the generator cannot publish a complete route contract."""
+
+
 def _period(cls: str) -> float:
     # Most-specific (longest) matching key wins, so item_health_mega (20s)
     # isn't shadowed by the item_health (30s) prefix.
@@ -79,6 +83,12 @@ def _dist(a, b) -> float:
 def build_route_graph(rooms, connections, items, spawns, lava_pools,
                       hook_required_edges=None) -> dict:
     """items: list of (cls, x, y, z). spawns: list of (x, y, z)."""
+    item_origins = [(int(x), int(y), int(z)) for _cls, x, y, z in items]
+    if len(item_origins) != len(set(item_origins)):
+        raise RouteGraphError("route graph contains stacked item origins")
+    spawn_origins = {(int(x), int(y), int(z)) for x, y, z in spawns}
+    if spawn_origins.intersection(item_origins):
+        raise RouteGraphError("route graph item overlaps a spawn origin")
     # --- room centres + danger ---
     rc = [
         (r.wx + r.w / 2, r.wy + r.d / 2,
@@ -147,51 +157,86 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
                       "x": int(x), "y": int(y), "z": int(z),
                       "room": room_of(x, y, z)})
 
-    # --- all-pairs shortest path over rooms (Dijkstra; rooms are few) ---
+    # --- all-pairs deterministic paths over rooms (Dijkstra; rooms are few) ---
     def dijkstra(src):
-        dist = {i: math.inf for i in range(len(rooms))}
-        dist[src] = 0.0
-        pq = [(0.0, src)]
+        # The search minimizes risk-weighted distance and retains the exact
+        # room-centre predecessor path for selection and risk exposure.  Those
+        # hidden centres are not part of the published endpoint cost claim.
+        best = {
+            src: (0.0, 0.0, (src,), 0.0, ()),
+        }
+        pq = [(0.0, 0.0, (src,), src, 0.0, ())]
         while pq:
-            d, u = heapq.heappop(pq)
-            if d > dist[u]:
+            weighted, physical, path, u, exposure, path_edges = heapq.heappop(pq)
+            current = best.get(u)
+            if current is None or (weighted, physical, path) != current[:3]:
                 continue
             for v, w, risk in adj[u]:
-                nd = d + w * (1.0 + risk)   # risk inflates effective travel cost
-                if nd < dist[v]:
-                    dist[v] = nd
-                    heapq.heappush(pq, (nd, v))
-        return dist
+                candidate = (
+                    weighted + w * (1.0 + risk),
+                    physical + w,
+                    path + (v,),
+                    exposure + w * risk,
+                    path_edges + ((u, v, w, risk),),
+                )
+                previous = best.get(v)
+                if previous is None or candidate[:3] < previous[:3]:
+                    best[v] = candidate
+                    heapq.heappush(
+                        pq,
+                        (
+                            candidate[0], candidate[1], candidate[2], v,
+                            candidate[3], candidate[4],
+                        ),
+                    )
+        return best
 
-    room_dist = {i: dijkstra(i) for i in range(len(rooms))}
+    room_paths = {i: dijkstra(i) for i in range(len(rooms))}
 
-    def route_cost(source, target):
+    def route_metric(source, target):
+        """Return physical distance, risk exposure, and selection cost."""
         ra = source["room"]
         rb = target["room"]
         if ra < 0 or rb < 0 or ra >= len(rooms) or rb >= len(rooms):
-            return math.inf
+            return None
         source_point = (source["x"], source["y"], source["z"])
         target_point = (target["x"], target["y"], target["z"])
         if ra == rb:
-            return _dist(source_point, target_point)
-        inter_room = room_dist[ra].get(rb, math.inf)
-        if not math.isfinite(inter_room):
-            return math.inf
-        return (
-            _dist(source_point, rc[ra])
-            + inter_room
-            + _dist(rc[rb], target_point)
-        )
+            physical = _dist(source_point, target_point)
+            exposure = physical * edge_risk(source_point, target_point)
+            return physical, exposure, physical + exposure
+        room_path = room_paths[ra].get(rb)
+        if room_path is None:
+            return None
+        legs = [
+            (
+                _dist(source_point, rc[ra]),
+                edge_risk(source_point, rc[ra]),
+            ),
+            *((edge[2], edge[3]) for edge in room_path[4]),
+            (
+                _dist(rc[rb], target_point),
+                edge_risk(rc[rb], target_point),
+            ),
+        ]
+        physical = sum(distance for distance, _risk in legs)
+        exposure = sum(distance * risk for distance, risk in legs)
+        return physical, exposure, physical + exposure
+
+    def archetype_pool(archetype):
+        if archetype == "offense":
+            axes = ("offense", "value")
+            pool = [node for node in item_nodes if node["axis"] in axes]
+        elif archetype == "survival":
+            axes = ("survival", "value")
+            pool = [node for node in item_nodes if node["axis"] in axes]
+        else:
+            pool = list(item_nodes)
+        return [node for node in pool if node["room"] >= 0]
 
     # --- generate archetype routes: value-weighted greedy loops ---
     def gen_route(archetype, start):
-        if archetype == "offense":
-            pool = [n for n in item_nodes if n["axis"] in ("offense", "value")]
-        elif archetype == "survival":
-            pool = [n for n in item_nodes if n["axis"] in ("survival", "value")]
-        else:  # control / balanced: everything, value-weighted
-            pool = list(item_nodes)
-        pool = [n for n in pool if n["room"] >= 0]
+        pool = archetype_pool(archetype)
         if not pool:
             return None
         visited, seq, current = [], [], start
@@ -201,13 +246,13 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
             # Pick the best reachable value using endpoint-aware 3D cost.
             # Distinct same-room points therefore never receive a fake zero.
             def score(n):
-                c = route_cost(current, n)
-                if not math.isfinite(c):
+                metric = route_metric(current, n)
+                if metric is None:
                     return -math.inf
-                return n["value"] / (1.0 + c / 1024.0)
+                return n["value"] / (1.0 + metric[2] / 1024.0)
             reachable = [
                 node for node in remaining
-                if math.isfinite(route_cost(current, node))
+                if route_metric(current, node) is not None
             ]
             if not reachable:
                 break
@@ -220,18 +265,36 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
             return None
         # close the loop back to start
         loop = [start, *seq, start]
-        total = sum(route_cost(source, target)
-                    for source, target in zip(loop, loop[1:]))
-        if not math.isfinite(total):
+        metrics = [
+            route_metric(source, target)
+            for source, target in zip(loop, loop[1:])
+        ]
+        if any(metric is None for metric in metrics):
             return None
-        risk = round(sum(edge_risk(rc[seq[i]["room"]], rc[seq[i + 1]["room"]])
-                         for i in range(len(seq) - 1)) / max(1, len(seq) - 1), 3)
+        path_total = sum(metric[0] for metric in metrics)
+        exposure = sum(metric[1] for metric in metrics)
+        if path_total <= 0:
+            return None
+        # Room centres and predecessor edges are an internal selection/risk
+        # model, not published route waypoints.  The compiled Atlas challenges
+        # only this exact spawn/item endpoint loop, so claim its deterministic
+        # geometric lower bound and let the oracle publish authoritative cost.
+        claimed_distance = sum(
+            _dist(
+                (source["x"], source["y"], source["z"]),
+                (target["x"], target["y"], target["z"]),
+            )
+            for source, target in zip(loop, loop[1:])
+        )
+        if claimed_distance <= 0:
+            return None
+        risk = round(exposure / path_total, 3)
         return {
             "archetype": archetype,
             "node_ids": visited,
             "items": [n["class"] for n in seq],
             "respawn_s": [n["respawn_s"] for n in seq],
-            "dist": round(total),
+            "dist": round(claimed_distance),
             "risk": risk,
             "value": round(sum(n["value"] for n in seq), 2),
         }
@@ -245,16 +308,29 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
         first_spawn_by_room.setdefault(node["room"], node)
     # Retain the original spawn-room rotation, but use its canonical first
     # node because the claim normalizer resolves a route's start the same way.
-    route_starts = [first_spawn_by_room[node["room"]] for node in spawn_nodes]
+    route_starts = list(first_spawn_by_room.values())
     routes = []
     if route_starts:
         for i, arch in enumerate(ROUTE_ARCHETYPES):
-            start = route_starts[i % len(route_starts)]
+            offset = i % len(route_starts)
+            ordered_starts = route_starts[offset:] + route_starts[:offset]
+            pool = archetype_pool(arch)
+            start = next((
+                candidate for candidate in ordered_starts
+                if sum(
+                    route_metric(candidate, node) is not None for node in pool
+                ) >= 2
+            ), None)
+            if start is None:
+                raise RouteGraphError(
+                    f"no spawn component has two reachable {arch} items"
+                )
             r = gen_route(arch, start)
-            if r:
-                r["id"] = len(routes)
-                r["start_room"] = start["room"]
-                routes.append(r)
+            if r is None:
+                raise RouteGraphError(f"could not build mandatory {arch} route")
+            r["id"] = len(routes)
+            r["start_room"] = start["room"]
+            routes.append(r)
 
     return {
         "version": 1,

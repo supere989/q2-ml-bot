@@ -217,6 +217,43 @@ def test_towers_seed_71425107_emits_direct_interior_lights(tmp_path):
     assert result["static_ok"] is True
 
 
+def test_arena_vertical_seed_71426502_keeps_lava_out_of_building_zone(tmp_path):
+    map_path, _ = generate_map(
+        "lava_building_regression", 71426502, tmp_path,
+        style="arena_vertical",
+    )
+    meta = json.loads(map_path.with_suffix(".meta.json").read_text())
+    lattice = json.loads(map_path.with_suffix(".lattice.json").read_text())
+
+    assert meta["large_buildings"] == 2
+    building = next(
+        zone for zone in meta["lighting"]["interior_zones"]
+        if zone["id"] == "building_1"
+    )
+    x0, y0, x1, y1 = building["bounds"]
+    protected = (
+        x0, y0, building["floor_z"],
+        x1, y1, max(building["ceiling_z"],
+                    building["floor_z"] + MIN_SAFE_HEADROOM),
+    )
+    for danger in lattice["danger"]:
+        assert (
+            danger[3] <= protected[0] or danger[0] >= protected[3]
+            or danger[4] <= protected[1] or danger[1] >= protected[4]
+            or danger[5] <= protected[2] or danger[2] >= protected[5]
+        )
+
+    entities = _parse_entities(map_path.read_text())
+    assert any(
+        entity.get("_ml_interior_light") == "1"
+        and entity.get("_ml_zone") == "building_1"
+        for entity in entities
+    )
+    result = static_validate(map_path, _static_args())
+    assert result["interior_lighting_ok"] is True
+    assert result["static_ok"] is True
+
+
 def test_validator_rejects_map_missing_a_regions_lights(tmp_path):
     generate_map("shadowed", 42, tmp_path, style="arena_vertical")
     map_path = tmp_path / "shadowed.map"
