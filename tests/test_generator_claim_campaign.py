@@ -35,6 +35,12 @@ FAILURE_71429 = (
 DECLARATION_71429 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71429-DECLARATION.json"
 )
+FAILURE_71430 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71430-FAILURE.json"
+)
+DECLARATION_71430 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71430-DECLARATION.json"
+)
 NONZERO = "ab" * 32
 
 
@@ -84,6 +90,8 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "0/28",
         "b2g26_final_71429",
         "b2g26_final_71430",
+        "one-chunk hurt-boundary",
+        "grounded origins at Z 24.03125",
         "first source-freeze attempt",
         "version 2",
         "room-edge fallback",
@@ -239,6 +247,48 @@ def test_71429_failure_record_is_canonical_exact_and_no_salvage() -> None:
     assert admission["salvage_allowed"] is False
     assert admission["retry_under_same_declaration_allowed"] is False
     assert admission["regeneration_under_same_declaration_allowed"] is False
+
+
+def test_71430_failure_record_is_canonical_exact_and_no_salvage() -> None:
+    payload = FAILURE_71430.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71430"
+    assert failure["status"] == "permanently-failed-analysis"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71430-DECLARATION.json",
+        "sha256": hashlib.sha256(DECLARATION_71430.read_bytes()).hexdigest(),
+    }
+    assert failure["failure"]["phase"] == "exact-compiled-atlas-analysis"
+    assert failure["failure"]["classified_map_count"] == 28
+    assert failure["failure"]["classification"] == {
+        "hurt_zero_retained_sparse_evidence": 28,
+    }
+    failed = failure["evidence"]["failed_analysis_campaign"]
+    assert failed["pass_count"] == 0
+    assert failed["expected_map_count"] == 28
+    assert failed["passed"] is False
+    assert failed["published"] is False
+    assert failed["sha256"] == (
+        "11b8c6725856938bd8d708590e09532f"
+        "594e4b2f9fd03a380bac4525e0abaeb2"
+    )
+    admission = failure["admission"]
+    assert admission["permanently_non_admissible"] is True
+    assert admission["source_stage_published"] is True
+    assert admission["compiled_stage_published"] is True
+    assert admission["materialized_stage_published"] is True
+    assert admission["claims_stage_published"] is True
+    assert admission["analysis_stage_published"] is False
+    for key in (
+        "older_population_reuse_allowed", "passing_subset_allowed",
+        "regeneration_under_same_declaration_allowed",
+        "replacement_member_allowed", "retry_under_same_declaration_allowed",
+        "salvage_allowed",
+    ):
+        assert admission[key] is False
 
 
 def write_stage(directory: Path, stage: str) -> dict:

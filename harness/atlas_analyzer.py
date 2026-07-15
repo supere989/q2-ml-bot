@@ -2812,6 +2812,39 @@ def _surface_candidate_scope(
     )
 
 
+def _hurt_boundary_chunks(
+    scope: _SurfaceCandidateScope,
+    nodes: Mapping[tuple[int, int, int], NavNode],
+    origin: tuple[int, int, int],
+) -> tuple[tuple[int, int, int], ...]:
+    """Return the exact one-chunk hazard band below reachable boundaries.
+
+    Pmove player origins are quantized to 1/8 unit.  A grounded origin can
+    therefore sit just above the nominal 24-unit floor offset, putting the
+    floor candidate in the chunk above a compiled kill brush.  Surface
+    retention intentionally does not allocate witness-only neighbor chunks;
+    hurt retention has a separate, narrower authority for the immediately
+    lower chunk of an evidenced reachable boundary column.  Interior columns,
+    horizontal dilation, and gaps of two or more chunks are never admitted.
+    """
+
+    chunks: set[tuple[int, int, int]] = set()
+    for key in scope.boundary_l1:
+        node = nodes[key]
+        floor_cell = _grid_index(
+            (
+                node.position[0],
+                node.position[1],
+                node.position[2] - 24.0 - 1e-6,
+            ),
+            origin,
+            4,
+        )
+        floor_chunk = _l0_chunk_key(floor_cell)
+        chunks.add((floor_chunk[0], floor_chunk[1], floor_chunk[2] - 1))
+    return tuple(sorted(chunks, key=_zyx))
+
+
 def _surface_request_upper_bound(
     groups: Sequence[SurfaceCandidateGroup],
 ) -> int:
@@ -3243,6 +3276,9 @@ def _l0_chunks(
     if metadata is not None:
         entities = {entity.index: entity for entity in metadata.entities}
         retained_chunks = set(surface_scope.authorized_chunks)
+        hurt_boundary_chunks = set(
+            _hurt_boundary_chunks(surface_scope, nodes, origin)
+        )
 
         def translated(bounds: Aabb, translation: Sequence[float]) -> Aabb:
             return Aabb(
@@ -3279,13 +3315,16 @@ def _l0_chunks(
             *, scalar: tuple[str, int] | None = None,
             semantic: str | Sequence[str] | None = None,
         ) -> None:
-            """Materialize entity fields only inside the sparse L0 permit.
+            """Materialize entity fields only inside the sparse L0 permits.
 
             Large generated kill planes and authored trigger volumes are exact
             engine hazards, but their full AABBs are not permission to allocate
-            dense map-wide L0.  Intersect them with the same retained chunk set
-            used by reachable surface discovery, while preserving inclusive
-            linked-AABB contact at the clipped boundaries.
+            dense map-wide L0.  Prefer the chunks retained by reachable surface
+            discovery.  If they have no intersection, permit only the exact
+            one-chunk-lower band beneath evidenced reachable boundary columns.
+            This covers fixed-point grounded origins without dilating interior
+            floor columns or distant exterior volume.  Inclusive linked-AABB
+            contact is preserved at every clipped boundary.
             """
 
             lower = _grid_index(bounds.mins, origin, 4)
@@ -3297,21 +3336,36 @@ def _l0_chunks(
                     tuple[int, int, int],
                 ]
             ] = []
-            for chunk in sorted(retained_chunks, key=_zyx):
-                chunk_low = tuple(value * 16 for value in chunk)
-                chunk_high = tuple(value + 15 for value in chunk_low)
-                clipped_low = tuple(
-                    max(lower[axis], chunk_low[axis]) for axis in range(3)
-                )
-                clipped_high = tuple(
-                    min(upper[axis], chunk_high[axis]) for axis in range(3)
-                )
-                if any(
-                    clipped_high[axis] < clipped_low[axis]
-                    for axis in range(3)
-                ):
-                    continue
-                clips.append((chunk, clipped_low, clipped_high))
+            def intersect(
+                permit: set[tuple[int, int, int]],
+            ) -> list[
+                tuple[
+                    tuple[int, int, int],
+                    tuple[int, int, int],
+                    tuple[int, int, int],
+                ]
+            ]:
+                result = []
+                for chunk in sorted(permit, key=_zyx):
+                    chunk_low = tuple(value * 16 for value in chunk)
+                    chunk_high = tuple(value + 15 for value in chunk_low)
+                    clipped_low = tuple(
+                        max(lower[axis], chunk_low[axis]) for axis in range(3)
+                    )
+                    clipped_high = tuple(
+                        min(upper[axis], chunk_high[axis]) for axis in range(3)
+                    )
+                    if any(
+                        clipped_high[axis] < clipped_low[axis]
+                        for axis in range(3)
+                    ):
+                        continue
+                    result.append((chunk, clipped_low, clipped_high))
+                return result
+
+            clips.extend(intersect(retained_chunks))
+            if not clips:
+                clips.extend(intersect(hurt_boundary_chunks))
 
             # Reserve this field's complete affected plane set before its first
             # cell is allocated. The authoritative 1,200-chunk/16-MiB budget,

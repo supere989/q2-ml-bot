@@ -34,6 +34,7 @@ from harness.atlas_analyzer import (
     _dynamic_mover_dependency_index,
     _exact_landing_key,
     _ground_navigation_seeds,
+    _hurt_boundary_chunks,
     _l0_chunks,
     _ladder_contact_requests,
     _ladder_contact_trace_admits,
@@ -781,6 +782,114 @@ def test_map_wide_hurt_is_clipped_to_sparse_reachable_permit() -> None:
     assert {tuple(chunk["key"]) for chunk in chunks}.issubset(retained)
     assert 0 < semantics["hurt:7:raw"] < 2_000_000
     assert 0 < semantics["hurt:7:expanded"] < 2_000_000
+
+
+def test_fixed_point_floor_boundary_admits_only_one_lower_hurt_chunk() -> None:
+    """Match the exact chunk alignment that rejected generated cohort 71430."""
+
+    trigger = EntityMetadata(
+        index=1,
+        classname="trigger_hurt",
+        properties=(("model", "*1"), ("spawnflags", "12")),
+    )
+    metadata = SimpleNamespace(
+        entities=(trigger,),
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0)),
+            # Runtime linking expands this to
+            # [-514,-514,-242]..[3586,3586,-62].
+            SimpleNamespace(
+                mins=(-513, -513, -241), maxs=(3585, 3585, -63),
+            ),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 1, "model_index": 1},
+        )),
+    )
+    origin = (-512, -512, -512)
+    nodes = {
+        (0, 0, 0): NavNode(
+            (0, 0, 0), (0.0, 0.0, 24.03125),
+            True, True, True, 0, (0.0, 0.0, 1.0),
+        ),
+    }
+    scope = _surface_candidate_scope(nodes, origin)
+    retained = set(scope.authorized_chunks)
+    boundary = set(_hurt_boundary_chunks(scope, nodes, origin))
+
+    assert all(chunk[2] == 8 for chunk in retained)
+    assert boundary == {(8, 8, 7)}
+
+    semantics: dict[str, int] = {}
+    chunks = _l0_chunks(
+        nodes, [], origin, metadata=metadata, semantic_summary=semantics,
+    )
+    hurt_chunks = {
+        tuple(chunk["key"])
+        for chunk in chunks
+        if chunk["bits"].get("hurt")
+    }
+    assert hurt_chunks == boundary
+    assert semantics["hurt:1:raw"] > 0
+    assert semantics["hurt:1:expanded"] > 0
+
+
+def test_fixed_point_hurt_boundary_does_not_cross_two_chunk_gap() -> None:
+    trigger = EntityMetadata(
+        index=2,
+        classname="trigger_hurt",
+        properties=(("model", "*1"), ("spawnflags", "12")),
+    )
+    metadata = SimpleNamespace(
+        entities=(trigger,),
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0)),
+            SimpleNamespace(
+                mins=(-513, -513, -305), maxs=(3585, 3585, -127),
+            ),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 2, "model_index": 1},
+        )),
+    )
+    nodes = {
+        (0, 0, 0): NavNode(
+            (0, 0, 0), (0.0, 0.0, 24.03125),
+            True, True, True, 0, (0.0, 0.0, 1.0),
+        ),
+    }
+    semantics: dict[str, int] = {}
+
+    chunks = _l0_chunks(
+        nodes, [], (-512, -512, -512), metadata=metadata,
+        semantic_summary=semantics,
+    )
+
+    assert chunks == []
+    assert "hurt:2:raw" not in semantics
+    assert "hurt:2:expanded" not in semantics
+
+
+def test_hurt_boundary_excludes_compatible_interior_columns() -> None:
+    origin = (-512, -512, -512)
+    nodes = {
+        (x, y, 0): NavNode(
+            (x, y, 0), (x * 16.0, y * 16.0, 24.03125),
+            True, True, True, 0, (0.0, 0.0, 1.0),
+        )
+        for x in range(-1, 2)
+        for y in range(-1, 2)
+    }
+    scope = _surface_candidate_scope(nodes, origin)
+    boundary = set(_hurt_boundary_chunks(scope, nodes, origin))
+    without_center = dict(nodes)
+    del without_center[(0, 0, 0)]
+    without_center_scope = _surface_candidate_scope(without_center, origin)
+
+    assert (0, 0, 0) not in scope.boundary_l1
+    assert boundary == set(
+        _hurt_boundary_chunks(without_center_scope, without_center, origin)
+    )
 
 
 def test_hurt_inclusive_upper_grid_boundary_is_retained() -> None:

@@ -78,7 +78,14 @@ The generated path requires every criterion below:
    separation remains at least 384 units.
 6. Every lava/hurt claim has positive raw and hull-expanded Atlas cells and
    positive oracle containment evidence. Aggregate hazard types must include
-   every claimed type.
+   every claimed type. Compiled hurt fields first intersect the ordinary
+   reachable-surface chunk permit. If that intersection is empty, a distinct
+   hazard permit may retain the exact chunk immediately below each evidenced
+   reachable boundary floor column. This one-chunk downward band exists for
+   fixed-point grounded-origin alignment only: it never admits interior floor
+   columns, horizontal dilation, a two-chunk gap, or the trigger's full AABB.
+   Only the inclusive AABB intersection inside an admitted chunk is stored,
+   under the same prospective 1200-chunk/16-MiB L0 budgets.
 7. Compiled lethal-edge count matches the safety contract, all lethal exterior
    edges are guarded, and no uncontained edge remains.
 8. qrad lightdata is nonempty and at most 2 MiB, has a nonzero digest and
@@ -246,19 +253,26 @@ archived as `B2-GENERATED-COHORT-71429-DECLARATION.json` and
 non-admissible; its generated members may not be reused, regenerated, repaired,
 or salvaged.
 
-The version-2 route-sidecar/source-freeze fix was committed before the fresh
-authoritative declaration. That declaration now names
-`b2g26_final_71430`, with four maps per concrete style and exact seed blocks
-`71430000` through `71430603`. Its status is `declared-not-generated`: no seed
-has been invoked and no source, compiled, materialized, claims, analysis, or
-gate result is claimed. Declaration presence alone never claims that any
-member passes.
+The version-2 route-sidecar/source-freeze fix was committed before cohort
+`b2g26_final_71430` was declared. Its source freeze, compile, static
+validation, V4 hook materialization, and claims preparation all passed for 28
+members. Exact compiled Atlas analysis then failed 0/28 because real Pmove
+grounded origins at Z 24.03125 put the reachable floor-surface permit exactly
+one 64-unit L0 chunk above the generated kill plane. Strict three-dimensional
+surface clipping consequently retained no raw or hull-expanded hurt evidence.
+Its exact declaration and canonical failure record are archived as
+`B2-GENERATED-COHORT-71430-DECLARATION.json` and
+`B2-GENERATED-COHORT-71430-FAILURE.json`. Cohort 71430 is permanently
+non-admissible; none of its source, BSP, V4 hook, claims, or analysis artifacts
+may be reused, repaired, retried, or salvaged. A fresh declaration remains
+pending until the separate one-chunk hurt-boundary implementation and retired
+71430 shadow validation are committed.
 
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
 replacement declaration. It must never name retired cohort 71426, 71427,
-71428, or 71429.
+71428, 71429, or 71430.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V4 hook candidates under the pinned B1 authorities. Materialization
