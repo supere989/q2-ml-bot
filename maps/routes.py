@@ -84,8 +84,10 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
             if r.wx <= x <= r.wx + r.w and r.wy <= y <= r.wy + r.d:
                 return i
         # nearest room centre fallback
-        return min(range(len(rc)), key=lambda i: _dist((x, y, rc[i][2]),
-                                                        (x, y, rc[i][2]))) if rc else -1
+        return min(
+            range(len(rc)),
+            key=lambda i: math.hypot(x - rc[i][0], y - rc[i][1]),
+        ) if rc else -1
 
     def edge_risk(ca, cb) -> float:
         if not lava_c:
@@ -164,12 +166,18 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
             # pick best value/cost item reachable from current room
             def score(n):
                 c = route_cost(cur, n["room"])
-                if not math.isfinite(c) or c <= 0:
+                if not math.isfinite(c):
+                    return -math.inf
+                if c <= 0:
                     c = 1.0
                 return n["value"] / (1.0 + c / 1024.0)
-            nxt = max(remaining, key=score)
-            if not math.isfinite(route_cost(cur, nxt["room"])):
+            reachable = [
+                node for node in remaining
+                if math.isfinite(route_cost(cur, node["room"]))
+            ]
+            if not reachable:
                 break
+            nxt = max(reachable, key=score)
             seq.append(nxt)
             visited.append(nxt["id"])
             cur = nxt["room"]
