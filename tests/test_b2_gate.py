@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
+import math
 from pathlib import Path
 import struct
 
 import pytest
 import zstandard
 
+from harness.hook_claims_v4 import (
+    render_runtime_sidecar,
+    runtime_records_sha256,
+    selected_records_sha256,
+    validation_trace_sha256,
+    validation_traces_sha256,
+)
+import tools.assemble_b2_gate as b2_gate
 from tools.assemble_b2_gate import (
     B2GateError,
     B2GatePaths,
@@ -18,13 +28,14 @@ from tools.assemble_b2_gate import (
     _dyn_source_authority,
     _expected_71438_rows,
     _validate_dyn_evidence,
+    _validate_materialized,
     _validate_source_route_contract,
     _validate_source_spawn_origin_binding,
     _validate_source_spawn_origin_binding_pass_count,
     _validate_test_report,
     _parser,
 )
-from tools.run_generator_cohort import canonical_bytes
+from tools.run_generator_cohort import STAGE_SUFFIXES, canonical_bytes
 from tools.run_b2_test_suite import (
     B2TestSuiteError,
     _commands,
@@ -90,12 +101,299 @@ def _paths(tmp_path: Path) -> B2GatePaths:
     )
 
 
+def _selected_hook_record(index: int) -> dict:
+    source = [index * 32_000, 0, 24_125]
+    anchor = [source[0] + 16_000, 0, 200_000]
+    eye = [source[0], source[1], source[2] + 22_000]
+    return {
+        "claim_id": f"hook:{index:04d}:candidate:0000",
+        "source_milliunits": source,
+        "trace_target_milliunits": anchor,
+        "measured_anchor_milliunits": anchor,
+        "landing_milliunits": [source[0] + 16_000, 0, 24_000],
+        "release_after_ticks": 2,
+        "distance_milliunits": round(math.sqrt(sum(
+            (anchor[axis] - eye[axis]) ** 2 for axis in range(3)
+        ))),
+        "flags": 1,
+    }
+
+
+def _v4_materialization(
+    map_id: str, bsp_payload: bytes, source_projection: bytes,
+) -> dict:
+    records = [_selected_hook_record(index) for index in range(6)]
+    traces = []
+    for record in records:
+        fixed = [[value // 125 for value in record["landing_milliunits"]]]
+        traces.append({
+            "claim_id": record["claim_id"],
+            "origin_fixed_frames": fixed,
+            "first_grounded_frame_index": 0,
+            "sha256": validation_trace_sha256(record["claim_id"], fixed, 0),
+        })
+    oracle_records = {
+        name: {
+            "executable_sha256": format(index + 5, "x") * 64,
+            "tool_identity": format(index + 6, "x") * 64,
+            "physics_identity": format(index + 7, "x") * 64,
+            "requests": index + 1,
+        }
+        for index, name in enumerate(("collision", "pmove", "hook", "fall"))
+    }
+    bsp_sha256 = _sha256(bsp_payload)
+    seal = {
+        "schema": "q2-b1-runtime-authority-seal-v1",
+        "normative_documents": {
+            "design_sha256": "a" * 64,
+            "plan_sha256": "b" * 64,
+        },
+        "hook_parity_attestation_sha256": "c" * 64,
+        "fixture_bsp_sha256": "d" * 64,
+        "analysis_bsp_sha256": bsp_sha256,
+        "executables": {
+            "cm_sha256": oracle_records["collision"]["executable_sha256"],
+            "pmove_sha256": oracle_records["pmove"]["executable_sha256"],
+            "hook_sha256": oracle_records["hook"]["executable_sha256"],
+            "fall_sha256": oracle_records["fall"]["executable_sha256"],
+        },
+        "identities": {
+            name: {
+                field: oracle_records[name][field]
+                for field in ("tool_identity", "physics_identity")
+            }
+            for name in ("collision", "pmove", "hook", "fall")
+        },
+    }
+    return {
+        "schema": "q2-hook-claim-materialization-v4",
+        "map": map_id,
+        "passed": True,
+        "landing_policy": "compiled-first-grounded-exact-v4",
+        "bsp": {"sha256": bsp_sha256, "size_bytes": len(bsp_payload)},
+        "candidates": {
+            "meta_sha256": "2" * 64,
+            "records_sha256": "3" * 64,
+            "record_count": 42,
+        },
+        "source_projection_sha256": _sha256(source_projection),
+        "runtime_records_sha256": runtime_records_sha256(records),
+        "selected_records": records,
+        "validation_traces": traces,
+        "oracles": oracle_records | {
+            "hook_parity_attestation_sha256": "c" * 64,
+            "b1_runtime_authority_seal": seal,
+        },
+        "fresh_strict_replay": {
+            "schema": "q2-hook-fresh-strict-replay-v4",
+            "passed": True,
+            "record_count": 6,
+            "selected_records_sha256": selected_records_sha256(records),
+            "validation_traces_sha256": validation_traces_sha256(traces),
+            "oracles": {
+                name: oracle_records[name] | {"requests": 1}
+                for name in ("collision", "pmove", "hook")
+            },
+        },
+        "replay": {
+            "analyzer": "q2-hook-claim-materializer",
+            "analyzer_version": "b2-c-v4",
+            "verifier": "q2-atlas-analyzer-exact-hook-replay",
+            "verifier_version": "b2-a-v4",
+        },
+        "request_count": 13,
+    }
+
+
+def _write_materialized_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[B2GatePaths, dict, dict]:
+    compiled = tmp_path / "compiled"
+    materialized = tmp_path / "materialized"
+    compiled.mkdir()
+    materialized.mkdir()
+    membership_report = tmp_path / "materialized-membership.json"
+    membership_report.write_bytes(canonical_bytes({}))
+    paths = replace(
+        _paths(tmp_path),
+        compiled_dir=compiled,
+        materialized_dir=materialized,
+        materialized_membership_report=membership_report,
+    )
+    declaration = {"maps": [{"map": "fixture"}]}
+    monkeypatch.setattr(
+        b2_gate,
+        "_membership_with_declaration",
+        lambda *_args, **_kwargs: {"passed": True},
+    )
+    monkeypatch.setattr(
+        b2_gate,
+        "_require_report_equals",
+        lambda *_args, **_kwargs: None,
+    )
+    source_projection = b"# non-admissible generator hook projection\n"
+    bsp_payload = b"IBSP materialized continuity fixture"
+    payloads = {
+        ".map": b"map fixture\n",
+        ".json": source_projection,
+        ".meta.json": canonical_bytes({"fixture": "meta"}),
+        ".lattice.json": canonical_bytes({"fixture": "lattice"}),
+        ".routes.json": canonical_bytes({"fixture": "routes"}),
+        ".bsp": bsp_payload,
+    }
+    for suffix in STAGE_SUFFIXES["compiled"]:
+        (compiled / f"fixture{suffix}").write_bytes(payloads[suffix])
+        (materialized / f"fixture{suffix}").write_bytes(payloads[suffix])
+
+    document = _v4_materialization(
+        "fixture", bsp_payload, source_projection,
+    )
+    attestation_payload = canonical_bytes(document)
+    attestation = materialized / "fixture.hook-materialization.json"
+    attestation.write_bytes(attestation_payload)
+    (materialized / "fixture.json").write_bytes(render_runtime_sidecar(
+        "fixture",
+        _sha256(bsp_payload),
+        _sha256(attestation_payload),
+        document["selected_records"],
+    ))
+    return paths, declaration, document
+
+
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
 def _file_evidence(path_text: str, payload: bytes) -> dict:
     return {"path": path_text, "sha256": _sha256(payload), "size_bytes": len(payload)}
+
+
+def test_materialized_v4_runtime_upgrade_is_exactly_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, declaration, document = _write_materialized_fixture(
+        tmp_path, monkeypatch,
+    )
+
+    result = _validate_materialized(paths, declaration, SHA)
+
+    attestation = paths.materialized_dir / "fixture.hook-materialization.json"
+    assert result["attestation_set_sha256"] == _sha256(canonical_bytes([
+        _sha256(attestation.read_bytes())
+    ]))
+    assert (paths.materialized_dir / "fixture.json").read_bytes() == (
+        render_runtime_sidecar(
+            "fixture",
+            _sha256((paths.materialized_dir / "fixture.bsp").read_bytes()),
+            _sha256(attestation.read_bytes()),
+            document["selected_records"],
+        )
+    )
+
+
+def test_materialized_unchanged_source_projection_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, declaration, _document = _write_materialized_fixture(
+        tmp_path, monkeypatch,
+    )
+    (paths.materialized_dir / "fixture.json").write_bytes(
+        (paths.compiled_dir / "fixture.json").read_bytes()
+    )
+
+    with pytest.raises(B2GateError, match="runtime sidecar was not upgraded"):
+        _validate_materialized(paths, declaration, SHA)
+
+
+def test_materialized_tampered_runtime_sidecar_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, declaration, _document = _write_materialized_fixture(
+        tmp_path, monkeypatch,
+    )
+    runtime = paths.materialized_dir / "fixture.json"
+    runtime.write_bytes(runtime.read_bytes() + b"tampered\n")
+
+    with pytest.raises(B2GateError, match="invalid V4 runtime sidecar"):
+        _validate_materialized(paths, declaration, SHA)
+
+
+@pytest.mark.parametrize("binding", ["bsp", "materialization"])
+def test_materialized_wrong_runtime_sidecar_binding_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binding: str,
+) -> None:
+    paths, declaration, document = _write_materialized_fixture(
+        tmp_path, monkeypatch,
+    )
+    attestation = paths.materialized_dir / "fixture.hook-materialization.json"
+    bsp_sha256 = _sha256((paths.materialized_dir / "fixture.bsp").read_bytes())
+    materialization_sha256 = _sha256(attestation.read_bytes())
+    if binding == "bsp":
+        bsp_sha256 = "0" * 64
+    else:
+        materialization_sha256 = "0" * 64
+    (paths.materialized_dir / "fixture.json").write_bytes(
+        render_runtime_sidecar(
+            "fixture", bsp_sha256, materialization_sha256,
+            document["selected_records"],
+        )
+    )
+
+    with pytest.raises(B2GateError, match="invalid V4 runtime sidecar"):
+        _validate_materialized(paths, declaration, SHA)
+
+
+def test_materialized_wrong_source_projection_binding_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, declaration, document = _write_materialized_fixture(
+        tmp_path, monkeypatch,
+    )
+    document["source_projection_sha256"] = "0" * 64
+    (paths.materialized_dir / "fixture.hook-materialization.json").write_bytes(
+        canonical_bytes(document)
+    )
+
+    with pytest.raises(B2GateError, match="source projection differs"):
+        _validate_materialized(paths, declaration, SHA)
+
+
+def test_materialized_wrong_attested_bsp_binding_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, declaration, document = _write_materialized_fixture(
+        tmp_path, monkeypatch,
+    )
+    document["bsp"]["sha256"] = "0" * 64
+    document["oracles"]["b1_runtime_authority_seal"][
+        "analysis_bsp_sha256"
+    ] = "0" * 64
+    (paths.materialized_dir / "fixture.hook-materialization.json").write_bytes(
+        canonical_bytes(document)
+    )
+
+    with pytest.raises(B2GateError, match="BSP binding differs"):
+        _validate_materialized(paths, declaration, SHA)
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [".map", ".meta.json", ".lattice.json", ".routes.json", ".bsp"],
+)
+def test_materialized_immutable_compiled_inputs_remain_byte_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str,
+) -> None:
+    paths, declaration, _document = _write_materialized_fixture(
+        tmp_path, monkeypatch,
+    )
+    immutable = paths.materialized_dir / f"fixture{suffix}"
+    immutable.write_bytes(immutable.read_bytes() + b"tampered")
+
+    with pytest.raises(
+        B2GateError,
+        match=r"materialized immutable input changed across stages",
+    ):
+        _validate_materialized(paths, declaration, SHA)
 
 
 def _encoded_snapshot(

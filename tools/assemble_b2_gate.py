@@ -39,6 +39,7 @@ from harness.atlas_source_closure import (  # noqa: E402
 from harness.hook_claims_v4 import (  # noqa: E402
     HookClaimsV4Error,
     validate_materialization as validate_hook_materialization_v4,
+    validate_runtime_sidecar,
 )
 from tools.generator_claim_validator import (  # noqa: E402
     ClaimValidationError,
@@ -154,7 +155,9 @@ def _reject_duplicates(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _load_json(path: Path, *, canonical: bool = True) -> Any:
+def _load_json_and_raw(
+    path: Path, *, canonical: bool = True,
+) -> tuple[Any, bytes]:
     try:
         raw = path.read_bytes()
         value = json.loads(
@@ -168,7 +171,11 @@ def _load_json(path: Path, *, canonical: bool = True) -> Any:
         raise B2GateError(f"cannot read JSON {path}: {exc}") from exc
     if canonical and raw != canonical_bytes(value):
         raise B2GateError(f"JSON is not canonical compact/sorted JSON plus LF: {path}")
-    return value
+    return value, raw
+
+
+def _load_json(path: Path, *, canonical: bool = True) -> Any:
+    return _load_json_and_raw(path, canonical=canonical)[0]
 
 
 def _mapping(value: object, label: str) -> Mapping[str, Any]:
@@ -737,21 +744,73 @@ def _validate_materialized(
     _require_report_equals(
         paths.materialized_membership_report, membership, "materialized membership report"
     )
-    common = [
+    immutable = [
         f"{row['map']}{suffix}"
-        for row in declaration["maps"] for suffix in STAGE_SUFFIXES["compiled"]
+        for row in declaration["maps"]
+        for suffix in STAGE_SUFFIXES["compiled"]
+        if suffix != ".json"
     ]
-    _require_same_files(paths.compiled_dir, paths.materialized_dir, common, "materialized input")
+    _require_same_files(
+        paths.compiled_dir, paths.materialized_dir, immutable,
+        "materialized immutable input",
+    )
     attestations = []
     for row in declaration["maps"]:
-        path = paths.materialized_dir / f"{row['map']}.hook-materialization.json"
+        map_id = row["map"]
+        path = paths.materialized_dir / f"{map_id}.hook-materialization.json"
         try:
-            value = validate_hook_materialization_v4(dict(_mapping(_load_json(path), "hook materialization")))
+            raw_value, attestation_payload = _load_json_and_raw(path)
+            value = validate_hook_materialization_v4(
+                dict(_mapping(raw_value, "hook materialization"))
+            )
         except HookClaimsV4Error as exc:
-            raise B2GateError(f"invalid V4 materialization for {row['map']}: {exc}") from exc
-        _require(value["map"] == row["map"], "materialization map differs")
-        _require(len(value["selected_records"]) == 6, "materialization does not seal exactly six hooks")
-        attestations.append(_file_record(path)["sha256"])
+            raise B2GateError(
+                f"invalid V4 materialization for {map_id}: {exc}"
+            ) from exc
+        _require(value["map"] == map_id, "materialization map differs")
+        _require(
+            len(value["selected_records"]) == 6,
+            "materialization does not seal exactly six hooks",
+        )
+
+        compiled_runtime = paths.compiled_dir / f"{map_id}.json"
+        materialized_runtime = paths.materialized_dir / f"{map_id}.json"
+        compiled_runtime_payload = compiled_runtime.read_bytes()
+        materialized_runtime_payload = materialized_runtime.read_bytes()
+        compiled_runtime_sha256 = _sha256_bytes(compiled_runtime_payload)
+        _require(
+            value["source_projection_sha256"] == compiled_runtime_sha256,
+            f"materialization source projection differs for {map_id}",
+        )
+        _require(
+            materialized_runtime_payload != compiled_runtime_payload,
+            f"materialization runtime sidecar was not upgraded for {map_id}",
+        )
+
+        materialized_bsp = paths.materialized_dir / f"{map_id}.bsp"
+        materialized_bsp_payload = materialized_bsp.read_bytes()
+        materialized_bsp_sha256 = _sha256_bytes(materialized_bsp_payload)
+        _require(
+            value["bsp"] == {
+                "sha256": materialized_bsp_sha256,
+                "size_bytes": len(materialized_bsp_payload),
+            },
+            f"materialization BSP binding differs for {map_id}",
+        )
+        materialization_sha256 = _sha256_bytes(attestation_payload)
+        try:
+            validate_runtime_sidecar(
+                materialized_runtime_payload,
+                map_id=map_id,
+                bsp_sha256=materialized_bsp_sha256,
+                materialization_sha256=materialization_sha256,
+                records=value["selected_records"],
+            )
+        except HookClaimsV4Error as exc:
+            raise B2GateError(
+                f"invalid V4 runtime sidecar for {map_id}: {exc}"
+            ) from exc
+        attestations.append(materialization_sha256)
     return {
         "membership": _file_record(paths.materialized_membership_report),
         "attestation_set_sha256": _sha256_bytes(canonical_bytes(attestations)),
