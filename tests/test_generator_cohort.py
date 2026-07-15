@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,8 @@ def fake_generator_factory(
     calls: list[dict[str, object]],
     *,
     cold_mismatch: str | None = None,
+    cold_route_mismatch: str | None = None,
+    invalid_route: str | None = None,
     wrong_meta_seed: str | None = None,
 ):
     def generate(
@@ -74,8 +77,53 @@ def fake_generator_factory(
         (output / f"{name}.lattice.json").write_text(
             json.dumps({"map": name, "seed": seed}) + "\n", encoding="utf-8"
         )
+        base = seed * 10
+        nodes = [
+            {
+                "id": item_id,
+                "type": "item",
+                "class": f"item_{item_id}",
+                "x": base + item_id * 10,
+                "y": item_id * 20,
+                "z": 24,
+                "room": 0,
+            }
+            for item_id in range(4)
+        ]
+        nodes.append({
+            "id": 4, "type": "spawn", "x": base + 100,
+            "y": 100, "z": 24, "room": 0,
+        })
+        if name == invalid_route:
+            nodes[1]["x"], nodes[1]["y"], nodes[1]["z"] = (
+                nodes[0]["x"], nodes[0]["y"], nodes[0]["z"]
+            )
+        if output.name == "cold" and name == cold_route_mismatch:
+            nodes[0]["x"] += 1
+        routes = [
+            {"archetype": "offense", "start_room": 0, "node_ids": [0, 1]},
+            {"archetype": "survival", "start_room": 0, "node_ids": [1, 2]},
+            {"archetype": "control", "start_room": 0, "node_ids": [2, 3]},
+            {"archetype": "balanced", "start_room": 0, "node_ids": [3, 0]},
+        ]
+        by_id = {node["id"]: node for node in nodes}
+        for route in routes:
+            loop = [
+                nodes[4], *(by_id[node_id] for node_id in route["node_ids"]),
+                nodes[4],
+            ]
+            route["dist"] = round(sum(
+                math.dist(
+                    (source["x"], source["y"], source["z"]),
+                    (target["x"], target["y"], target["z"]),
+                )
+                for source, target in zip(loop, loop[1:])
+            ))
         (output / f"{name}.routes.json").write_text(
-            json.dumps({"map": name, "routes": [seed]}) + "\n", encoding="utf-8"
+            json.dumps({
+                "version": 1, "nodes": nodes, "edges": [], "routes": routes,
+            }) + "\n",
+            encoding="utf-8",
         )
 
     return generate
@@ -137,6 +185,11 @@ def test_generate_publishes_only_a_complete_double_built_source_freeze(
     assert report["passed"] is True
     assert report["map_count"] == 28
     assert report["unique_layout_count"] == 28
+    assert report["route_contract_pass_count"] == 28
+    assert all(
+        row["route_contract"]["all_selected_rooms_source_connected"] is True
+        for row in report["maps"]
+    )
     assert report["style_counts"] == {
         style: 4 for style in sorted(cohort.CONCRETE_STYLES)
     }
@@ -179,6 +232,50 @@ def test_cold_byte_drift_rejects_whole_cohort_without_report(tmp_path: Path) -> 
             tmp_path / "cold",
             report_path,
             _generator=fake_generator_factory([], cold_mismatch=bad_map),
+            _static_validator=static_pass,
+            _binding=binding(),
+        )
+
+    assert not report_path.exists()
+
+
+def test_invalid_source_route_contract_rejects_whole_cohort(tmp_path: Path) -> None:
+    declaration, _ = cohort.load_declaration(DECLARATION)
+    bad_map = declaration["maps"][3]["map"]
+    report_path = tmp_path / "source-freeze.json"
+
+    with pytest.raises(
+        cohort.GeneratorCohortError,
+        match=rf"{bad_map} item origins are not globally unique",
+    ):
+        cohort.generate_source_freeze(
+            DECLARATION,
+            tmp_path / "primary",
+            tmp_path / "cold",
+            report_path,
+            _generator=fake_generator_factory([], invalid_route=bad_map),
+            _static_validator=static_pass,
+            _binding=binding(),
+        )
+
+    assert not report_path.exists()
+
+
+def test_cold_route_report_mismatch_rejects_whole_cohort(tmp_path: Path) -> None:
+    declaration, _ = cohort.load_declaration(DECLARATION)
+    bad_map = declaration["maps"][11]["map"]
+    report_path = tmp_path / "source-freeze.json"
+
+    with pytest.raises(
+        cohort.GeneratorCohortError,
+        match=rf"{bad_map} cold route contract differs",
+    ):
+        cohort.generate_source_freeze(
+            DECLARATION,
+            tmp_path / "primary",
+            tmp_path / "cold",
+            report_path,
+            _generator=fake_generator_factory([], cold_route_mismatch=bad_map),
             _static_validator=static_pass,
             _binding=binding(),
         )

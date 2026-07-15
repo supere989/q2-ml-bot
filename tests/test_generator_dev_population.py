@@ -97,6 +97,8 @@ def fake_generator_factory(
             {"archetype": "control", "start_room": 0, "node_ids": [2, 3]},
             {"archetype": "balanced", "start_room": 0, "node_ids": [3, 0]},
         ]
+        version = 1
+        edges = []
         if name == defective_map:
             if defect == "duplicate_item_origin":
                 nodes[1]["x"], nodes[1]["y"], nodes[1]["z"] = (
@@ -128,6 +130,21 @@ def fake_generator_factory(
                 routes[0]["node_ids"] = [0]
             elif defect == "non_item_endpoint":
                 routes[0]["node_ids"] = [4, 1]
+            elif defect == "disconnected_endpoint_room":
+                nodes[0]["room"] = 1
+            elif defect == "wrong_version":
+                version = 2
+            elif defect == "unhashable_archetype":
+                routes[0]["archetype"] = ["offense"]
+            elif defect == "self_loop_edge":
+                edges = [{"a": 0, "b": 0}]
+            elif defect == "duplicate_undirected_edge":
+                edges = [{"a": 0, "b": 1}, {"a": 1, "b": 0}]
+            elif defect == "unknown_node_type":
+                nodes.append({
+                    "id": 5, "type": "teleporter", "x": base + 200,
+                    "y": 200, "z": 24, "room": 0,
+                })
         by_id = {node["id"]: node for node in nodes}
         for route in routes:
             loop = [
@@ -145,7 +162,10 @@ def fake_generator_factory(
         if name == defective_map and defect == "distance_mismatch":
             routes[0]["dist"] += 2
         (output / f"{name}.routes.json").write_text(
-            json.dumps({"version": 1, "nodes": nodes, "routes": routes}) + "\n",
+            json.dumps({
+                "version": version, "nodes": nodes, "edges": edges,
+                "routes": routes,
+            }) + "\n",
             encoding="utf-8",
         )
 
@@ -204,6 +224,7 @@ def test_complete_double_generation_publishes_canonical_development_report(
     assert report["unique_layout_count"] == 56
     assert report["source_static_pass_count"] == 56
     assert report["metadata_identity_pass_count"] == 56
+    assert report["route_contract_pass_count"] == 56
     assert report["route_count"] == 224
     assert report["all_route_archetypes_exactly_once"] is True
     assert report["globally_unique_item_origins"] is True
@@ -215,6 +236,7 @@ def test_complete_double_generation_publishes_canonical_development_report(
     assert report["duplicate_route_endpoints"] == 0
     assert report["zero_length_route_legs"] == 0
     assert report["all_spawns_and_route_endpoints_floor_assigned"] is True
+    assert report["all_selected_rooms_source_connected"] is True
     assert report["exact_source_file_count_per_directory"] == 280
     assert report["cold_rebuild"] == {
         "distinct_empty_directories": True,
@@ -244,6 +266,12 @@ def test_complete_double_generation_publishes_canonical_development_report(
         ("one_endpoint", "requires at least two item endpoints"),
         ("non_item_endpoint", "endpoint node 4 is not an item"),
         ("distance_mismatch", "differs from endpoint-loop geometry"),
+        ("disconnected_endpoint_room", "unreachable from start room"),
+        ("wrong_version", "route graph version must be exactly 1"),
+        ("unhashable_archetype", "each route archetype exactly once"),
+        ("self_loop_edge", "edge 0 is a self-loop"),
+        ("duplicate_undirected_edge", "duplicates undirected edge"),
+        ("unknown_node_type", "node 5 has unknown type"),
     ],
 )
 def test_route_defect_rejects_population_without_report(

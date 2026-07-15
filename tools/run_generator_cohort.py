@@ -31,6 +31,10 @@ from harness.atlas_source_closure import (  # noqa: E402
     atlas_analyzer_authority_inputs,
     atlas_analyzer_authority_sha256,
 )
+from tools.source_route_contract import (  # noqa: E402
+    SourceRouteContractError,
+    load_source_route_contract,
+)
 
 
 DECLARATION_SCHEMA = "q2-b2-generated-cohort-declaration-v1"
@@ -631,6 +635,18 @@ def generate_source_freeze(
         if canonical_bytes(static) != canonical_bytes(cold_static):
             raise GeneratorCohortError(f"{name} cold source/static report differs")
 
+        try:
+            route_contract = load_source_route_contract(
+                output_dir / f"{name}.routes.json", name
+            )
+            cold_route_contract = load_source_route_contract(
+                cold_dir / f"{name}.routes.json", name
+            )
+        except SourceRouteContractError as exc:
+            raise GeneratorCohortError(str(exc)) from exc
+        if route_contract != cold_route_contract:
+            raise GeneratorCohortError(f"{name} cold route contract differs")
+
         source_files = {}
         for suffix in SOURCE_SUFFIXES:
             primary = output_dir / f"{name}{suffix}"
@@ -657,6 +673,7 @@ def generate_source_freeze(
             "grid": declared["grid"],
             "metadata": metadata,
             "source_static": static,
+            "route_contract": route_contract,
             "source_files": source_files,
         })
 
@@ -676,6 +693,7 @@ def generate_source_freeze(
         "map_count": len(rows),
         "style_counts": dict(sorted(style_counts.items())),
         "unique_layout_count": len(map_hashes),
+        "route_contract_pass_count": len(rows),
         "source_suffixes": list(SOURCE_SUFFIXES),
         "cold_rebuild": {
             "fresh_process_required": False,

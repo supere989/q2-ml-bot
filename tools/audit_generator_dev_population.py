@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
-import math
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -24,6 +23,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools import run_generator_cohort as cohort  # noqa: E402
+from tools.source_route_contract import (  # noqa: E402
+    ROUTE_ARCHETYPES,
+    SourceRouteContractError,
+    load_source_route_contract,
+)
 
 
 REPORT_SCHEMA = "q2-b2-generator-development-population-audit-v1"
@@ -32,7 +36,6 @@ MAP_PREFIX = "b2dev"
 GRID = 5
 MAPS_PER_STYLE = 8
 MAP_COUNT = len(cohort.CONCRETE_STYLES) * MAPS_PER_STYLE
-ROUTE_ARCHETYPES = ("offense", "survival", "control", "balanced")
 FINAL_DECLARATION = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
 )
@@ -290,189 +293,11 @@ def _metadata_identity(path: Path, row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _number(value: object, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise DevelopmentPopulationError(f"{label} must be numeric")
-    result = float(value)
-    if not math.isfinite(result):
-        raise DevelopmentPopulationError(f"{label} must be finite")
-    return result
-
-
-def _room(value: object, label: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise DevelopmentPopulationError(f"{label} is not floor-assigned")
-    return value
-
-
-def _origin(node: Mapping[str, Any], label: str) -> tuple[float, float, float]:
-    return tuple(_number(node.get(axis), f"{label} {axis}") for axis in "xyz")
-
-
 def _route_contract(path: Path, map_id: str) -> dict[str, Any]:
-    graph = _load_json(path, f"{map_id} route graph")
-    nodes_value = graph.get("nodes")
-    routes_value = graph.get("routes")
-    if not isinstance(nodes_value, list) or not isinstance(routes_value, list):
-        raise DevelopmentPopulationError(
-            f"{map_id} route graph lacks nodes/routes arrays"
-        )
-
-    nodes: dict[int, Mapping[str, Any]] = {}
-    item_origins: dict[tuple[float, float, float], int] = {}
-    spawn_origins: dict[tuple[float, float, float], int] = {}
-    spawn_nodes = []
-    for position, value in enumerate(nodes_value):
-        if not isinstance(value, Mapping):
-            raise DevelopmentPopulationError(f"{map_id} node {position} is invalid")
-        node_id = value.get("id")
-        if isinstance(node_id, bool) or not isinstance(node_id, int) or node_id < 0:
-            raise DevelopmentPopulationError(f"{map_id} node ID is invalid")
-        if node_id in nodes:
-            raise DevelopmentPopulationError(f"{map_id} duplicates node ID {node_id}")
-        nodes[node_id] = value
-        node_type = value.get("type")
-        if node_type == "item":
-            _room(value.get("room"), f"{map_id} item node {node_id}")
-            origin = _origin(value, f"{map_id} item node {node_id}")
-            if origin in item_origins:
-                raise DevelopmentPopulationError(
-                    f"{map_id} item origins are not globally unique: nodes "
-                    f"{item_origins[origin]} and {node_id} share {origin}"
-                )
-            item_origins[origin] = node_id
-        elif node_type == "spawn":
-            _room(value.get("room"), f"{map_id} spawn node {node_id}")
-            origin = _origin(value, f"{map_id} spawn node {node_id}")
-            spawn_origins.setdefault(origin, node_id)
-            spawn_nodes.append(value)
-    collision = set(item_origins).intersection(spawn_origins)
-
-    archetypes = [
-        route.get("archetype") if isinstance(route, Mapping) else None
-        for route in routes_value
-    ]
-    if (
-        len(archetypes) != len(ROUTE_ARCHETYPES)
-        or any(not isinstance(archetype, str) for archetype in archetypes)
-        or Counter(archetypes) != Counter(ROUTE_ARCHETYPES)
-    ):
-        raise DevelopmentPopulationError(
-            f"{map_id} must contain each route archetype exactly once"
-        )
-
-    zero_length_legs = 0
-    route_endpoint_count = 0
-    for route_index, value in enumerate(routes_value):
-        assert isinstance(value, Mapping)
-        start_room = _room(
-            value.get("start_room"), f"{map_id} route {route_index} start room"
-        )
-        start = next(
-            (node for node in spawn_nodes if node.get("room") == start_room),
-            None,
-        )
-        if start is None:
-            raise DevelopmentPopulationError(
-                f"{map_id} route {route_index} has no floor-assigned start spawn"
-            )
-        node_ids = value.get("node_ids")
-        if not isinstance(node_ids, list) or len(node_ids) < 2:
-            raise DevelopmentPopulationError(
-                f"{map_id} route {route_index} requires at least two item endpoints"
-            )
-        if (
-            any(isinstance(node_id, bool) or not isinstance(node_id, int)
-                for node_id in node_ids)
-            or len(set(node_ids)) != len(node_ids)
-        ):
-            raise DevelopmentPopulationError(
-                f"{map_id} route {route_index} has duplicate or invalid endpoints"
-            )
-        endpoints = [start]
-        for endpoint_index, node_id in enumerate(node_ids):
-            if (
-                isinstance(node_id, bool)
-                or not isinstance(node_id, int)
-                or node_id not in nodes
-            ):
-                raise DevelopmentPopulationError(
-                    f"{map_id} route {route_index} endpoint {endpoint_index} is invalid"
-                )
-            node = nodes[node_id]
-            if node.get("type") != "item":
-                raise DevelopmentPopulationError(
-                    f"{map_id} route {route_index} endpoint node {node_id} "
-                    "is not an item"
-                )
-            _room(
-                node.get("room"),
-                f"{map_id} route {route_index} endpoint node {node_id}",
-            )
-            endpoints.append(node)
-        endpoints.append(start)
-        route_endpoint_count += len(endpoints) - 2
-        for leg_index, (source, target) in enumerate(
-            zip(endpoints, endpoints[1:])
-        ):
-            source_origin = _origin(
-                source, f"{map_id} route {route_index} leg {leg_index} source"
-            )
-            target_origin = _origin(
-                target, f"{map_id} route {route_index} leg {leg_index} target"
-            )
-            if source_origin == target_origin:
-                zero_length_legs += 1
-        geometric_distance = sum(
-            math.dist(
-                _origin(
-                    source,
-                    f"{map_id} route {route_index} distance source",
-                ),
-                _origin(
-                    target,
-                    f"{map_id} route {route_index} distance target",
-                ),
-            )
-            for source, target in zip(endpoints, endpoints[1:])
-        )
-        published_distance = _number(
-            value.get("dist"), f"{map_id} route {route_index} dist"
-        )
-        if (
-            published_distance != round(published_distance)
-            or abs(published_distance - geometric_distance) > 0.5
-        ):
-            raise DevelopmentPopulationError(
-                f"{map_id} route {route_index} dist {published_distance:g} "
-                f"differs from endpoint-loop geometry {geometric_distance:.6f}"
-            )
-    if zero_length_legs:
-        raise DevelopmentPopulationError(
-            f"{map_id} has {zero_length_legs} zero-length route legs"
-        )
-    if collision:
-        origin = min(collision)
-        raise DevelopmentPopulationError(
-            f"{map_id} item node {item_origins[origin]} overlaps spawn node "
-            f"{spawn_origins[origin]} at {origin}"
-        )
-
-    return {
-        "archetypes": list(ROUTE_ARCHETYPES),
-        "route_count": len(routes_value),
-        "item_origin_count": len(item_origins),
-        "spawn_count": len(spawn_nodes),
-        "route_endpoint_count": route_endpoint_count,
-        "zero_length_route_legs": 0,
-        "minimum_distinct_item_endpoints_per_route": 2,
-        "all_route_endpoints_are_items": True,
-        "published_dist_matches_endpoint_loop": True,
-        "all_item_nodes_floor_assigned": True,
-        "item_spawn_origin_collisions": 0,
-        "all_spawns_and_route_endpoints_floor_assigned": True,
-        "globally_unique_item_origins": True,
-    }
+    try:
+        return load_source_route_contract(path, map_id)
+    except SourceRouteContractError as exc:
+        raise DevelopmentPopulationError(str(exc)) from exc
 
 
 def audit_development_population(
@@ -650,6 +475,7 @@ def audit_development_population(
         "unique_layout_count": len(layouts),
         "source_static_pass_count": len(map_reports),
         "metadata_identity_pass_count": len(map_reports),
+        "route_contract_pass_count": len(map_reports),
         "route_archetypes": list(ROUTE_ARCHETYPES),
         "all_route_archetypes_exactly_once": True,
         "route_count": total_routes,
@@ -664,6 +490,7 @@ def audit_development_population(
         "all_item_nodes_floor_assigned": True,
         "item_spawn_origin_collisions": 0,
         "all_spawns_and_route_endpoints_floor_assigned": True,
+        "all_selected_rooms_source_connected": True,
         "maps": map_reports,
         "failures": [],
         "passed": True,
