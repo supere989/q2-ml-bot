@@ -246,15 +246,19 @@ archived as `B2-GENERATED-COHORT-71429-DECLARATION.json` and
 non-admissible; its generated members may not be reused, regenerated, repaired,
 or salvaged.
 
-The version-2 route-sidecar/source-freeze fix must be committed before a fresh
-replacement declaration is issued. Until that declaration commit exists, no
-new cohort is authorized for generation.
+The version-2 route-sidecar/source-freeze fix was committed before the fresh
+authoritative declaration. That declaration now names
+`b2g26_final_71430`, with four maps per concrete style and exact seed blocks
+`71430000` through `71430603`. Its status is `declared-not-generated`: no seed
+has been invoked and no source, compiled, materialized, claims, analysis, or
+gate result is claimed. Declaration presence alone never claims that any
+member passes.
 
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
-replacement declaration. It must never name retired cohort 71426, 71427, or
-71428.
+replacement declaration. It must never name retired cohort 71426, 71427,
+71428, or 71429.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V4 hook candidates under the pinned B1 authorities. Materialization

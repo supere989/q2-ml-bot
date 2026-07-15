@@ -29,6 +29,12 @@ FAILURE_71428 = (
 DECLARATION_71428 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71428-DECLARATION.json"
 )
+FAILURE_71429 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71429-FAILURE.json"
+)
+DECLARATION_71429 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71429-DECLARATION.json"
+)
 NONZERO = "ab" * 32
 
 
@@ -77,6 +83,7 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "b2g26_final_71428",
         "0/28",
         "b2g26_final_71429",
+        "b2g26_final_71430",
         "first source-freeze attempt",
         "version 2",
         "room-edge fallback",
@@ -193,6 +200,45 @@ def test_71428_failure_record_is_canonical_exact_and_no_salvage() -> None:
         "salvage_allowed",
     ):
         assert admission[key] is False
+
+
+def test_71429_failure_record_is_canonical_exact_and_no_salvage() -> None:
+    payload = FAILURE_71429.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71429"
+    assert failure["status"] == "permanently-failed-first-source-freeze"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71429-DECLARATION.json",
+        "sha256": hashlib.sha256(DECLARATION_71429.read_bytes()).hexdigest(),
+    }
+    assert failure["failure"]["phase"] == "first-source-freeze-validation"
+    assert failure["failure"]["first_failure"] == {
+        "map": "b2g26_towers_71429101",
+        "message": (
+            "route 0 endpoint room 2 is unreachable from start room 0 "
+            "through source room edges"
+        ),
+        "ordinal": 5,
+        "seed": 71429101,
+        "style": "towers",
+    }
+    assert failure["failure"]["affected_map_count"] == 7
+    assert failure["evidence"]["primary_population"][
+        "content_manifest_sha256"
+    ] == failure["evidence"]["cold_population"]["content_manifest_sha256"]
+    assert failure["evidence"]["primary_population"]["actual_file_count"] == 140
+    assert failure["evidence"]["cold_population"]["actual_file_count"] == 140
+    assert failure["evidence"]["source_freeze_report"]["published"] is False
+    admission = failure["admission"]
+    assert admission["permanently_non_admissible"] is True
+    assert admission["source_stage_published"] is False
+    assert admission["compiled_stage_published"] is False
+    assert admission["salvage_allowed"] is False
+    assert admission["retry_under_same_declaration_allowed"] is False
+    assert admission["regeneration_under_same_declaration_allowed"] is False
 
 
 def write_stage(directory: Path, stage: str) -> dict:

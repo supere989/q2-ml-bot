@@ -137,13 +137,13 @@ def static_pass(map_path: Path) -> dict[str, object]:
 def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> None:
     declaration, digest = cohort.load_declaration(DECLARATION)
     style_bases = (
-        ("open", 71429000),
-        ("towers", 71429100),
-        ("canyon", 71429200),
-        ("pits", 71429300),
-        ("arena_open", 71429400),
-        ("arena_vertical", 71429500),
-        ("arena_lanes", 71429600),
+        ("open", 71430000),
+        ("towers", 71430100),
+        ("canyon", 71430200),
+        ("pits", 71430300),
+        ("arena_open", 71430400),
+        ("arena_vertical", 71430500),
+        ("arena_lanes", 71430600),
     )
     expected = [
         {
@@ -159,7 +159,7 @@ def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> Non
     ]
 
     assert len(digest) == 64
-    assert declaration["cohort_id"] == "b2g26_final_71429"
+    assert declaration["cohort_id"] == "b2g26_final_71430"
     assert declaration["maps"] == expected
     assert declaration["selection"] == {
         "timing": "declared-before-generation",
