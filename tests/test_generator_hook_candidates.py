@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from typing import get_type_hints
 
 from maps.generator import (
     FloorLightRegion,
@@ -46,6 +47,14 @@ def _minimal_generator() -> MapGenerator:
 
 def _l1(point: list[int]) -> tuple[int, int, int]:
     return tuple(math.floor(axis / 16_000) for axis in point)
+
+
+def test_hook_helper_type_hints_resolve() -> None:
+    diverse_hints = get_type_hints(MapGenerator._diverse_hook_geometry_order)
+    source_hints = get_type_hints(MapGenerator._select_hook_sources)
+
+    assert "geometries" in diverse_hints
+    assert "sources" in source_hints
 
 
 def test_hook_candidates_use_real_ceiling_and_standing_origin() -> None:
