@@ -403,7 +403,7 @@ def test_platform_surface_uses_exact_current_pose_and_full_unknown_envelope() ->
     assert surfaces["inline_models"][0]["authority"] == "exact-fixed-transformed-cm"
 
 
-def test_train_marks_candidate_poses_unknown_without_guessing_between_them() -> None:
+def test_train_marks_exact_ordinary_segment_sweep_unknown() -> None:
     train = EntityMetadata(
         index=1,
         classname="func_train",
@@ -457,7 +457,7 @@ def test_train_marks_candidate_poses_unknown_without_guessing_between_them() -> 
 
     assert marked((0, 0, 0), "mover_swept_envelope")
     assert marked((48, 0, 0), "mover_swept_envelope")
-    assert not marked((26, 0, 0), "mover_swept_envelope")
+    assert marked((26, 0, 0), "mover_swept_envelope")
     assert semantics["mover_dynamic_unknown"] > 0
 
 

@@ -32,6 +32,7 @@ from .atlas_entity_semantics import (
     platform_mover_semantics,
     rotating_mover_semantics,
     sliding_mover_semantics,
+    train_swept_geometry,
     train_topology,
     trigger_hurt_semantics,
 )
@@ -732,20 +733,18 @@ def _dynamic_mover_dependency_index(
                 globally_unknown = True
         elif classname == "func_train":
             result = train_topology(entity, metadata.entities, cmodel.mins)
-            topology = result.value
-            positions = [] if topology is None else [
-                candidate.train_origin.value
-                for group in topology.groups for candidate in group.eligible
-                if candidate.train_origin.is_exact and candidate.train_origin.value is not None
-            ]
-            if not result.is_exact or not positions:
+            geometry = (
+                train_swept_geometry(result.value, cmodel.mins, cmodel.maxs)
+                if result.is_exact and result.value is not None else None
+            )
+            if (
+                geometry is None or not geometry.is_exact
+                or geometry.value is None or not geometry.value.pose_bounds
+            ):
                 globally_unknown = True
             else:
-                poses = [translated(cmodel, position) for position in positions]
-                envelopes.append(Aabb(
-                    tuple(min(pose.mins[axis] for pose in poses) for axis in range(3)),
-                    tuple(max(pose.maxs[axis] for pose in poses) for axis in range(3)),
-                ))  # type: ignore[arg-type]
+                envelopes.extend(geometry.value.pose_bounds)
+                envelopes.extend(geometry.value.linear_segment_bounds)
         else:
             # Unimplemented mover classes have no admitted path law.
             # Current-pose bounds cannot prove their future occupancy.
@@ -2938,12 +2937,11 @@ def _l0_chunks(
                     entity, metadata.entities, cmodel_bounds.mins
                 )
                 topology = topology_result.value
-                positions: list[tuple[float, float, float]] = []
+                geometry = None
                 if topology is not None:
-                    for group in topology.groups:
-                        for candidate in group.eligible:
-                            if candidate.train_origin.is_exact and candidate.train_origin.value is not None:
-                                positions.append(candidate.train_origin.value)
+                    geometry = train_swept_geometry(
+                        topology, cmodel_bounds.mins, cmodel_bounds.maxs,
+                    )
                     first = topology.group(topology.initial_target) if topology.initial_target else None
                     if (
                         topology_result.is_exact and first is not None
@@ -2964,15 +2962,22 @@ def _l0_chunks(
                         )
                 else:
                     record_inline_unknown(entity, model_index, topology_result.reason)
-                # Every eligible target position is conservative Unknown. Do
-                # not fill the union AABB between positions: topology proves
-                # candidate poses, not traversal through every intervening
-                # point (teleport corners make that distinction observable).
-                for position in sorted(
-                    set(positions), key=lambda value: (value[2], value[1], value[0])
+                # Retain only exact ordinary Move_Calc sweeps. TELEPORT path
+                # corners contribute their endpoint poses but never the empty
+                # space crossed by the discontinuity.
+                if (
+                    topology_result.is_exact and geometry is not None
+                    and geometry.is_exact and geometry.value is not None
                 ):
+                    train_envelopes = (
+                        *geometry.value.pose_bounds,
+                        *geometry.value.linear_segment_bounds,
+                    )
+                else:
+                    train_envelopes = ()
+                for bounds in train_envelopes:
                     fill_potential_envelope(
-                        translated(cmodel_bounds, position),
+                        bounds,
                         "mover_dynamic_unknown",
                     )
                 continue

@@ -192,6 +192,21 @@ class TrainTopology:
         return next((group for group in self.groups if group.lookup.casefold() == folded), None)
 
 
+@dataclass(frozen=True)
+class TrainSweptGeometry:
+    """Exact occupied bounds implied by a unique ``func_train`` path law.
+
+    ``pose_bounds`` retains every resolved path-corner pose.  A
+    ``linear_segment_bound`` is emitted only when ``train_next`` calls
+    ``Move_Calc`` between two ordinary corners.  Selecting a TELEPORT corner
+    changes the train origin discontinuously, so the empty space between the
+    two poses is deliberately absent.
+    """
+
+    pose_bounds: tuple[Aabb, ...]
+    linear_segment_bounds: tuple[Aabb, ...]
+
+
 class RotationAxis(str, Enum):
     X = "x"
     Y = "y"
@@ -704,6 +719,68 @@ def train_topology(
     if reasons:
         return AuthorityResult.unknown(topology, "; ".join(reasons))
     return AuthorityResult.exact(topology)
+
+
+def train_swept_geometry(
+    topology: TrainTopology,
+    model_mins: Sequence[float],
+    model_maxs: Sequence[float],
+) -> AuthorityResult[TrainSweptGeometry]:
+    """Resolve exact per-pose and per-linear-segment train occupancy.
+
+    This helper is spatial authority only.  It does not make a moving train a
+    static collision solid or prove that a player can board or ride it.
+    """
+
+    model = _model_bounds(model_mins, model_maxs)
+    if not model.is_exact or model.value is None:
+        return AuthorityResult.unknown(None, model.reason)
+
+    by_lookup: dict[str, TrainCandidate] = {}
+    poses_by_entity: dict[int, Aabb] = {}
+    reasons: list[str] = []
+    for group in topology.groups:
+        if len(group.eligible) != 1 or group.ignored_matching_entity_indices:
+            reasons.append(f"train target {group.lookup!r} is not unique")
+            continue
+        candidate = group.eligible[0]
+        if (
+            candidate.classname != "path_corner"
+            or not candidate.train_origin.is_exact
+            or candidate.train_origin.value is None
+        ):
+            reasons.append(f"train target {group.lookup!r} lacks an exact pose")
+            continue
+        by_lookup[group.lookup.casefold()] = candidate
+        poses_by_entity[candidate.entity_index] = _translated_aabb(
+            model.value.mins, model.value.maxs, candidate.train_origin.value,
+        )
+    if topology.groups and len(by_lookup) != len(topology.groups):
+        return AuthorityResult.unknown(None, "; ".join(reasons))
+
+    segments: set[Aabb] = set()
+    for candidate in by_lookup.values():
+        if candidate.next_target is None:
+            continue
+        following = by_lookup.get(candidate.next_target.casefold())
+        if following is None:
+            # An unresolved lookup stops train_next.  The current pose remains
+            # known, but no subsequent movement segment is authorized.
+            continue
+        if following.teleport:
+            # train_next assigns the destination pose without sweeping the
+            # intervening world.  Never poison that empty space.
+            continue
+        segments.add(_union_aabb(
+            poses_by_entity[candidate.entity_index],
+            poses_by_entity[following.entity_index],
+        ))
+
+    order = lambda bounds: (*bounds.mins[::-1], *bounds.maxs[::-1])
+    return AuthorityResult.exact(TrainSweptGeometry(
+        pose_bounds=tuple(sorted(set(poses_by_entity.values()), key=order)),
+        linear_segment_bounds=tuple(sorted(segments, key=order)),
+    ))
 
 
 def _rotation_axis(classname: str, spawnflags: int) -> tuple[RotationAxis, Vec3]:

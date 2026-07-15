@@ -6,6 +6,7 @@ import math
 import pytest
 
 from harness.atlas_entity_semantics import (
+    Aabb,
     Authority,
     GeometryClassification,
     L0_BITPLANE_BYTES,
@@ -20,6 +21,7 @@ from harness.atlas_entity_semantics import (
     set_movedir,
     sliding_mover_semantics,
     train_topology,
+    train_swept_geometry,
     trigger_hurt_semantics,
 )
 
@@ -203,6 +205,32 @@ def test_train_teleport_and_unresolved_stop_topology_are_explicit() -> None:
     assert topology.consecutive_teleport_pairs == ((11, 12),)
     assert topology.unresolved_lookups == ("missing",)
     assert topology.open_chain_entity_indices == ()
+
+
+def test_train_sweeps_only_ordinary_segments_and_not_teleport_gap() -> None:
+    train = entity(1, "func_train", ("target", "A"))
+    entities = (
+        entity(10, "path_corner", ("targetname", "A"), ("target", "B"),
+               ("origin", "0 0 0")),
+        entity(11, "path_corner", ("targetname", "B"), ("target", "T"),
+               ("origin", "64 0 0")),
+        entity(12, "path_corner", ("targetname", "T"), ("target", "C"),
+               ("origin", "1000 0 0"), ("spawnflags", "1")),
+        entity(13, "path_corner", ("targetname", "C"),
+               ("origin", "1064 0 0")),
+    )
+    topology = exact(train_topology(train, entities, (0, 0, 0)))
+    geometry = exact(train_swept_geometry(topology, (0, 0, 0), (32, 32, 16)))
+
+    assert len(geometry.pose_bounds) == 4
+    assert geometry.linear_segment_bounds == (
+        Aabb((0.0, 0.0, 0.0), (96.0, 32.0, 16.0)),
+        Aabb((1000.0, 0.0, 0.0), (1096.0, 32.0, 16.0)),
+    )
+    assert all(
+        not (bounds.mins[0] < 500 < bounds.maxs[0])
+        for bounds in (*geometry.pose_bounds, *geometry.linear_segment_bounds)
+    )
 
 
 def test_train_requires_edict_order_and_flags_unexpected_target_class() -> None:
