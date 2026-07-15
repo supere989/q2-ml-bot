@@ -353,11 +353,18 @@ or salvaged. Ordinary structure clearance now protects the full reserved
 traversable volume of every hollow building and corner pocket, so towers,
 cover, lava, and objectives cannot silently erase a promised interior.
 
+The reserved-interior fix, exact 71432101 regression, and immutable 71432
+failure record were committed before replacement cohort
+`b2g26_final_71433` was declared. Its 28 new members use seeds 71433000
+through 71433603 under the same all-or-nothing, declared-before-generation
+policy. The current alias and immutable named copy are byte-identical; no
+71432 source or later-stage member is an input to 71433.
+
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
 replacement declaration. It must never name retired cohort 71426, 71427,
-71428, 71429, 71430, or 71431.
+71428, 71429, 71430, 71431, or 71432.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V4 hook candidates under the pinned B1 authorities. Materialization
