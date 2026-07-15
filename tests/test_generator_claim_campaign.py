@@ -1,0 +1,327 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from tools import run_generator_claim_campaign as campaign
+from tools.generator_claim_validator import canonical_bytes, file_sha256
+from tools.run_generator_cohort import (
+    STAGE_SUFFIXES,
+    load_declaration,
+    verify_stage_membership,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DECLARATION = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+NONZERO = "ab" * 32
+
+
+def write_stage(directory: Path, stage: str) -> dict:
+    declaration, _digest = load_declaration(DECLARATION)
+    directory.mkdir()
+    for row in declaration["maps"]:
+        for suffix in STAGE_SUFFIXES[stage]:
+            payload: bytes
+            if suffix == ".analysis.manifest.json":
+                payload = canonical_bytes({
+                    "identity": {
+                        "atlas_sha256": hashlib.sha256(
+                            row["map"].encode("ascii")
+                        ).hexdigest()
+                    }
+                })
+            else:
+                payload = (
+                    f"{stage}:{row['ordinal']}:{row['map']}:{suffix}\n".encode()
+                )
+            (directory / f"{row['map']}{suffix}").write_bytes(payload)
+    return declaration
+
+
+def fake_claims(map_path: Path) -> dict:
+    return {
+        "schema": "test-generator-claims",
+        "map": map_path.stem,
+    }
+
+
+def test_prepare_requires_exact_materialized_membership_before_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    materialized = tmp_path / "materialized"
+    declaration = write_stage(materialized, "materialized")
+    missing = f"{declaration['maps'][0]['map']}.bsp"
+    (materialized / missing).unlink()
+    replacement = "b2g26_replacement_99999999.bsp"
+    (materialized / replacement).write_bytes(b"replacement")
+    called = []
+    monkeypatch.setattr(
+        campaign, "build_generator_claims", lambda path: called.append(path)
+    )
+
+    report = campaign.prepare_claims(
+        DECLARATION, materialized, tmp_path / "claims"
+    )
+
+    assert report["passed"] is False
+    assert report["pass_count"] == 0
+    assert called == []
+    assert not (tmp_path / "claims").exists()
+    assert f"materialized-stage: missing file {missing}" in report["failures"]
+    assert f"materialized-stage: unexpected file {replacement}" in report["failures"]
+    assert [row["ordinal"] for row in report["maps"]] == list(range(28))
+
+
+def test_prepare_builds_all_before_atomic_exact_claims_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    materialized = tmp_path / "materialized"
+    declaration = write_stage(materialized, "materialized")
+    calls: list[str] = []
+
+    def build(path: Path) -> dict:
+        calls.append(path.stem)
+        return fake_claims(path)
+
+    monkeypatch.setattr(campaign, "build_generator_claims", build)
+    claims_dir = tmp_path / "claims"
+    report = campaign.prepare_claims(
+        DECLARATION, materialized, claims_dir
+    )
+
+    expected_order = [row["map"] for row in declaration["maps"]]
+    assert calls == expected_order
+    assert report["passed"] is True
+    assert report["pass_count"] == 28
+    assert [row["map"] for row in report["maps"]] == expected_order
+    assert verify_stage_membership(
+        declaration, claims_dir, "claims"
+    )["passed"] is True
+    for row in declaration["maps"]:
+        for suffix in STAGE_SUFFIXES["materialized"]:
+            assert (
+                claims_dir / f"{row['map']}{suffix}"
+            ).read_bytes() == (
+                materialized / f"{row['map']}{suffix}"
+            ).read_bytes()
+        claims_path = claims_dir / f"{row['map']}.generator-claims.json"
+        assert json.loads(claims_path.read_text())["map"] == row["map"]
+        assert report["maps"][row["ordinal"]][
+            "generator_claims_sha256"
+        ] == file_sha256(claims_path)
+
+
+def test_prepare_one_build_failure_publishes_no_subset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    materialized = tmp_path / "materialized"
+    declaration = write_stage(materialized, "materialized")
+    bad = declaration["maps"][17]["map"]
+    calls: list[str] = []
+
+    def build(path: Path) -> dict:
+        calls.append(path.stem)
+        if path.stem == bad:
+            raise ValueError("route node is not compiled-reachable")
+        return fake_claims(path)
+
+    monkeypatch.setattr(campaign, "build_generator_claims", build)
+    claims_dir = tmp_path / "claims"
+    report = campaign.prepare_claims(
+        DECLARATION, materialized, claims_dir
+    )
+
+    assert calls == [row["map"] for row in declaration["maps"]]
+    assert report["passed"] is False
+    assert report["pass_count"] == 27
+    assert not claims_dir.exists()
+    assert report["maps"][17]["passed"] is False
+    assert report["maps"][17]["error"] == "route node is not compiled-reachable"
+    assert report["failures"] == [
+        f"{bad}: route node is not compiled-reachable"
+    ]
+
+
+def test_prepare_refuses_existing_or_nested_claims_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    materialized = tmp_path / "materialized"
+    write_stage(materialized, "materialized")
+    monkeypatch.setattr(campaign, "build_generator_claims", fake_claims)
+
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    with pytest.raises(campaign.ClaimCampaignError, match="already exists"):
+        campaign.prepare_claims(DECLARATION, materialized, existing)
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "absent")
+    with pytest.raises(campaign.ClaimCampaignError, match="already exists"):
+        campaign.prepare_claims(DECLARATION, materialized, dangling)
+    with pytest.raises(campaign.ClaimCampaignError, match="separate non-nested"):
+        campaign.prepare_claims(
+            DECLARATION, materialized, materialized / "claims"
+        )
+
+
+def make_claims_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict, Path]:
+    materialized = tmp_path / "materialized"
+    declaration = write_stage(materialized, "materialized")
+    monkeypatch.setattr(campaign, "build_generator_claims", fake_claims)
+    claims = tmp_path / "claims"
+    report = campaign.prepare_claims(DECLARATION, materialized, claims)
+    assert report["passed"] is True
+    return declaration, claims
+
+
+def test_validate_uses_separate_explicit_analysis_root_in_declared_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declaration, claims = make_claims_stage(tmp_path, monkeypatch)
+    analysis = tmp_path / "analysis"
+    write_stage(analysis, "analysis")
+    b1_gate = tmp_path / "B1-GATE.json"
+    b1_gate.write_text("{}\n")
+    calls: list[tuple[Path, Path, Path]] = []
+
+    def validate(map_path: Path, analysis_path: Path, *, b1_gate_path: Path):
+        calls.append((map_path, analysis_path, b1_gate_path))
+        return {
+            "passed": True,
+            "identities": {
+                "bsp_sha256": file_sha256(map_path.with_suffix(".bsp")),
+                "generator_claims_sha256": file_sha256(
+                    map_path.with_suffix(".generator-claims.json")
+                ),
+            },
+            "failures": [],
+        }
+
+    monkeypatch.setattr(campaign, "validate_generated_map", validate)
+    report = campaign.validate_campaign(
+        DECLARATION, claims, analysis, b1_gate
+    )
+
+    expected_names = [row["map"] for row in declaration["maps"]]
+    assert report["passed"] is True
+    assert report["pass_count"] == 28
+    assert [row["map"] for row in report["maps"]] == expected_names
+    assert [call[0] for call in calls] == [
+        claims / f"{name}.map" for name in expected_names
+    ]
+    assert [call[1] for call in calls] == [
+        analysis / f"{name}.analysis.manifest.json" for name in expected_names
+    ]
+    assert all(call[2] == b1_gate for call in calls)
+    assert all(call[0].parent != call[1].parent for call in calls)
+    assert (claims / f"{expected_names[0]}.routes.json").read_bytes() != (
+        analysis / f"{expected_names[0]}.routes.json"
+    ).read_bytes()
+
+
+def test_validate_rejects_same_count_analysis_substitution_before_validator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declaration, claims = make_claims_stage(tmp_path, monkeypatch)
+    analysis = tmp_path / "analysis"
+    write_stage(analysis, "analysis")
+    missing = f"{declaration['maps'][4]['map']}.atlas.bin"
+    (analysis / missing).unlink()
+    replacement = "b2g26_replacement_99999999.atlas.bin"
+    (analysis / replacement).write_bytes(b"replacement")
+    b1_gate = tmp_path / "B1-GATE.json"
+    b1_gate.write_text("{}\n")
+    calls = []
+    monkeypatch.setattr(
+        campaign, "validate_generated_map", lambda *args, **kwargs: calls.append(args)
+    )
+
+    report = campaign.validate_campaign(
+        DECLARATION, claims, analysis, b1_gate
+    )
+
+    assert report["passed"] is False
+    assert report["pass_count"] == 0
+    assert calls == []
+    assert f"analysis-stage: missing file {missing}" in report["failures"]
+    assert f"analysis-stage: unexpected file {replacement}" in report["failures"]
+
+
+def test_validate_rejects_same_count_claims_substitution_before_validator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declaration, claims = make_claims_stage(tmp_path, monkeypatch)
+    analysis = tmp_path / "analysis"
+    write_stage(analysis, "analysis")
+    missing = f"{declaration['maps'][9]['map']}.generator-claims.json"
+    (claims / missing).unlink()
+    replacement = "b2g26_replacement_99999999.generator-claims.json"
+    (claims / replacement).write_bytes(b"replacement")
+    b1_gate = tmp_path / "B1-GATE.json"
+    b1_gate.write_text("{}\n")
+    calls = []
+    monkeypatch.setattr(
+        campaign, "validate_generated_map", lambda *args, **kwargs: calls.append(args)
+    )
+
+    report = campaign.validate_campaign(
+        DECLARATION, claims, analysis, b1_gate
+    )
+
+    assert report["passed"] is False
+    assert report["pass_count"] == 0
+    assert calls == []
+    assert f"claims-stage: missing file {missing}" in report["failures"]
+    assert f"claims-stage: unexpected file {replacement}" in report["failures"]
+
+
+def test_validate_refuses_adjacent_or_nested_analysis_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _declaration, claims = make_claims_stage(tmp_path, monkeypatch)
+    with pytest.raises(campaign.ClaimCampaignError, match="separate non-nested"):
+        campaign.validate_campaign(
+            DECLARATION, claims, claims, tmp_path / "B1-GATE.json"
+        )
+    with pytest.raises(campaign.ClaimCampaignError, match="separate non-nested"):
+        campaign.validate_campaign(
+            DECLARATION,
+            claims,
+            claims / "analysis",
+            tmp_path / "B1-GATE.json",
+        )
+
+
+def test_cli_requires_declaration_and_exclusive_external_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    materialized = tmp_path / "materialized"
+    write_stage(materialized, "materialized")
+    monkeypatch.setattr(campaign, "build_generator_claims", fake_claims)
+    report_path = tmp_path / "reports/prepare.json"
+    arguments = [
+        "prepare",
+        "--declaration", str(DECLARATION),
+        "--materialized-dir", str(materialized),
+        "--claims-dir", str(tmp_path / "claims"),
+        "--output", str(report_path),
+    ]
+
+    assert campaign.main(arguments) == 0
+    first = report_path.read_bytes()
+    assert first == canonical_bytes(json.loads(first))
+    assert campaign.main(arguments) == 1
+    assert report_path.read_bytes() == first
+
+    with pytest.raises(SystemExit):
+        campaign.main([
+            "prepare",
+            "--materialized-dir", str(materialized),
+            "--claims-dir", str(tmp_path / "other-claims"),
+            "--output", str(tmp_path / "other-report.json"),
+        ])

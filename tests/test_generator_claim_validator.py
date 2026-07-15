@@ -31,7 +31,6 @@ from tools.generator_claim_validator import (
     validate_stock_analysis,
 )
 from tools.validate_maps import Q2_BSP_LIGHTING_LUMP, Q2_BSP_LUMPS
-from tools.run_generator_claim_campaign import prepare_claims
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1166,24 +1165,6 @@ def test_contract_schemas_forbid_unknown_top_level_fields():
     )
     assert claims_schema["additionalProperties"] is False
     assert report_schema["additionalProperties"] is False
-
-
-def test_prepare_campaign_is_canonical_and_requires_exact_count(tmp_path: Path):
-    map_path, _ = generate_map("campaign", 7, tmp_path, style="open")
-    unmaterialized = prepare_claims([map_path], expected_count=1)
-    assert unmaterialized["passed"] is False
-    _write_compiled_bsp(map_path)
-    _fake_materialize(map_path)
-    first = prepare_claims([map_path], expected_count=1)
-    first_bytes = canonical_bytes(first)
-    second = prepare_claims([map_path], expected_count=1)
-    assert canonical_bytes(second) == first_bytes
-    assert first["passed"] is True
-    assert first["pass_count"] == 1
-
-    wrong_count = prepare_claims([map_path], expected_count=2)
-    assert wrong_count["passed"] is False
-    assert wrong_count["failures"] == ["map count 1 != required 2"]
 
 
 @pytest.mark.parametrize("mutation", ["bsp", "meta", "candidate", "materialization"])
