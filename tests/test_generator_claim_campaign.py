@@ -58,7 +58,9 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "O_CREAT | O_EXCL",
         "no salvage",
         "b2g26_final_71426",
+        "b2g26_final_71427",
         "non-admissible",
+        "declared-not-generated",
     )
     assert all(fragment in contract for fragment in required_contract)
     assert "--glob 'b2claim_*.map'" not in contract

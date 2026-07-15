@@ -172,18 +172,21 @@ The retired campaign-v1 options `--generated-dir`, `--glob`,
 `--expected-count`, and `--phase` are not accepted. Glob/count equality was
 never proof that the declared cohort survived unchanged.
 
-## Current declaration status: non-admissible
+## Declaration status
 
-The first declared cohort, `b2g26_final_71426`, failed its first source-freeze
-attempt. That failure is retained as evidence; it did not authorize a source,
-materialized, claims, or analysis stage. Do not repair it by substituting maps,
-selecting its passing members, regenerating behind the same declaration, or
-feeding an older materialized population into campaign v2. The declaration
-stays unchanged and non-admissible while the generator-source defects are
-fixed. Any later attempt still requires explicit root authorization and the
-same declared-before-generation discipline; this contract does not authorize
-one. Consequently the commands below describe the required workflow, not a
-claim that the current declaration has passed.
+The historical cohort `b2g26_final_71426` failed its first source-freeze
+attempt and is permanently non-admissible. That failure is retained as
+evidence; it did not authorize a source, materialized, claims, or analysis
+stage. Do not repair it by substituting maps, selecting its passing members,
+regenerating behind the same declaration, or feeding an older materialized
+population into campaign v2.
+
+The authoritative declaration now names the replacement cohort
+`b2g26_final_71427`. It is immutable and declared before generation, but it has
+not yet been generated. Its status is `declared-not-generated`, so it likewise
+authorizes no source, materialized, claims, or analysis stage. Committing the
+declaration is the boundary that must precede the first generator invocation;
+neither this contract nor declaration presence claims that any member passes.
 
 ## Offline workflow
 
@@ -210,9 +213,9 @@ runtime sidecars, prepare the v2 claims:
 ```sh
 python tools/run_generator_claim_campaign.py prepare \
   --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
-  --materialized-dir /isolated/B2/b2g26_final_71426/materialized \
-  --claims-dir /isolated/B2/b2g26_final_71426/claims \
-  --output /isolated/B2/reports/b2g26_final_71426-claims-prepare.json
+  --materialized-dir /isolated/B2/b2g26_final_71427/materialized \
+  --claims-dir /isolated/B2/b2g26_final_71427/claims \
+  --output /isolated/B2/reports/b2g26_final_71427-claims-prepare.json
 ```
 
 Run the B2-A v2 analyzer with the matching claim from the claims root and write
@@ -225,10 +228,10 @@ analysis membership before any per-map validator runs:
 ```sh
 python tools/run_generator_claim_campaign.py validate \
   --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
-  --claims-dir /isolated/B2/b2g26_final_71426/claims \
-  --analysis-dir /isolated/B2/b2g26_final_71426/analysis \
+  --claims-dir /isolated/B2/b2g26_final_71427/claims \
+  --analysis-dir /isolated/B2/b2g26_final_71427/analysis \
   --b1-gate docs/multires/B1-GATE.json \
-  --output /isolated/B2/reports/b2g26_final_71426-compiled-validation.json
+  --output /isolated/B2/reports/b2g26_final_71427-compiled-validation.json
 ```
 
 Any missing or unexpected file in either root rejects the complete campaign

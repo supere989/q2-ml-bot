@@ -135,8 +135,31 @@ def static_pass(map_path: Path) -> dict[str, object]:
 
 def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> None:
     declaration, digest = cohort.load_declaration(DECLARATION)
+    style_bases = (
+        ("open", 71427000),
+        ("towers", 71427100),
+        ("canyon", 71427200),
+        ("pits", 71427300),
+        ("arena_open", 71427400),
+        ("arena_vertical", 71427500),
+        ("arena_lanes", 71427600),
+    )
+    expected = [
+        {
+            "grid": 5,
+            "map": f"b2g26_{style}_{base + offset}",
+            "observed_heat": None,
+            "ordinal": style_index * 4 + offset,
+            "seed": base + offset,
+            "style": style,
+        }
+        for style_index, (style, base) in enumerate(style_bases)
+        for offset in range(4)
+    ]
 
     assert len(digest) == 64
+    assert declaration["cohort_id"] == "b2g26_final_71427"
+    assert declaration["maps"] == expected
     assert declaration["selection"] == {
         "timing": "declared-before-generation",
         "policy": "all-or-nothing",
