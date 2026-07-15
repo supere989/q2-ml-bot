@@ -554,31 +554,55 @@ def _challenge_hazards(
         expected_walls.append(wall)
         if wall not in proposed_walls:
             raise GeneratedClaimProbeError(f"lethal edge {edge_index} has no exact guard proposal")
-        midpoint = ((x0 + x1) / 2000.0, (y0 + y1) / 2000.0)
-        floor = floor_z / 1000.0
-        inward = [midpoint[0] - outward[0] * 32.0, midpoint[1] - outward[1] * 32.0]
-        outside = [midpoint[0] + outward[0] * 32.0, midpoint[1] + outward[1] * 32.0]
-        inward_support = cm.call([_box_request(
-            f"lethal-inward:{edge_index}",
-            [inward[0], inward[1], floor + 48.0],
-            [inward[0], inward[1], floor - 64.0],
-            STANDING_MINS, STANDING_MAXS, MASK_PLAYERSOLID,
-        )])[0]
-        plane = inward_support.get("plane")
-        if (
-            inward_support.get("startsolid")
-            or not isinstance(inward_support.get("fraction"), (int, float))
-            or inward_support["fraction"] >= 1
-            or not isinstance(plane, Mapping)
-            or not isinstance(plane.get("normal"), list)
-            or len(plane["normal"]) != 3
-            or plane["normal"][2] < 0.7
-        ):
+        # Generator safety metadata is expressed in Quake world units.  Only
+        # claim bounds and parsed brush-model bounds use milliunits.  Keep CM
+        # probes in world units and convert solely at the hurt-bound comparison.
+        floor = float(floor_z)
+        # Stand one 1/8u Pmove quantum beyond the 16u guard plus the standing
+        # hull half-width.  A 32u witness touches the guard's inner face and
+        # can correctly report startsolid despite having valid floor beneath it.
+        # A single edge midpoint can coincide with unrelated compiled cover,
+        # so challenge a frozen, bounded set of positions along the same exact
+        # claimed segment and admit the first standing-clear floor witness.
+        fractions = (0.5, 0.1, 0.9, 0.25, 0.75, 0.05, 0.95, 0.33, 0.67, 0.4, 0.6)
+        midpoints = [
+            (x0 + (x1 - x0) * fraction, y0 + (y1 - y0) * fraction)
+            for fraction in fractions
+        ]
+        inward_points = [
+            [point[0] - outward[0] * 32.125, point[1] - outward[1] * 32.125]
+            for point in midpoints
+        ]
+        inward_results = cm.call([
+            _box_request(
+                f"lethal-inward:{edge_index}:{sample_index}",
+                [point[0], point[1], floor + 48.0],
+                [point[0], point[1], floor - 64.0],
+                STANDING_MINS, STANDING_MAXS, MASK_PLAYERSOLID,
+            )
+            for sample_index, point in enumerate(inward_points)
+        ])
+        witness_index = next((
+            sample_index
+            for sample_index, result in enumerate(inward_results)
+            if (
+                not result.get("startsolid")
+                and isinstance(result.get("fraction"), (int, float))
+                and result["fraction"] < 1
+                and isinstance(result.get("plane"), Mapping)
+                and isinstance(result["plane"].get("normal"), list)
+                and len(result["plane"]["normal"]) == 3
+                and result["plane"]["normal"][2] >= 0.7
+            )
+        ), None)
+        if witness_index is None:
             raise GeneratedClaimProbeError(f"lethal edge {edge_index} has no compiled interior floor")
+        midpoint = midpoints[witness_index]
+        outside = [midpoint[0] + outward[0] * 32.0, midpoint[1] + outward[1] * 32.0]
         covering_hurt = next((bounds for bounds in hurt_bounds if (
             bounds[0] <= round(outside[0] * 1000) <= bounds[3]
             and bounds[1] <= round(outside[1] * 1000) <= bounds[4]
-            and bounds[5] <= floor_z - 64_000
+            and bounds[5] <= floor_z * 1000 - 64_000
         )), None)
         if covering_hurt is None:
             raise GeneratedClaimProbeError(f"lethal edge {edge_index} has no compiled lethal catch")
@@ -590,7 +614,7 @@ def _challenge_hazards(
         )])[0]
         if void_trace.get("startsolid") or void_trace.get("fraction") != 1:
             raise GeneratedClaimProbeError(f"lethal edge {edge_index} exterior is not a void drop")
-        wall_world = [value / 1000.0 for value in wall]
+        wall_world = [float(value) for value in wall]
         guard_samples = []
         for along in (0.1, 0.5, 0.9):
             for height in (8.0, 48.0, 88.0):

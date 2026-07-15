@@ -137,11 +137,17 @@ class _LightEntity:
 
 
 class _FakeCm:
-    def __init__(self, *, lava: bool = True, projection: bool = True) -> None:
+    def __init__(
+        self, *, lava: bool = True, projection: bool = True,
+        blocked_inward_samples: set[int] | None = None,
+    ) -> None:
         self.lava = lava
         self.projection = projection
+        self.blocked_inward_samples = blocked_inward_samples or set()
+        self.requests: list[dict] = []
 
     def call(self, requests: list[dict]) -> list[dict]:
+        self.requests.extend(deepcopy(requests))
         output = []
         for request in requests:
             identifier = request["id"]
@@ -166,8 +172,10 @@ class _FakeCm:
             elif identifier.startswith("lighting"):
                 output.append({"fraction": 1.0, "startsolid": False})
             elif identifier.startswith("lethal-inward"):
+                sample_index = int(identifier.rsplit(":", 1)[1])
                 output.append({
-                    "fraction": 0.5, "startsolid": False,
+                    "fraction": 0.5,
+                    "startsolid": sample_index in self.blocked_inward_samples,
                     "plane": {"normal": [0.0, 0.0, 1.0]},
                 })
             elif identifier.startswith("lethal-void"):
@@ -207,8 +215,8 @@ def _compiled_fixture() -> tuple[SimpleNamespace, dict, list, list]:
 def _safety_fixture() -> dict:
     return {
         "version": 1, "guard_height": 96, "guard_thickness": 16,
-        "lethal_edges": [{"side": "west", "segment": [0, -32, 0, 32, 0]}],
-        "guard_walls": [[0, -32, 0, 16, 32, 96]],
+        "lethal_edges": [{"side": "west", "segment": [0, -32, 0, 32, 64]}],
+        "guard_walls": [[0, -32, 64, 16, 32, 160]],
     }
 
 
@@ -223,8 +231,9 @@ def test_strict_load_provenance_and_non_hook_challenges(tmp_path: Path) -> None:
     assert provenance["bsp_sha256"] == _digest(bsp.read_bytes())
 
     metadata, nodes, edges, spawns = _compiled_fixture()
+    cm = _FakeCm()
     result = analyze_non_hook_claims(
-        _FakeCm(), metadata, nodes, edges, (0, 0, 0), spawns, claims,
+        cm, metadata, nodes, edges, (0, 0, 0), spawns, claims,
         _safety_fixture(),
     )
     assert [item["status"] for item in result["hazard_claims"]] == ["oracle", "oracle"]
@@ -232,6 +241,69 @@ def test_strict_load_provenance_and_non_hook_challenges(tmp_path: Path) -> None:
     assert result["lighting"]["lightdata_sha256"] == "a" * 64
     assert result["lighting"]["dark_spawn_regions"] == 0
     assert "hooks" not in result
+    requests = {request["id"]: request for request in cm.requests}
+    assert requests["lethal-inward:0:0"]["start"] == [32.125, 0.0, 112.0]
+    assert requests["lethal-inward:0:0"]["end"] == [32.125, 0.0, 0.0]
+    assert requests["lethal-guard:0:0"]["start"] == [8.0, -25.6, 72.0]
+
+
+def test_lethal_floor_uses_a_bounded_alternate_segment_witness(tmp_path: Path) -> None:
+    _, claims = _claims_fixture(tmp_path)
+    metadata, nodes, edges, spawns = _compiled_fixture()
+    cm = _FakeCm(blocked_inward_samples={0})
+    result = analyze_non_hook_claims(
+        cm, metadata, nodes, edges, (0, 0, 0), spawns, claims,
+        _safety_fixture(),
+    )
+    assert result["hazards"]["lethal_drop_edges"] == 1
+    requests = {request["id"]: request for request in cm.requests}
+    assert requests["lethal-void:0"]["start"][:2] == [-32.0, -25.6]
+
+
+@pytest.mark.parametrize(
+    ("side", "segment", "wall", "inward", "guard"),
+    [
+        ("west", [0, -32, 0, 32, 64], [0, -32, 64, 16, 32, 160],
+         [32.125, 0.0, 112.0], [8.0, -25.6, 72.0]),
+        ("east", [0, -32, 0, 32, 64], [-16, -32, 64, 0, 32, 160],
+         [-32.125, 0.0, 112.0], [-8.0, -25.6, 72.0]),
+        ("south", [-32, 0, 32, 0, 64], [-32, 0, 64, 32, 16, 160],
+         [0.0, 32.125, 112.0], [-25.6, 8.0, 72.0]),
+        ("north", [-32, 0, 32, 0, 64], [-32, -16, 64, 32, 0, 160],
+         [0.0, -32.125, 112.0], [-25.6, -8.0, 72.0]),
+    ],
+)
+def test_lethal_probe_preserves_world_units_and_side_orientation(
+    tmp_path: Path, side: str, segment: list[int], wall: list[int],
+    inward: list[float], guard: list[float],
+) -> None:
+    _, claims = _claims_fixture(tmp_path)
+    metadata, nodes, edges, spawns = _compiled_fixture()
+    safety = {
+        "version": 1, "guard_height": 96, "guard_thickness": 16,
+        "lethal_edges": [{"side": side, "segment": segment}],
+        "guard_walls": [wall],
+    }
+    cm = _FakeCm()
+    analyze_non_hook_claims(
+        cm, metadata, nodes, edges, (0, 0, 0), spawns, claims, safety,
+    )
+    requests = {request["id"]: request for request in cm.requests}
+    assert requests["lethal-inward:0:0"]["start"] == inward
+    assert requests["lethal-guard:0:0"]["start"] == guard
+
+
+def test_lethal_floor_rejects_when_every_segment_witness_is_blocked(
+    tmp_path: Path,
+) -> None:
+    _, claims = _claims_fixture(tmp_path)
+    metadata, nodes, edges, spawns = _compiled_fixture()
+    with pytest.raises(GeneratedClaimProbeError, match="no compiled interior floor"):
+        analyze_non_hook_claims(
+            _FakeCm(blocked_inward_samples=set(range(11))),
+            metadata, nodes, edges, (0, 0, 0), spawns, claims,
+            _safety_fixture(),
+        )
 
 
 def test_trigger_hurt_uses_exact_runtime_linked_aabb_law() -> None:
