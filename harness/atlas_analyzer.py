@@ -772,6 +772,20 @@ def _origin(
     return value  # type: ignore[return-value]
 
 
+def _authored_item_destinations(
+    metadata: BspMetadata,
+) -> list[tuple[float, float, float]]:
+    """Return point-entity destinations that seed the stance-aware L1 flood."""
+
+    destinations = []
+    for entity in metadata.entities:
+        classname = entity.classname.casefold()
+        if not classname.startswith(("item_", "weapon_", "ammo_")):
+            continue
+        destinations.append(_origin(entity))
+    return destinations
+
+
 def _snapped_origin(model_mins: Sequence[float]) -> tuple[int, int, int]:
     integer_mins = [math.floor(value) for value in model_mins]
     return tuple((value // 256) * 256 for value in integer_mins)  # type: ignore[return-value]
@@ -836,6 +850,65 @@ def _node_probe_requests(points: Sequence[tuple[float, float, float]]) -> list[d
             {"id": f"contents:{ordinal}", "op": "point_contents", "point": list(point)},
         ])
     return requests
+
+
+def _ground_navigation_seeds(
+    cm: OracleProcess,
+    seeds: Sequence[
+        tuple[int | None, tuple[float, float, float], bool]
+    ],
+) -> tuple[list[tuple[float, float, float] | None], list[dict[str, Any]]]:
+    """Ground navigation seeds without moving an engine spawn into a ceiling.
+
+    A deathmatch spawn is already an engine-owned player origin (including the
+    nine-unit spawn lift applied by the caller).  Prove that exact standing
+    origin clear first, then trace downward from it for support.  Raising the
+    hull before the support trace is not part of the spawn lifecycle and can
+    begin inside a low ceiling even when the authored spawn is legal.
+
+    Non-spawn destinations retain the bounded raised floor search because an
+    authored item/teleporter point is not necessarily a player origin.
+    """
+
+    spawn_ordinals = [
+        ordinal for ordinal, (_, _, is_spawn) in enumerate(seeds) if is_spawn
+    ]
+    spawn_clear = cm.call([
+        _box_request(
+            f"seed-spawn-clear:{ordinal}", point, point,
+            STANDING_MINS, STANDING_MAXS,
+        )
+        for ordinal, (_, point, is_spawn) in enumerate(seeds) if is_spawn
+    ])
+    clear_by_ordinal = dict(zip(spawn_ordinals, spawn_clear))
+    support = cm.call([
+        _box_request(
+            f"seed-floor:{ordinal}",
+            point if is_spawn else (point[0], point[1], point[2] + 32),
+            (point[0], point[1], point[2] - 96),
+            STANDING_MINS, STANDING_MAXS,
+        )
+        for ordinal, (_, point, is_spawn) in enumerate(seeds)
+    ])
+    grounded: list[tuple[float, float, float] | None] = []
+    for ordinal, ((_, _, is_spawn), floor) in enumerate(zip(seeds, support)):
+        if is_spawn:
+            clear = clear_by_ordinal[ordinal]
+            if (
+                clear["startsolid"] or clear["allsolid"]
+                or clear["fraction"] != 1
+            ):
+                grounded.append(None)
+                continue
+        if (
+            floor["startsolid"] or floor["allsolid"]
+            or floor["fraction"] >= 1
+            or floor["plane"]["normal"][2] < 0.7
+        ):
+            grounded.append(None)
+        else:
+            grounded.append(tuple(floor["endpos"]))
+    return grounded, support
 
 
 def _directed_adjacency(
@@ -1310,6 +1383,32 @@ def _add_exact_platform_navigation(
             and all(abs(float(endpos[axis]) - target[axis]) <= 0.25 for axis in range(3))
         )
 
+    def does_not_precede_target(
+        trace: Mapping[str, Any], target: Sequence[float],
+    ) -> bool:
+        """Accept a second authority's support only when it lies below target.
+
+        Model-0 and an inline platform are traced separately, while the game
+        clips movement against their union. During a downward stair trace the
+        higher collision wins. A model-0 floor below the exact platform top
+        therefore cannot block boarding that top, but a collision above it
+        must still reject the connector.
+        """
+
+        if trace_clear(trace) or supports_target(trace, target):
+            return True
+        normal = (trace.get("plane") or {}).get("normal")
+        endpos = trace.get("endpos")
+        return (
+            trace.get("startsolid") is False
+            and trace.get("allsolid") is False
+            and type(trace.get("fraction")) in (int, float)
+            and 0 <= trace["fraction"] <= 1
+            and isinstance(normal, list) and len(normal) == 3 and normal[2] >= 0.7
+            and isinstance(endpos, list) and len(endpos) == 3
+            and float(endpos[2]) <= target[2] + 0.25
+        )
+
     def connector_clear(
         source: NavNode, target: NavNode,
         *, entity_index: int, label: str, headnode: int,
@@ -1358,7 +1457,7 @@ def _add_exact_platform_navigation(
             return (
                 any(supports_target(trace, target.position) for trace in down_traces)
                 and all(
-                    trace_clear(trace) or supports_target(trace, target.position)
+                    does_not_precede_target(trace, target.position)
                     for trace in down_traces
                 )
             )
@@ -1414,6 +1513,17 @@ def _add_exact_platform_navigation(
             or cmodel.maxs[1] - cmodel.mins[1] < 32.0
         ):
             continue
+        # The endpoint is at the platform center, while a legal static
+        # connector can sit beyond a corner by one standing-hull radius plus
+        # one L1 cell of quantization.  Bound the search from authored brush
+        # geometry; a fixed radius rejects valid large-platform boardings.
+        boarding_radius_squared = sum(
+            (
+                (cmodel.maxs[axis] - cmodel.mins[axis]) * 0.5
+                + STANDING_MAXS[axis] + 16.0
+            ) ** 2
+            for axis in (0, 1)
+        )
         other_movers = _dynamic_mover_dependency_index(
             metadata, exclude_entity_index=entity.index,
         )
@@ -1440,9 +1550,9 @@ def _add_exact_platform_navigation(
                 headnode=model.headnode, pose_origin=pose_origin,
             ))
         supports = cm.call(support_requests)
-        endpoint_records: list[
-            tuple[str, tuple[float, float, float], tuple[int, int, int]]
-        ] = []
+        endpoint_records: list[tuple[
+            str, tuple[float, float, float], tuple[int, int, int], NavNode,
+        ]] = []
         for (label, pose_origin, _), support in zip(proposed, supports):
             normal = (support.get("plane") or {}).get("normal")
             position = support.get("endpos")
@@ -1486,30 +1596,33 @@ def _add_exact_platform_navigation(
                 continue
             crouched_clear = trace_clear(crouch) and trace_clear(inline_crouch)
             key = _grid_index(exact_position, origin, 16)
+            endpoint = NavNode(
+                key, exact_position, True, crouched_clear, True,
+                int(contents["contents"]), tuple(float(value) for value in normal),
+                floor_surface_flags=(support.get("surface") or {}).get("flags", 0),
+                floor_surface_name=(support.get("surface") or {}).get("name", ""),
+            )
             existing = nodes.get(key)
             if existing is None:
-                nodes[key] = NavNode(
-                    key, exact_position, True, crouched_clear, True,
-                    int(contents["contents"]), tuple(float(value) for value in normal),
-                    floor_surface_flags=(support.get("surface") or {}).get("flags", 0),
-                    floor_surface_name=(support.get("surface") or {}).get("name", ""),
-                )
+                nodes[key] = endpoint
             elif not existing.standing_clear:
                 continue
-            endpoint_records.append((label, pose_origin, key))
+            # Keep the exact transformed-CM endpoint even when its L1 index
+            # aliases an existing model-0 node. Connector replay must never
+            # substitute that static node's different continuous origin.
+            endpoint_records.append((label, pose_origin, key, endpoint))
 
         if len(endpoint_records) != 2:
             # Remove an endpoint inserted for a platform whose other pose did
             # not prove. Existing static nodes are never removed.
             static_keys = {key for key, _ in static_nodes}
-            for _, _, key in endpoint_records:
+            for _, _, key, _ in endpoint_records:
                 if key not in static_keys:
                     nodes.pop(key, None)
             continue
 
         connector_by_label: dict[str, tuple[int, int, int]] = {}
-        for label, pose_origin, endpoint_key in endpoint_records:
-            endpoint = nodes[endpoint_key]
+        for label, pose_origin, endpoint_key, endpoint in endpoint_records:
             candidates = [
                 (key, node) for key, node in static_nodes
                 if key != endpoint_key and node.standing_clear
@@ -1517,7 +1630,7 @@ def _add_exact_platform_navigation(
                 and (
                     (node.position[0] - endpoint.position[0]) ** 2
                     + (node.position[1] - endpoint.position[1]) ** 2
-                ) <= 64.0 ** 2
+                ) <= boarding_radius_squared
             ]
             candidates.sort(key=lambda item: (
                 (item[1].position[0] - endpoint.position[0]) ** 2
@@ -1550,12 +1663,12 @@ def _add_exact_platform_navigation(
 
         if set(connector_by_label) != {"bottom", "top"}:
             static_keys = {key for key, _ in static_nodes}
-            for _, _, key in endpoint_records:
+            for _, _, key, _ in endpoint_records:
                 if key not in static_keys:
                     nodes.pop(key, None)
             continue
 
-        endpoints = {label: key for label, _, key in endpoint_records}
+        endpoints = {label: key for label, _, key, _ in endpoint_records}
         travel_cost = round(abs(platform.pos1[2] - platform.pos2[2]) * 256.0)
         for label in ("bottom", "top"):
             endpoint_key = endpoints[label]
@@ -1597,24 +1710,7 @@ def _build_navigation(
     ] + [
         (None, point, False) for point in candidate_points
     ]
-    seed_points = [point for _, point, _ in seeds]
-    seed_support = cm.call([
-        _box_request(
-            f"seed-floor:{ordinal}",
-            (point[0], point[1], point[2] + 32),
-            (point[0], point[1], point[2] - 96),
-                     STANDING_MINS, STANDING_MAXS)
-        for ordinal, point in enumerate(seed_points)
-    ])
-    grounded: list[tuple[float, float, float] | None] = []
-    for point, support in zip(seed_points, seed_support):
-        if (
-            support["startsolid"] or support["allsolid"] or support["fraction"] >= 1
-            or support["plane"]["normal"][2] < 0.7
-        ):
-            grounded.append(None)
-        else:
-            grounded.append(tuple(support["endpos"]))
+    grounded, seed_support = _ground_navigation_seeds(cm, seeds)
     supported_points = [point for point in grounded if point is not None]
     probes = cm.call(_node_probe_requests(supported_points))
     nodes: dict[tuple[int, int, int], NavNode] = {}
@@ -4198,6 +4294,7 @@ def analyze_map(
     ]
     if len(spawns) < 2:
         raise AtlasAnalysisError("map has fewer than two deathmatch spawns")
+    item_destinations = _authored_item_destinations(metadata)
     teleporter_resolution = resolve_trigger_teleporters(
         metadata.entities,
         metadata.entity_catalog.brush_submodels,
@@ -4316,7 +4413,7 @@ def analyze_map(
                     materialized_oracles, process_identities
                 )
             navigation_seed_points = list(dict.fromkeys((
-                *claim_seed_points,
+                *item_destinations, *claim_seed_points,
                 *teleporter_seed_points(teleporter_resolution, cm.call),
             )))
             nodes, edges, spawn_indices, drop_classifications = _build_navigation(

@@ -24,11 +24,13 @@ from harness.atlas_analyzer import (
     _add_exact_platform_navigation,
     _atlas_channels,
     _analyze_hook_claims,
+    _authored_item_destinations,
     _build_navigation,
     _complete_pmove_source_set,
     _drop_settle_request,
     _dynamic_mover_dependency_index,
     _exact_landing_key,
+    _ground_navigation_seeds,
     _l0_chunks,
     _movement_edge_stance,
     _normalized_analysis_manifest,
@@ -71,6 +73,71 @@ def _replace_entities(path: Path, entities: bytes) -> None:
     data.extend(entities)
     struct.pack_into("<2i", data, 8, entity_offset, len(entities))
     path.write_bytes(data)
+
+
+class _Q2dm5LowCeilingSeedCm:
+    """Reproduce the two legal q2dm5 spawns rejected by a raised hull."""
+
+    player_floor = {
+        (-96.0, 448.0, 57.0): 48.03125,
+        (-592.0, -72.0, 289.0): 280.03125,
+    }
+
+    def __init__(self) -> None:
+        self.seen = []
+
+    def call(self, requests):
+        self.seen.extend(requests)
+        output = []
+        for request in requests:
+            point = tuple(float(value) for value in request["start"])
+            if request["id"].startswith("seed-spawn-clear:"):
+                output.append({
+                    "startsolid": False, "allsolid": False, "fraction": 1,
+                    "endpos": list(request["end"]),
+                    "plane": {"normal": [0.0, 0.0, 0.0]},
+                })
+                continue
+            floor = self.player_floor[point]
+            output.append({
+                "startsolid": False, "allsolid": False, "fraction": 0.1,
+                "endpos": [point[0], point[1], floor],
+                "plane": {"normal": [0.0, 0.0, 1.0]},
+                "surface": {"name": "e2u3/floor1_6", "flags": 0},
+            })
+        return output
+
+
+def test_q2dm5_low_ceiling_spawns_ground_from_engine_origin() -> None:
+    cm = _Q2dm5LowCeilingSeedCm()
+    seeds = [
+        (143, (-96.0, 448.0, 57.0), True),
+        (145, (-592.0, -72.0, 289.0), True),
+    ]
+    grounded, _ = _ground_navigation_seeds(cm, seeds)
+    assert grounded == [
+        (-96.0, 448.0, 48.03125),
+        (-592.0, -72.0, 280.03125),
+    ]
+    floor_requests = [
+        request for request in cm.seen
+        if request["id"].startswith("seed-floor:")
+    ]
+    assert [request["start"] for request in floor_requests] == [
+        [-96.0, 448.0, 57.0], [-592.0, -72.0, 289.0],
+    ]
+
+
+def test_authored_item_destinations_include_q2_point_item_classes() -> None:
+    metadata = SimpleNamespace(entities=(
+        EntityMetadata(1, "item_health", (("origin", "1 2 3"),)),
+        EntityMetadata(2, "weapon_railgun", (("origin", "4 5 6"),)),
+        EntityMetadata(3, "ammo_slugs", (("origin", "7 8 9"),)),
+        EntityMetadata(4, "light", (("origin", "10 11 12"),)),
+    ))
+    assert _authored_item_destinations(metadata) == [
+        (1.0, 2.0, 3.0), (4.0, 5.0, 6.0), (7.0, 8.0, 9.0),
+    ]
 
 
 def _required_artifacts() -> tuple[Path, Path, Path, Path, Path]:
@@ -987,6 +1054,42 @@ class _ExactPlatformNavigationCm:
         return output
 
 
+class _AliasedPlatformEndpointCm(_ExactPlatformNavigationCm):
+    def call(self, requests):
+        self.requests += len(requests)
+        output = []
+        for request in requests:
+            if request["op"] == "point_contents":
+                output.append({
+                    "ok": True, "id": request["id"], "op": request["op"],
+                    "contents": 0,
+                })
+                continue
+            support = request["id"].startswith("platform-support:")
+            if support:
+                z = 14.0 if float(request["origin"][2]) < 0 else 46.0
+                endpos = [32.0, 32.0, z]
+                fraction = 0.5
+                normal = [0.0, 0.0, 1.0]
+                surface = {"name": "platform-top", "flags": 0, "value": 0}
+                contents = 1
+            else:
+                endpos = list(request["end"])
+                fraction = 1.0
+                normal = [0.0, 0.0, 0.0]
+                surface = {"name": "", "flags": 0, "value": 0}
+                contents = 0
+            output.append({
+                "ok": True, "id": request["id"], "op": request["op"],
+                "startsolid": False, "allsolid": False,
+                "fraction": fraction, "endpos": endpos, "contents": contents,
+                "plane": {"normal": normal, "dist": 0.0, "type": 0, "signbits": 0},
+                "surface": surface,
+            })
+        self.seen.extend(requests)
+        return output
+
+
 def test_exact_platform_adds_stateful_boarding_and_endpoint_edges() -> None:
     platform = EntityMetadata(
         1, "func_plat", (
@@ -1042,6 +1145,64 @@ def test_exact_platform_adds_stateful_boarding_and_endpoint_edges() -> None:
                 visited.add(target)
                 pending.append(target)
     assert top_static in visited
+
+
+def test_platform_connector_preserves_aliased_exact_origin_and_geometry_radius() -> None:
+    platform = EntityMetadata(
+        1, "func_plat", (
+            ("classname", "func_plat"), ("model", "*1"), ("height", "32"),
+        ),
+    )
+    metadata = SimpleNamespace(
+        entities=(platform,),
+        models=(
+            SimpleNamespace(mins=(-128.0,) * 3, maxs=(128.0,) * 3, headnode=0),
+            SimpleNamespace(
+                mins=(0.0, 0.0, 0.0), maxs=(64.0, 64.0, 16.0), headnode=17,
+            ),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 1, "model_index": 1},
+        )),
+    )
+    # Each exact mover endpoint aliases an existing L1 cell whose model-0
+    # origin differs by six units. The first valid connector is 80 units from
+    # the platform center: outside the former arbitrary 64-unit search.
+    nodes = {
+        (2, 2, 0): NavNode(
+            (2, 2, 0), (32.0, 32.0, 8.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        ),
+        (2, 2, 2): NavNode(
+            (2, 2, 2), (32.0, 32.0, 40.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        ),
+        (7, 2, 0): NavNode(
+            (7, 2, 0), (112.0, 32.0, 14.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        ),
+        (7, 2, 2): NavNode(
+            (7, 2, 2), (112.0, 32.0, 46.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        ),
+    }
+    cm = _AliasedPlatformEndpointCm()
+    cm.seen = []
+    edges = []
+    _add_exact_platform_navigation(cm, metadata, nodes, edges, set(), (0, 0, 0))
+    assert len(edges) == 6
+    board_requests = [
+        request for request in cm.seen if "platform-board" in request["id"]
+    ]
+    assert board_requests
+    endpoints = {
+        tuple(request[field])
+        for request in board_requests for field in ("start", "end")
+    }
+    assert (32.0, 32.0, 14.0) in endpoints
+    assert (32.0, 32.0, 46.0) in endpoints
+    assert (32.0, 32.0, 8.0) not in endpoints
+    assert (32.0, 32.0, 40.0) not in endpoints
 
 
 def test_target_disabled_platform_does_not_claim_activation_topology() -> None:
