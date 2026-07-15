@@ -1,0 +1,143 @@
+{
+  "admission": {
+    "analysis_stage_published": true,
+    "claims_stage_published": true,
+    "compiled_stage_published": true,
+    "materialized_stage_published": true,
+    "older_population_reuse_allowed": false,
+    "passing_subset_allowed": false,
+    "permanently_non_admissible": true,
+    "regeneration_under_same_declaration_allowed": false,
+    "replacement_declaration_status": "pending-implementation-fix",
+    "replacement_member_allowed": false,
+    "retry_under_same_declaration_allowed": false,
+    "salvage_allowed": false,
+    "source_stage_published": true
+  },
+  "cohort_id": "b2g26_final_71435",
+  "declaration": {
+    "path": "docs/multires/B2-GENERATED-COHORT-71435-DECLARATION.json",
+    "sha256": "d9081912ae70fd5a0deaf396f803d0190e3bdf8af6afe90690064be878714ebd"
+  },
+  "evidence": {
+    "artifact_root_at_capture": "/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71435-1bd8727d",
+    "implementation": {
+      "atlas_analyzer_authority_file_count": 29,
+      "atlas_analyzer_authority_sha256": "1bd8727da427bc4af79983072852bdafe8675eacb3a70ae769ec0c679cb2f9b9",
+      "generator_sha256": "5eba7670e21c05087920880e1bf983bd2a533824c41124a6ef996ad6c529b559",
+      "git_clean": true,
+      "repository_commit": "1477938f29908a593e563316599d98e42164406a",
+      "repository_tree": "6064be90709082a27e09b6f218d80e7ddd5c8011",
+      "routes_sha256": "4ceb7bd5b6d5233e75218ab40dd5b16dac0f23aba14f04894fec26b698f531d7"
+    },
+    "reports": {
+      "claims_prepare": {
+        "bytes": 5366,
+        "path_from_artifact_root": "reports/claims-prepare.json",
+        "sha256": "3b676d222af23046fb982320d257f23a1e422f3352f614b947b12c33bb8520cb"
+      },
+      "compiled_membership": {
+        "bytes": 19314,
+        "path_from_artifact_root": "reports/compiled-membership.json",
+        "sha256": "cbf60c262d162a5ef9bda00a75ff32b14fd957b0eea80f4296467c1890041803"
+      },
+      "compiled_static_campaign": {
+        "bytes": 23606,
+        "path_from_artifact_root": "reports/compiled-static-campaign.json",
+        "sha256": "978f3de8049ce8b8c4f423567be33996b4b52dd12fec22f4153106fdd8c1309a"
+      },
+      "generated_atlas_campaign": {
+        "analysis_membership_sha256": "063cb4d347baffc67c4716410e7873ce15e7eead34553622e3d0535b8f5e86b5",
+        "bytes": 70547,
+        "path_from_artifact_root": "reports/generated-atlas-campaign.json",
+        "sha256": "f873bd0d50221fce706a77a8370ff80aae5f9d70d4d38502755eb9f7c8af7708"
+      },
+      "generated_validation": {
+        "bytes": 30276,
+        "path_from_artifact_root": "reports/generated-validation.json",
+        "sha256": "6f14cd73fd61199ec387ed610054fb063e70ca7453840e799997369dab1da78b"
+      },
+      "materialized_membership": {
+        "bytes": 22679,
+        "path_from_artifact_root": "reports/materialized-membership.json",
+        "sha256": "0c54db2c5c350066d5f5a4444a8a40bd0a55094bd4b3228ff32d44a2f2f0496b"
+      },
+      "source_freeze": {
+        "bytes": 105122,
+        "path_from_b2_artifact_root": "generated-final-71435-1bd8727d-report.json",
+        "sha256": "a0046d5f0f4afbc9e0a26cdb5169c736919f352132176519b0863d50157caa19"
+      }
+    },
+    "stage_results": {
+      "analysis": {
+        "actual_file_count": 224,
+        "expected_file_count": 224,
+        "map_count": 28,
+        "pass_count": 28,
+        "passed": true
+      },
+      "claims": {
+        "actual_file_count": 224,
+        "expected_file_count": 224,
+        "map_count": 28,
+        "pass_count": 28,
+        "passed": true
+      },
+      "compiled": {
+        "actual_file_count": 168,
+        "expected_file_count": 168,
+        "map_count": 28,
+        "static_pass_count": 28,
+        "passed": true
+      },
+      "compiled_validation": {
+        "failure_count": 114,
+        "map_count": 28,
+        "pass_count": 0,
+        "passed": false
+      },
+      "materialized": {
+        "actual_file_count": 196,
+        "expected_file_count": 196,
+        "map_count": 28,
+        "passed": true
+      },
+      "source": {
+        "cold_file_count": 140,
+        "map_count": 28,
+        "primary_file_count": 140,
+        "route_contract_pass_count": 28,
+        "unique_layout_count": 28,
+        "passed": true
+      }
+    }
+  },
+  "failure": {
+    "classification_counts": {
+      "dark_spawn_region_failures": 9,
+      "route_cost_failures": 12,
+      "spawn_connectivity_failures": 65,
+      "spawn_light_region_domain_failures": 28
+    },
+    "phase": "compiled-generated-validation",
+    "root_causes": {
+      "lighting_darkness": "source lighting measured floor-plus-one samples with horizontal radius and simplified overhead occlusion, while compiled promotion measured spawn-eye origins with three-dimensional radius and exact MASK_SHOT collision; nine maps therefore retained real compiled darkness",
+      "lighting_region_domain": "the validator compared the count of authored floor-light tiles with the analyzer count of strongly connected spawn navigation regions; all 28 compiled BSPs retained the exact authored _ml_region tag set, so this comparison joined unrelated domains",
+      "route_cost": "source route selection retained only standing-component membership and Euclidean endpoint distance, discarding obstacle detour distance; Atlas correctly measured compiled 16-unit graph geodesics and twelve route totals exceeded both frozen mismatch thresholds",
+      "spawn_connectivity": "distributed spawn placement optimized separation and local clearance without requiring all eight origins to share one conservative standing component; nine maps remained split under compiled directed reachability"
+    },
+    "validation_summary": {
+      "compiled_route_claim_count": 1487,
+      "compiled_route_claims_connected_finite_oracle": 1487,
+      "dark_navigation_region_count": 10,
+      "darkness_map_count": 9,
+      "route_failure_map_count": 5,
+      "route_summary_count": 112,
+      "spawn_connectivity_map_count": 9,
+      "source_floor_light_region_count": 720,
+      "spawn_navigation_region_count": 41
+    }
+  },
+  "schema": "q2-b2-generated-cohort-failure-v1",
+  "status": "permanently-failed-compiled-validation"
+}
