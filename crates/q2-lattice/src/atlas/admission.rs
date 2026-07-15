@@ -813,15 +813,14 @@ impl B1RuntimeAuthoritySeal {
                 "B1 Pmove authority differs from oracle admission".to_owned(),
             ));
         }
-        if let Some(hook) = &admissions.hook_oracle {
-            if self.executables.hook_sha256 != hook.tool.executable_sha256
+        if let Some(hook) = &admissions.hook_oracle
+            && (self.executables.hook_sha256 != hook.tool.executable_sha256
                 || self.identities.hook.tool_identity != hook.tool.tool_identity_sha256
-                || self.identities.hook.physics_identity != hook.tool.physics_identity_sha256
-            {
-                return Err(AtlasError::InvalidFormat(
-                    "B1 hook authority differs from oracle admission".to_owned(),
-                ));
-            }
+                || self.identities.hook.physics_identity != hook.tool.physics_identity_sha256)
+        {
+            return Err(AtlasError::InvalidFormat(
+                "B1 hook authority differs from oracle admission".to_owned(),
+            ));
         }
         let fall = &admissions.fall_oracle;
         if self.executables.fall_sha256 != fall.tool.executable_sha256
