@@ -400,11 +400,19 @@ at explicit height and iteration fences. The monotonic ceiling normalization
 preserves the 96-unit safe-headroom and low/mid/high spatial-proportion
 contracts.
 
+The monotonic-normalization fix, exact six-state-cycle fixture, timeout-bound
+71434500 regression, and immutable 71434 failure record were committed before
+replacement cohort `b2g26_final_71435` was declared. Its 28 entirely new
+members use seeds 71435000 through 71435603 under the same all-or-nothing,
+declared-before-generation policy. The current alias and immutable named copy
+are byte-identical; no 71434 source or later-stage member is an input to
+71435.
+
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
 replacement declaration. It must never name retired cohort 71426, 71427,
-71428, 71429, 71430, 71431, 71432, or 71433.
+71428, 71429, 71430, 71431, 71432, 71433, or 71434.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V4 hook candidates under the pinned B1 authorities. Materialization
