@@ -63,6 +63,8 @@ LIGHT_REGION_SIZE = 512    # maximum XY extent of one base-floor light region
 LIGHT_SAMPLE_SPACING = 128 # fixed coverage probes within each region
 MIN_FLOOR_LIGHT_COVERAGE = 0.98
 FLOOR_LIGHT_RADIUS = 448   # guaranteed horizontal reach used by validation
+SPAWN_LIGHT_EYE_OFFSET = 31  # authored origin +9 link offset +22 view height
+SPAWN_COLUMN_LIGHT_OFFSET = 48  # 17u above the admitted spawn eye
 OVERHEAD_LIGHT_VALUE = 900 # qrad point-light intensity
 UNDER_PLATFORM_LIGHT_VALUE = 700
 MIN_FLOOR_LIGHT_VALUE = 650
@@ -315,6 +317,53 @@ def light_reaches_sample(source: LightSource,
     return True
 
 
+def _segment_intersects_solid(
+    start: Tuple[float, float, float],
+    end: Tuple[float, float, float],
+    box: SolidBox,
+) -> bool:
+    """Return whether a closed segment intersects an axis-aligned solid."""
+    entry = 0.0
+    exit_ = 1.0
+    for start_value, end_value, lower, upper in zip(
+        start, end,
+        (box.x0, box.y0, box.z0),
+        (box.x1, box.y1, box.z1),
+    ):
+        delta = end_value - start_value
+        if abs(delta) <= 1e-12:
+            if start_value < lower or start_value > upper:
+                return False
+            continue
+        first = (lower - start_value) / delta
+        second = (upper - start_value) / delta
+        if first > second:
+            first, second = second, first
+        entry = max(entry, first)
+        exit_ = min(exit_, second)
+        if entry > exit_:
+            return False
+    return True
+
+
+def light_reaches_spawn_eye(
+    source: LightSource,
+    eye: Tuple[float, float, float],
+    solids: Sequence[SolidBox],
+) -> bool:
+    """Mirror the compiled spawn-light obligation in source coordinates.
+
+    Unlike floor coverage, this uses full three-dimensional radius and every
+    emitted solid. The compiled CM trace remains the promotion authority.
+    """
+    if math.dist(eye, source.origin) > source.radius:
+        return False
+    return not any(
+        _segment_intersects_solid(eye, source.origin, box)
+        for box in solids
+    )
+
+
 def floor_light_coverage(region: FloorLightRegion,
                          sources: List[LightSource],
                          occluders: List[SolidBox]) -> float:
@@ -505,6 +554,7 @@ class MapWriter:
         self.brushes: List[str] = []
         self.entities: List[str] = []
         self.world_props: dict = {}
+        self.solid_boxes: List[SolidBox] = []
 
     # ----- primitive: axis-aligned box brush (6 faces) -----
 
@@ -543,6 +593,8 @@ class MapWriter:
             tf=tf, tc=tc, tw=tw,
             surf_flags=surf_flags, contents=contents, value=value,
         ))
+        if not (contents & CONTENTS_LAVA):
+            self.solid_boxes.append(SolidBox(x0, y0, z0, x1, y1, z1))
 
     def add_entity(self, classname: str, props: dict):
         lines = ['{', f'"classname" "{classname}"']
@@ -597,6 +649,7 @@ class MapGenerator:
         self.light_regions: List[FloorLightRegion] = []
         self.light_sources: List[LightSource] = []
         self.light_coverages: dict = {}
+        self.spawn_eye_samples: List[Tuple[float, float, float]] = []
         self.horizontal_surfaces: List[HorizontalSurface] = []
         self.lethal_edges: List[dict] = []
         self.lethal_guard_walls: List[SolidBox] = []
@@ -1755,6 +1808,17 @@ class MapGenerator:
         return False
 
     def _spawn_is_clear(self, room: Room, x: int, y: int, z: int) -> bool:
+        if not self._spawn_is_locally_clear(room, x, y, z):
+            return False
+        for sx, sy, _ in self.spawn_points:
+            if math.hypot(x - sx, y - sy) < MIN_SPAWN_SEPARATION:
+                return False
+        return True
+
+    def _spawn_is_locally_clear(
+        self, room: Room, x: int, y: int, z: int,
+    ) -> bool:
+        """Check every spawn condition except separation from other starts."""
         if not self._inside_room_for_spawn(room, x, y):
             return False
         if self._spawn_overlaps_blocker(x, y, z):
@@ -1763,9 +1827,6 @@ class MapGenerator:
             return False
         if (x, y, z) in self._item_origins:
             return False
-        for sx, sy, _ in self.spawn_points:
-            if math.hypot(x - sx, y - sy) < MIN_SPAWN_SEPARATION:
-                return False
         return True
 
     def _choose_spawn(self, room: Room) -> Optional[Tuple[int, int, int]]:
@@ -1862,6 +1923,181 @@ class MapGenerator:
         ys = [p[1] for p in placed]
         return (max(xs) - min(xs)) >= 1024 and (max(ys) - min(ys)) >= 1024
 
+    def _shared_spawn_source_component(
+        self, origins: Sequence[Tuple[int, int, int]],
+    ) -> Optional[int]:
+        """Return the one conservative standing component owning all starts."""
+        if len(origins) != DM_SPAWN_COUNT:
+            return None
+        from maps.routes import source_endpoint_components
+
+        components = source_endpoint_components(
+            self.rooms, origins, self.spawn_blockers, self.lava_pools,
+        )
+        admitted = [components.get(index) for index in range(len(origins))]
+        if any(component is None for component in admitted):
+            return None
+        distinct = set(admitted)
+        return admitted[0] if len(distinct) == 1 else None
+
+    def _spawn_candidate_pool(self) -> List[Tuple[int, int, int]]:
+        """Enumerate deterministic, locally legal starts across final geometry.
+
+        The 64-unit lattice is finer than the 384-unit separation gate and is
+        anchored independently in every room so narrow connected floor bands
+        remain represented.  Global separation is applied only after source
+        components are known.
+        """
+        candidates: set[Tuple[int, int, int]] = set()
+        candidate_step = 64
+        for room in sorted(
+            self.rooms,
+            key=lambda value: (
+                value.floor_z, value.wy, value.wx, value.d, value.w,
+            ),
+        ):
+            x0 = room.wx + SPAWN_EDGE_MARGIN
+            x1 = room.wx + room.w - SPAWN_EDGE_MARGIN
+            y0 = room.wy + SPAWN_EDGE_MARGIN
+            y1 = room.wy + room.d - SPAWN_EDGE_MARGIN
+            if x0 > x1 or y0 > y1:
+                continue
+            z = room.floor_z + 24
+            for x in range(x0, x1 + 1, candidate_step):
+                for y in range(y0, y1 + 1, candidate_step):
+                    if self._spawn_is_locally_clear(room, x, y, z):
+                        candidates.add((x, y, z))
+        return sorted(candidates, key=lambda point: (point[2], point[1], point[0]))
+
+    def _greedy_component_spawn_set(
+        self, candidates: Sequence[Tuple[int, int, int]],
+    ) -> Optional[List[Tuple[int, int, int]]]:
+        """Find a separated, map-spanning eight-start subset deterministically."""
+        if len(candidates) < DM_SPAWN_COUNT:
+            return None
+
+        ordered = sorted(candidates, key=lambda point: (point[2], point[1], point[0]))
+        extrema = {
+            min(ordered, key=lambda point: (point[0], point[1], point[2])),
+            max(ordered, key=lambda point: (point[0], -point[1], -point[2])),
+            min(ordered, key=lambda point: (point[1], point[0], point[2])),
+            max(ordered, key=lambda point: (point[1], -point[0], -point[2])),
+            min(ordered, key=lambda point: (point[0] + point[1], point[2])),
+            max(ordered, key=lambda point: (point[0] + point[1], -point[2])),
+            min(ordered, key=lambda point: (point[0] - point[1], point[2])),
+            max(ordered, key=lambda point: (point[0] - point[1], -point[2])),
+        }
+        # Cover the interior as well as extrema; a blocker beside an extreme
+        # must not make the only greedy attempt determine source publication.
+        stride = max(1, len(ordered) // 24)
+        seeds = sorted(
+            extrema.union(ordered[::stride]),
+            key=lambda point: (point[2], point[1], point[0]),
+        )
+
+        passing: List[List[Tuple[int, int, int]]] = []
+        for seed in seeds:
+            chosen = [seed]
+            while len(chosen) < DM_SPAWN_COUNT:
+                eligible = [
+                    point for point in ordered
+                    if point not in chosen
+                    and all(
+                        math.hypot(point[0] - other[0], point[1] - other[1])
+                        >= MIN_SPAWN_SEPARATION
+                        for other in chosen
+                    )
+                ]
+                if not eligible:
+                    break
+
+                def priority(point: Tuple[int, int, int]) -> tuple:
+                    trial = [*chosen, point]
+                    x_span = max(value[0] for value in trial) - min(
+                        value[0] for value in trial
+                    )
+                    y_span = max(value[1] for value in trial) - min(
+                        value[1] for value in trial
+                    )
+                    capped_x = min(x_span, 1024)
+                    capped_y = min(y_span, 1024)
+                    nearest = min(
+                        math.hypot(point[0] - other[0], point[1] - other[1])
+                        for other in chosen
+                    )
+                    return (
+                        capped_x + capped_y,
+                        capped_x * capped_y,
+                        nearest,
+                        -point[2], -point[1], -point[0],
+                    )
+
+                chosen.append(max(eligible, key=priority))
+            if len(chosen) == DM_SPAWN_COUNT and self._spawn_span_ok(chosen):
+                passing.append(chosen)
+
+        if not passing:
+            return None
+
+        def result_priority(points: Sequence[Tuple[int, int, int]]) -> tuple:
+            minimum_separation = min(
+                math.hypot(left[0] - right[0], left[1] - right[1])
+                for index, left in enumerate(points)
+                for right in points[index + 1:]
+            )
+            x_span = max(point[0] for point in points) - min(point[0] for point in points)
+            y_span = max(point[1] for point in points) - min(point[1] for point in points)
+            canonical = tuple(sorted(points, key=lambda point: (point[2], point[1], point[0])))
+            return minimum_separation, x_span * y_span, x_span + y_span, canonical
+
+        return list(max(passing, key=result_priority))
+
+    def _component_constrained_combat_spawns(
+        self,
+    ) -> Optional[List[Tuple[int, int, int, int]]]:
+        """Select all starts from one source standing component or fail."""
+        from maps.routes import source_endpoint_components
+
+        candidates = self._spawn_candidate_pool()
+        components = source_endpoint_components(
+            self.rooms, candidates, self.spawn_blockers, self.lava_pools,
+        )
+        groups: dict[int, List[Tuple[int, int, int]]] = {}
+        for index, candidate in enumerate(candidates):
+            component = components.get(index)
+            if component is not None:
+                groups.setdefault(component, []).append(candidate)
+
+        selections = []
+        for component in sorted(groups):
+            selected = self._greedy_component_spawn_set(groups[component])
+            if selected is not None:
+                selections.append((component, selected))
+        if not selections:
+            return None
+
+        # Prefer the widest admitted solution; component ID and coordinates
+        # make equal layouts byte-deterministic.
+        def selection_priority(value) -> tuple:
+            component, selected = value
+            x_span = max(point[0] for point in selected) - min(point[0] for point in selected)
+            y_span = max(point[1] for point in selected) - min(point[1] for point in selected)
+            return (
+                x_span * y_span, x_span + y_span, -component,
+                tuple(sorted(selected, key=lambda point: (point[2], point[1], point[0]))),
+            )
+
+        _component, selected = max(selections, key=selection_priority)
+        map_cx = sum(room.wx + room.w // 2 for room in self.rooms) // len(self.rooms)
+        map_cy = sum(room.wy + room.d // 2 for room in self.rooms) // len(self.rooms)
+        return [
+            (
+                x, y, z,
+                int(round((math.degrees(math.atan2(map_cy - y, map_cx - x)) + 360.0) % 360.0)),
+            )
+            for x, y, z in selected
+        ]
+
     def _emit_arena_cover(self):
         """Extra cover geometry in arenas (on top of the baseline _emit_cover):
         peek-height pillars in the fight space so
@@ -1910,52 +2146,27 @@ class MapGenerator:
         )
         for room in arenas:
             placed = self._try_combat_spawns_in(room)
-            if placed and self._spawn_span_ok(placed):
+            if (
+                placed
+                and self._spawn_span_ok(placed)
+                and self._shared_spawn_source_component(
+                    [(x, y, z) for x, y, z, _yaw in placed]
+                ) is not None
+            ):
                 self._emit_spawn_entities(placed)
                 return
-            if placed:   # ring fit but too tight — undo and go distributed
+            if placed:
                 self.spawn_points = self.spawn_points[:-len(placed)]
-                break
 
-        # Distributed: one spawn per room, greedily choosing the room whose
-        # centre is farthest from the spawns placed so far (maximises spread).
-        placed = []
-        map_cx = sum(r.wx + r.w // 2 for r in self.rooms) // max(1, len(self.rooms))
-        map_cy = sum(r.wy + r.d // 2 for r in self.rooms) // max(1, len(self.rooms))
-        # Revisit rooms after the first pass: larger layouts can safely hold
-        # more than one start per room, while _spawn_is_clear still enforces
-        # both geometry clearance and global separation.
-        for _ in range(DM_SPAWN_COUNT * 2):
-            if len(placed) >= DM_SPAWN_COUNT:
-                break
-            ranked = sorted(
-                self.rooms,
-                key=lambda r: (
-                    min(
-                        math.hypot(r.wx + r.w // 2 - px, r.wy + r.d // 2 - py)
-                        for px, py, _, _ in placed
-                    ) if placed else float(r.w * r.d)
-                ),
-                reverse=True,
-            )
-            progress = False
-            for room in ranked:
-                cand = self._choose_spawn(room)
-                if cand is None:
-                    continue
-                x, y, fz = cand
-                yaw = int(round((math.degrees(math.atan2(map_cy - y, map_cx - x)) + 360.0) % 360.0))
-                self.spawn_points.append((x, y, fz))
-                placed.append((x, y, fz, yaw))
-                progress = True
-                if len(placed) >= DM_SPAWN_COUNT:
-                    break
-            if not progress:
-                break
-        if len(placed) < DM_SPAWN_COUNT:
+        placed = self._component_constrained_combat_spawns()
+        if placed is None:
             raise RuntimeError(
-                f"could not place {DM_SPAWN_COUNT} clear deathmatch spawns"
+                f"could not place {DM_SPAWN_COUNT} clear, separated, "
+                "map-spanning deathmatch spawns in one source standing component"
             )
+        self.spawn_points.extend((x, y, z) for x, y, z, _yaw in placed)
+        if self._shared_spawn_source_component(self.spawn_points) is None:
+            raise RuntimeError("selected deathmatch spawns do not share one source component")
         self._emit_spawn_entities(placed)
 
     def _floor_item_spot(self, room: Room, xc: int, yc: int,
@@ -2541,6 +2752,68 @@ class MapGenerator:
             "_ml_radius": f"{source.radius:g}",
         })
 
+    def _ensure_spawn_eye_lighting(self) -> None:
+        """Give every authored spawn an exact source-side visible light.
+
+        The ordinary floor contract samples the walking surface. Promotion
+        instead traces from the linked player eye, so this is a separate and
+        stricter obligation. A missing witness receives one deterministic
+        qualified light in the already-admitted spawn column.
+        """
+        self.spawn_eye_samples = []
+        regions_by_floor = sorted(
+            self.light_regions,
+            key=lambda region: (
+                region.floor_z, region.bounds[1], region.bounds[0],
+                region.region_id,
+            ),
+        )
+        for spawn_index, (spawn_x, spawn_y, spawn_z) in enumerate(
+            self.spawn_points
+        ):
+            eye = (
+                float(spawn_x), float(spawn_y),
+                float(spawn_z + SPAWN_LIGHT_EYE_OFFSET),
+            )
+            self.spawn_eye_samples.append(eye)
+            visible = any(
+                source.value >= MIN_FLOOR_LIGHT_VALUE
+                and light_reaches_spawn_eye(
+                    source, eye, self.writer.solid_boxes,
+                )
+                for source in self.light_sources
+            )
+            if visible:
+                continue
+            floor_z = spawn_z + PLAYER_MINS_Z
+            region = next(
+                (
+                    candidate for candidate in regions_by_floor
+                    if candidate.floor_z == floor_z
+                    and candidate.bounds[0] <= spawn_x < candidate.bounds[2]
+                    and candidate.bounds[1] <= spawn_y < candidate.bounds[3]
+                ),
+                None,
+            )
+            if region is None:
+                raise RuntimeError(
+                    f"spawn {spawn_index} has no floor-light region"
+                )
+            self._add_floor_light(
+                region, "spawn_column",
+                (
+                    float(spawn_x), float(spawn_y),
+                    float(spawn_z + SPAWN_COLUMN_LIGHT_OFFSET),
+                ),
+                UNDER_PLATFORM_LIGHT_VALUE,
+            )
+            if not light_reaches_spawn_eye(
+                self.light_sources[-1], eye, self.writer.solid_boxes,
+            ):
+                raise RuntimeError(
+                    f"spawn {spawn_index} has no unobstructed source light"
+                )
+
     @staticmethod
     def _sample_under_box(sample: Tuple[float, float, float], box: SolidBox) -> bool:
         x, y, z = sample
@@ -2653,6 +2926,8 @@ class MapGenerator:
                     region, region_sources, region_occluders
                 )
             self.light_coverages[region.region_id] = coverage
+
+        self._ensure_spawn_eye_lighting()
 
         self.writer.world_props.update({
             "_ml_lighting_version": "2",
@@ -3372,6 +3647,10 @@ class MapGenerator:
             "minimum_light_value": MIN_FLOOR_LIGHT_VALUE,
             "minimum_interior_light_value": MIN_INTERIOR_LIGHT_VALUE,
             "minimum_interior_light_radius": MIN_INTERIOR_LIGHT_RADIUS,
+            "spawn_eye_offset": SPAWN_LIGHT_EYE_OFFSET,
+            "spawn_eye_samples": [
+                list(sample) for sample in self.spawn_eye_samples
+            ],
             "player_hull": {
                 "width": PLAYER_DIAMETER,
                 "standing_height": PLAYER_H,

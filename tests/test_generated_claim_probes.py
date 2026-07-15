@@ -136,6 +136,7 @@ class _LightEntity:
         return {
             "origin": self.origin, "light": self.intensity,
             "_ml_radius": self.radius, "_ml_floor_light": "1",
+            "_ml_region": "floor_0_0_0",
         }.get(key, "")
 
 
@@ -209,8 +210,14 @@ def _compiled_fixture() -> tuple[SimpleNamespace, dict, list, list]:
         {"source": [1, 0, 1], "target": [0, 0, 1], "cost": 4096, "evidence": 1, "validation_version": 1},
     ]
     spawns = [
-        {"region_id": 1, "origin_milliunits": [8_000, 8_000, 24_000]},
-        {"region_id": 1, "origin_milliunits": [24_000, 8_000, 24_000]},
+        {
+            "entity_ordinal": 3, "region_id": 1,
+            "origin_milliunits": [8_000, 8_000, 24_000],
+        },
+        {
+            "entity_ordinal": 4, "region_id": 1,
+            "origin_milliunits": [24_000, 8_000, 24_000],
+        },
     ]
     return metadata, nodes, edges, spawns
 
@@ -338,7 +345,10 @@ def test_strict_load_provenance_and_non_hook_challenges(tmp_path: Path) -> None:
     assert [item["status"] for item in result["hazard_claims"]] == ["oracle", "oracle"]
     assert [item["cost_q8"] for item in result["route_claims"]] == [4096, 4096]
     assert result["lighting"]["lightdata_sha256"] == "a" * 64
-    assert result["lighting"]["dark_spawn_regions"] == 0
+    assert result["lighting"]["floor_light_region_count"] == 1
+    assert result["lighting"]["floor_light_region_ids"] == ["floor_0_0_0"]
+    assert result["lighting"]["spawn_nav_region_count"] == 1
+    assert result["lighting"]["dark_spawns"] == []
     assert "hooks" not in result
     requests = {request["id"]: request for request in cm.requests}
     assert requests["lethal-inward:0:0"]["start"] == [32.125, 0.0, 112.0]
@@ -516,7 +526,18 @@ def test_far_light_cannot_clear_spawn_regions(tmp_path: Path) -> None:
         _FakeCm(), metadata, nodes, edges, (0, 0, 0), spawns, claims,
         _safety_fixture(), _l0_semantics_fixture(),
     )
-    assert result["lighting"]["dark_spawn_regions"] == 1
+    assert result["lighting"]["dark_spawns"] == [
+        {
+            "entity_ordinal": 3,
+            "nav_region_id": 1,
+            "eligible_light_entity_ordinals": [],
+        },
+        {
+            "entity_ordinal": 4,
+            "nav_region_id": 1,
+            "eligible_light_entity_ordinals": [],
+        },
+    ]
 
 
 def test_removed_lethal_guard_is_rejected(tmp_path: Path) -> None:

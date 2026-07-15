@@ -30,16 +30,17 @@ def _graph() -> dict[str, Any]:
         }
         for node_id in range(4)
     ]
-    nodes.append(
+    nodes.extend(
         {
-            "id": 4,
+            "id": node_id,
             "type": "spawn",
-            "x": 192,
-            "y": 64,
+            "x": 192 + (node_id - 4) * 64,
+            "y": 64 + (node_id % 2) * 64,
             "z": 24,
             "room": 0,
             "source_component": 0,
         }
+        for node_id in range(4, 12)
     )
     routes = [
         {
@@ -117,30 +118,49 @@ def test_component_mismatch_rejects_even_when_room_metadata_would_connect(
 
 def test_exact_start_node_selects_component_not_first_spawn_in_room() -> None:
     graph = _graph()
-    nodes = graph["nodes"]
-    nodes.append(
-        {
-            "id": 5,
-            "type": "spawn",
-            "x": 224,
-            "y": 96,
-            "z": 24,
-            "room": 0,
-            "source_component": 1,
-        }
-    )
-    for node in nodes[:4]:
-        node["source_component"] = 1
     for route in graph["routes"]:
         route["start_node_id"] = 5
-        route["source_component"] = 1
     _refresh_distances(graph)
 
     report = validate_source_route_contract(graph, MAP_ID)
 
     assert {route["start_node_id"] for route in report["routes"]} == {5}
-    assert {route["source_component"] for route in report["routes"]} == {1}
-    assert report["spawn_count"] == 2
+    assert {route["source_component"] for route in report["routes"]} == {0}
+    assert report["spawn_count"] == 8
+
+
+def test_split_spawn_components_are_rejected_before_route_publication() -> None:
+    graph = _graph()
+    graph["nodes"][-1]["source_component"] = 1
+
+    with pytest.raises(
+        SourceRouteContractError,
+        match="spawn nodes must share one non-null source standing component",
+    ):
+        validate_source_route_contract(graph, MAP_ID)
+
+
+@pytest.mark.parametrize("delta", (-1, 1), ids=("seven", "nine"))
+def test_exactly_eight_spawn_nodes_are_required(delta: int) -> None:
+    graph = _graph()
+    if delta < 0:
+        graph["nodes"].pop()
+    else:
+        graph["nodes"].append({
+            "id": 12,
+            "type": "spawn",
+            "x": 704,
+            "y": 64,
+            "z": 24,
+            "room": 0,
+            "source_component": 0,
+        })
+
+    with pytest.raises(
+        SourceRouteContractError,
+        match="must declare exactly eight deathmatch spawn nodes",
+    ):
+        validate_source_route_contract(graph, MAP_ID)
 
 
 @pytest.mark.parametrize(
@@ -215,3 +235,24 @@ def test_route_report_is_deterministic_and_binds_component_labels() -> None:
     assert first == second
     with pytest.raises(SourceRouteContractError, match="source standing component"):
         validate_source_route_contract(changed, MAP_ID)
+
+
+def test_source_geodesic_may_exceed_endpoint_loop_geometry() -> None:
+    graph = _graph()
+    graph["routes"][0]["dist"] += 2048.0
+
+    report = validate_source_route_contract(graph, MAP_ID)
+    route = report["routes"][0]
+
+    assert route["source_geodesic_overhead"] == pytest.approx(2048.0)
+    assert report["published_dist_covers_endpoint_loop_geometry"] is True
+
+
+def test_published_distance_cannot_undercut_endpoint_loop_geometry() -> None:
+    graph = _graph()
+    graph["routes"][0]["dist"] -= 1.0
+
+    with pytest.raises(
+        SourceRouteContractError, match="falls below endpoint-loop geometry"
+    ):
+        validate_source_route_contract(graph, MAP_ID)

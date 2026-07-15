@@ -28,6 +28,7 @@ if LOCAL_Q2_ROOT.exists():
 sys.path.insert(0, str(ROOT))
 
 from maps.generator import (  # noqa: E402
+    CONTENTS_LAVA,
     FloorLightRegion,
     HorizontalSurface,
     InteriorLightZone,
@@ -44,10 +45,12 @@ from maps.generator import (  # noqa: E402
     PLAYER_H,
     SPAWN_ESCAPE_DISTANCE,
     SPAWN_ESCAPE_STEP,
+    SPAWN_LIGHT_EYE_OFFSET,
     SolidBox,
     WORLD_AMBIENT_LIGHT,
     floor_light_coverage,
     light_reaches_sample,
+    light_reaches_spawn_eye,
     unsafe_horizontal_sandwiches,
 )
 
@@ -75,6 +78,8 @@ Q2_BSP_LIGHTING_LUMP = 7
 class BrushGeometry:
     bounds: Tuple[float, float, float, float, float, float]
     textures: Tuple[str, ...]
+    owner_classname: str
+    contents: int
 
 
 def _parse_entities(text: str) -> List[Dict[str, str]]:
@@ -115,9 +120,12 @@ def _parse_brush_geometry(text: str) -> List[BrushGeometry]:
     brushes: List[BrushGeometry] = []
     depth = 0
     brush_lines: Optional[List[str]] = None
+    entity_classname = ""
     for line in text.splitlines():
         stripped = line.strip()
         if stripped == "{":
+            if depth == 0:
+                entity_classname = ""
             depth += 1
             if depth == 2:
                 brush_lines = []
@@ -134,6 +142,7 @@ def _parse_brush_geometry(text: str) -> List[BrushGeometry]:
                     ys = [point[1] for point in points]
                     zs = [point[2] for point in points]
                     textures = []
+                    contents = 0
                     for item in brush_lines:
                         matches = list(POINT_RE.finditer(item))
                         if len(matches) < 3:
@@ -141,14 +150,27 @@ def _parse_brush_geometry(text: str) -> List[BrushGeometry]:
                         tail = item[matches[2].end():].split()
                         if tail:
                             textures.append(tail[0].lower())
+                        if len(tail) >= 7:
+                            try:
+                                contents |= int(float(tail[6]))
+                            except ValueError:
+                                pass
                     brushes.append(BrushGeometry(
                         bounds=(min(xs), min(ys), min(zs),
                                 max(xs), max(ys), max(zs)),
                         textures=tuple(textures),
+                        owner_classname=entity_classname,
+                        contents=contents,
                     ))
                 brush_lines = None
+            elif depth == 1:
+                entity_classname = ""
             depth -= 1
             continue
+        if depth == 1 and '"classname"' in line:
+            match = ENTITY_RE.search(line)
+            if match and match.group(1) == "classname":
+                entity_classname = match.group(2)
         if depth == 2 and brush_lines is not None:
             brush_lines.append(line)
     return brushes
@@ -158,6 +180,17 @@ def _parse_brush_aabbs(
     text: str,
 ) -> List[Tuple[float, float, float, float, float, float]]:
     return [brush.bounds for brush in _parse_brush_geometry(text)]
+
+
+def _parse_world_solid_aabbs(
+    text: str,
+) -> List[Tuple[float, float, float, float, float, float]]:
+    """Return the exact world brushes that block MASK_SHOT light traces."""
+    return [
+        brush.bounds for brush in _parse_brush_geometry(text)
+        if brush.owner_classname == "worldspawn"
+        and not (brush.contents & CONTENTS_LAVA)
+    ]
 
 
 def _is_overhead_surface(brush: BrushGeometry) -> bool:
@@ -512,6 +545,9 @@ def _floor_lighting_metrics(
         "interior_light_zones": 0,
         "interior_lights": 0,
         "interior_lighting_ok": False,
+        "spawn_eye_samples": 0,
+        "dark_spawn_eye_ordinals": [],
+        "spawn_eye_lighting_ok": False,
         "min_light_coverage": 0.0,
         "lighting_ok": False,
     }
@@ -554,6 +590,15 @@ def _floor_lighting_metrics(
             MIN_INTERIOR_LIGHT_RADIUS,
             float(contract["minimum_interior_light_radius"]),
         )
+        spawn_eye_offset = int(contract["spawn_eye_offset"])
+        if spawn_eye_offset != SPAWN_LIGHT_EYE_OFFSET:
+            raise ValueError("spawn-eye offset differs from compiled contract")
+        contract_spawn_eyes = [
+            tuple(float(value) for value in _sample)
+            for _sample in contract["spawn_eye_samples"]
+        ]
+        if any(len(sample) != 3 for sample in contract_spawn_eyes):
+            raise ValueError("spawn-eye sample must contain three coordinates")
         hull = contract["player_hull"]
         if (int(hull["width"]) != PLAYER_DIAMETER or
                 int(hull["standing_height"]) != PLAYER_H or
@@ -732,6 +777,36 @@ def _floor_lighting_metrics(
         map_interior_min_value >= MIN_INTERIOR_LIGHT_VALUE and
         map_interior_min_radius >= MIN_INTERIOR_LIGHT_RADIUS
     )
+    spawn_origins = [
+        origin for origin in (
+            _origin(entity) for entity in ents
+            if entity.get("classname") == "info_player_deathmatch"
+        )
+        if origin is not None
+    ]
+    expected_spawn_eyes = [
+        (origin[0], origin[1], origin[2] + SPAWN_LIGHT_EYE_OFFSET)
+        for origin in spawn_origins
+    ]
+    spawn_eye_contract_ok = contract_spawn_eyes == expected_spawn_eyes
+    solid_boxes = [
+        SolidBox(*brush) for brush in _parse_world_solid_aabbs(
+            map_path.read_text(errors="ignore")
+        )
+    ]
+    qualified_spawn_sources = [*sources, *interior_sources]
+    dark_spawn_eye_ordinals = [
+        index for index, eye in enumerate(expected_spawn_eyes)
+        if not any(
+            light_reaches_spawn_eye(source, eye, solid_boxes)
+            for source in qualified_spawn_sources
+        )
+    ]
+    spawn_eye_lighting_ok = (
+        bool(expected_spawn_eyes)
+        and spawn_eye_contract_ok
+        and not dark_spawn_eye_ordinals
+    )
     lighting_ok = (
         worldspawn.get("_ml_lighting_version") == "2" and
         bool(regions) and
@@ -745,7 +820,8 @@ def _floor_lighting_metrics(
         map_min_value >= MIN_FLOOR_LIGHT_VALUE and
         min_coverage + 1e-9 >= effective_min and
         world_ambient >= WORLD_AMBIENT_LIGHT and
-        interior_lighting_ok
+        interior_lighting_ok and
+        spawn_eye_lighting_ok
     )
     result.update({
         "light_regions": len(regions),
@@ -756,6 +832,9 @@ def _floor_lighting_metrics(
         "interior_light_zones": len(interior_zones),
         "interior_lights": len(tagged_interior),
         "interior_lighting_ok": interior_lighting_ok,
+        "spawn_eye_samples": len(expected_spawn_eyes),
+        "dark_spawn_eye_ordinals": dark_spawn_eye_ordinals,
+        "spawn_eye_lighting_ok": spawn_eye_lighting_ok,
         "world_ambient_light": world_ambient,
         "min_light_coverage": round(min_coverage, 4),
         "lighting_ok": lighting_ok,
@@ -766,7 +845,8 @@ def _floor_lighting_metrics(
             f"required {effective_min:.3f}; valid lights "
             f"{len(sources)}/{len(tagged)}; interior "
             f"{len(interior_sources)}/{len(interior_zones)}; "
-            f"ambient {world_ambient}"
+            f"spawn eyes {len(expected_spawn_eyes) - len(dark_spawn_eye_ordinals)}/"
+            f"{len(expected_spawn_eyes)}; ambient {world_ambient}"
         )
     return result
 

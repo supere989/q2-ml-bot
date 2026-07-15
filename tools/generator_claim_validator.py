@@ -413,10 +413,9 @@ def _route_contract(routes: Mapping[str, Any]) -> tuple[list[dict], list[dict]]:
             )
             for node in path
         ]
-        # The legacy room graph assigns zero cost between distinct points in
-        # one room.  Its coordinate sequence is still a claim, so canonicalize
-        # a nonzero geometric lower bound rather than treating zero as an
-        # oracle fact or discarding the route.
+        # The source route distance is a deterministic standing-grid geodesic,
+        # not compiled collision authority.  Retain its blocker-aware proposal
+        # while enforcing the exact endpoint loop's geometric lower bound.
         geometric_distance = sum(
             math.dist(source, target)
             for source, target in zip(origins, origins[1:])
@@ -1352,7 +1351,8 @@ def _validate_lighting(
         lighting,
         {
             "lightdata_bytes", "lightdata_sha256", "lightmapped_faces",
-            "spawn_region_count", "dark_spawn_regions",
+            "floor_light_region_count", "floor_light_region_ids",
+            "spawn_nav_region_count", "dark_spawns",
         },
         "compiled lighting",
     )
@@ -1367,17 +1367,115 @@ def _validate_lighting(
     if _integer(lighting.get("lightmapped_faces"), "lightmapped faces", minimum=0) <= 0:
         failures.append("compiled BSP has no lightmapped faces")
     meta = claims.get("_meta")
-    expected_regions = 0
+    expected_region_ids: list[str] = []
     if isinstance(meta, Mapping):
-        expected_regions = len(
-            _list(_mapping(meta.get("lighting"), "generator lighting").get("regions"), "light regions")
+        expected_regions = [
+            _mapping(item, "generator light region")
+            for item in _list(
+                _mapping(meta.get("lighting"), "generator lighting").get("regions"),
+                "light regions",
+            )
+        ]
+        for region in expected_regions:
+            region_id = region.get("id")
+            if not isinstance(region_id, str) or not region_id:
+                raise ClaimValidationError(
+                    "generator light region ID must be a nonempty string"
+                )
+            expected_region_ids.append(region_id)
+        if len(expected_region_ids) != len(set(expected_region_ids)):
+            raise ClaimValidationError(
+                "generator light region IDs are not unique"
+            )
+        # Metadata regions are deterministically ordered by spatial bounds,
+        # whereas compiled entity tags are canonically ordered by ID.  Compare
+        # the exact sets in one shared representation without conflating the
+        # two legitimate array-order contracts.
+        expected_region_ids.sort()
+    actual_region_ids = _list(
+        lighting.get("floor_light_region_ids"),
+        "compiled floor-light region IDs",
+    )
+    if not all(isinstance(item, str) and item for item in actual_region_ids):
+        raise ClaimValidationError(
+            "compiled floor-light region IDs must be nonempty strings"
         )
-    actual_regions = _integer(lighting.get("spawn_region_count"), "spawn light regions", minimum=0)
-    if expected_regions and actual_regions != expected_regions:
-        failures.append("compiled spawn-light region count differs from v6 contract")
-    if _integer(lighting.get("dark_spawn_regions"), "dark spawn regions", minimum=0) != 0:
-        failures.append("compiled Atlas reports dark spawn regions")
-    return _criterion(failures, actual_regions)
+    if actual_region_ids != sorted(set(actual_region_ids)):
+        failures.append("compiled floor-light region IDs are not canonical")
+    floor_regions = _integer(
+        lighting.get("floor_light_region_count"),
+        "compiled floor-light regions", minimum=0,
+    )
+    if floor_regions != len(actual_region_ids):
+        failures.append("compiled floor-light region count is inconsistent")
+    if expected_region_ids and floor_regions != len(expected_region_ids):
+        failures.append("compiled floor-light region count differs from v6 contract")
+    if expected_region_ids and actual_region_ids != expected_region_ids:
+        failures.append("compiled floor-light region IDs differ from v6 contract")
+
+    spawn_records = [
+        _mapping(item, "compiled spawn")
+        for item in _list(compiled.get("spawns"), "compiled spawns")
+    ]
+    spawn_by_ordinal = {
+        _integer(item.get("entity_ordinal"), "spawn entity ordinal", minimum=0): item
+        for item in spawn_records
+    }
+    expected_nav_regions = {
+        _integer(item.get("region_id"), "compiled spawn region", minimum=0)
+        for item in spawn_records
+        if item.get("region_id") != 0
+    }
+    spawn_nav_regions = _integer(
+        lighting.get("spawn_nav_region_count"),
+        "compiled spawn navigation regions", minimum=0,
+    )
+    if spawn_nav_regions != len(expected_nav_regions):
+        failures.append("compiled spawn navigation region count is inconsistent")
+
+    dark_spawns = [
+        _mapping(item, "dark spawn diagnostic")
+        for item in _list(lighting.get("dark_spawns"), "dark spawn diagnostics")
+    ]
+    dark_ordinals = []
+    for record in dark_spawns:
+        _exact_keys(
+            record,
+            {
+                "entity_ordinal", "nav_region_id",
+                "eligible_light_entity_ordinals",
+            },
+            "dark spawn diagnostic",
+        )
+        ordinal = _integer(
+            record.get("entity_ordinal"), "dark spawn entity ordinal", minimum=0,
+        )
+        nav_region = _integer(
+            record.get("nav_region_id"), "dark spawn navigation region", minimum=1,
+        )
+        eligible = [
+            _integer(item, "eligible light entity ordinal", minimum=0)
+            for item in _list(
+                record.get("eligible_light_entity_ordinals"),
+                "eligible light entity ordinals",
+            )
+        ]
+        if eligible != sorted(set(eligible)):
+            failures.append(
+                f"dark spawn {ordinal} eligible light ordinals are not canonical"
+            )
+        spawn = spawn_by_ordinal.get(ordinal)
+        if spawn is None:
+            failures.append(f"dark spawn {ordinal} is not a compiled spawn")
+        elif nav_region != spawn.get("region_id"):
+            failures.append(
+                f"dark spawn {ordinal} navigation region is inconsistent"
+            )
+        dark_ordinals.append(ordinal)
+        failures.append(f"compiled Atlas reports dark spawn {ordinal}")
+    if dark_ordinals != sorted(set(dark_ordinals)):
+        failures.append("dark spawn diagnostics are not canonical")
+    return _criterion(failures, floor_regions)
 
 
 def _validate_hooks(

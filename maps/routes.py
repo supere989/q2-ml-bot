@@ -17,6 +17,7 @@ node respawn periods to predict availability; the policy consumes route value
 is that substrate.
 """
 from __future__ import annotations
+import heapq
 import math
 from collections import defaultdict
 from typing import Dict, List, Mapping, Sequence, Tuple
@@ -59,6 +60,69 @@ MAX_SOURCE_NAV_CELLS = 250_000
 
 class RouteGraphError(ValueError):
     """Raised when the generator cannot publish a complete route contract."""
+
+
+class _StandingNavigation:
+    """Deterministic source standing graph retained for route-cost proposals.
+
+    Component labels remain proposal evidence only.  Distances are shortest
+    paths through the same conservative 16-unit standing-hull graph, so final
+    walls and other source blockers affect route selection and the published
+    cost claim instead of being discarded after connectivity is established.
+    The compiled Atlas still independently challenges every endpoint and owns
+    the authoritative cost.
+    """
+
+    def __init__(
+        self,
+        components: Dict[int, int],
+        endpoint_vertices: Dict[int, int],
+        adjacency: Sequence[Sequence[Tuple[int, float]]],
+    ) -> None:
+        self.components = components
+        self._endpoint_vertices = endpoint_vertices
+        self._adjacency = tuple(
+            tuple(sorted(values, key=lambda item: (item[0], item[1])))
+            for values in adjacency
+        )
+        self._distance_cache: Dict[int, Dict[int, float]] = {}
+
+    def distance(self, source: int, target: int) -> float | None:
+        """Return one finite source-grid geodesic, or ``None`` if disjoint."""
+        if (
+            source not in self.components or target not in self.components
+            or self.components[source] != self.components[target]
+        ):
+            return None
+        if source == target:
+            return 0.0
+        cached = self._distance_cache.get(source)
+        if cached is None:
+            start = self._endpoint_vertices[source]
+            endpoint_by_vertex = {
+                vertex: endpoint
+                for endpoint, vertex in self._endpoint_vertices.items()
+                if self.components.get(endpoint) == self.components[source]
+            }
+            remaining = set(endpoint_by_vertex)
+            queue = [(0.0, start)]
+            best = {start: 0.0}
+            cached = {}
+            while queue and remaining:
+                cost, vertex = heapq.heappop(queue)
+                if cost != best[vertex]:
+                    continue
+                endpoint = endpoint_by_vertex.get(vertex)
+                if endpoint is not None:
+                    cached[endpoint] = cost
+                    remaining.discard(vertex)
+                for neighbor, edge_cost in self._adjacency[vertex]:
+                    candidate = cost + edge_cost
+                    if candidate < best.get(neighbor, math.inf):
+                        best[neighbor] = candidate
+                        heapq.heappush(queue, (candidate, neighbor))
+            self._distance_cache[source] = cached
+        return cached.get(target)
 
 
 def _period(cls: str) -> float:
@@ -120,13 +184,13 @@ def _solid_bounds(value, label: str) -> Tuple[float, float, float, float, float,
     return bounds  # type: ignore[return-value]
 
 
-def _standing_components(
+def _standing_navigation(
     rooms: Sequence[object],
     nodes: Sequence[Mapping[str, object]],
     standing_blockers: Sequence[object],
     lava_pools: Sequence[object],
-) -> Dict[int, int]:
-    """Build conservative final-source standing components for route proposals.
+) -> _StandingNavigation:
+    """Build the conservative final-source standing graph for route proposals.
 
     This is deliberately not collision authority.  It rejects proposals that
     are already contradicted by the generator's final room floors, blockers, or
@@ -229,6 +293,9 @@ def _standing_components(
     ordered_cells = sorted(cells, key=lambda key: (key[2], key[1], key[0]))
     cell_vertex = {key: index for index, key in enumerate(ordered_cells)}
     parent = list(range(len(ordered_cells) + len(nodes)))
+    adjacency: List[List[Tuple[int, float]]] = [
+        [] for _ in range(len(parent))
+    ]
 
     def find(vertex: int) -> int:
         while parent[vertex] != vertex:
@@ -245,6 +312,13 @@ def _standing_components(
         if left_root > right_root:
             left_root, right_root = right_root, left_root
         parent[right_root] = left_root
+
+    def connect(left: int, right: int, cost: float) -> None:
+        if not math.isfinite(cost) or cost < 0:
+            raise RouteGraphError("source standing edge has invalid cost")
+        union(left, right)
+        adjacency[left].append((right, cost))
+        adjacency[right].append((left, cost))
 
     for key in ordered_cells:
         source = cell_vertex[key]
@@ -264,7 +338,7 @@ def _standing_components(
                 max(source_x, target_x) + half,
                 max(source_y, target_y) + half,
             ):
-                union(source, target)
+                connect(source, target, float(SOURCE_NAV_CELL))
 
     endpoint_offset = len(ordered_cells)
     admitted_endpoints = set()
@@ -309,17 +383,40 @@ def _standing_components(
                     max(point_x, center_x) + half,
                     max(point_y, center_y) + half,
                 ):
-                    union(endpoint, target)
+                    connect(
+                        endpoint, target,
+                        math.hypot(point_x - center_x, point_y - center_y),
+                    )
                     admitted_endpoints.add(node_index)
 
     component_roots = sorted({
         find(endpoint_offset + index) for index in admitted_endpoints
     })
     component_ids = {root: index for index, root in enumerate(component_roots)}
-    return {
+    components = {
         index: component_ids[find(endpoint_offset + index)]
         for index in sorted(admitted_endpoints)
     }
+    return _StandingNavigation(
+        components,
+        {
+            index: endpoint_offset + index
+            for index in sorted(admitted_endpoints)
+        },
+        adjacency,
+    )
+
+
+def _standing_components(
+    rooms: Sequence[object],
+    nodes: Sequence[Mapping[str, object]],
+    standing_blockers: Sequence[object],
+    lava_pools: Sequence[object],
+) -> Dict[int, int]:
+    """Return conservative component labels without discarding graph rules."""
+    return _standing_navigation(
+        rooms, nodes, standing_blockers, lava_pools,
+    ).components
 
 
 def source_endpoint_components(
@@ -401,9 +498,10 @@ def build_route_graph(
                       "x": int(x), "y": int(y), "z": int(z),
                       "room": source_room_index(rooms, x, y, z)})
 
-    components = _standing_components(
+    navigation = _standing_navigation(
         rooms, nodes, standing_blockers, lava_pools,
     )
+    components = navigation.components
     # Source component IDs are proposal evidence, not compiled authority.  They
     # make the exact standing-hull relation used for route selection explicit
     # in the sidecar so the source-freeze validator never has to reinterpret
@@ -414,17 +512,12 @@ def build_route_graph(
         node["source_component"] = components.get(node["id"])
 
     def route_metric(source, target):
-        """Return a lower-bound metric only within one source component."""
-        source_component = components.get(source["id"])
-        target_component = components.get(target["id"])
-        if (
-            source_component is None or target_component is None
-            or source_component != target_component
-        ):
+        """Return the source standing-grid geodesic and its risk proposal."""
+        physical = navigation.distance(source["id"], target["id"])
+        if physical is None:
             return None
         source_point = (source["x"], source["y"], source["z"])
         target_point = (target["x"], target["y"], target["z"])
-        physical = _dist(source_point, target_point)
         exposure = physical * edge_risk(source_point, target_point)
         return physical, exposure, physical + exposure
 
@@ -480,17 +573,11 @@ def build_route_graph(
         exposure = sum(metric[1] for metric in metrics)
         if path_total <= 0:
             return None
-        # Room centres and predecessor edges are an internal selection/risk
-        # model, not published route waypoints.  The compiled Atlas challenges
-        # only this exact spawn/item endpoint loop, so claim its deterministic
-        # geometric lower bound and let the oracle publish authoritative cost.
-        claimed_distance = sum(
-            _dist(
-                (source["x"], source["y"], source["z"]),
-                (target["x"], target["y"], target["z"]),
-            )
-            for source, target in zip(loop, loop[1:])
-        )
+        # Publish the obstacle-aware source geodesic used for selection. Room
+        # metadata edges remain diagnostics and the compiled Atlas remains the
+        # only collision/cost authority, but source walls can no longer turn a
+        # cheap Euclidean chord into an unreported multi-room detour.
+        claimed_distance = path_total
         if claimed_distance <= 0:
             return None
         risk = round(exposure / path_total, 3)

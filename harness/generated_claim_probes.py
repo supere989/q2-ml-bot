@@ -826,11 +826,11 @@ def compiled_lighting_diagnostics(
     if metadata.lightmaps.byte_count <= 0 or metadata.faces.lightmapped_count <= 0:
         raise GeneratedClaimProbeError("compiled BSP has no admitted qrad lighting")
     _sha(metadata.lightmaps.sha256, "compiled lightdata")
-    regions = {
+    nav_regions = {
         _integer(record.get("region_id"), "spawn region", minimum=1)
         for record in spawn_records
     }
-    if not regions:
+    if not nav_regions:
         raise GeneratedClaimProbeError("compiled spawns have no Atlas regions")
     worldspawn = next(
         (entity for entity in metadata.entities if entity.classname == "worldspawn"),
@@ -852,6 +852,7 @@ def compiled_lighting_diagnostics(
         raise GeneratedClaimProbeError("compiled lighting thresholds differ from frozen v6")
 
     lights = []
+    floor_light_regions: set[str] = set()
     for entity in metadata.entities:
         if entity.classname != "light":
             continue
@@ -877,11 +878,22 @@ def compiled_lighting_diagnostics(
             and radius > 0
             and qualified
         ):
+            if floor_light:
+                floor_region = entity.value("_ml_region")
+                if not floor_region:
+                    raise GeneratedClaimProbeError(
+                        "compiled qualified floor light lacks an _ml_region tag"
+                    )
+                floor_light_regions.add(floor_region)
             lights.append((entity.index, point, radius))
     if not lights:
         raise GeneratedClaimProbeError("compiled BSP has no qualified v6 light entities")
+    if not floor_light_regions:
+        raise GeneratedClaimProbeError(
+            "compiled BSP has no qualified floor-light region tags"
+        )
 
-    dark_regions: set[int] = set()
+    dark_spawns = []
     for spawn_index, record in enumerate(spawn_records):
         origin_milliunits = _vec3(
             record.get("origin_milliunits"), f"spawn {spawn_index} origin"
@@ -909,13 +921,27 @@ def compiled_lighting_diagnostics(
             for response in (cm.call(requests) if requests else [])
         )
         if not visible:
-            dark_regions.add(_integer(record.get("region_id"), "spawn region", minimum=1))
+            dark_spawns.append({
+                "entity_ordinal": _integer(
+                    record.get("entity_ordinal"),
+                    f"spawn {spawn_index} entity ordinal", minimum=0,
+                ),
+                "nav_region_id": _integer(
+                    record.get("region_id"), "spawn region", minimum=1,
+                ),
+                "eligible_light_entity_ordinals": sorted(
+                    light_index for light_index, _light_origin in eligible_lights
+                ),
+            })
+    dark_spawns.sort(key=lambda record: record["entity_ordinal"])
     return {
         "lightdata_bytes": metadata.lightmaps.byte_count,
         "lightdata_sha256": metadata.lightmaps.sha256,
         "lightmapped_faces": metadata.faces.lightmapped_count,
-        "spawn_region_count": len(regions),
-        "dark_spawn_regions": len(dark_regions),
+        "floor_light_region_count": len(floor_light_regions),
+        "floor_light_region_ids": sorted(floor_light_regions),
+        "spawn_nav_region_count": len(nav_regions),
+        "dark_spawns": dark_spawns,
     }
 
 

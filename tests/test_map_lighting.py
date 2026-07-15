@@ -6,8 +6,10 @@ import subprocess
 import sys
 
 from maps.generator import (
+    CONTENTS_LAVA,
     FloorLightRegion,
     HorizontalSurface,
+    LightSource,
     MIN_FLOOR_LIGHT_COVERAGE,
     MIN_SAFE_HEADROOM,
     MapWriter,
@@ -19,6 +21,7 @@ from maps.generator import (
     TOWER_H_MIN,
     floor_light_coverage,
     generate_map,
+    light_reaches_spawn_eye,
     unsafe_horizontal_sandwiches,
 )
 from tools.validate_maps import (
@@ -26,6 +29,7 @@ from tools.validate_maps import (
     Q2_BSP_LUMPS,
     _compiled_lightdata_metrics,
     _parse_entities,
+    _parse_world_solid_aabbs,
     static_validate,
 )
 
@@ -133,6 +137,63 @@ def test_platform_shadow_gets_under_platform_light():
     assert floor_light_coverage(
         region, region_sources, generator.light_occluders
     ) >= MIN_FLOOR_LIGHT_COVERAGE
+
+
+def test_spawn_eye_visibility_uses_3d_radius_and_complete_solids():
+    eye = (0.0, 0.0, 55.0)
+    vertically_far = LightSource(
+        "floor_0_0_0", "overhead", (400.0, 0.0, 455.0), 448.0, 900,
+    )
+    assert light_reaches_spawn_eye(vertically_far, eye, []) is False
+
+    blocked = LightSource(
+        "floor_0_0_0", "overhead", (100.0, 0.0, 72.0), 448.0, 900,
+    )
+    wall = SolidBox(40, -32, 0, 60, 32, 128)
+    assert light_reaches_spawn_eye(blocked, eye, [wall]) is False
+
+
+def test_static_spawn_light_solids_match_emitted_world_semantics(tmp_path):
+    writer = MapWriter()
+    writer.add_brush(0, 0, 0, 64, 64, 16)
+    writer.add_brush(80, 0, 0, 144, 64, 16, contents=CONTENTS_LAVA)
+    trigger = writer.make_box_brush(160, 0, 0, 224, 64, 16)
+    writer.add_brush_entity("trigger_hurt", {}, [trigger])
+    map_path = tmp_path / "solid_semantics.map"
+    writer.write(map_path)
+
+    assert writer.solid_boxes == [SolidBox(0, 0, 0, 64, 64, 16)]
+    assert _parse_world_solid_aabbs(map_path.read_text()) == [
+        (0.0, 0.0, 0.0, 64.0, 64.0, 16.0),
+    ]
+
+
+def test_occluded_spawn_gets_deterministic_column_light():
+    generator = MapGenerator(seed=7, style="open")
+    generator.rooms = [
+        Room(
+            gx=0, gy=0, wx=0, wy=0, w=512, d=512,
+            floor_z=0, ceil_z=256, kind="room",
+        )
+    ]
+    generator.spawn_points = [(96, 256, 24)]
+    wall = SolidBox(128, 0, 0, 160, 512, 200)
+    generator.spawn_blockers.append(wall)
+    generator.writer.add_brush(
+        wall.x0, wall.y0, wall.z0, wall.x1, wall.y1, wall.z1,
+    )
+
+    generator._emit_floor_lighting()
+
+    column = [
+        source for source in generator.light_sources
+        if source.kind == "spawn_column"
+    ]
+    assert [source.origin for source in column] == [(96.0, 256.0, 72.0)]
+    assert generator.spawn_eye_samples == [(96.0, 256.0, 55.0)]
+    assert light_reaches_spawn_eye(
+        column[0], generator.spawn_eye_samples[0], generator.writer.solid_boxes,
+    )
 
 
 def test_interior_anchor_rejects_sample_without_safe_headroom():
@@ -271,6 +332,9 @@ def test_towers_seed_71425107_emits_direct_interior_lights(tmp_path):
     )
 
     assert result["interior_lighting_ok"] is True
+    assert result["spawn_eye_samples"] == 8
+    assert result["dark_spawn_eye_ordinals"] == []
+    assert result["spawn_eye_lighting_ok"] is True
     assert result["lighting_ok"] is True
     assert result["static_ok"] is True
 

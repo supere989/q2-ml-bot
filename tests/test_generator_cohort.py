@@ -94,10 +94,18 @@ def fake_generator_factory(
             }
             for item_id in range(4)
         ]
-        nodes.append({
-            "id": 4, "type": "spawn", "x": base + 100,
-            "y": 100, "z": 24, "room": 0, "source_component": 0,
-        })
+        nodes.extend(
+            {
+                "id": spawn_id,
+                "type": "spawn",
+                "x": base + 100 + (spawn_id - 4) * 64,
+                "y": 100 + (spawn_id % 2) * 64,
+                "z": 24,
+                "room": 0,
+                "source_component": 0,
+            }
+            for spawn_id in range(4, 12)
+        )
         if name == invalid_route:
             nodes[1]["x"], nodes[1]["y"], nodes[1]["z"] = (
                 nodes[0]["x"], nodes[0]["y"], nodes[0]["z"]
@@ -217,6 +225,13 @@ def test_generate_publishes_only_a_complete_double_built_source_freeze(
     assert all(
         row["route_contract"][
             "all_selected_endpoints_share_source_standing_component"
+        ] is True
+        for row in report["maps"]
+    )
+    assert all(
+        row["route_contract"]["spawn_count"] == 8
+        and row["route_contract"][
+            "all_spawns_share_source_standing_component"
         ] is True
         for row in report["maps"]
     )

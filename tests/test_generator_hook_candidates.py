@@ -298,8 +298,15 @@ def test_runtime_sidecar_is_unique_eight_field_unproven_projection(tmp_path) -> 
 
 
 def test_seeded_styles_publish_only_real_ceiling_geometry() -> None:
-    for style in ("open", "towers", "arena_vertical"):
-        generator = MapGenerator(seed=7, style=style)
+    # Use members already proven to satisfy the stricter one-component spawn
+    # contract; arbitrary layouts may now correctly fail closed before hook
+    # proposal generation when no component can hold eight map-spanning starts.
+    for style, seed in (
+        ("open", 71435000),
+        ("towers", 71435100),
+        ("arena_vertical", 71435500),
+    ):
+        generator = MapGenerator(seed=seed, style=style)
         generator.generate()
         allowed = {
             (float(surface.box.z0), surface.kind)

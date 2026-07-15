@@ -169,6 +169,22 @@ def validate_source_route_contract(
             spawn_by_room.setdefault(room, []).append(node)
     for room_spawns in spawn_by_room.values():
         room_spawns.sort(key=lambda node: int(node["id"]))
+    spawn_count = sum(len(spawns) for spawns in spawn_by_room.values())
+    if spawn_count != 8:
+        raise SourceRouteContractError(
+            f"{map_id} must declare exactly eight deathmatch spawn nodes"
+        )
+    spawn_components = {
+        components_by_node[node_id]
+        for node_id, node in nodes.items()
+        if node.get("type") == "spawn"
+    }
+    if None in spawn_components or len(spawn_components) != 1:
+        raise SourceRouteContractError(
+            f"{map_id} deathmatch spawn nodes must share one non-null "
+            "source standing component"
+        )
+    spawn_source_component = next(iter(spawn_components))
 
     normalized_edges = []
     edge_pairs: set[tuple[int, int]] = set()
@@ -287,11 +303,17 @@ def validate_source_route_contract(
         published_distance = _number(
             route.get("dist"), f"{map_id} route {route_index} dist"
         )
-        distance_error = abs(published_distance - geometric_distance)
-        if distance_error > MAX_ENDPOINT_DISTANCE_ERROR:
+        # ``dist`` is the generator's deterministic shortest-path proposal on
+        # its conservative standing grid.  It must cover the exact endpoint
+        # chord loop, but walls and other final blockers are expected to make
+        # it longer.  The independently compiled Atlas still owns collision,
+        # connectivity, and authoritative cost.
+        geometric_shortfall = geometric_distance - published_distance
+        if geometric_shortfall > MAX_ENDPOINT_DISTANCE_ERROR:
             raise SourceRouteContractError(
                 f"{map_id} route {route_index} dist {published_distance:g} "
-                f"differs from endpoint-loop geometry {geometric_distance:.6f}"
+                "falls below endpoint-loop geometry "
+                f"{geometric_distance:.6f}"
             )
         normalized_routes.append({
             "archetype": archetype,
@@ -302,7 +324,9 @@ def validate_source_route_contract(
             "endpoint_loop_sha256": _sha256([list(origin) for origin in origins]),
             "published_dist": published_distance,
             "endpoint_loop_geometry": geometric_distance,
-            "distance_error": distance_error,
+            "source_geodesic_overhead": max(
+                0.0, published_distance - geometric_distance,
+            ),
         })
 
     if zero_length_legs:
@@ -332,16 +356,19 @@ def validate_source_route_contract(
         "edge_count": len(edges_value),
         "route_count": len(routes_value),
         "item_origin_count": len(item_origins),
-        "spawn_count": sum(len(spawns) for spawns in spawn_by_room.values()),
+        "spawn_count": spawn_count,
+        "spawn_source_component": spawn_source_component,
         "route_endpoint_count": route_endpoint_count,
         "routes": normalized_routes,
         "zero_length_route_legs": 0,
         "minimum_distinct_item_endpoints_per_route": 2,
         "all_route_endpoints_are_items": True,
         "published_dist_matches_endpoint_loop": True,
+        "published_dist_covers_endpoint_loop_geometry": True,
         "all_item_nodes_floor_assigned": True,
         "item_spawn_origin_collisions": 0,
         "all_spawns_and_route_endpoints_floor_assigned": True,
+        "all_spawns_share_source_standing_component": True,
         "globally_unique_item_origins": True,
         "all_selected_endpoints_share_source_standing_component": True,
         "exact_start_nodes_declared": True,

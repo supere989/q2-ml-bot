@@ -84,15 +84,18 @@ def fake_generator_factory(
             }
             for item_id in range(4)
         ]
-        nodes.append({
-            "id": 4,
-            "type": "spawn",
-            "x": base + 100,
-            "y": 100,
-            "z": 24,
-            "room": 0,
-            "source_component": 0,
-        })
+        nodes.extend(
+            {
+                "id": spawn_id,
+                "type": "spawn",
+                "x": base + 100 + (spawn_id - 4) * 64,
+                "y": 100 + (spawn_id % 2) * 64,
+                "z": 24,
+                "room": 0,
+                "source_component": 0,
+            }
+            for spawn_id in range(4, 12)
+        )
         routes = [
             {"archetype": "offense", "start_room": 0, "start_node_id": 4, "source_component": 0, "node_ids": [0, 1]},
             {"archetype": "survival", "start_room": 0, "start_node_id": 4, "source_component": 0, "node_ids": [1, 2]},
@@ -120,7 +123,7 @@ def fake_generator_factory(
                 nodes[0]["room"] = -1
             elif defect == "item_spawn_collision":
                 nodes.append({
-                    "id": 5,
+                    "id": 12,
                     "type": "item",
                     "class": "item_collision",
                     "x": nodes[4]["x"],
@@ -145,7 +148,7 @@ def fake_generator_factory(
                 edges = [{"a": 0, "b": 1}, {"a": 1, "b": 0}]
             elif defect == "unknown_node_type":
                 nodes.append({
-                    "id": 5, "type": "teleporter", "x": base + 200,
+                    "id": 12, "type": "teleporter", "x": base + 200,
                     "y": 200, "z": 24, "room": 0,
                     "source_component": 0,
                 })
@@ -164,7 +167,7 @@ def fake_generator_factory(
                 for source, target in zip(loop, loop[1:])
             ))
         if name == defective_map and defect == "distance_mismatch":
-            routes[0]["dist"] += 2
+            routes[0]["dist"] -= 2
         (output / f"{name}.routes.json").write_text(
             json.dumps({
                 "version": version, "nodes": nodes, "edges": edges,
@@ -268,10 +271,10 @@ def test_complete_double_generation_publishes_canonical_development_report(
         ("missing_archetype", "each route archetype exactly once"),
         ("unassigned_spawn", "spawn node 4 is not floor-assigned"),
         ("unassigned_item", "item node 0 is not floor-assigned"),
-        ("item_spawn_collision", "item node 5 overlaps spawn node 4"),
+        ("item_spawn_collision", "item node 12 overlaps spawn node 4"),
         ("one_endpoint", "requires at least two item endpoints"),
         ("non_item_endpoint", "endpoint node 4 is not an item"),
-        ("distance_mismatch", "differs from endpoint-loop geometry"),
+        ("distance_mismatch", "falls below endpoint-loop geometry"),
         (
             "disconnected_endpoint_room",
             "does not share source standing component",
@@ -280,7 +283,7 @@ def test_complete_double_generation_publishes_canonical_development_report(
         ("unhashable_archetype", "each route archetype exactly once"),
         ("self_loop_edge", "edge 0 is a self-loop"),
         ("duplicate_undirected_edge", "duplicates undirected edge"),
-        ("unknown_node_type", "node 5 has unknown type"),
+        ("unknown_node_type", "node 12 has unknown type"),
     ],
 )
 def test_route_defect_rejects_population_without_report(

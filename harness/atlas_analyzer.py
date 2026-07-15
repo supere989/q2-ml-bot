@@ -5430,11 +5430,13 @@ def analyze_map(
                         "lightdata_bytes": metadata.lightmaps.byte_count,
                         "lightdata_sha256": metadata.lightmaps.sha256,
                         "lightmapped_faces": metadata.faces.lightmapped_count,
-                        "spawn_region_count": len({
+                        "floor_light_region_count": 0,
+                        "floor_light_region_ids": [],
+                        "spawn_nav_region_count": len({
                             record["region_id"] for record in spawn_records
                             if record["region_id"]
                         }),
-                        "dark_spawn_regions": 0,
+                        "dark_spawns": [],
                     },
                 }
             drop_summary = summarize_drop_classifications(drop_classifications)

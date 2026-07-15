@@ -1,8 +1,66 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
-from maps.generator import LAVA_DEPTH, MapGenerator, Room, SolidBox
+from maps.generator import (
+    DM_SPAWN_COUNT,
+    LAVA_DEPTH,
+    MIN_SPAWN_SEPARATION,
+    MapGenerator,
+    Room,
+    SolidBox,
+)
+from maps.routes import source_endpoint_components
+
+
+@pytest.mark.parametrize(
+    ("style", "seed"),
+    (
+        ("open", 71435001),
+        ("canyon", 71435200),
+        ("canyon", 71435202),
+        ("canyon", 71435203),
+        ("pits", 71435300),
+        ("pits", 71435301),
+        ("arena_open", 71435403),
+        ("arena_lanes", 71435600),
+        ("arena_lanes", 71435603),
+    ),
+)
+def test_failed_71435_spawns_share_one_source_standing_component(
+    style: str, seed: int,
+) -> None:
+    generator = MapGenerator(seed=seed, style=style)
+    generator.generate(5)
+
+    assert len(generator.spawn_points) == DM_SPAWN_COUNT
+    components = source_endpoint_components(
+        generator.rooms,
+        generator.spawn_points,
+        generator.spawn_blockers,
+        generator.lava_pools,
+    )
+    assert len(components) == DM_SPAWN_COUNT
+    assert len(set(components.values())) == 1
+    assert generator._spawn_span_ok(generator.spawn_points)
+    assert min(
+        math.hypot(left[0] - right[0], left[1] - right[1])
+        for index, left in enumerate(generator.spawn_points)
+        for right in generator.spawn_points[index + 1:]
+    ) >= MIN_SPAWN_SEPARATION
+
+
+def test_spawn_placement_fails_when_no_component_can_span_the_map() -> None:
+    generator = MapGenerator(seed=17, style="open")
+    generator.rooms = [
+        Room(0, 0, 0, 0, 1024, 1024, 0, 384, "room"),
+        Room(4, 0, 2048, 0, 1024, 1024, 0, 384, "room"),
+    ]
+
+    with pytest.raises(RuntimeError, match="one source standing component"):
+        generator._place_combat_spawns()
 
 
 @pytest.mark.parametrize(
@@ -74,4 +132,3 @@ def test_lava_candidate_rejects_existing_static_structure() -> None:
     generator._emit_lava_pools()
 
     assert generator.lava_pools == []
-

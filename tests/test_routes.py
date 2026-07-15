@@ -132,7 +132,7 @@ def test_overlapping_rooms_choose_closest_compatible_floor_band() -> None:
     assert [node["room"] for node in graph["nodes"]] == [0, 1, 0, -1]
 
 
-def test_same_room_loop_uses_local_3d_distance_deterministically() -> None:
+def test_same_room_loop_uses_source_grid_geodesic_deterministically() -> None:
     kwargs = {
         "rooms": [room(0, width=128, depth=128)],
         "connections": [],
@@ -153,7 +153,51 @@ def test_same_room_loop_uses_local_3d_distance_deterministically() -> None:
         route for route in first["routes"] if route["archetype"] == "offense"
     )
 
-    assert offense["dist"] == 140
+    # The 16-unit cardinal standing grid retains its exact endpoint connector
+    # costs instead of collapsing the loop to a Euclidean chord sum.
+    assert offense["dist"] == 146
+    assert first == second
+
+
+def test_lane_wall_detour_is_retained_in_route_selection_and_distance() -> None:
+    kwargs = {
+        "rooms": [room(0, width=512, depth=512)],
+        "connections": [],
+        "items": [
+            ("weapon_rocketlauncher", 448, 64, 24),
+            ("weapon_supershotgun", 448, 96, 24),
+            ("item_health", 64, 96, 24),
+            ("item_armor_combat", 96, 96, 24),
+        ],
+        "spawns": [(64, 64, 24)],
+        "lava_pools": [],
+        # Same failure shape as arena-lanes 71435601: the endpoints remain in
+        # one component through the far opening, but their direct chord crosses
+        # a too-tall lane wall and understates travel by more than 2x.
+        "standing_blockers": [blocker(240, 0, 0, 272, 384, 128)],
+    }
+
+    first = build_route_graph(**kwargs)
+    second = build_route_graph(**kwargs)
+    offense = next(
+        route for route in first["routes"] if route["archetype"] == "offense"
+    )
+    nodes = {node["id"]: node for node in first["nodes"]}
+    loop = [
+        nodes[offense["start_node_id"]],
+        *(nodes[node_id] for node_id in offense["node_ids"]),
+        nodes[offense["start_node_id"]],
+    ]
+    endpoint_geometry = sum(
+        math.dist(
+            (source["x"], source["y"], source["z"]),
+            (target["x"], target["y"], target["z"]),
+        )
+        for source, target in zip(loop, loop[1:])
+    )
+
+    assert offense["dist"] == 2070
+    assert offense["dist"] > 2 * endpoint_geometry
     assert first == second
 
 
@@ -357,7 +401,7 @@ def test_mandatory_route_repairs_isolated_rotated_start() -> None:
     assert {nodes[node_id]["room"] for node_id in control["node_ids"]} <= {0, 1}
 
 
-def test_route_distance_and_risk_use_connected_endpoint_lower_bound() -> None:
+def test_route_distance_and_risk_use_source_grid_geodesic() -> None:
     lava = blocker(1020, 40, 14, 1040, 60, 34)
     graph = build_route_graph(
         rooms=[room(0, width=800, depth=128),
@@ -377,9 +421,9 @@ def test_route_distance_and_risk_use_connected_endpoint_lower_bound() -> None:
 
     offense = next(route for route in graph["routes"]
                    if route["archetype"] == "offense")
-    # Published cost remains exact endpoint-loop geometry. The source component
-    # only filters impossible legs; it is not a compiled route/cost authority.
-    assert offense["dist"] == 4060
+    # The lava volume is part of the conservative source standing graph, so
+    # its small detour is retained without becoming compiled collision authority.
+    assert offense["dist"] == 4162
     assert 0.0 < offense["risk"] < 1.0
 
 
@@ -420,10 +464,7 @@ def _assert_complete_generated_routes(routes: dict) -> None:
             )
             for left, right in zip(sequence, sequence[1:])
         )
-        assert route["dist"] == round(geometric)
-        ratio = max(route["dist"], geometric) / min(route["dist"], geometric)
-        difference = abs(route["dist"] - geometric)
-        assert not (ratio > 2.0 and difference > 1024.0)
+        assert route["dist"] + 0.5 >= geometric
         assert 0.0 <= route["risk"] <= 1.0
 
 

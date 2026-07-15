@@ -37,12 +37,14 @@ attestation. The generator's landing hint is never an expected-cell constraint
 or compiled-world claim. A final V4 runtime hook sidecar is admissible only
 when its canonical header and eight-field rows match this record exactly.
 
-The legacy room graph can report zero cost between different locations in one
-room. The canonical cost claim therefore uses the greater of the declared
-room-graph distance and the route node sequence's geometric length. This does
-not authorize a path; it only avoids treating a legacy zero as an oracle fact.
-The compiled analyzer still must prove every segment connected and emit its
-Atlas cost.
+The generator retains the deterministic 16-unit standing-hull grid used to
+establish source components and publishes each route's shortest-path distance
+through that grid. Final lane walls, cover, buildings, towers, and lava are
+therefore present in route scoring and cost claims rather than being discarded
+after a Boolean connectivity decision. The canonical claim uses the greater
+of that source geodesic and the exact route endpoint sequence's geometric
+length. Neither value authorizes a path: the compiled analyzer still must
+prove every segment connected and emit its independent Atlas cost.
 
 The analyzer accepts this document as an immutable input and echoes its digest
 as `generator_claims_sha256` in `q2-atlas-analysis-v1`. Generated promotion
@@ -109,8 +111,9 @@ The generated path requires every criterion below:
 10. Every route segment has positive oracle/validation evidence, exact claimed
    endpoints, finite cost, and compiled connectivity. A route fails cost
    consistency only when its total differs by more than 1024 units **and** by
-   more than 2x; the joint threshold accounts for the legacy room-centre cost
-   model while still rejecting gross/tampered claims. Endpoint support begins
+   more than 2x; the joint threshold admits bounded differences between the
+   conservative source standing grid and compiled Pmove navigation while still
+   rejecting gross/tampered claims. Endpoint support begins
    one exact 1/8-unit Pmove quantum above the claimed player origin. Likewise,
    navigation flood and non-spawn seed discovery retain their bounded raised
    search first, then use a grounded 1/8-unit support trace when the raised
@@ -200,12 +203,17 @@ replace, overwrite, or be copied into the generator claims stage.
 Generator route sidecars now use version 2. Every node carries its explicit
 `source_component` proposal, and every route names the exact `start_node_id`
 and component used during selection. The source-freeze validator requires the
-start spawn and every selected item endpoint to share that component. Room
-connection rows remain serialized diagnostics and risk priors; they are never
-reachability evidence. These component labels are still generator claims, not
-compiled collision authority. Independent Atlas route probes must challenge
-the exact endpoint loop before admission. Version 1 sidecars are retired and
-rejected; there is no inferred start-spawn or room-edge fallback.
+source graph to contain exactly eight deathmatch spawns, all assigned to one
+shared non-null standing component. The start spawn and every selected item
+endpoint must also share the route's declared component. If final source
+geometry has no one component that can hold all eight clear, separated,
+map-spanning starts, generation fails; it may not scatter starts across
+components. Room connection rows remain serialized diagnostics and risk
+priors; they are never reachability evidence. These component labels are still
+generator claims, not compiled collision authority. Independent Atlas route
+probes must challenge the exact endpoint loop and directed spawn reachability
+before admission. Version 1 sidecars are retired and rejected; there is no
+inferred start-spawn or room-edge fallback.
 
 Preparation evaluates all 28 claim documents in declaration order before it
 publishes anything. If any build fails, no claims root or passing subset is

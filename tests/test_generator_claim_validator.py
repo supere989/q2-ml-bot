@@ -24,6 +24,7 @@ from tools.generator_claim_validator import (
     ClaimValidationError,
     _canonical_semantic_analysis_manifest,
     _expected_analyzer_sha256,
+    _route_contract,
     build_generator_claims,
     canonical_bytes,
     file_sha256,
@@ -191,6 +192,39 @@ def _route_results(claims: dict) -> list[dict]:
     ]
 
 
+def test_route_claim_preserves_obstacle_aware_source_geodesic() -> None:
+    routes = {
+        "version": 2,
+        "nodes": [
+            {
+                "id": 0, "type": "item", "x": 448, "y": 64, "z": 24,
+                "room": 0, "source_component": 0,
+            },
+            {
+                "id": 1, "type": "item", "x": 448, "y": 96, "z": 24,
+                "room": 0, "source_component": 0,
+            },
+            {
+                "id": 2, "type": "spawn", "x": 64, "y": 64, "z": 24,
+                "room": 0, "source_component": 0,
+            },
+        ],
+        "routes": [{
+            "id": 0,
+            "archetype": "offense",
+            "start_room": 0,
+            "start_node_id": 2,
+            "source_component": 0,
+            "node_ids": [0, 1],
+            "dist": 2070,
+        }],
+    }
+
+    _segments, summaries = _route_contract(routes)
+
+    assert summaries[0]["claimed_cost_q8"] == 2070 * 256
+
+
 def _analysis(map_path: Path, claims: dict) -> dict:
     meta = json.loads(map_path.with_suffix(".meta.json").read_text())
     hook_materialization = json.loads(
@@ -295,8 +329,12 @@ def _analysis(map_path: Path, claims: dict) -> dict:
                 "lightdata_bytes": 4096,
                 "lightdata_sha256": "55" * 32,
                 "lightmapped_faces": 64,
-                "spawn_region_count": len(meta["lighting"]["regions"]),
-                "dark_spawn_regions": 0,
+                "floor_light_region_count": len(meta["lighting"]["regions"]),
+                "floor_light_region_ids": sorted(
+                    region["id"] for region in meta["lighting"]["regions"]
+                ),
+                "spawn_nav_region_count": 1,
+                "dark_spawns": [],
             },
             "hooks": {
                 "authority_admitted": True,
@@ -968,6 +1006,39 @@ def test_claim_materialization_cannot_carry_non_b1_hook_parity(generated):
             "lightdata",
         ),
         (
+            lambda value: value["compiled_world"]["lighting"].update(
+                floor_light_region_count=0
+            ),
+            "floor-light region count",
+        ),
+        (
+            lambda value: value["compiled_world"]["lighting"].update(
+                floor_light_region_ids=[
+                    *value["compiled_world"]["lighting"][
+                        "floor_light_region_ids"
+                    ][:-1],
+                    "floor_swapped_same_count_0",
+                ]
+            ),
+            "floor-light region IDs differ",
+        ),
+        (
+            lambda value: value["compiled_world"]["lighting"].update(
+                spawn_nav_region_count=2
+            ),
+            "navigation region count is inconsistent",
+        ),
+        (
+            lambda value: value["compiled_world"]["lighting"].update(
+                dark_spawns=[{
+                    "entity_ordinal": 0,
+                    "nav_region_id": 1,
+                    "eligible_light_entity_ordinals": [17],
+                }]
+            ),
+            "reports dark spawn 0",
+        ),
+        (
             lambda value: value["compiled_world"]["hooks"].update(
                 authority_admitted=False, omission_reason="oracle_unknown"
             ),
@@ -1059,7 +1130,11 @@ def test_unpinned_map_cannot_enter_stock_analysis_lane(generated):
     value["identity"]["generator_claims_sha256"] = None
     # These would fail generated-v6 promotion but are irrelevant to stock
     # analysis quality: no tagged light-region or hook-claim requirement.
-    value["compiled_world"]["lighting"]["dark_spawn_regions"] = 99
+    value["compiled_world"]["lighting"]["dark_spawns"] = [{
+        "entity_ordinal": 0,
+        "nav_region_id": 1,
+        "eligible_light_entity_ordinals": [],
+    }]
     value["compiled_world"]["hooks"] = {
         "authority_admitted": False,
         "omission_reason": "not_requested",
