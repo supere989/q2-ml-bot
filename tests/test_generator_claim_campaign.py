@@ -47,6 +47,12 @@ FAILURE_71431 = (
 DECLARATION_71431 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71431-DECLARATION.json"
 )
+FAILURE_71432 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71432-FAILURE.json"
+)
+DECLARATION_71432 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71432-DECLARATION.json"
+)
 SHADOW_71430 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71430-SHADOW-8CE1E75.json"
 )
@@ -103,6 +109,7 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "b2g26_final_71432",
         "80 units",
         "62-unit",
+        "reserved interior",
         "one-chunk hurt-boundary",
         "grounded origins at Z 24.03125",
         "first source-freeze attempt",
@@ -372,6 +379,69 @@ def test_71431_failure_record_is_canonical_exact_and_no_salvage() -> None:
         failure["evidence"]["primary_population"]["content_manifest_sha256"]
         == failure["evidence"]["cold_population"]["content_manifest_sha256"]
     )
+    assert failure["evidence"]["validation_summary"] == {
+        "all_primary_cold_file_bytes_match": True,
+        "expected_map_count": 28,
+        "route_contract_pass_count_in_complete_archived_scan": 28,
+        "static_pass_count_in_complete_archived_scan": 27,
+        "unique_layout_count": 28,
+    }
+    assert failure["evidence"]["source_freeze_report"]["published"] is False
+    admission = failure["admission"]
+    assert admission["permanently_non_admissible"] is True
+    assert admission["source_stage_published"] is False
+    assert admission["compiled_stage_published"] is False
+    assert admission["materialized_stage_published"] is False
+    assert admission["claims_stage_published"] is False
+    assert admission["analysis_stage_published"] is False
+    for key in (
+        "older_population_reuse_allowed", "passing_subset_allowed",
+        "regeneration_under_same_declaration_allowed",
+        "replacement_member_allowed", "retry_under_same_declaration_allowed",
+        "salvage_allowed",
+    ):
+        assert admission[key] is False
+
+
+def test_71432_failure_record_is_canonical_exact_and_no_salvage() -> None:
+    payload = FAILURE_71432.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71432"
+    assert failure["status"] == "permanently-failed-first-source-freeze"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71432-DECLARATION.json",
+        "sha256": hashlib.sha256(DECLARATION_71432.read_bytes()).hexdigest(),
+    }
+    assert failure["failure"]["phase"] == "first-source-freeze-validation"
+    assert failure["failure"]["affected_map_count"] == 1
+    assert failure["failure"]["first_failure"] == {
+        "map": "b2g26_towers_71432101",
+        "message": (
+            "source/static validation failed: one of four promised "
+            "corner-pocket interiors was erased by the later objective tower"
+        ),
+        "ordinal": 5,
+        "seed": 71432101,
+        "style": "towers",
+    }
+    assert failure["failure"]["geometry"] == {
+        "corner_bounds": [728, 1240, 824, 1336],
+        "corner_id": "corner_0",
+        "corner_safe_probe_count_after_objective": 0,
+        "objective_bounds": [724, 1261, 0, 852, 1389, 256],
+    }
+    for population in ("primary_population", "cold_population"):
+        evidence = failure["evidence"][population]
+        assert evidence["actual_file_count"] == 140
+        assert evidence["expected_file_count"] == 140
+        assert evidence["total_bytes"] == 10961177
+        assert evidence["stage_membership_sha256"] == (
+            "de6beb99445e16954adf635105aec6698"
+            "aa0a4931d0051e18f78b84cf7c2556d"
+        )
     assert failure["evidence"]["validation_summary"] == {
         "all_primary_cold_file_bytes_match": True,
         "expected_map_count": 28,

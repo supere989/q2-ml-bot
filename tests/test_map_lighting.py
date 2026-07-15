@@ -300,6 +300,51 @@ def test_arena_vertical_seed_71431503_rejects_low_ceiling_tower_sandwich(
     assert result["static_ok"] is True
 
 
+def test_towers_seed_71432101_preserves_promised_corner_interiors(tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    map_path, _ = generate_map(
+        "corner_objective_regression", 71432101, first,
+        style="towers",
+    )
+    cold_map, _ = generate_map(
+        "corner_objective_regression", 71432101, second,
+        style="towers",
+    )
+    assert map_path.read_bytes() == cold_map.read_bytes()
+    assert (
+        map_path.with_suffix(".meta.json").read_bytes()
+        == cold_map.with_suffix(".meta.json").read_bytes()
+    )
+    metadata = json.loads(map_path.with_suffix(".meta.json").read_text())
+    corner_zones = [
+        zone for zone in metadata["lighting"]["interior_zones"]
+        if zone["kind"] == "corner_pocket"
+    ]
+
+    assert metadata["corner_pockets"] == len(corner_zones)
+    assert metadata["corner_pockets"] > 0
+    result = static_validate(map_path, _static_args())
+    assert result["interior_lighting_ok"] is True
+    assert result["static_ok"] is True
+
+
+def test_structure_clearance_protects_reserved_interior_volume():
+    generator = MapGenerator(seed=1, style="open")
+    generator._interior_zone_specs = [
+        ("corner_0", "corner_pocket", (100, 100, 200, 200), 0, 256),
+    ]
+
+    assert not generator._structure_is_clear(
+        SolidBox(120, 120, 0, 180, 180, 128)
+    )
+    assert generator._structure_is_clear(
+        SolidBox(220, 120, 0, 280, 180, 128)
+    )
+
+
 def test_validator_rejects_map_missing_a_regions_lights(tmp_path):
     generate_map("shadowed", 42, tmp_path, style="arena_vertical")
     map_path = tmp_path / "shadowed.map"

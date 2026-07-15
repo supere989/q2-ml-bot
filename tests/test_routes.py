@@ -432,7 +432,11 @@ def test_retired_arena_open_contact_route_repairs_within_component(
         route for route in routes["routes"]
         if route["archetype"] == "survival"
     )
-    assert survival["node_ids"] == [11, 10, 0, 40, 1, 14]
+    assert survival["node_ids"] == [11, 10, 0, 1, 14, 35]
+    assert all(
+        nodes[node_id]["source_component"] == survival["source_component"]
+        for node_id in survival["node_ids"]
+    )
 
 
 @pytest.mark.parametrize(

@@ -340,6 +340,19 @@ all-or-nothing, declared-before-generation policy. The current alias and
 immutable named copy are byte-identical; no 71431 source or later-stage member
 is an input to 71432.
 
+The first and only 71432 source-freeze attempt also produced complete,
+byte-identical 140-file primary and cold populations and correctly published
+no freeze report. Ordinal 5, towers seed 71432101, emitted four corner pockets
+but retained only three enterable corner-light zones: the late objective tower
+occupied the reserved interior of `corner_0` after its boundary walls had been
+accepted. The exact declaration and canonical failure record are archived as
+`B2-GENERATED-COHORT-71432-DECLARATION.json` and
+`B2-GENERATED-COHORT-71432-FAILURE.json`. Cohort 71432 is permanently
+non-admissible; its members may not be reused, regenerated, repaired, retried,
+or salvaged. Ordinary structure clearance now protects the full reserved
+traversable volume of every hollow building and corner pocket, so towers,
+cover, lava, and objectives cannot silently erase a promised interior.
+
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative

@@ -1134,6 +1134,12 @@ class MapGenerator:
         if any(self._boxes_overlap(box, blocker)
                for blocker in self.spawn_blockers):
             return False
+        # Hollow buildings and corner pockets promise traversable interior
+        # volume, not just solid boundary brushes. Later towers, cover, lava,
+        # and objectives must challenge that volume as part of ordinary
+        # structure placement or they can silently erase a promised zone.
+        if self._overlaps_reserved_interior(box):
+            return False
         # A late structure must not invalidate an already-emitted reward.
         # Reserve the exact standing hull around each item origin in addition
         # to its zero-volume point identity.
@@ -1150,7 +1156,7 @@ class MapGenerator:
             for x, y, z in self._item_origins
         )
 
-    def _hazard_overlaps_reserved_interior(self, box: SolidBox) -> bool:
+    def _overlaps_reserved_interior(self, box: SolidBox) -> bool:
         """Protect every promised interior's traversable light volume."""
         for _zone_id, _kind, bounds, floor_z, ceiling_z in self._interior_zone_specs:
             x0, y0, x1, y1 = bounds
@@ -1576,10 +1582,7 @@ class MapGenerator:
                     px - 16, py - 16, fz,
                     px + size + 16, py + size + 16, fz + 64,
                 )
-                if (
-                    self._hazard_overlaps_reserved_interior(candidate)
-                    or not self._structure_is_clear(candidate)
-                ):
+                if not self._structure_is_clear(candidate):
                     continue
                 placement = (size, px, py, candidate)
                 break
@@ -2659,6 +2662,14 @@ class MapGenerator:
     def _emit_interior_lighting(self):
         """Give every enterable room-like location its own internal source."""
         self.interior_light_zones = self._collect_interior_light_zones()
+        promised = {spec[0] for spec in self._interior_zone_specs}
+        retained = {zone.zone_id for zone in self.interior_light_zones}
+        missing = sorted(promised - retained)
+        if missing:
+            raise RuntimeError(
+                "generated promised interior has no safe light zone: "
+                + ", ".join(missing)
+            )
         for zone in self.interior_light_zones:
             ax, ay, _az = zone.anchor
             light_z = min(
@@ -3162,8 +3173,9 @@ class MapGenerator:
         self._emit_lane_walls()
         self._emit_lava_pools()
         self._emit_arena_cover()
-        # Corners are placed last so later towers, lane walls, lava rims, and
-        # cover cannot silently occupy a pocket already promised as enterable.
+        # Corners follow the ambient structures so towers, lane walls, lava
+        # rims, and cover cannot occupy a pocket promised as enterable. The
+        # later objective pass respects the same reserved interior volume.
         self._emit_corner_pockets()
 
         # Objective geometry and its pickup are selected after every other
