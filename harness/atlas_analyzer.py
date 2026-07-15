@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -876,19 +877,198 @@ def _complete_pmove_source_set(
     spawn_indices: Mapping[int, tuple[int, int, int]],
     maximum: int,
 ) -> tuple[list[tuple[int, int, int]], dict[str, Any]]:
-    """Select a bounded deterministic prefix with complete omission accounting."""
+    """Select deterministic component/frontier-stratified Pmove sources.
 
-    outgoing: dict[tuple[int, int, int], int] = defaultdict(int)
+    The walk graph is the only topology authority here.  Spawn keys lead the
+    order, followed by one frontier representative for every weak walk-graph
+    component not already covered by a frontier spawn.  Remaining capacity is
+    apportioned by the exact selected/available frontier ratio; within a
+    component, deterministic farthest-point sampling prevents a coordinate
+    prefix from starving remote or high boundary transitions.
+
+    The expensive sampling work is bounded by ``maximum``.  Unselected
+    candidates are still ordered deterministically for complete omission
+    accounting, but are never challenged through Pmove and therefore cannot
+    emit Pmove-derived edges.
+    """
+
+    if maximum < 0:
+        raise AtlasAnalysisError("Pmove source maximum is negative")
+
+    def zyx(key: tuple[int, int, int]) -> tuple[int, int, int]:
+        return key[2], key[1], key[0]
+
+    def squared_distance(
+        left: tuple[int, int, int], right: tuple[int, int, int],
+    ) -> int:
+        return sum((left[axis] - right[axis]) ** 2 for axis in range(3))
+
+    def farthest(
+        candidates: Sequence[tuple[int, int, int]],
+        anchors: Sequence[tuple[int, int, int]],
+    ) -> tuple[int, int, int]:
+        if not anchors:
+            return min(candidates, key=zyx)
+        return min(
+            candidates,
+            key=lambda candidate: (
+                -min(squared_distance(candidate, anchor) for anchor in anchors),
+                *zyx(candidate),
+            ),
+        )
+
+    outgoing: dict[
+        tuple[int, int, int], set[tuple[int, int, int]]
+    ] = defaultdict(set)
+    adjacency: dict[
+        tuple[int, int, int], set[tuple[int, int, int]]
+    ] = defaultdict(set)
     for edge in edges:
-        outgoing[tuple(edge["source"])] += 1
-    ordered = sorted(nodes, key=lambda item: (item[2], item[1], item[0]))
-    result = list(dict.fromkeys(spawn_indices.values()))
-    result.extend(key for key in ordered if outgoing[key] < 4 and key not in result)
+        if edge.get("edge_type") != "walk":
+            continue
+        source = tuple(edge["source"])
+        target = tuple(edge["target"])
+        if source not in nodes or target not in nodes:
+            raise AtlasAnalysisError("walk edge references an unknown L1 node")
+        outgoing[source].add(target)
+        adjacency[source].add(target)
+        adjacency[target].add(source)
+
+    ordered_nodes = sorted(nodes, key=zyx)
+    components: list[list[tuple[int, int, int]]] = []
+    component_of: dict[tuple[int, int, int], int] = {}
+    for seed in ordered_nodes:
+        if seed in component_of:
+            continue
+        component_id = len(components)
+        pending = [seed]
+        component_of[seed] = component_id
+        component: list[tuple[int, int, int]] = []
+        while pending:
+            current = pending.pop()
+            component.append(current)
+            for neighbor in sorted(adjacency.get(current, ()), key=zyx, reverse=True):
+                if neighbor not in component_of:
+                    component_of[neighbor] = component_id
+                    pending.append(neighbor)
+        components.append(sorted(component, key=zyx))
+
+    spawn_order: list[tuple[int, int, int]] = []
+    spawn_seen: set[tuple[int, int, int]] = set()
+    for _, key in sorted(spawn_indices.items()):
+        if key not in nodes:
+            raise AtlasAnalysisError("Pmove spawn source is not an L1 node")
+        if key not in spawn_seen:
+            spawn_order.append(key)
+            spawn_seen.add(key)
+    if len(spawn_order) > maximum:
+        raise AtlasAnalysisError(
+            "Pmove source cap cannot retain every unique spawn source"
+        )
+
+    frontiers: list[list[tuple[int, int, int]]] = [
+        [key for key in component if len(outgoing[key]) < 4]
+        for component in components
+    ]
+    frontier_sets = [set(component) for component in frontiers]
+
+    # Tier 1: every unique spawn in entity-ordinal order.
+    priority = list(spawn_order)
+    priority_set = set(priority)
+
+    # Tier 2: before any component receives a secondary frontier source, every
+    # walk component gets a frontier representative.  A frontier spawn already
+    # satisfies this tier for its component.  Otherwise choose the frontier
+    # farthest from that component's spawn(s), or its canonical first frontier
+    # when the component contains no spawn.
+    for component_id, component_frontiers in enumerate(frontiers):
+        if not component_frontiers or frontier_sets[component_id] & priority_set:
+            continue
+        component_spawns = [
+            key for key in spawn_order if component_of[key] == component_id
+        ]
+        representative = farthest(component_frontiers, component_spawns)
+        priority.append(representative)
+        priority_set.add(representative)
+    if len(priority) > maximum:
+        raise AtlasAnalysisError(
+            "Pmove source cap cannot retain mandatory component-frontier coverage"
+        )
+
+    # Tier 3: proportionally cover all remaining frontiers.  Exact rational
+    # ratios avoid float-dependent ordering.  Farthest-point selection is
+    # anchored by both spawn and already-selected frontier sources.
+    frontier_selected = [
+        len(frontier_sets[index] & priority_set)
+        for index in range(len(components))
+    ]
+    anchors: list[list[tuple[int, int, int]]] = [
+        [key for key in priority if component_of[key] == component_id]
+        for component_id in range(len(components))
+    ]
+    remaining: list[list[tuple[int, int, int]]] = [
+        [key for key in component if key not in priority_set]
+        for component in frontiers
+    ]
+    nearest_anchor_distance: list[dict[tuple[int, int, int], int]] = [
+        {
+            candidate: min(
+                squared_distance(candidate, anchor)
+                for anchor in anchors[component_id]
+            )
+            for candidate in candidates
+        }
+        for component_id, candidates in enumerate(remaining)
+    ]
+    target_count = min(maximum, len(spawn_seen | set().union(*frontier_sets)))
+    while len(priority) < target_count:
+        active = [
+            component_id for component_id, candidates in enumerate(remaining)
+            if candidates
+        ]
+        if not active:
+            break
+        component_id = min(
+            active,
+            key=lambda index: (
+                Fraction(frontier_selected[index], len(frontiers[index])),
+                zyx(components[index][0]),
+            ),
+        )
+        representative = min(
+            remaining[component_id],
+            key=lambda candidate: (
+                -nearest_anchor_distance[component_id][candidate],
+                *zyx(candidate),
+            ),
+        )
+        priority.append(representative)
+        priority_set.add(representative)
+        anchors[component_id].append(representative)
+        remaining[component_id].remove(representative)
+        del nearest_anchor_distance[component_id][representative]
+        for candidate in remaining[component_id]:
+            nearest_anchor_distance[component_id][candidate] = min(
+                nearest_anchor_distance[component_id][candidate],
+                squared_distance(candidate, representative),
+            )
+        frontier_selected[component_id] += 1
+
+    # The post-cap order has no edge authority, but remains canonical so its
+    # digest accounts for every omitted source independent of input ordering.
+    result = priority + [
+        key
+        for component in remaining
+        for key in sorted(component, key=zyx)
+        if key not in priority_set
+    ]
     selected = result[:maximum]
     omitted = result[maximum:]
     return selected, {
         "schema": "q2-atlas-pmove-source-accounting-v1",
-        "selection_rule": "spawn-first-then-zyx-low-outdegree-prefix-v1",
+        "selection_rule": (
+            "spawn-first-component-frontier-proportional-farthest-v2"
+        ),
         "maximum": maximum,
         "total": len(result),
         "selected": len(selected),

@@ -544,6 +544,26 @@ def _test_node(
     )
 
 
+def _walk_edges(
+    keys: set[tuple[int, int, int]],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "source": list(source),
+            "target": list(target),
+            "edge_type": "walk",
+        }
+        for source in sorted(keys)
+        for target in (
+            (source[0] + 1, source[1], source[2]),
+            (source[0] - 1, source[1], source[2]),
+            (source[0], source[1] + 1, source[2]),
+            (source[0], source[1] - 1, source[2]),
+        )
+        if target in keys
+    ]
+
+
 def test_pmove_source_cap_has_complete_omission_accounting_before_oracle_calls() -> None:
     nodes = {
         (0, 0, 0): _test_node((0, 0, 0), standing=True, crouched=True),
@@ -551,14 +571,115 @@ def test_pmove_source_cap_has_complete_omission_accounting_before_oracle_calls()
     }
     calls = {"pmove": 0, "fall": 0}
     selected, accounting = _complete_pmove_source_set(
-        nodes, [], {1: (0, 0, 0)}, 1,
+        nodes, _walk_edges(set(nodes)), {1: (0, 0, 0)}, 1,
     )
     assert selected == [(0, 0, 0)]
     assert accounting["total"] == 2
     assert accounting["selected"] == 1
     assert accounting["omitted"] == 1
     assert accounting["omitted_sources_emit_pmove_edges"] is False
+    assert accounting["selection_rule"] == (
+        "spawn-first-component-frontier-proportional-farthest-v2"
+    )
     assert calls == {"pmove": 0, "fall": 0}
+
+
+def test_pmove_source_cap_fails_before_partial_component_coverage() -> None:
+    keys = {(0, 0, 0), (100, 0, 0), (200, 0, 0)}
+    nodes = {
+        key: _test_node(key, standing=True, crouched=True) for key in keys
+    }
+    with pytest.raises(
+        AtlasAnalysisError,
+        match="cannot retain mandatory component-frontier coverage",
+    ):
+        _complete_pmove_source_set(nodes, [], {1: (0, 0, 0)}, 2)
+
+
+def test_pmove_source_cap_fails_before_omitting_a_unique_spawn() -> None:
+    keys = {(0, 0, 0), (1, 0, 0)}
+    nodes = {
+        key: _test_node(key, standing=True, crouched=True) for key in keys
+    }
+    with pytest.raises(
+        AtlasAnalysisError, match="cannot retain every unique spawn source",
+    ):
+        _complete_pmove_source_set(
+            nodes, _walk_edges(keys), {1: (0, 0, 0), 2: (1, 0, 0)}, 1,
+        )
+
+
+def test_pmove_sources_cover_remote_spawn_component_frontiers_before_secondaries() -> None:
+    # Model the q2dm1 failure mode: a large, low-coordinate component would
+    # consume a z/y/x prefix before the smaller components containing spawn
+    # ordinals 61 and 69 were reached.  All three spawns are interior nodes, so
+    # each component still needs a distinct boundary source after the spawn
+    # tier.
+    large = {(x, y, 0) for x in range(9) for y in range(9)}
+    spawn_61 = (104, 104, 8)
+    spawn_69 = (204, -96, 16)
+    remote_61 = {
+        spawn_61,
+        (103, 104, 8), (105, 104, 8), (104, 103, 8), (104, 105, 8),
+    }
+    remote_69 = {
+        spawn_69,
+        (203, -96, 16), (205, -96, 16),
+        (204, -97, 16), (204, -95, 16),
+    }
+    keys = large | remote_61 | remote_69
+    nodes = {
+        key: _test_node(key, standing=True, crouched=True) for key in keys
+    }
+    edges = _walk_edges(keys)
+    spawns = {1: (4, 4, 0), 61: spawn_61, 69: spawn_69}
+
+    selected, accounting = _complete_pmove_source_set(nodes, edges, spawns, 6)
+
+    assert selected[:3] == [spawns[1], spawns[61], spawns[69]]
+    assert len(selected) == 6
+    component_frontiers = selected[3:]
+    assert sum(key in large for key in component_frontiers) == 1
+    assert sum(key in remote_61 for key in component_frontiers) == 1
+    assert sum(key in remote_69 for key in component_frontiers) == 1
+    assert accounting["selected"] == 6
+    assert accounting["total"] == 43
+    assert accounting["omitted"] == 37
+
+
+def test_pmove_sources_spatially_distribute_large_component_boundary() -> None:
+    keys = {(x, y, 0) for x in range(9) for y in range(9)}
+    nodes = {
+        key: _test_node(key, standing=True, crouched=True) for key in keys
+    }
+    selected, _ = _complete_pmove_source_set(
+        nodes, _walk_edges(keys), {1: (4, 4, 0)}, 5,
+    )
+
+    assert selected[0] == (4, 4, 0)
+    assert {(key[0], key[1]) for key in selected[1:]} == {
+        (0, 0), (8, 0), (0, 8), (8, 8),
+    }
+
+
+def test_pmove_source_selection_is_independent_of_mapping_and_edge_order() -> None:
+    low = {(x, y, 0) for x in range(7) for y in range(7)}
+    high = {(x, y, 12) for x in range(20, 25) for y in range(-2, 3)}
+    keys = low | high
+    nodes = {
+        key: _test_node(key, standing=True, crouched=True) for key in keys
+    }
+    edges = _walk_edges(keys)
+    spawns = {69: (22, 0, 12), 1: (3, 3, 0)}
+
+    expected = _complete_pmove_source_set(nodes, edges, spawns, 17)
+    reversed_nodes = dict(reversed(list(nodes.items())))
+    reversed_spawns = dict(reversed(list(spawns.items())))
+    actual = _complete_pmove_source_set(
+        reversed_nodes, list(reversed(edges)), reversed_spawns, 17,
+    )
+
+    assert actual == expected
 
 
 def test_crouched_only_source_cannot_emit_standing_movement_edge() -> None:
