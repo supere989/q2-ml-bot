@@ -48,10 +48,10 @@ from .generated_claim_probes import (
     GeneratedClaimProbeError,
     analyze_non_hook_claims,
 )
-from .hook_claims_v2 import (
-    HookClaimsV2Error,
-    validate_materialization as validate_hook_materialization_v2,
-    validate_record as validate_hook_record_v2,
+from .hook_claims_v3 import (
+    HookClaimsV3Error,
+    validate_materialization as validate_hook_materialization_v3,
+    validate_record as validate_hook_record_v3,
     validation_trace_sha256,
 )
 from .atlas_b1_authority import B1AuthorityError, admit_b1_runtime_authorities
@@ -3792,7 +3792,7 @@ def _write_canonical_atlas_manifest(
         },
         "analyzer": {
             "name": "q2-atlas-analyzer",
-            "version": "b2-a-v2",
+            "version": "b2-a-v3",
             "sha256": analyzer_sha256,
         },
         "oracles": oracle_records,
@@ -4340,18 +4340,27 @@ def _replay_hook_record_exact(
     request_prefix: str,
     atlas_origin: tuple[int, int, int],
     expected_landing: bool,
+    discover_landing: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any] | None]:
     """Replay one exact source/release schedule and return measured landing.
 
-    Candidate desired landing is used only as a same-L1 constraint.  The
-    materialized record receives the first post-release false-to-true grounded
-    Pmove fixed origin.  Independent analysis sets ``expected_landing`` and
-    additionally requires exact fixed-origin equality with the sealed record.
+    Candidate desired landing is normally used as a same-L1 constraint.  An
+    authority performing initial materialization sets ``discover_landing`` to
+    bind the first post-release false-to-true grounded Pmove fixed origin
+    without pretending that generator-authored geometry predicted its compiled
+    landing cell.  Independent analysis leaves discovery disabled, sets
+    ``expected_landing``, and additionally requires exact fixed-origin equality
+    with the sealed record.
     """
 
+    if discover_landing and expected_landing:
+        raise AtlasAnalysisError(
+            "hook replay cannot discover and expect a landing simultaneously"
+        )
+
     try:
-        record = validate_hook_record_v2(dict(record_value), request_prefix)
-    except HookClaimsV2Error as error:
+        record = validate_hook_record_v3(dict(record_value), request_prefix)
+    except HookClaimsV3Error as error:
         raise AtlasAnalysisError(str(error)) from error
     pmove_identity = getattr(pmove, "identity", None)
     pmove_parameters = (
@@ -4375,8 +4384,11 @@ def _replay_hook_record_exact(
     desired_landing_mu = record["landing_milliunits"]
     source = tuple(value / 1000.0 for value in source_mu)
     anchor = tuple(value / 1000.0 for value in anchor_mu)
-    if _grid_index(source, atlas_origin, 16) == _grid_index(
-        tuple(value / 1000.0 for value in desired_landing_mu), atlas_origin, 16
+    if (
+        not discover_landing
+        and _grid_index(source, atlas_origin, 16) == _grid_index(
+            tuple(value / 1000.0 for value in desired_landing_mu), atlas_origin, 16
+        )
     ):
         return None, "source_and_desired_landing_share_l1", None
 
@@ -4538,8 +4550,11 @@ def _replay_hook_record_exact(
     measured_landing_mu = [axis * 125 for axis in first_grounded_fixed]
     measured_landing = tuple(axis / 8.0 for axis in first_grounded_fixed)
     desired_landing = tuple(value / 1000.0 for value in desired_landing_mu)
-    if _grid_index(measured_landing, atlas_origin, 16) != _grid_index(
-        desired_landing, atlas_origin, 16
+    if (
+        not discover_landing
+        and _grid_index(measured_landing, atlas_origin, 16) != _grid_index(
+            desired_landing, atlas_origin, 16
+        )
     ):
         return None, "measured_landing_outside_desired_l1", None
     if expected_landing and measured_landing_mu != desired_landing_mu:
@@ -4586,7 +4601,7 @@ def _analyze_hook_claims(
         }
     proposed = claims.get("hook_claims")
     if not isinstance(proposed, list) or len(proposed) != 6:
-        raise AtlasAnalysisError("generated claims require six exact hook-v2 records")
+        raise AtlasAnalysisError("generated claims require six exact hook-v3 records")
     if (
         hook_admission.get("authority_admitted") is not True
         or pmove is None
@@ -4671,10 +4686,10 @@ def _validate_hook_materialization_binding(
 ) -> dict[str, Any]:
     """Bind a valid materialization to claims, BSP, and executable bytes."""
     try:
-        document = validate_hook_materialization_v2(dict(value))
-    except HookClaimsV2Error as error:
+        document = validate_hook_materialization_v3(dict(value))
+    except HookClaimsV3Error as error:
         raise AtlasAnalysisError(str(error)) from error
-    if generator_claims.get("schema") != "q2-generator-claims-v2":
+    if generator_claims.get("schema") != "q2-generator-claims-v3":
         raise AtlasAnalysisError("generated claims schema mismatch")
     if generator_claims.get("map") != canonical_map_id:
         raise AtlasAnalysisError("generated claims map identity mismatch")
@@ -5284,7 +5299,7 @@ def analyze_map(
         "status": "candidate",
         "deterministic_rebuild": False,
         "confidence": "pending-independent-cold-rebuild",
-        "analyzer_version": "b2-a-v2",
+        "analyzer_version": "b2-a-v3",
         "canonical_map_id": canonical_map_id,
         "bsp": {
             "sha256": metadata.sha256, "bytes": metadata.byte_count, "ibsp_version": metadata.version,

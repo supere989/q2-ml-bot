@@ -3,7 +3,9 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import math
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,15 +15,20 @@ from harness.atlas_analyzer import (
     _validate_hook_materialization_binding,
     _validate_materialized_oracle_identities,
 )
-from harness.hook_claims_v2 import (
-    HookClaimsV2Error,
+from harness.hook_claims_v3 import (
+    HookClaimsV3Error,
     canonical_json,
     render_runtime_sidecar,
     runtime_records_sha256,
+    validate_candidates,
     validate_materialization,
     validate_runtime_sidecar,
     validate_trace,
     validation_trace_sha256,
+)
+from tools.materialize_hook_claims import (
+    _measured_target_rejection,
+    _publish_materialization_pair,
 )
 
 
@@ -40,6 +47,22 @@ def _record(index: int = 0) -> dict:
         ))),
         "flags": 1,
     }
+
+
+def test_v3_candidate_schema_rejects_retired_v2_identity() -> None:
+    value = {
+        "schema": "q2-hook-claim-candidates-v3",
+        "tick_msec": 100,
+        "status": "unproven",
+        "bundle_admissible": False,
+        "records": [_record()],
+    }
+    assert validate_candidates(value) == value
+
+    retired = deepcopy(value)
+    retired["schema"] = "q2-hook-claim-candidates-v2"
+    with pytest.raises(HookClaimsV3Error, match="not frozen v3"):
+        validate_candidates(retired)
 
 
 def _frame(origin_fixed: list[int], grounded: bool) -> dict:
@@ -121,12 +144,18 @@ class _ExactPmove:
         return [{"frames": frames, "final": frames[-1]}]
 
 
-def _replay(record: dict, *, expected_landing: bool = True):
+def _replay(
+    record: dict,
+    *,
+    expected_landing: bool = True,
+    discover_landing: bool = False,
+):
     authority = _record()
     return _replay_hook_record_exact(
         _ExactCm(authority), _ExactPmove(authority), _ExactHook(), record,
         request_prefix="test-hook", atlas_origin=(0, 0, 0),
         expected_landing=expected_landing,
+        discover_landing=discover_landing,
     )
 
 
@@ -235,6 +264,60 @@ def test_desired_l1_and_exact_measured_landing_tampering_reject() -> None:
     assert measured is None and reason == "measured_landing_outside_desired_l1"
 
 
+def test_discovery_binds_measured_landing_then_exact_replay_remains_strict() -> None:
+    proposal = _record()
+    proposal["landing_milliunits"][0] += 16_000
+
+    measured, reason, trace = _replay(
+        proposal, expected_landing=False, discover_landing=True,
+    )
+    assert reason is None and measured is not None and trace is not None
+    assert measured["landing_milliunits"] == _record()["landing_milliunits"]
+
+    replayed, reason, replayed_trace = _replay(measured, expected_landing=True)
+    assert reason is None and replayed == measured and replayed_trace == trace
+
+    tampered = deepcopy(measured)
+    tampered["landing_milliunits"][0] += 125
+    replayed, reason, _ = _replay(tampered, expected_landing=True)
+    assert replayed is None and reason == "measured_landing_fixed_mismatch"
+
+
+def test_discovery_and_exact_landing_modes_are_mutually_exclusive() -> None:
+    with pytest.raises(
+        AtlasAnalysisError,
+        match="cannot discover and expect a landing simultaneously",
+    ):
+        _replay(_record(), expected_landing=True, discover_landing=True)
+
+
+def test_materializer_rejects_same_source_or_unsafe_measured_target() -> None:
+    source = (1, 2, 3)
+    clear = SimpleNamespace(
+        supported=True, standing_clear=True, crouched_clear=False,
+    )
+    unsupported = SimpleNamespace(
+        supported=False, standing_clear=True, crouched_clear=True,
+    )
+    blocked = SimpleNamespace(
+        supported=True, standing_clear=False, crouched_clear=False,
+    )
+
+    assert _measured_target_rejection(source, source, clear) == (
+        "measured_landing_shares_source_l1"
+    )
+    assert _measured_target_rejection(source, (4, 5, 6), None) == (
+        "measured_landing_l1_unavailable"
+    )
+    assert _measured_target_rejection(source, (4, 5, 6), unsupported) == (
+        "measured_landing_unsupported"
+    )
+    assert _measured_target_rejection(source, (4, 5, 6), blocked) == (
+        "measured_landing_hull_blocked"
+    )
+    assert _measured_target_rejection(source, (4, 5, 6), clear) is None
+
+
 def _materialization() -> dict:
     records = [_record(index) for index in range(6)]
     traces = []
@@ -278,8 +361,9 @@ def _materialization() -> dict:
         },
     }
     return {
-        "schema": "q2-hook-claim-materialization-v2",
+        "schema": "q2-hook-claim-materialization-v3",
         "map": "fixture", "passed": True,
+        "landing_policy": "compiled-first-grounded-exact-v3",
         "bsp": {"sha256": "1" * 64, "size_bytes": 1234},
         "candidates": {
             "meta_sha256": "2" * 64, "records_sha256": "3" * 64,
@@ -295,9 +379,9 @@ def _materialization() -> dict:
         },
         "replay": {
             "analyzer": "q2-hook-claim-materializer",
-            "analyzer_version": "b2-c-v2",
+            "analyzer_version": "b2-c-v3",
             "verifier": "q2-atlas-analyzer-exact-hook-replay",
-            "verifier_version": "b2-a-v2",
+            "verifier_version": "b2-a-v3",
         },
         "request_count": 10,
     }
@@ -309,13 +393,18 @@ def test_trace_runtime_rows_and_six_unique_geometry_tampering_reject() -> None:
 
     trace_tamper = deepcopy(document)
     trace_tamper["validation_traces"][0]["origin_fixed_frames"][0][0] += 1
-    with pytest.raises(HookClaimsV2Error, match="sha256 differs"):
+    with pytest.raises(HookClaimsV3Error, match="sha256 differs"):
         validate_materialization(trace_tamper)
 
     fewer = deepcopy(document)
     fewer["selected_records"].pop()
-    with pytest.raises(HookClaimsV2Error, match="exactly six"):
+    with pytest.raises(HookClaimsV3Error, match="exactly six"):
         validate_materialization(fewer)
+
+    wrong_policy = deepcopy(document)
+    wrong_policy["landing_policy"] = "generator-hint-v2"
+    with pytest.raises(HookClaimsV3Error, match="landing policy differs"):
+        validate_materialization(wrong_policy)
 
     duplicate = deepcopy(document)
     duplicate["selected_records"][1]["anchor_milliunits"] = list(
@@ -330,7 +419,7 @@ def test_trace_runtime_rows_and_six_unique_geometry_tampering_reject() -> None:
     duplicate["selected_records"][1]["distance_milliunits"] = duplicate[
         "selected_records"
     ][0]["distance_milliunits"]
-    with pytest.raises(HookClaimsV2Error, match="runtime geometries are not unique"):
+    with pytest.raises(HookClaimsV3Error, match="runtime geometries are not unique"):
         validate_materialization(duplicate)
 
     payload = render_runtime_sidecar(
@@ -340,11 +429,86 @@ def test_trace_runtime_rows_and_six_unique_geometry_tampering_reject() -> None:
         payload, map_id="fixture", bsp_sha256="1" * 64,
         materialization_sha256="9" * 64, records=document["selected_records"],
     )
-    with pytest.raises(HookClaimsV2Error, match="header/rows differ"):
+    with pytest.raises(HookClaimsV3Error, match="header/rows differ"):
         validate_runtime_sidecar(
             payload[:-2] + b"9\n", map_id="fixture", bsp_sha256="1" * 64,
             materialization_sha256="9" * 64, records=document["selected_records"],
         )
+
+
+def test_paired_publication_rolls_back_injected_runtime_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _materialization()
+    attestation_bytes = canonical_json(document) + b"\n"
+    attestation_sha256 = hashlib.sha256(attestation_bytes).hexdigest()
+    source_projection = b"# source hook proposal\n# bundle_admissible: false\n"
+    runtime_bytes = render_runtime_sidecar(
+        "fixture", "1" * 64, attestation_sha256,
+        document["selected_records"],
+    )
+    output_attestation = tmp_path / "fixture.hook-materialization.json"
+    runtime_sidecar = tmp_path / "fixture.json"
+    runtime_sidecar.write_bytes(source_projection)
+    original_replace = os.replace
+
+    def fail_runtime_publication(source, destination) -> None:
+        if Path(destination) == runtime_sidecar:
+            raise OSError("injected second-publication failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_runtime_publication)
+    with pytest.raises(
+        AtlasAnalysisError, match="failed and was rolled back",
+    ):
+        _publish_materialization_pair(
+            output_attestation=output_attestation,
+            runtime_sidecar=runtime_sidecar,
+            attestation_bytes=attestation_bytes,
+            runtime_bytes=runtime_bytes,
+            source_projection=source_projection,
+            source_projection_sha256=hashlib.sha256(source_projection).hexdigest(),
+            map_id="fixture",
+            bsp_sha256="1" * 64,
+            records=document["selected_records"],
+        )
+
+    assert not output_attestation.exists()
+    assert runtime_sidecar.read_bytes() == source_projection
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["fixture.json"]
+
+
+def test_paired_publication_is_cross_checked_and_refuses_overwrite(
+    tmp_path: Path,
+) -> None:
+    document = _materialization()
+    attestation_bytes = canonical_json(document) + b"\n"
+    attestation_sha256 = hashlib.sha256(attestation_bytes).hexdigest()
+    source_projection = b"# source hook proposal\n# bundle_admissible: false\n"
+    runtime_bytes = render_runtime_sidecar(
+        "fixture", "1" * 64, attestation_sha256,
+        document["selected_records"],
+    )
+    output_attestation = tmp_path / "fixture.hook-materialization.json"
+    runtime_sidecar = tmp_path / "fixture.json"
+    runtime_sidecar.write_bytes(source_projection)
+    arguments = {
+        "output_attestation": output_attestation,
+        "runtime_sidecar": runtime_sidecar,
+        "attestation_bytes": attestation_bytes,
+        "runtime_bytes": runtime_bytes,
+        "source_projection": source_projection,
+        "source_projection_sha256": hashlib.sha256(source_projection).hexdigest(),
+        "map_id": "fixture",
+        "bsp_sha256": "1" * 64,
+        "records": document["selected_records"],
+    }
+
+    _publish_materialization_pair(**arguments)
+    assert output_attestation.read_bytes() == attestation_bytes
+    assert runtime_sidecar.read_bytes() == runtime_bytes
+    with pytest.raises(AtlasAnalysisError, match="already exists"):
+        _publish_materialization_pair(**arguments)
 
 
 def _binding_fixture(tmp_path: Path) -> tuple[dict, dict, dict[str, Path]]:
@@ -371,7 +535,7 @@ def _binding_fixture(tmp_path: Path) -> tuple[dict, dict, dict[str, Path]]:
     ] = document["oracles"]["hook_parity_attestation_sha256"]
     validate_materialization(document)
     claims = {
-        "schema": "q2-generator-claims-v2",
+        "schema": "q2-generator-claims-v3",
         "map": "fixture",
         "source_files": {
             "meta_sha256": document["candidates"]["meta_sha256"],

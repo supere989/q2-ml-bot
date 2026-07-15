@@ -80,7 +80,7 @@ def main() -> int:
     parser.add_argument("--map-id")
     parser.add_argument(
         "--generator-claims", type=Path,
-        help="strict q2-generator-claims-v2 proposals for a generated BSP",
+        help="strict q2-generator-claims-v3 proposals for a generated BSP",
     )
     parser.add_argument("--provenance", type=Path, default=DEFAULT_PROVENANCE)
     parser.add_argument("--output", type=Path, required=True)

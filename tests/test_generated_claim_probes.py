@@ -42,7 +42,7 @@ def _claims_fixture(tmp_path: Path) -> tuple[Path, dict]:
         (tmp_path / filename).write_bytes(data)
         source_hashes[key] = _digest(data)
     claims = {
-        "schema": "q2-generator-claims-v2",
+        "schema": "q2-generator-claims-v3",
         "map": name,
         "generator": "v6",
         "source_files": source_hashes,
@@ -245,6 +245,15 @@ def test_strict_load_provenance_and_non_hook_challenges(tmp_path: Path) -> None:
     assert requests["lethal-inward:0:0"]["start"] == [32.125, 0.0, 112.0]
     assert requests["lethal-inward:0:0"]["end"] == [32.125, 0.0, 0.0]
     assert requests["lethal-guard:0:0"]["start"] == [8.0, -25.6, 72.0]
+
+
+def test_generator_claim_loader_rejects_retired_v2_schema(tmp_path: Path) -> None:
+    path, claims = _claims_fixture(tmp_path)
+    claims["schema"] = "q2-generator-claims-v2"
+    path.write_bytes(_canonical(claims))
+
+    with pytest.raises(GeneratedClaimProbeError, match="not frozen v6"):
+        load_generator_claims(path, "generated_fixture")
 
 
 def test_lethal_floor_uses_a_bounded_alternate_segment_witness(tmp_path: Path) -> None:

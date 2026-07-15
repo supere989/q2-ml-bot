@@ -64,8 +64,8 @@ def fake_generator_factory(
             "seed": seed + (1 if name == wrong_meta_seed else 0),
             "style": style,
             "generator": "v6",
-            "hook_claim_candidates_v2": {
-                "schema": "q2-hook-claim-candidates-v2",
+            "hook_claim_candidates_v3": {
+                "schema": "q2-hook-claim-candidates-v3",
                 "status": "unproven",
                 "bundle_admissible": False,
                 "records": [{"claim": index} for index in range(6)],

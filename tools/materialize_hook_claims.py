@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize six compiled, source-bound hook-v2 claims atomically."""
+"""Materialize six compiled, source-bound hook-v3 claims atomically."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import tempfile
 import sys
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,8 +38,9 @@ from harness.atlas_b1_authority import (  # noqa: E402
     B1AuthorityError,
     admit_b1_runtime_authorities,
 )
-from harness.hook_claims_v2 import (  # noqa: E402
-    HookClaimsV2Error,
+from harness.hook_claims_v3 import (  # noqa: E402
+    HookClaimsV3Error,
+    LANDING_POLICY,
     MATERIALIZATION_SCHEMA,
     RUNTIME_RECORD_COUNT,
     canonical_json as hook_canonical_json,
@@ -74,6 +76,153 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _stage_payload(path: Path, payload: bytes) -> Path:
+    """Write and fsync a same-directory publication candidate."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".stage", dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return temporary
+
+
+def _publish_materialization_pair(
+    *,
+    output_attestation: Path,
+    runtime_sidecar: Path,
+    attestation_bytes: bytes,
+    runtime_bytes: bytes,
+    source_projection: bytes,
+    source_projection_sha256: str,
+    map_id: str,
+    bsp_sha256: str,
+    records: list[dict],
+) -> None:
+    """Stage, cross-check, and fail-closed publish one V3 artifact pair.
+
+    The attestation is an exclusive new artifact. The runtime sidecar is the
+    one source projection intentionally upgraded in place. If the second
+    publication fails, the exclusive attestation is removed and the exact
+    non-admissible source projection remains (or is restored) before failure
+    is returned to the caller.
+    """
+
+    if output_attestation.exists() or output_attestation.is_symlink():
+        raise AtlasAnalysisError(
+            "hook materialization attestation already exists; refusing overwrite"
+        )
+    if (
+        not runtime_sidecar.is_file()
+        or runtime_sidecar.is_symlink()
+        or sha256_file(runtime_sidecar) != source_projection_sha256
+        or runtime_sidecar.read_bytes() != source_projection
+    ):
+        raise AtlasAnalysisError(
+            "source hook projection changed before paired publication"
+        )
+
+    staged_attestation = _stage_payload(output_attestation, attestation_bytes)
+    staged_runtime: Path | None = None
+    attestation_published = False
+    try:
+        staged_runtime = _stage_payload(runtime_sidecar, runtime_bytes)
+        staged_document, staged_digest = load_materialization(staged_attestation)
+        if (
+            staged_document["map"] != map_id
+            or staged_document["bsp"]["sha256"] != bsp_sha256
+            or staged_document["selected_records"] != records
+        ):
+            raise AtlasAnalysisError(
+                "staged hook materialization identity differs before publication"
+            )
+        validate_runtime_sidecar(
+            staged_runtime.read_bytes(),
+            map_id=map_id,
+            bsp_sha256=bsp_sha256,
+            materialization_sha256=staged_digest,
+            records=records,
+        )
+        if staged_attestation.read_bytes() != attestation_bytes:
+            raise AtlasAnalysisError(
+                "staged hook materialization bytes changed before publication"
+            )
+        if staged_runtime.read_bytes() != runtime_bytes:
+            raise AtlasAnalysisError(
+                "staged hook runtime bytes changed before publication"
+            )
+        if (
+            output_attestation.exists()
+            or output_attestation.is_symlink()
+            or sha256_file(runtime_sidecar) != source_projection_sha256
+            or runtime_sidecar.read_bytes() != source_projection
+        ):
+            raise AtlasAnalysisError(
+                "hook artifact destination changed during paired staging"
+            )
+
+        # A hard link gives the attestation O_EXCL-style publication semantics;
+        # unlike os.replace it cannot overwrite a concurrently created seal.
+        os.link(staged_attestation, output_attestation)
+        attestation_published = True
+        staged_attestation.unlink()
+        os.replace(staged_runtime, runtime_sidecar)
+        staged_runtime = None
+        for directory in {output_attestation.parent, runtime_sidecar.parent}:
+            _fsync_directory(directory)
+    except BaseException as error:
+        rollback_errors: list[str] = []
+        try:
+            if (
+                runtime_sidecar.is_file()
+                and runtime_sidecar.read_bytes() != source_projection
+            ):
+                _atomic_write(runtime_sidecar, source_projection)
+                _fsync_directory(runtime_sidecar.parent)
+        except BaseException as rollback_error:
+            rollback_errors.append(f"runtime restore failed: {rollback_error}")
+        try:
+            if attestation_published and output_attestation.is_file():
+                if output_attestation.read_bytes() != attestation_bytes:
+                    raise AtlasAnalysisError(
+                        "published attestation changed before rollback"
+                    )
+                output_attestation.unlink()
+                _fsync_directory(output_attestation.parent)
+        except BaseException as rollback_error:
+            rollback_errors.append(f"attestation removal failed: {rollback_error}")
+        if rollback_errors:
+            raise AtlasAnalysisError(
+                "paired hook publication rollback failed: "
+                + "; ".join(rollback_errors)
+            ) from error
+        if isinstance(error, AtlasAnalysisError):
+            raise
+        raise AtlasAnalysisError(
+            f"paired hook publication failed and was rolled back: {error}"
+        ) from error
+    finally:
+        staged_attestation.unlink(missing_ok=True)
+        if staged_runtime is not None:
+            staged_runtime.unlink(missing_ok=True)
+
+
 def _reachable_nodes(edges: list[dict], spawn_indices: dict) -> set[tuple[int, int, int]]:
     adjacency = _directed_adjacency(edges)
     reachable = set(spawn_indices.values())
@@ -85,6 +234,24 @@ def _reachable_nodes(edges: list[dict], spawn_indices: dict) -> set[tuple[int, i
                 reachable.add(neighbor)
                 pending.append(neighbor)
     return reachable
+
+
+def _measured_target_rejection(
+    source_key: tuple[int, int, int],
+    target_key: tuple[int, int, int],
+    target: Any | None,
+) -> str | None:
+    """Return the fail-closed reason for an unusable measured hook landing."""
+
+    if source_key == target_key:
+        return "measured_landing_shares_source_l1"
+    if target is None:
+        return "measured_landing_l1_unavailable"
+    if not target.supported:
+        return "measured_landing_unsupported"
+    if not (target.standing_clear or target.crouched_clear):
+        return "measured_landing_hull_blocked"
+    return None
 
 
 def materialize(
@@ -268,6 +435,7 @@ def materialize(
                         request_prefix=f"preflight-hook:{index:04d}",
                         atlas_origin=origin,
                         expected_landing=False,
+                        discover_landing=True,
                     )
                     if measured is None:
                         rejection_counts[str(reason)] += 1
@@ -277,10 +445,11 @@ def materialize(
                     )
                     target_key = _grid_index(landing, origin, 16)
                     target = nodes.get(target_key)
-                    if target is None or not target.supported or not (
-                        target.standing_clear or target.crouched_clear
-                    ):
-                        rejection_counts["measured_landing_l1_unavailable"] += 1
+                    target_rejection = _measured_target_rejection(
+                        source_key, target_key, target,
+                    )
+                    if target_rejection is not None:
+                        rejection_counts[target_rejection] += 1
                         continue
                     geometry = (
                         tuple(measured["anchor_milliunits"]),
@@ -354,6 +523,7 @@ def materialize(
         "schema": MATERIALIZATION_SCHEMA,
         "map": map_id,
         "passed": True,
+        "landing_policy": LANDING_POLICY,
         "bsp": {"sha256": initial_bsp_sha256, "size_bytes": initial_bsp_size},
         "candidates": {
             "meta_sha256": meta_sha256,
@@ -367,9 +537,9 @@ def materialize(
         "oracles": oracle_records,
         "replay": {
             "analyzer": "q2-hook-claim-materializer",
-            "analyzer_version": "b2-c-v2",
+            "analyzer_version": "b2-c-v3",
             "verifier": "q2-atlas-analyzer-exact-hook-replay",
-            "verifier_version": "b2-a-v2",
+            "verifier_version": "b2-a-v3",
         },
         "request_count": sum(
             oracle_records[name]["requests"]
@@ -382,8 +552,17 @@ def materialize(
     runtime_bytes = render_runtime_sidecar(
         map_id, initial_bsp_sha256, attestation_sha256, selected,
     )
-    _atomic_write(output_attestation, attestation_bytes)
-    _atomic_write(runtime_sidecar, runtime_bytes)
+    _publish_materialization_pair(
+        output_attestation=output_attestation,
+        runtime_sidecar=runtime_sidecar,
+        attestation_bytes=attestation_bytes,
+        runtime_bytes=runtime_bytes,
+        source_projection=source_projection,
+        source_projection_sha256=source_projection_sha256,
+        map_id=map_id,
+        bsp_sha256=initial_bsp_sha256,
+        records=selected,
+    )
     return document
 
 
@@ -409,11 +588,11 @@ def main() -> int:
             hook_parity_attestation=args.hook_parity_attestation,
             limits=AnalyzerLimits(),
         )
-    except (AtlasAnalysisError, HookClaimsV2Error, OSError, ValueError) as error:
+    except (AtlasAnalysisError, HookClaimsV3Error, OSError, ValueError) as error:
         print(f"hook materialization failed: {error}", file=sys.stderr)
         return 1
     print(json.dumps({
-        "schema": "q2-hook-materialization-result-v2",
+        "schema": "q2-hook-materialization-result-v3",
         "map": document["map"], "passed": True,
         "selected_count": len(document["selected_records"]),
         "attestation_sha256": sha256_file(args.output_attestation),

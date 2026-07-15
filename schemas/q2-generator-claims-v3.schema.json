@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:q2-ml:q2-generator-claims-v2",
+  "$id": "urn:q2-ml:q2-generator-claims-v3",
   "title": "Canonical generator-v6 claims with source-bound compiled hook replay",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "map", "generator", "source_files", "spawns", "hazard_claims", "hook_claims", "route_claims", "routes"],
   "properties": {
-    "schema": {"const": "q2-generator-claims-v2"},
+    "schema": {"const": "q2-generator-claims-v3"},
     "map": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
     "generator": {"const": "v6"},
     "source_files": {
@@ -47,7 +47,7 @@
     },
     "hook_claims": {
       "type": "array", "minItems": 6, "maxItems": 6,
-      "items": {"$ref": "#/$defs/hook_v2"}
+      "items": {"$ref": "#/$defs/hook_v3"}
     },
     "route_claims": {
       "type": "array", "minItems": 1,
@@ -81,7 +81,7 @@
     "claim_id": {"type": "string", "pattern": "^[a-z0-9:_-]{1,127}$"},
     "vec3_i64": {"type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}, {"type": "integer"}], "minItems": 3, "maxItems": 3},
     "bounds_i64": {"type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}, {"type": "integer"}, {"type": "integer"}, {"type": "integer"}, {"type": "integer"}], "minItems": 6, "maxItems": 6},
-    "hook_v2": {
+    "hook_v3": {
       "type": "object", "additionalProperties": false,
       "required": ["claim_id", "source_milliunits", "anchor_milliunits", "landing_milliunits", "release_after_ticks", "distance_milliunits", "flags"],
       "properties": {

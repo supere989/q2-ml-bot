@@ -17,6 +17,9 @@ from tools.run_generator_cohort import (
 
 ROOT = Path(__file__).resolve().parents[1]
 DECLARATION = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+FAILURE_71427 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71427-FAILURE.json"
+)
 NONZERO = "ab" * 32
 
 
@@ -60,11 +63,84 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "b2g26_final_71426",
         "b2g26_final_71427",
         "non-admissible",
-        "declared-not-generated",
+        "permanently non-admissible",
+        "168 of 196",
+        "replacement declaration is pending",
     )
     assert all(fragment in contract for fragment in required_contract)
     assert "--glob 'b2claim_*.map'" not in contract
     assert "--expected-count 20" not in contract
+
+
+def test_71427_failure_record_is_canonical_exact_and_no_salvage() -> None:
+    payload = FAILURE_71427.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71427"
+    assert failure["declaration"]["sha256"] == (
+        "78acab13ecb7ad4a365b7f8cb64318650"
+        "d07fd88edd4471c4b7f8acb1a36cd1a"
+    )
+    assert failure["status"] == "permanently-failed-first-materialization"
+
+    first_map = failure["failure"]["first_map"]
+    assert first_map == {
+        "map": "b2g26_open_71427000",
+        "ordinal": 0,
+        "seed": 71427000,
+        "style": "open",
+    }
+    transcript = failure["failure"]["operator_transcript"]
+    assert transcript["durably_retained"] is False
+    assert transcript["exit_code"] == 1
+    assert transcript["proved_unique_geometries"] == 2
+    assert transcript["required_unique_geometries"] == 6
+    assert transcript["rejections"] == {
+        "anchor_not_exactly_attachable": 28,
+        "duplicate_proven_geometry": 2,
+        "measured_landing_outside_desired_l1": 400,
+        "source_not_spawn_reachable": 80,
+    }
+    assert transcript["stdout_text"] == ""
+    assert transcript["stderr_text"] == (
+        "hook materialization failed: compiled hook preflight proved 2/6 "
+        "unique geometries; rejections={'anchor_not_exactly_attachable': 28, "
+        "'duplicate_proven_geometry': 2, "
+        "'measured_landing_outside_desired_l1': 400, "
+        "'source_not_spawn_reachable': 80}"
+    )
+    durable = failure["failure"]["durable_process_capture"]
+    assert durable["stderr_retained"] is False
+    assert durable["exit_code_retained"] is False
+    assert failure["evidence"]["failed_materialization_stdout"] == {
+        "path_from_artifact_root": (
+            "generated-final-71427-d83391aa/"
+            "failed-materialization-open-71427000/logs/"
+            "b2g26_open_71427000.materialize.json"
+        ),
+        "sha256": hashlib.sha256(b"").hexdigest(),
+        "size_bytes": 0,
+    }
+
+    membership = failure["evidence"]["materialized_membership"]
+    assert membership["expected_file_count"] == 196
+    assert membership["actual_file_count"] == 168
+    assert membership["missing_attestation_count"] == 28
+    assert membership["unexpected_file_count"] == 0
+    assert membership["passed"] is False
+    admission = failure["admission"]
+    assert admission["permanently_non_admissible"] is True
+    assert admission["materialized_stage_published"] is False
+    assert admission["claims_stage_published"] is False
+    assert admission["analysis_stage_published"] is False
+    assert admission["salvage_allowed"] is False
+    assert admission["retry_under_same_declaration_allowed"] is False
+    assert admission["regeneration_under_same_declaration_allowed"] is False
+    assert admission["replacement_declaration_status"] == (
+        "pending-implementation-fix"
+    )
 
 
 def write_stage(directory: Path, stage: str) -> dict:

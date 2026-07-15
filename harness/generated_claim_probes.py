@@ -3,7 +3,7 @@
 Generator records are proposals.  This module validates their frozen wire
 contract and source identities, then admits only facts reproduced from the
 compiled BSP through B1 metadata/collision authority and evidenced Atlas
-navigation. Hook-v2 claims are independently replayed by the Atlas analyzer.
+navigation. Hook-v3 claims are independently replayed by the Atlas analyzer.
 """
 
 from __future__ import annotations
@@ -18,14 +18,14 @@ from pathlib import Path
 import re
 from typing import Any
 
-from .hook_claims_v2 import (
-    HookClaimsV2Error,
+from .hook_claims_v3 import (
+    HookClaimsV3Error,
     load_materialization,
-    validate_record as validate_hook_record_v2,
+    validate_record as validate_hook_record_v3,
 )
 
 
-CLAIMS_SCHEMA = "q2-generator-claims-v2"
+CLAIMS_SCHEMA = "q2-generator-claims-v3"
 ORACLE_STATUS = "oracle"
 VALIDATION_VERSION = 1
 EVIDENCE_CM_CONTENTS_V1 = 3
@@ -112,7 +112,7 @@ def _sha(value: Any, label: str) -> str:
 
 
 def validate_generator_claims(value: Any) -> dict[str, Any]:
-    """Validate the exact frozen q2-generator-claims-v2 structure."""
+    """Validate the exact frozen q2-generator-claims-v3 structure."""
     claims = _exact_mapping(value, {
         "schema", "map", "generator", "source_files", "spawns",
         "hazard_claims", "hook_claims", "route_claims", "routes",
@@ -166,8 +166,8 @@ def validate_generator_claims(value: Any) -> dict[str, Any]:
 
     for index, item in enumerate(_list(claims["hook_claims"], "hooks", minimum=6)):
         try:
-            record = validate_hook_record_v2(item, f"hook {index}")
-        except HookClaimsV2Error as error:
+            record = validate_hook_record_v3(item, f"hook {index}")
+        except HookClaimsV3Error as error:
             raise GeneratedClaimProbeError(str(error)) from error
         unique(record["claim_id"], f"hook {index} claim_id")
     if len(claims["hook_claims"]) != 6:
@@ -324,7 +324,7 @@ def load_generator_hook_materialization(
     )
     try:
         document, digest = load_materialization(materialization_path)
-    except (HookClaimsV2Error, OSError) as error:
+    except (HookClaimsV3Error, OSError) as error:
         raise GeneratedClaimProbeError(str(error)) from error
     if digest != claims["source_files"]["hook_materialization_sha256"]:
         raise GeneratedClaimProbeError("hook materialization identity differs")

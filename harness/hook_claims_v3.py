@@ -15,8 +15,9 @@ import re
 from typing import Any, Mapping, Sequence
 
 
-CANDIDATE_SCHEMA = "q2-hook-claim-candidates-v2"
-MATERIALIZATION_SCHEMA = "q2-hook-claim-materialization-v2"
+CANDIDATE_SCHEMA = "q2-hook-claim-candidates-v3"
+MATERIALIZATION_SCHEMA = "q2-hook-claim-materialization-v3"
+LANDING_POLICY = "compiled-first-grounded-exact-v3"
 RUNTIME_RECORD_COUNT = 6
 RECORD_KEYS = {
     "claim_id", "source_milliunits", "anchor_milliunits",
@@ -30,8 +31,8 @@ _CLAIM_RE = re.compile(r"^hook:[0-9]{4}:candidate:[0-9]{4}$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-class HookClaimsV2Error(RuntimeError):
-    """A hook-v2 artifact is malformed, stale, or not canonically encoded."""
+class HookClaimsV3Error(RuntimeError):
+    """A hook-v3 artifact is malformed, stale, or not canonically encoded."""
 
 
 def canonical_json(value: Any) -> bytes:
@@ -55,7 +56,7 @@ def sha256_file(path: Path) -> str:
 def _mapping(value: Any, keys: set[str], label: str) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != keys:
         actual = set(value) if isinstance(value, dict) else set()
-        raise HookClaimsV2Error(
+        raise HookClaimsV3Error(
             f"{label} keys differ: missing={sorted(keys - actual)}, "
             f"unknown={sorted(actual - keys)}"
         )
@@ -64,21 +65,21 @@ def _mapping(value: Any, keys: set[str], label: str) -> dict[str, Any]:
 
 def _integer(value: Any, label: str, minimum: int | None = None) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise HookClaimsV2Error(f"{label} must be an integer")
+        raise HookClaimsV3Error(f"{label} must be an integer")
     if minimum is not None and value < minimum:
-        raise HookClaimsV2Error(f"{label} must be at least {minimum}")
+        raise HookClaimsV3Error(f"{label} must be at least {minimum}")
     return value
 
 
 def _vec3(value: Any, label: str) -> list[int]:
     if not isinstance(value, list) or len(value) != 3:
-        raise HookClaimsV2Error(f"{label} must be three integers")
+        raise HookClaimsV3Error(f"{label} must be three integers")
     return [_integer(item, f"{label}[{index}]") for index, item in enumerate(value)]
 
 
 def _sha(value: Any, label: str) -> str:
     if not isinstance(value, str) or not _SHA_RE.fullmatch(value):
-        raise HookClaimsV2Error(f"{label} is not a lowercase SHA-256")
+        raise HookClaimsV3Error(f"{label} is not a lowercase SHA-256")
     return value
 
 
@@ -86,25 +87,25 @@ def validate_record(value: Any, label: str) -> dict[str, Any]:
     record = _mapping(value, RECORD_KEYS, label)
     claim_id = record["claim_id"]
     if not isinstance(claim_id, str) or not _CLAIM_RE.fullmatch(claim_id):
-        raise HookClaimsV2Error(f"{label} has invalid claim_id")
+        raise HookClaimsV3Error(f"{label} has invalid claim_id")
     source = _vec3(record["source_milliunits"], f"{label}.source_milliunits")
     anchor = _vec3(record["anchor_milliunits"], f"{label}.anchor_milliunits")
     landing = _vec3(record["landing_milliunits"], f"{label}.landing_milliunits")
     release = _integer(record["release_after_ticks"], f"{label}.release_after_ticks", 1)
     if release > 49:
-        raise HookClaimsV2Error(f"{label}.release_after_ticks exceeds hook lifetime")
+        raise HookClaimsV3Error(f"{label}.release_after_ticks exceeds hook lifetime")
     distance = _integer(record["distance_milliunits"], f"{label}.distance_milliunits", 1)
     flags = _integer(record["flags"], f"{label}.flags", 0)
     if flags > 7:
-        raise HookClaimsV2Error(f"{label}.flags exceeds 7")
+        raise HookClaimsV3Error(f"{label}.flags exceeds 7")
     eye = (source[0], source[1], source[2] + 22_000)
     expected_distance = round(math.sqrt(sum(
         (anchor[axis] - eye[axis]) ** 2 for axis in range(3)
     )))
     if distance != expected_distance:
-        raise HookClaimsV2Error(f"{label}.distance_milliunits is not source-bound")
+        raise HookClaimsV3Error(f"{label}.distance_milliunits is not source-bound")
     if any(value % 125 for value in source):
-        raise HookClaimsV2Error(f"{label}.source_milliunits is not exact Pmove fixed-point")
+        raise HookClaimsV3Error(f"{label}.source_milliunits is not exact Pmove fixed-point")
     return {
         "claim_id": claim_id,
         "source_milliunits": source,
@@ -126,14 +127,14 @@ def validate_candidates(value: Any) -> dict[str, Any]:
         or container["status"] != "unproven"
         or container["bundle_admissible"] is not False
     ):
-        raise HookClaimsV2Error("hook candidate container is not frozen v2")
+        raise HookClaimsV3Error("hook candidate container is not frozen v3")
     values = container["records"]
     if not isinstance(values, list) or not values:
-        raise HookClaimsV2Error("hook candidate container has no records")
+        raise HookClaimsV3Error("hook candidate container has no records")
     records = [validate_record(item, f"candidate {index}") for index, item in enumerate(values)]
     ids = [record["claim_id"] for record in records]
     if ids != sorted(ids) or len(ids) != len(set(ids)):
-        raise HookClaimsV2Error("hook candidate IDs are not unique and stably ordered")
+        raise HookClaimsV3Error("hook candidate IDs are not unique and stably ordered")
     return {
         "schema": CANDIDATE_SCHEMA,
         "tick_msec": 100,
@@ -148,10 +149,10 @@ def load_candidates(meta_path: Path) -> tuple[dict[str, Any], str, str]:
     try:
         metadata = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise HookClaimsV2Error("generator metadata is not valid JSON") from error
+        raise HookClaimsV3Error("generator metadata is not valid JSON") from error
     if not isinstance(metadata, dict):
-        raise HookClaimsV2Error("generator metadata is not an object")
-    candidates = validate_candidates(metadata.get("hook_claim_candidates_v2"))
+        raise HookClaimsV3Error("generator metadata is not an object")
+    candidates = validate_candidates(metadata.get("hook_claim_candidates_v3"))
     return (
         candidates,
         sha256_bytes(canonical_json(candidates) + b"\n"),
@@ -182,8 +183,8 @@ def render_runtime_sidecar(
 ) -> bytes:
     records_sha256 = runtime_records_sha256(records)
     header = [
-        "# q2-ml-bot hook zones - compiled exact materialization v2",
-        "# schema: q2-hook-runtime-sidecar-v2",
+        "# q2-ml-bot hook zones - compiled exact materialization v3",
+        "# schema: q2-hook-runtime-sidecar-v3",
         "# passed: true",
         "# bundle_admissible: true",
         f"# map: {map_id}",
@@ -208,7 +209,7 @@ def validate_runtime_sidecar(
         map_id, bsp_sha256, materialization_sha256, records
     )
     if payload != expected:
-        raise HookClaimsV2Error(
+        raise HookClaimsV3Error(
             "runtime hook sidecar header/rows differ from materialization"
         )
 
@@ -229,14 +230,14 @@ def validate_trace(value: Any, label: str) -> dict[str, Any]:
     trace = _mapping(value, TRACE_KEYS, label)
     claim_id = trace["claim_id"]
     if not isinstance(claim_id, str) or not _CLAIM_RE.fullmatch(claim_id):
-        raise HookClaimsV2Error(f"{label}.claim_id is invalid")
+        raise HookClaimsV3Error(f"{label}.claim_id is invalid")
     frames = trace["origin_fixed_frames"]
     if not isinstance(frames, list) or not frames:
-        raise HookClaimsV2Error(f"{label}.origin_fixed_frames is empty")
+        raise HookClaimsV3Error(f"{label}.origin_fixed_frames is empty")
     normalized_frames = []
     for index, frame in enumerate(frames):
         if not isinstance(frame, list) or len(frame) != 3:
-            raise HookClaimsV2Error(f"{label} frame {index} is not fixed3")
+            raise HookClaimsV3Error(f"{label} frame {index} is not fixed3")
         normalized_frames.append([
             _integer(axis, f"{label} frame {index}") for axis in frame
         ])
@@ -245,10 +246,10 @@ def validate_trace(value: Any, label: str) -> dict[str, Any]:
         f"{label}.first_grounded_frame_index", 0,
     )
     if grounded != len(normalized_frames) - 1:
-        raise HookClaimsV2Error(f"{label} does not end at first grounded frame")
+        raise HookClaimsV3Error(f"{label} does not end at first grounded frame")
     expected = validation_trace_sha256(claim_id, normalized_frames, grounded)
     if _sha(trace["sha256"], f"{label}.sha256") != expected:
-        raise HookClaimsV2Error(f"{label}.sha256 differs")
+        raise HookClaimsV3Error(f"{label}.sha256 differs")
     return {
         "claim_id": claim_id,
         "origin_fixed_frames": normalized_frames,
@@ -261,13 +262,15 @@ def validate_materialization(value: Any) -> dict[str, Any]:
     document = _mapping(value, {
         "schema", "map", "passed", "bsp", "candidates", "source_projection_sha256",
         "runtime_records_sha256", "selected_records", "validation_traces",
-        "oracles", "replay",
+        "landing_policy", "oracles", "replay",
         "request_count",
     }, "hook materialization")
     if document["schema"] != MATERIALIZATION_SCHEMA or document["passed"] is not True:
-        raise HookClaimsV2Error("hook materialization is not a passed v2 record")
+        raise HookClaimsV3Error("hook materialization is not a passed v3 record")
     if not isinstance(document["map"], str) or not document["map"]:
-        raise HookClaimsV2Error("hook materialization map is invalid")
+        raise HookClaimsV3Error("hook materialization map is invalid")
+    if document["landing_policy"] != LANDING_POLICY:
+        raise HookClaimsV3Error("hook materialization landing policy differs")
     bsp = _mapping(document["bsp"], {"sha256", "size_bytes"}, "materialization BSP")
     _sha(bsp["sha256"], "materialization BSP digest")
     _integer(bsp["size_bytes"], "materialization BSP size", 1)
@@ -281,28 +284,28 @@ def validate_materialization(value: Any) -> dict[str, Any]:
     _sha(document["runtime_records_sha256"], "runtime records digest")
     selected = document["selected_records"]
     if not isinstance(selected, list) or len(selected) != RUNTIME_RECORD_COUNT:
-        raise HookClaimsV2Error("materialization must select exactly six records")
+        raise HookClaimsV3Error("materialization must select exactly six records")
     records = [validate_record(item, f"selected record {index}") for index, item in enumerate(selected)]
     ids = [record["claim_id"] for record in records]
     if ids != sorted(ids) or len(ids) != len(set(ids)):
-        raise HookClaimsV2Error("selected records are not uniquely and stably ordered")
+        raise HookClaimsV3Error("selected records are not uniquely and stably ordered")
     geometries = [
         (tuple(record["anchor_milliunits"]), tuple(record["landing_milliunits"]), record["flags"])
         for record in records
     ]
     if len(set(geometries)) != RUNTIME_RECORD_COUNT:
-        raise HookClaimsV2Error("selected runtime geometries are not unique")
+        raise HookClaimsV3Error("selected runtime geometries are not unique")
     if runtime_records_sha256(records) != document["runtime_records_sha256"]:
-        raise HookClaimsV2Error("materialization runtime record digest differs")
+        raise HookClaimsV3Error("materialization runtime record digest differs")
     traces_value = document["validation_traces"]
     if not isinstance(traces_value, list) or len(traces_value) != RUNTIME_RECORD_COUNT:
-        raise HookClaimsV2Error("materialization must have six validation traces")
+        raise HookClaimsV3Error("materialization must have six validation traces")
     traces = [
         validate_trace(item, f"validation trace {index}")
         for index, item in enumerate(traces_value)
     ]
     if [trace["claim_id"] for trace in traces] != ids:
-        raise HookClaimsV2Error("validation traces differ from selected records")
+        raise HookClaimsV3Error("validation traces differ from selected records")
     oracles = _mapping(document["oracles"], {
         "collision", "pmove", "hook", "fall",
         "hook_parity_attestation_sha256", "b1_runtime_authority_seal",
@@ -320,7 +323,7 @@ def validate_materialization(value: Any) -> dict[str, Any]:
         "fixture_bsp_sha256", "analysis_bsp_sha256", "executables", "identities",
     }, "materialization B1 runtime authority seal")
     if seal["schema"] != "q2-b1-runtime-authority-seal-v1":
-        raise HookClaimsV2Error("materialization B1 seal schema differs")
+        raise HookClaimsV3Error("materialization B1 seal schema differs")
     normative = _mapping(
         seal["normative_documents"], {"design_sha256", "plan_sha256"},
         "materialization B1 normative documents",
@@ -353,7 +356,7 @@ def validate_materialization(value: Any) -> dict[str, Any]:
             identity[field] != oracles[name][field]
             for field in ("tool_identity", "physics_identity")
         ):
-            raise HookClaimsV2Error(
+            raise HookClaimsV3Error(
                 f"materialization {name} identity differs from retained B1 seal"
             )
     if (
@@ -366,17 +369,17 @@ def validate_materialization(value: Any) -> dict[str, Any]:
             for name in ("collision", "pmove", "hook", "fall")
         )
     ):
-        raise HookClaimsV2Error("materialization B1 seal binding differs")
+        raise HookClaimsV3Error("materialization B1 seal binding differs")
     replay = _mapping(document["replay"], {
         "analyzer", "analyzer_version", "verifier", "verifier_version",
     }, "materialization replay")
     if replay != {
         "analyzer": "q2-hook-claim-materializer",
-        "analyzer_version": "b2-c-v2",
+        "analyzer_version": "b2-c-v3",
         "verifier": "q2-atlas-analyzer-exact-hook-replay",
-        "verifier_version": "b2-a-v2",
+        "verifier_version": "b2-a-v3",
     }:
-        raise HookClaimsV2Error("materialization replay versions differ")
+        raise HookClaimsV3Error("materialization replay versions differ")
     _integer(document["request_count"], "materialization request count", 1)
     return document
 
@@ -386,9 +389,9 @@ def load_materialization(path: Path) -> tuple[dict[str, Any], str]:
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise HookClaimsV2Error("hook materialization is not valid JSON") from error
+        raise HookClaimsV3Error("hook materialization is not valid JSON") from error
     document = validate_materialization(value)
     canonical = canonical_json(document) + b"\n"
     if raw != canonical:
-        raise HookClaimsV2Error("hook materialization is not canonical JSON plus LF")
+        raise HookClaimsV3Error("hook materialization is not canonical JSON plus LF")
     return document, sha256_bytes(canonical)

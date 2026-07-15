@@ -303,7 +303,7 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
     assert candidate["status"] == "candidate"
     assert candidate["deterministic_rebuild"] is False
     assert candidate["confidence"] == "pending-independent-cold-rebuild"
-    assert candidate["analyzer_version"] == "b2-a-v2"
+    assert candidate["analyzer_version"] == "b2-a-v3"
     assert candidate["confidence_summary"]["hook"] == "attested-no-replayed-edge"
     outputs = []
     for name in ("first", "second"):

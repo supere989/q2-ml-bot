@@ -7,8 +7,8 @@ import struct
 
 import pytest
 
-from harness.hook_claims_v2 import (
-    HookClaimsV2Error,
+from harness.hook_claims_v3 import (
+    HookClaimsV3Error,
     canonical_json as hook_canonical_json,
     load_candidates,
     render_runtime_sidecar,
@@ -120,8 +120,9 @@ def _fake_materialize(map_path: Path) -> None:
         },
     }
     document = validate_materialization({
-        "schema": "q2-hook-claim-materialization-v2",
+        "schema": "q2-hook-claim-materialization-v3",
         "map": map_path.stem, "passed": True,
+        "landing_policy": "compiled-first-grounded-exact-v3",
         "bsp": {"sha256": file_sha256(bsp_path), "size_bytes": bsp_path.stat().st_size},
         "candidates": {
             "meta_sha256": meta_digest, "records_sha256": candidate_digest,
@@ -137,9 +138,9 @@ def _fake_materialize(map_path: Path) -> None:
         },
         "replay": {
             "analyzer": "q2-hook-claim-materializer",
-            "analyzer_version": "b2-c-v2",
+            "analyzer_version": "b2-c-v3",
             "verifier": "q2-atlas-analyzer-exact-hook-replay",
-            "verifier_version": "b2-a-v2",
+            "verifier_version": "b2-a-v3",
         },
         "request_count": 4,
     })
@@ -906,7 +907,7 @@ def test_claim_materialization_cannot_carry_non_b1_hook_parity(generated):
     materialization_path = Path(f"{stem}.hook-materialization.json")
     materialization = json.loads(materialization_path.read_text())
     materialization["oracles"]["hook_parity_attestation_sha256"] = "aa" * 32
-    with pytest.raises(HookClaimsV2Error, match="B1 seal binding differs"):
+    with pytest.raises(HookClaimsV3Error, match="B1 seal binding differs"):
         validate_materialization(materialization)
 
 
@@ -1158,7 +1159,7 @@ def test_stock_structural_facts_are_pinned_not_self_declared(
 
 def test_contract_schemas_forbid_unknown_top_level_fields():
     claims_schema = json.loads(
-        (ROOT / "schemas/q2-generator-claims-v2.schema.json").read_text()
+        (ROOT / "schemas/q2-generator-claims-v3.schema.json").read_text()
     )
     report_schema = json.loads(
         (ROOT / "schemas/q2-generator-claim-validation-v1.schema.json").read_text()
@@ -1183,7 +1184,7 @@ def test_materialization_source_mutation_rejects_before_claim_publish(
         if mutation == "meta":
             metadata["tampered_after_materialization"] = True
         else:
-            metadata["hook_claim_candidates_v2"]["records"][0][
+            metadata["hook_claim_candidates_v3"]["records"][0][
                 "release_after_ticks"
             ] += 1
         meta_path.write_bytes(canonical_bytes(metadata))

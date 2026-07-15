@@ -51,7 +51,7 @@ HOOK_EYE_Z  = 22           # hook trace starts at player origin + view height
 HOOK_RELEASE_TICK_MSEC = 100
 HOOK_RELEASE_TICKS = tuple(range(1, 7))
 MAX_HOOK_SOURCES_PER_GEOMETRY = 2
-MAX_HOOK_CANDIDATES_V2 = 512
+MAX_HOOK_CANDIDATES_V3 = 512
 HOOK_RELEASES_PER_SOURCE = 4        # two ranks x four schedules x 64 cells
 HOOK_COORDINATE_GEOMETRY_FLOOR = 43  # complete former 512/(2*6) prefix
 MAX_RUNTIME_HOOK_ZONES = 256  # must match ml_bridge.c MAX_HOOK_ZONES
@@ -182,7 +182,7 @@ class HookZone:
 
 
 @dataclass(frozen=True)
-class HookClaimCandidateV2:
+class HookClaimCandidateV3:
     """Unproven source-bound hook schedule with a desired landing proposal."""
 
     source: Tuple[float, float, float]
@@ -586,7 +586,7 @@ class MapGenerator:
         self.rooms: List[Room] = []
         self.connections: List[Connection] = []
         self.hook_zones: List[HookZone] = []
-        self.hook_claim_candidates_v2: List[Tuple[str, HookClaimCandidateV2]] = []
+        self.hook_claim_candidates_v3: List[Tuple[str, HookClaimCandidateV3]] = []
         self.spawn_points: List[Tuple[int, int, int]] = []
         self.spawn_blockers: List[SolidBox] = []
         self.light_occluders: List[SolidBox] = []
@@ -2776,9 +2776,9 @@ class MapGenerator:
         exact_spawn = source in fixed_spawns
         on_spawn_floor = source[2] in spawn_floor_origins
         on_landing_floor = source[2] == landing[2] + PMOVE_FIXED_QUANTUM
-        if on_spawn_floor and on_landing_floor:
+        if exact_spawn:
             authored_tier = 0
-        elif exact_spawn:
+        elif on_spawn_floor and on_landing_floor:
             authored_tier = 1
         elif on_spawn_floor:
             authored_tier = 2
@@ -2822,7 +2822,7 @@ class MapGenerator:
         return HOOK_RELEASE_TICKS[-HOOK_RELEASES_PER_SOURCE:]
 
     def _annotate_hook_zones(self):
-        """Publish source-bound v2 proposals, never traversal authority.
+        """Publish source-bound V3 proposals, never traversal authority.
 
         The pool is deliberately overcomplete. A compiled-world preflight must
         replay one exact source/release schedule, materialize the first six
@@ -2830,7 +2830,7 @@ class MapGenerator:
         """
 
         self.hook_zones = []
-        self.hook_claim_candidates_v2 = []
+        self.hook_claim_candidates_v3 = []
         source_origins = self._authored_floor_origins()
         grouped: dict[
             Tuple[Tuple[float, float, float], Tuple[float, float, float], int],
@@ -2873,7 +2873,7 @@ class MapGenerator:
         # replay rows steering the selection.
         geometry_limit = min(
             len(diverse_order),
-            MAX_HOOK_CANDIDATES_V2
+            MAX_HOOK_CANDIDATES_V3
             // (MAX_HOOK_SOURCES_PER_GEOMETRY * HOOK_RELEASES_PER_SOURCE),
             MAX_RUNTIME_HOOK_ZONES,
         )
@@ -2894,7 +2894,7 @@ class MapGenerator:
         ]
         extra_release_budget = max(
             0,
-            MAX_HOOK_CANDIDATES_V2 - sum(
+            MAX_HOOK_CANDIDATES_V3 - sum(
                 len(sources) * HOOK_RELEASES_PER_SOURCE
                 for _geometry, sources in selected_geometry_sources
             ),
@@ -2921,14 +2921,14 @@ class MapGenerator:
                         release_window.append(release_after_ticks)
                         extra_release_budget -= 1
                 candidates.extend(
-                    HookClaimCandidateV2(
+                    HookClaimCandidateV3(
                         source=source, anchor=anchor, landing=landing,
                         release_after_ticks=release_after_ticks,
                         distance_milliunits=distance_milliunits, flags=flags,
                     )
                     for release_after_ticks in release_window
                 )
-            remaining = MAX_HOOK_CANDIDATES_V2 - len(self.hook_claim_candidates_v2)
+            remaining = MAX_HOOK_CANDIDATES_V3 - len(self.hook_claim_candidates_v3)
             if remaining <= 0:
                 break
             candidates = candidates[:remaining]
@@ -2938,7 +2938,7 @@ class MapGenerator:
                 claim_id = (
                     f"hook:{geometry_ordinal:04d}:candidate:{candidate_ordinal:04d}"
                 )
-                self.hook_claim_candidates_v2.append((claim_id, candidate))
+                self.hook_claim_candidates_v3.append((claim_id, candidate))
             projection = candidates[0]
             self.hook_zones.append(HookZone(
                 anchor=projection.anchor,
@@ -3099,7 +3099,7 @@ class MapGenerator:
             "connections": len(self.connections),
             "platforms": sum(len(r.platforms) for r in self.rooms),
             "hook_zones": len(self.hook_zones),
-            "hook_claim_candidates_v2_count": len(self.hook_claim_candidates_v2),
+            "hook_claim_candidates_v3_count": len(self.hook_claim_candidates_v3),
             "hook_required": sum(1 for z in self.hook_zones if z.flags & HOOK_REQUIRED),
             "arenas": sum(1 for r in self.rooms if r.kind == 'arena'),
             "kill_planes": 1 if self.rooms else 0,
@@ -3206,11 +3206,11 @@ class MapGenerator:
             ],
         }
 
-    def hook_claim_candidates_v2_manifest(self) -> dict:
+    def hook_claim_candidates_v3_manifest(self) -> dict:
         """Return non-admissible proposals for exact compiled-world replay."""
 
         return {
-            "schema": "q2-hook-claim-candidates-v2",
+            "schema": "q2-hook-claim-candidates-v3",
             "tick_msec": HOOK_RELEASE_TICK_MSEC,
             "status": "unproven",
             "bundle_admissible": False,
@@ -3224,7 +3224,7 @@ class MapGenerator:
                     "distance_milliunits": candidate.distance_milliunits,
                     "flags": candidate.flags,
                 }
-                for claim_id, candidate in self.hook_claim_candidates_v2
+                for claim_id, candidate in self.hook_claim_candidates_v3
             ],
         }
 
@@ -3259,7 +3259,7 @@ def generate_map(name: str, seed: Optional[int], out_dir: Path, grid_n: int = 5,
         **gen.stats(),
         "lighting": gen.lighting_manifest(),
         "safety": gen.safety_manifest(),
-        "hook_claim_candidates_v2": gen.hook_claim_candidates_v2_manifest(),
+        "hook_claim_candidates_v3": gen.hook_claim_candidates_v3_manifest(),
     }
     meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 

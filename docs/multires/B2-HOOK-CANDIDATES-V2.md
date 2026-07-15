@@ -1,6 +1,13 @@
-# B2 generated hook candidates v2
+# B2 generated hook candidates v2 (retired)
 
-Status: offline, unproven generator output
+Status: retired historical contract; non-admissible
+
+V2 is preserved only to explain historical artifacts and failed campaigns. It
+is superseded in one direction by `B2-HOOK-CANDIDATES-V3.md`. No current
+materializer, claim builder, analyzer, campaign, bundle, or runtime accepts V2,
+and there is no parser fallback, conversion, or dual-acceptance path. The
+present-tense descriptions below describe the retired V2 protocol only; they
+do not authorize new generation or materialization.
 
 The generator emits an overcomplete source-bound hook replay pool in the
 top-level `.meta.json` key `hook_claim_candidates_v2`. This pool is a proposal,

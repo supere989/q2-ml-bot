@@ -1,9 +1,15 @@
 # B2-C generated-map compiled-world claim contract
 
 Status: offline prototype contract for B2 integration
-Schemas: `q2-generator-claims-v2`,
+Schemas: `q2-generator-claims-v3`,
 `q2-generator-claim-validation-v1`, and
 `q2-generator-claim-campaign-v2`
+
+Nested hook authority uses only `q2-hook-claim-candidates-v3`,
+`q2-hook-claim-materialization-v3`, and `q2-hook-runtime-sidecar-v3` as defined
+by `B2-HOOK-CANDIDATES-V3.md`. Hook V2 is retired historical evidence. It is
+not a fallback or alternate input to any current claim, analysis, campaign,
+bundle, or runtime path.
 
 Generator v6 `.map`, `.meta.json`, `.lattice.json`, hook-zone,
 `.hook-materialization.json`, and route sidecars are claims to challenge. They
@@ -18,16 +24,18 @@ canonical compact/sorted JSON document with a trailing LF. Its SHA-256 binds:
 
 - all eight source and lattice spawn origins;
 - every lava and generated `trigger_hurt` volume;
-- every materialized source, anchor, measured landing, release schedule,
+- every V3-materialized source, anchor, measured landing, release schedule,
   distance, and flag;
 - every route segment endpoint and each route's normalized cost claim; and
 - SHA-256 identities for all six source files.
 
-The hook materialization is a separate canonical record. It binds the exact
-BSP and candidate metadata, the original non-admissible projection, six
-selected records and ordered Pmove traces, executable/tool/physics identities,
-and the pinned parity attestation. A final runtime hook sidecar is admissible
-only when its canonical header and eight-field rows match this record exactly.
+The V3 hook materialization is a separate canonical record. It binds the exact
+BSP and V3 candidate metadata, the original non-admissible projection, six
+selected records whose landing is the compiled first-grounded Pmove origin,
+ordered Pmove traces, executable/tool/physics identities, and the pinned parity
+attestation. The generator's landing hint is never an expected-cell constraint
+or compiled-world claim. A final V3 runtime hook sidecar is admissible only
+when its canonical header and eight-field rows match this record exactly.
 
 The legacy room graph can report zero cost between different locations in one
 room. The canonical cost claim therefore uses the greater of the declared
@@ -76,8 +84,9 @@ The generated path requires every criterion below:
 8. qrad lightdata is nonempty and at most 2 MiB, has a nonzero digest and
    lightmapped faces, the compiled spawn-region count matches the v6 lighting
    contract, and no dark spawn region remains.
-9. Hook authority is admitted under both the B1 hook physics identity and the
-   exact SHA-256 of the accepted B1 hook-parity attestation. The analysis and
+9. Hook authority is admitted under the sole V3 contract, the B1 hook physics
+   identity, and the exact SHA-256 of the accepted B1 hook-parity attestation.
+   The analysis and
    hook materialization must independently carry that same attestation digest;
    matching physics text alone is insufficient. Every claim has exactly one
    source-bound, spawn-reachable edge whose exact source, anchor, release ticks,
@@ -181,17 +190,47 @@ stage. Do not repair it by substituting maps, selecting its passing members,
 regenerating behind the same declaration, or feeding an older materialized
 population into campaign v2.
 
-The authoritative declaration now names the replacement cohort
-`b2g26_final_71427`. It is immutable and declared before generation, but it has
-not yet been generated. Its status is `declared-not-generated`, so it likewise
-authorizes no source, materialized, claims, or analysis stage. Committing the
-declaration is the boundary that must precede the first generator invocation;
-neither this contract nor declaration presence claims that any member passes.
+The historical replacement cohort `b2g26_final_71427` passed its exact
+28-member source freeze, compile membership, and static validation, then
+failed the first hook materialization on ordinal 0,
+`b2g26_open_71427000`. The retained process stdout is empty and the original
+stderr and exit status were not durably captured. Operator commentary recorded
+exit 1 and the diagnostic `compiled hook preflight proved 2/6 unique
+geometries`, with rejection counts `anchor_not_exactly_attachable=28`,
+`duplicate_proven_geometry=2`,
+`measured_landing_outside_desired_l1=400`, and
+`source_not_spawn_reachable=80`; that commentary is explicitly not a hashed
+raw log. The durable exact-membership check is authoritative for admission: it
+found 168 of 196 required materialized files, with all 28
+`.hook-materialization.json` attestations absent and no unexpected files.
+
+The canonical failure record is
+`docs/multires/B2-GENERATED-COHORT-71427-FAILURE.json`. Cohort 71427 is
+permanently non-admissible. Its source and compiled results remain evidence
+only; it published no materialized, claims, or analysis stage. Do not rerun or
+regenerate it behind the same declaration, repair or substitute a member,
+select a passing subset, or feed its compiled files or an older materialized
+population into campaign v2.
+
+The authoritative declaration file still names failed cohort 71427 so its
+exact selection bytes remain visible. A replacement declaration is pending an
+implementation fix and explicit root authorization. No replacement cohort ID
+or seed is declared or authorized by this contract. After the fix is committed
+and tested, a new immutable declaration must be committed before its first
+generator invocation; declaration presence alone never claims that a member
+passes.
 
 ## Offline workflow
 
+The commands in this section are templates only while the replacement is
+pending. Set `COHORT_ID` from a future committed authoritative declaration;
+it must never name retired cohort 71426 or 71427.
+
 Generate and compile the BSP beside its source files first. Then materialize
-the hook candidates under the pinned B1 authorities:
+only the V3 hook candidates under the pinned B1 authorities. Materialization
+discovers the first grounded compiled Pmove landing without constraining it to
+the generator hint; independent analysis later requires the sealed exact
+landing and ordered trace to replay identically:
 
 ```sh
 python tools/materialize_hook_claims.py \
@@ -202,23 +241,27 @@ python tools/materialize_hook_claims.py \
   --cm-oracle /isolated/B1/q2-cm-oracle \
   --pmove-oracle /isolated/B1/q2-pmove-oracle \
   --hook-oracle /isolated/B1/q2-hook-oracle \
+  --fall-oracle /isolated/B1/q2-fall-oracle \
   --hook-parity-attestation /isolated/B1/hook-parity-pullspeed-1700.json
 ```
 
-Materialization fails closed unless exactly six unique geometries replay. The
-example paths below deliberately keep every stage and report separate. Once
+Materialization fails closed unless exactly six unique measured geometries
+replay, pass actual source/target L1 legality, and are atomically sealed with
+their V3 attestation. V2 candidates, attestations, and runtime sidecars are
+rejected rather than converted or retried. The example paths below
+deliberately keep every stage and report separate. Once
 all 28 declared compiled maps have canonical attestations and admissible
-runtime sidecars, prepare the v2 claims:
+runtime sidecars, prepare the v3 claims:
 
 ```sh
 python tools/run_generator_claim_campaign.py prepare \
   --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
-  --materialized-dir /isolated/B2/b2g26_final_71427/materialized \
-  --claims-dir /isolated/B2/b2g26_final_71427/claims \
-  --output /isolated/B2/reports/b2g26_final_71427-claims-prepare.json
+  --materialized-dir "/isolated/B2/${COHORT_ID}/materialized" \
+  --claims-dir "/isolated/B2/${COHORT_ID}/claims" \
+  --output "/isolated/B2/reports/${COHORT_ID}-claims-prepare.json"
 ```
 
-Run the B2-A v2 analyzer with the matching claim from the claims root and write
+Run the B2 Atlas analyzer with the matching claim from the claims root and write
 all eight Atlas artifacts to the separate analysis root. The normal path
 remains `candidate`/pending until its independent full-cold rebuild and
 verifier replay succeed. Do not use `maps/compile.sh` for this gate because it
@@ -228,10 +271,10 @@ analysis membership before any per-map validator runs:
 ```sh
 python tools/run_generator_claim_campaign.py validate \
   --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
-  --claims-dir /isolated/B2/b2g26_final_71427/claims \
-  --analysis-dir /isolated/B2/b2g26_final_71427/analysis \
+  --claims-dir "/isolated/B2/${COHORT_ID}/claims" \
+  --analysis-dir "/isolated/B2/${COHORT_ID}/analysis" \
   --b1-gate docs/multires/B1-GATE.json \
-  --output /isolated/B2/reports/b2g26_final_71427-compiled-validation.json
+  --output "/isolated/B2/reports/${COHORT_ID}-compiled-validation.json"
 ```
 
 Any missing or unexpected file in either root rejects the complete campaign
