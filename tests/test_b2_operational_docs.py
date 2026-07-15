@@ -74,7 +74,8 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "2abbb7c9de511fd4b497111317d61be439f37c96702441d6d7190e9afb5cf19c",
         "94681d77f53b0514a2795865d593b6007d58bef9e9bbf1be0a7ef2f16d7e46b1",
         "11689967027196a77443d02628da1ee72df33bfa71475a1967634e268f47afc4",
-        "replacement cohort",
+        "Fresh replacement cohort `b2g26_final_71441` is explicitly authorized",
+        "5929532e0edae77b48073abccf4a4f3afdbacfb6905d1eadfb7f18d1dc5ba151",
         "authority-bound",
         "not a cohort artifact",
     ):
@@ -84,6 +85,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
 
     assert "Cohort 71440" in text
     assert "permanently retired" in text
+    assert "b2g26_final_71441" in text
     assert "future-only" not in text
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 

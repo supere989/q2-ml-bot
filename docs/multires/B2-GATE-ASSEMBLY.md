@@ -56,10 +56,15 @@ invalidates 71440's `9327683` implementation binding even though its artifacts
 are sound. `B2-GENERATED-COHORT-71440-FAILURE.json` archives the exact evidence.
 Cohort 71440 is permanently retired, and none of its source, compiled,
 materialized, claims, stock, report, log, or producer-snapshot bytes may be
-retried, resumed, reused, copied, salvaged, substituted, or admitted. The alias
-and assembler remain pinned to retired 71440, so the retirement registry
-rejects every producer and gate entry point. No replacement cohort is
-authorized.
+retried, resumed, reused, copied, salvaged, substituted, or admitted. Its
+immutable named declaration remains rejected by the retirement registry.
+
+Fresh replacement cohort `b2g26_final_71441` is explicitly authorized. Its
+canonical named declaration and current alias are byte-identical with SHA-256
+`5929532e0edae77b48073abccf4a4f3afdbacfb6905d1eadfb7f18d1dc5ba151`.
+They declare 28 fresh rows in ordinal order, four per concrete style, using
+seed blocks 71441000..71441003 through 71441600..71441603. No 71441 producer,
+artifact, report, Dyn, test, gate, deployment, or training path exists yet.
 
 The exact clean immediate-predecessor implementation snapshot at commit
 `8d89df4a787e261f8a4fb935908191f8df7634b2` and tree
@@ -85,27 +90,26 @@ zstandard. These repeated checks must finish before source generation or WSL
 cohort bootstrap; a local newer-Python parse is not sufficient because Python 3.14
 accepted the PEP-701 construct that terminated 71439 on Python 3.10.
 
-The assembler's declaration check remains shaped for the exact 71440 rows but
-rejects both the alias and immutable named declaration as retired before it
-reads campaign evidence. Existing clean-repository, source-freeze, Atlas, test,
+The assembler's declaration check admits only the exact fresh 71441 rows. It
+rejects the immutable named 71440 declaration as retired before reading
+campaign evidence. Existing clean-repository, source-freeze, Atlas, test,
 manifest, and Dyn requirements remain the frozen gate contract. All evidence
 through 71440 is historical only.
 
 ## Frozen producer-report contract
 
-No producer report is currently authorized. The list below records what a
-separately declared, authority-bound future cohort must supply; it does not
-authorize a 71440 retry or reuse of any retired byte.
+No 71441 producer report exists yet. The authorized, authority-bound 71441
+cohort must supply every item below from fresh roots. This authorization does
+not permit a 71440 retry or reuse of any retired byte.
 
-- `tools/run_generator_cohort.py generate` produced the exact retired 71440
-  source freeze from two distinct fresh directories. That publication is now
-  evidence only.
-- `tools/compile_generated_cohort.py` produced the retired 71440 compiled stage
-  and canonical compile report. The contract
+- `tools/run_generator_cohort.py generate` is the only authorized producer for
+  the exact 71441 source freeze from two distinct fresh directories.
+- `tools/compile_generated_cohort.py` is the only authorized 71441 compiled
+  stage producer. Its canonical report
   retains per-map terminal logs and exit status, and publishes only the exact
   168-file declaration with atomic no-replace semantics.
-- `tools/materialize_generated_cohort.py` produced the retired 71440
-  cohort-level V4 stage and canonical materialization report. The contract
+- `tools/materialize_generated_cohort.py` is the only authorized 71441
+  cohort-level V4 stage producer. Its canonical report
   publishes only the exact 196-file declaration with atomic no-replace
   semantics. Its B1 authorities are explicit immutable inputs, never files
   discovered beside a cohort.
@@ -216,9 +220,9 @@ The B1 bundle remains reusable authority; it does not authorize reuse of any
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. The alias names retired 71440, so this command fails at
-declaration admission and creates no output. It is retained only as the frozen
-gate interface.
+clean-tree authority. The alias admits fresh 71441 identity, but this command
+still fails closed and creates no output until all newly produced 71441
+evidence is complete and green.
 
 ```sh
 python tools/assemble_b2_gate.py \

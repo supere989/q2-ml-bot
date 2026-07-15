@@ -70,7 +70,7 @@ from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
 
 
 GATE_SCHEMA = "q2-multires-b2-gate-v1"
-EXPECTED_COHORT = "b2g26_final_71440"
+EXPECTED_COHORT = "b2g26_final_71441"
 EXPECTED_DESIGN_SHA256 = (
     "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5"
 )
@@ -413,12 +413,12 @@ def _validate_b1_and_oracles(
     }, binaries
 
 
-def _expected_71440_rows() -> list[dict[str, Any]]:
+def _expected_71441_rows() -> list[dict[str, Any]]:
     rows = []
     ordinal = 0
     for style_index, style in enumerate(CONCRETE_STYLES):
         for member in range(4):
-            seed = 71_440_000 + style_index * 100 + member
+            seed = 71_441_000 + style_index * 100 + member
             rows.append({
                 "ordinal": ordinal,
                 "map": f"b2g26_{style}_{seed}",
@@ -439,11 +439,11 @@ def _validate_declaration(path: Path) -> tuple[dict[str, Any], str]:
         raise B2GateError(f"B2 declaration admission refused: {exc}") from exc
     _require(
         declaration["cohort_id"] == EXPECTED_COHORT,
-        "B2 gate accepts only cohort 71440",
+        "B2 gate accepts only cohort 71441",
     )
     _require(
-        declaration["maps"] == _expected_71440_rows(),
-        "71440 map/seed selection differs",
+        declaration["maps"] == _expected_71441_rows(),
+        "71441 map/seed selection differs",
     )
     return declaration, digest
 
@@ -1596,7 +1596,7 @@ def _validate_dyn_evidence(
     map_id = authority["canonical_map_id"]
     _require(
         map_id in {row["map"] for row in declaration["maps"]},
-        "Dyn map is outside cohort 71440",
+        "Dyn map is outside cohort 71441",
     )
 
     host = _mapping(report["host"], "Dyn host")
