@@ -522,23 +522,39 @@ declared-before-generation policy. The authoritative alias and immutable 71438
 named declaration are canonical and byte-identical with SHA-256
 `bebe7c2c63711c399d34780f3297a622f9d28d1c9751511473ec1ed4815a58c2`.
 No 71437 or older member, seed, artifact, stage, report, Dyn evidence, or test
-evidence is reusable. The first and only 71438 source-freeze attempt must begin
-from the clean declaration commit in the absent authority-bound root
+evidence is reusable. The first and only 71438 source-freeze attempt began
+from clean implementation commit `0fab172` in the fresh authority-bound root
 `/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71438-${ATLAS_AUTHORITY_SHA256:0:8}`,
-with distinct fresh `source` and `source-cold` directories and the absent
-exclusive sibling report
-`/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71438-${ATLAS_AUTHORITY_SHA256:0:8}-report.json`.
-Any WSL compilation and later-stage root must likewise be new and bound to
-`b2g26_final_71438` plus the same authority suffix.
+with distinct fresh `source` and `source-cold` directories. It passed all 28
+members, both 140-file populations were byte-identical, all 28 route and spawn
+bindings passed, and all 28 layouts were unique. The exclusive sibling report
+`/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71438-${ATLAS_AUTHORITY_SHA256:0:8}-report.json`
+was published with SHA-256
+`4507d9b4528308fcf1fd05e7a0dba57237b3a1049fd07f673cb660d58061b34f`.
+
+The sole 71438 WSL compilation then failed closed on the first compile command,
+`b2g26_arena_lanes_71438600`, during RAD with
+`unable to load pics/colormap.pcx`. The supplied `-basedir` resolved to the
+fresh `assets` directory while the exact retail pak was isolated below
+`assets/baseq2/pak0.pak`. Compilation stopped immediately with one partial BSP,
+one PRT, and no complete compiled member; no retry, correction, substitution,
+copy-back, membership report, or static campaign occurred. The frozen release
+binaries built in parallel are also explicitly non-admissible and forbidden
+from reuse, copying, execution, or substitution. Exact evidence is archived in
+`B2-GENERATED-COHORT-71438-FAILURE.json`. Cohort 71438 and every source, WSL,
+release-build, and residual artifact associated with it are permanently
+retired. No replacement cohort is authorized or declared.
 
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
 replacement declaration. It must never name retired cohort 71426, 71427,
-71428, 71429, 71430, 71431, 71432, 71433, 71434, 71435, 71436, or 71437. Fresh
-replacement cohort `b2g26_final_71438` is now declared for this workflow. The
-commands become executable only from its clean declaration commit with
-entirely new members and absent authority-bound artifact and report paths.
+71428, 71429, 71430, 71431, 71432, 71433, 71434, 71435, 71436, 71437, or
+71438. The alias and assembler remain pinned to retired 71438 as a fail-closed
+historical identity; that pin does not authorize another run. The commands
+below are non-executable until a separate clean commit declares an entirely
+new replacement population and fresh authority-bound artifact and report
+paths.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V4 hook candidates under the pinned B1 authorities. Materialization

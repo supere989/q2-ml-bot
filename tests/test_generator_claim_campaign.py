@@ -83,6 +83,12 @@ FAILURE_71437 = (
 DECLARATION_71437 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71437-DECLARATION.json"
 )
+FAILURE_71438 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71438-FAILURE.json"
+)
+DECLARATION_71438 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71438-DECLARATION.json"
+)
 SHADOW_71430 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71430-SHADOW-8CE1E75.json"
 )
@@ -144,7 +150,9 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "b2g26_final_71437",
         "b2g26_final_71438",
         "B2-GENERATED-COHORT-71437-FAILURE.json",
+        "B2-GENERATED-COHORT-71438-FAILURE.json",
         "lane-wall static blockers",
+        "No replacement cohort is authorized or declared",
         "fresh replacement cohort",
         "Full-cold producer closure",
         "tools/atlas_cold_worker.py",
@@ -1112,6 +1120,240 @@ def test_71437_failure_record_is_canonical_exact_and_no_salvage() -> None:
         "substitution_allowed",
     ):
         assert admission[key] is False
+
+
+def test_71438_failure_record_is_canonical_exact_and_no_salvage() -> None:
+    payload = FAILURE_71438.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "29c997e49e197688e15e62864cea62897"
+        "c22b69e59297b8258c800dc79e93103"
+    )
+
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71438"
+    assert failure["status"] == "permanently-failed-first-compile"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71438-DECLARATION.json",
+        "sha256": hashlib.sha256(DECLARATION_71438.read_bytes()).hexdigest(),
+    }
+    assert failure["evidence"]["implementation"] == {
+        "atlas_analyzer_authority_file_count": 29,
+        "atlas_analyzer_authority_sha256": (
+            "73d558112b4659c8508e2c848361d5df"
+            "ba032ee9d616acd379dce73bb0fa08a4"
+        ),
+        "generator_sha256": (
+            "dd2d52b3b4fb466f66ab0993a4ecae94"
+            "a16389f4bc69653a974f8edf3a4546ed"
+        ),
+        "git_clean": True,
+        "repository_commit": "0fab17225210738a98ff64c362a1be492aa9c290",
+        "repository_tree": "164fbd135e2d3ab297c4a0fa28cb5e9556a59f09",
+        "routes_sha256": (
+            "406b552eb195f6f0fd6a75b689c5ee2"
+            "df141b158d7118502c07698eeddae86d7"
+        ),
+    }
+    assert failure["evidence"]["source_freeze"] == {
+        "all_file_bytes_match": True,
+        "atlas_admissible": False,
+        "bundle_admissible": False,
+        "cold_file_count": 140,
+        "declaration_sha256": hashlib.sha256(
+            DECLARATION_71438.read_bytes()
+        ).hexdigest(),
+        "exists_at_capture": True,
+        "map_count": 28,
+        "passed": True,
+        "path_from_b2_artifact_root": (
+            "generated-final-71438-73d55811-report.json"
+        ),
+        "primary_file_count": 140,
+        "report_sha256": (
+            "4507d9b4528308fcf1fd05e7a0dba572"
+            "37b3a1049fd07f673cb660d58061b34f"
+        ),
+        "route_contract_pass_count": 28,
+        "source_total_bytes": 10861198,
+        "spawn_origin_binding_pass_count": 28,
+        "status": "source-frozen-pre-compile",
+        "unique_layout_count": 28,
+    }
+    release = failure["evidence"]["release_build_provenance"]
+    assert release == {
+        "all_three_release_builds_succeeded": True,
+        "atlas_run": False,
+        "copy_run_reuse_or_substitution_permitted": False,
+        "dyn_evidence_run": False,
+        "explicitly_non_admissible": True,
+        "path": (
+            "/home/raymondj/multires-artifacts/atlas-v1/B2/"
+            "generated-final-71438-73d55811/"
+            "release-build-provenance-0fab17225210.json"
+        ),
+        "sha256": (
+            "362769453e063fb23cd6076f01596ac15"
+            "8693e024a8ab00950b548053720ba83"
+        ),
+        "size_bytes": 5163,
+        "source_repository_commit": (
+            "0fab17225210738a98ff64c362a1be492aa9c290"
+        ),
+        "source_repository_tree": (
+            "164fbd135e2d3ab297c4a0fa28cb5e9556a59f09"
+        ),
+        "wsl_touched": False,
+    }
+    wsl = failure["evidence"]["wsl_compile"]
+    assert wsl["host"] == "DESKTOP-RTX2080"
+    assert wsl["wsl_root"] == (
+        "/home/raymond/q2-multires-isolated/B2/"
+        "b2g26_final_71438-73d55811"
+    )
+    assert wsl["q2tool"] == {
+        "path": (
+            "/home/raymond/q2-rollout/q2-ml-bot/maps/"
+            "q2tools/bin/q2tool"
+        ),
+        "sha256": (
+            "a13dd3095ff56ca668e94c8992c915be"
+            "669f9404162c9c87ded3b922316b26f0"
+        ),
+    }
+    assert wsl["asset_isolation"] == {
+        "pak0_path": (
+            "/home/raymond/q2-multires-isolated/B2/"
+            "b2g26_final_71438-73d55811/assets/baseq2/pak0.pak"
+        ),
+        "pak0_sha256": (
+            "1ce99eb11e7e251ccdf690858effba798"
+            "36dbe5e32a4083ad00a13ecda491679"
+        ),
+        "supplied_basedir": (
+            "/home/raymond/q2-multires-isolated/B2/"
+            "b2g26_final_71438-73d55811/assets"
+        ),
+    }
+    assert wsl["source_transfer"] == {
+        "all_file_bytes_match": True,
+        "compiled_precompile_file_count": 140,
+        "local_source_path": (
+            "/home/raymondj/multires-artifacts/atlas-v1/B2/"
+            "generated-final-71438-73d55811/source"
+        ),
+        "relative_sha256_manifest_sha256": (
+            "5ce26dfe990a197ea49ae966552216ce8"
+            "1edc38af94c0e08b3deb5a4ecafaf88"
+        ),
+        "source_file_count": 140,
+        "source_total_bytes": 10861198,
+        "wsl_compiled_path": (
+            "/home/raymond/q2-multires-isolated/B2/"
+            "b2g26_final_71438-73d55811/compiled"
+        ),
+        "wsl_source_path": (
+            "/home/raymond/q2-multires-isolated/B2/"
+            "b2g26_final_71438-73d55811/source"
+        ),
+    }
+    assert wsl["command_log"] == {
+        "path_from_wsl_root": (
+            "logs/b2g26_arena_lanes_71438600.command.txt"
+        ),
+        "sha256": (
+            "2deb5b11b77d7db7ca77f52381014f50"
+            "3f143900d2f00bfb79d8b28bb4dc0e11"
+        ),
+        "size_bytes": 288,
+    }
+    assert wsl["compile_log"] == {
+        "path_from_wsl_root": (
+            "logs/b2g26_arena_lanes_71438600.compile.log"
+        ),
+        "sha256": (
+            "f7ed18bf6ab26ce5f5027453dacfc2b5"
+            "25059d60fd521d7b2d55d2a69f23e068"
+        ),
+        "size_bytes": 3590,
+    }
+    assert wsl["compiled_residual"] == {
+        "actual_file_count": 142,
+        "bsp_count": 1,
+        "complete_member_count": 0,
+        "expected_file_count": 168,
+        "missing_bsp_count": 27,
+        "partial_member_count": 1,
+        "prt_count": 1,
+        "source_file_count": 140,
+        "total_bytes": 11658404,
+        "unattempted_member_count": 27,
+        "unexpected_file_count": 1,
+        "unexpected_files": [{
+            "path_from_wsl_root": (
+                "compiled/b2g26_arena_lanes_71438600.prt"
+            ),
+            "sha256": (
+                "c4f71915693f7573b433875014d1ef0e"
+                "a119f70398d277c2d6b8d1569ef7d600"
+            ),
+            "size_bytes": 213866,
+        }],
+        "written_bsps": [{
+            "complete": False,
+            "path_from_wsl_root": (
+                "compiled/b2g26_arena_lanes_71438600.bsp"
+            ),
+            "sha256": (
+                "4a1feab912c6205378c80d9f5a9fae5"
+                "19c2b8491f5b440226cfbf9fb24d369cd"
+            ),
+            "size_bytes": 583340,
+        }],
+    }
+    assert failure["failure"]["first_failure"] == {
+        "grid": 5,
+        "map": "b2g26_arena_lanes_71438600",
+        "message": "unable to load pics/colormap.pcx",
+        "ordinal": 24,
+        "phase": "rad",
+        "seed": 71438600,
+        "style": "arena_lanes",
+    }
+    assert failure["failure"]["publication_contract"] == {
+        "atlas_run": False,
+        "compiled_membership_report_created": False,
+        "compiled_stage_copied_back": False,
+        "compiled_static_campaign_run": False,
+        "dyn_run": False,
+        "later_stage_run": False,
+        "maps_attempted": 1,
+        "maps_compiled_completely": 0,
+        "maps_declared": 28,
+    }
+    assert failure["operator_transcript"] == {
+        "command": (
+            "/home/raymond/q2-rollout/q2-ml-bot/maps/q2tools/bin/q2tool "
+            "-bsp -vis -fast -rad -bounce 0 -threads 1 -basedir "
+            "/home/raymond/q2-multires-isolated/B2/"
+            "b2g26_final_71438-73d55811/assets "
+            "/home/raymond/q2-multires-isolated/B2/"
+            "b2g26_final_71438-73d55811/compiled/"
+            "b2g26_arena_lanes_71438600.map"
+        ),
+        "failure_branch_entered": True,
+        "q2tool_exit_code_retained": False,
+        "terminal_log_text": "unable to load pics/colormap.pcx",
+        "wrapper_exit_code": 1,
+        "wrapper_post_negation_status": 0,
+    }
+    admission = failure["admission"]
+    assert admission["permanently_non_admissible"] is True
+    assert admission["replacement_declaration_status"] == "not-authorized"
+    for key, value in admission.items():
+        if key not in {"permanently_non_admissible", "replacement_declaration_status"}:
+            assert value is False, key
 
 
 def write_stage(directory: Path, stage: str) -> dict:
