@@ -7,12 +7,28 @@ pub const COLLISION_ORACLE_NAME: &str = "q2-cm-oracle";
 pub const COLLISION_ORACLE_SCHEMA: &str = "q2-cm-oracle-v1";
 pub const PMOVE_ORACLE_NAME: &str = "q2-pmove-oracle";
 pub const PMOVE_ORACLE_SCHEMA: &str = "q2-pmove-oracle-v1";
+pub const FALL_ORACLE_NAME: &str = "q2-fall-oracle";
+pub const FALL_ORACLE_SCHEMA: &str = "q2-fall-oracle-v1";
 pub const HOOK_ORACLE_NAME: &str = "q2-hook-oracle";
 pub const HOOK_ORACLE_SCHEMA: &str = "q2-hook-oracle-v1";
 pub const HOOK_PARITY_NAME: &str = "q2-hook-q2ded-parity";
 pub const HOOK_PARITY_SCHEMA: &str = "q2-hook-parity-v1";
 pub const HOOK_PARITY_CASES_V1: u32 = 8;
 pub const B1_RUNTIME_AUTHORITY_SEAL_SCHEMA: &str = "q2-b1-runtime-authority-seal-v1";
+
+const B1_DESIGN_SHA256: &str = "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5";
+const B1_PLAN_SHA256: &str = "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b";
+const B1_HOOK_ATTESTATION_SHA256: &str = "2e473d8face6b89f5b32798ddc5264bb8cc406e8dc29fd837e85bbd11b53d5ab";
+const B1_FIXTURE_BSP_SHA256: &str = "ed6c3ae52dffce93b932756486fdaea3992f6a8ce68dddf2fbfd4281e4515b3f";
+const B1_CM_EXECUTABLE_SHA256: &str = "781edaee1b9317766dbf831ad5edc8b5fdebe696969ca1efe0e54e2f3e5c7d1e";
+const B1_PMOVE_EXECUTABLE_SHA256: &str = "66b481e924ec3d0a5e4eaf5458dd34cfe3c0927d5b7650455bceb368666718e4";
+const B1_HOOK_EXECUTABLE_SHA256: &str = "cd8bc4107ae2e9f4ac006fbe469b360832db80b96a5597c2e5dfe12c32dc9284";
+const B1_FALL_EXECUTABLE_SHA256: &str = "dfdcf7ed74cc3ad7b8aa73df86986a8a4a31207da98ccffb4dd61673c324bef8";
+const B1_COLLISION_PMOVE_TOOL_IDENTITY: &str = "50fd0df0a296c54d0060dc2406977b1c78f9392ea1643e010f6759622557cfdf";
+const B1_HOOK_TOOL_IDENTITY: &str = "9c47e3339df3f194c7729ea95c1955708540411d8baffc8208aa92349e1d2e78";
+const B1_HOOK_PHYSICS_IDENTITY: &str = "38f441106d653997466f8ace13baebe5e5515d6b77a7edf535a1d93576eef9d3";
+const B1_FALL_TOOL_IDENTITY: &str = "8f6706edf203bb75451fd148943fb9d0425a1b112f086b6886788434973117d5";
+const B1_FALL_PHYSICS_IDENTITY: &str = "8b1f06550cb546d329bbce209f2b13248810fc10e0e19799616a338c0f633582";
 
 pub const MASK_PLAYERSOLID_V1: u32 = 33_619_971;
 pub const MASK_SHOT_V1: u32 = 100_663_299;
@@ -56,6 +72,7 @@ pub struct OracleToolIdentity {
     pub schema: String,
     pub version: u16,
     pub executable_sha256: String,
+    pub tool_identity_sha256: String,
     pub physics_identity_sha256: String,
 }
 
@@ -70,10 +87,120 @@ impl OracleToolIdentity {
             )));
         }
         validate_digest(&format!("{field} executable"), &self.executable_sha256)?;
+        validate_digest(&format!("{field} tool identity"), &self.tool_identity_sha256)?;
         validate_digest(
             &format!("{field} physics identity"),
             &self.physics_identity_sha256,
         )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FallParameters {
+    pub fall_damagemod_f32_bits: u32,
+    pub deathmatch: bool,
+    pub dmflags: u32,
+    pub constants: String,
+}
+
+impl FallParameters {
+    fn validate(&self) -> AtlasResult<()> {
+        if self.fall_damagemod_f32_bits != 1.0_f32.to_bits()
+            || !self.deathmatch
+            || self.dmflags != 0
+        {
+            return Err(AtlasError::InvalidFormat(
+                "fall oracle parameters differ from the B1 default".to_owned(),
+            ));
+        }
+        validate_text("fall constants", &self.constants)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FallSourceClosure {
+    pub shared_c_sha256: String,
+    pub shared_h_sha256: String,
+    pub integration_sha256: String,
+    pub game_header_sha256: String,
+    pub constants_sha256: String,
+    pub build_contract: String,
+    pub tool_closure_sha256: String,
+}
+
+impl FallSourceClosure {
+    fn validate(&self, tool: &OracleToolIdentity, constants: &str) -> AtlasResult<()> {
+        for (name, digest) in [
+            ("fall shared C source", self.shared_c_sha256.as_str()),
+            ("fall shared header", self.shared_h_sha256.as_str()),
+            ("fall integration source", self.integration_sha256.as_str()),
+            ("fall game header", self.game_header_sha256.as_str()),
+            ("fall constants source", self.constants_sha256.as_str()),
+            ("fall tool closure", self.tool_closure_sha256.as_str()),
+        ] {
+            validate_digest(name, digest)?;
+        }
+        validate_text("fall build contract", &self.build_contract)?;
+        if self.shared_c_sha256 != "6d30c143e359e18784615ad0f4b21a85b3b4b9b2d4b841792685b19a88a7b6d8"
+            || self.shared_h_sha256 != "debd12ca5315cfa9e6cff714bad2d2c2fe708e378a37776e6665793aa3967357"
+            || self.integration_sha256 != "326f59b12ee60bd93252a9d5a39428c535097ed6bc7a6258f2326a3cdb12ed62"
+            || self.game_header_sha256 != "da27f13498fb7120b037b2a6b6ce0a36f4e90a90d1caf0c09c7aaeb1c8310877"
+            || self.constants_sha256 != "6274fdec332e9d51db6f1b8ca8a836835902e5269957f62c72e3d63a3a54c703"
+            || self.build_contract != "lithium-linux-c99-o1-f32-shared-fall-v1"
+            || self.tool_closure_sha256 != tool.tool_identity_sha256
+            || sha256_hex(constants.as_bytes()) != self.constants_sha256
+        {
+            return Err(AtlasError::InvalidFormat(
+                "fall source closure differs from the sealed B1 authority".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FallOracleAdmission {
+    pub tool: OracleToolIdentity,
+    pub parameters: FallParameters,
+    pub source: FallSourceClosure,
+    pub contract_sha256: String,
+}
+
+#[derive(Serialize)]
+struct FallContractPayload<'a> {
+    tool: &'a OracleToolIdentity,
+    parameters: &'a FallParameters,
+    source: &'a FallSourceClosure,
+}
+
+impl FallOracleAdmission {
+    pub fn canonical_contract_sha256(&self) -> String {
+        canonical_digest(&FallContractPayload {
+            tool: &self.tool,
+            parameters: &self.parameters,
+            source: &self.source,
+        })
+    }
+
+    pub fn seal(mut self) -> Self {
+        self.contract_sha256 = self.canonical_contract_sha256();
+        self
+    }
+
+    fn validate(&self) -> AtlasResult<()> {
+        self.tool.validate(FALL_ORACLE_NAME, FALL_ORACLE_SCHEMA, "fall oracle")?;
+        self.parameters.validate()?;
+        self.source.validate(&self.tool, &self.parameters.constants)?;
+        validate_digest("fall oracle contract", &self.contract_sha256)?;
+        if self.contract_sha256 != self.canonical_contract_sha256() {
+            return Err(AtlasError::InvalidFormat(
+                "fall oracle semantic closure mismatch".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -592,6 +719,25 @@ impl B1RuntimeAuthoritySeal {
                 "B1 runtime authority seal schema mismatch".to_owned(),
             ));
         }
+        if self.normative_documents.design_sha256 != B1_DESIGN_SHA256
+            || self.normative_documents.plan_sha256 != B1_PLAN_SHA256
+            || self.hook_parity_attestation_sha256 != B1_HOOK_ATTESTATION_SHA256
+            || self.fixture_bsp_sha256 != B1_FIXTURE_BSP_SHA256
+            || self.executables.cm_sha256 != B1_CM_EXECUTABLE_SHA256
+            || self.executables.pmove_sha256 != B1_PMOVE_EXECUTABLE_SHA256
+            || self.executables.hook_sha256 != B1_HOOK_EXECUTABLE_SHA256
+            || self.executables.fall_sha256 != B1_FALL_EXECUTABLE_SHA256
+            || self.identities.collision.tool_identity != B1_COLLISION_PMOVE_TOOL_IDENTITY
+            || self.identities.pmove.tool_identity != B1_COLLISION_PMOVE_TOOL_IDENTITY
+            || self.identities.hook.tool_identity != B1_HOOK_TOOL_IDENTITY
+            || self.identities.hook.physics_identity != B1_HOOK_PHYSICS_IDENTITY
+            || self.identities.fall.tool_identity != B1_FALL_TOOL_IDENTITY
+            || self.identities.fall.physics_identity != B1_FALL_PHYSICS_IDENTITY
+        {
+            return Err(AtlasError::InvalidFormat(
+                "B1 runtime authority seal differs from the trusted B1 gate".to_owned(),
+            ));
+        }
         for (name, digest) in [
             ("B1 design", &self.normative_documents.design_sha256),
             ("B1 plan", &self.normative_documents.plan_sha256),
@@ -626,6 +772,7 @@ impl B1RuntimeAuthoritySeal {
         }
         let collision = &admissions.collision_oracle.tool;
         if self.executables.cm_sha256 != collision.executable_sha256
+            || self.identities.collision.tool_identity != collision.tool_identity_sha256
             || self.identities.collision.physics_identity != collision.physics_identity_sha256
         {
             return Err(AtlasError::InvalidFormat(
@@ -638,6 +785,7 @@ impl B1RuntimeAuthoritySeal {
             )
         })?;
         if self.executables.pmove_sha256 != pmove.tool.executable_sha256
+            || self.identities.pmove.tool_identity != pmove.tool.tool_identity_sha256
             || self.identities.pmove.physics_identity != pmove.tool.physics_identity_sha256
         {
             return Err(AtlasError::InvalidFormat(
@@ -646,12 +794,22 @@ impl B1RuntimeAuthoritySeal {
         }
         if let Some(hook) = &admissions.hook_oracle {
             if self.executables.hook_sha256 != hook.tool.executable_sha256
+                || self.identities.hook.tool_identity != hook.tool.tool_identity_sha256
                 || self.identities.hook.physics_identity != hook.tool.physics_identity_sha256
             {
                 return Err(AtlasError::InvalidFormat(
                     "B1 hook authority differs from oracle admission".to_owned(),
                 ));
             }
+        }
+        let fall = &admissions.fall_oracle;
+        if self.executables.fall_sha256 != fall.tool.executable_sha256
+            || self.identities.fall.tool_identity != fall.tool.tool_identity_sha256
+            || self.identities.fall.physics_identity != fall.tool.physics_identity_sha256
+        {
+            return Err(AtlasError::InvalidFormat(
+                "B1 fall authority differs from oracle admission".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -662,6 +820,7 @@ impl B1RuntimeAuthoritySeal {
 pub struct OracleAdmissions {
     pub b1_runtime_authority_seal: B1RuntimeAuthoritySeal,
     pub collision_oracle: CollisionOracleAdmission,
+    pub fall_oracle: FallOracleAdmission,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pmove_oracle: Option<PmoveOracleAdmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -672,6 +831,7 @@ impl OracleAdmissions {
     pub fn admit(&self, bsp: &BspIdentity) -> AtlasResult<EdgeAdmission> {
         self.b1_runtime_authority_seal.validate(bsp, self)?;
         self.collision_oracle.validate(bsp)?;
+        self.fall_oracle.validate()?;
         if let Some(pmove) = &self.pmove_oracle {
             pmove.validate(bsp, &self.collision_oracle)?;
         }
@@ -686,6 +846,7 @@ impl OracleAdmissions {
         Ok(EdgeAdmission {
             pmove: self.pmove_oracle.is_some(),
             hook: self.hook_oracle.is_some(),
+            fall: true,
         })
     }
 }
@@ -696,6 +857,7 @@ impl OracleAdmissions {
 pub struct EdgeAdmission {
     pmove: bool,
     hook: bool,
+    fall: bool,
 }
 
 impl EdgeAdmission {
@@ -707,7 +869,13 @@ impl EdgeAdmission {
         self.hook
     }
 
-    pub(crate) fn validate_edge_type(self, edge_type: EdgeType) -> AtlasResult<()> {
+    pub fn admits_fall(self) -> bool {
+        self.fall
+    }
+
+    pub(crate) fn validate_edge(
+        self, edge_type: EdgeType, evidence: u16, validation_version: u16,
+    ) -> AtlasResult<()> {
         match edge_type {
             EdgeType::Jump | EdgeType::ControlledDrop if !self.pmove => {
                 Err(AtlasError::InvalidFormat(format!(
@@ -717,6 +885,16 @@ impl EdgeAdmission {
             EdgeType::Hook if !(self.hook && self.pmove) => Err(AtlasError::InvalidFormat(
                 "Hook edge requires admitted hook, pmove, and q2ded parity contracts".to_owned(),
             )),
+            EdgeType::ControlledDrop
+                if !(self.pmove
+                    && self.fall
+                    && evidence == 10
+                    && validation_version == 1) =>
+            {
+                Err(AtlasError::InvalidFormat(
+                    "ControlledDrop requires exact Pmove|Fall evidence v1".to_owned(),
+                ))
+            }
             _ => Ok(()),
         }
     }

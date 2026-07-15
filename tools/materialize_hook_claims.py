@@ -25,6 +25,7 @@ from harness.atlas_analyzer import (  # noqa: E402
     _admit_hook,
     _build_navigation,
     _directed_adjacency,
+    _dynamic_mover_dependency_index,
     _grid_index,
     _oracle_atlas_origin,
     _origin,
@@ -109,7 +110,7 @@ def materialize(
     )):
         raise AtlasAnalysisError("hook materialization input is missing")
     try:
-        admit_b1_runtime_authorities(
+        b1_seal = admit_b1_runtime_authorities(
             cm_oracle=cm_oracle, pmove_oracle=pmove_oracle,
             hook_oracle=hook_oracle, fall_oracle=fall_oracle,
             hook_parity_attestation=hook_parity_attestation,
@@ -145,6 +146,8 @@ def materialize(
             or document["candidates"]["record_count"] != len(candidates["records"])
             or document["oracles"]["hook_parity_attestation_sha256"]
             != sha256_file(hook_parity_attestation)
+            or document["oracles"]["b1_runtime_authority_seal"]
+            != b1_seal.as_dict()
         ):
             raise AtlasAnalysisError("existing hook materialization identities changed")
         validate_runtime_sidecar(
@@ -153,7 +156,8 @@ def materialize(
         )
         expected_oracles = document["oracles"]
         for name, binary in (
-            ("collision", cm_oracle), ("pmove", pmove_oracle), ("hook", hook_oracle),
+            ("collision", cm_oracle), ("pmove", pmove_oracle),
+            ("hook", hook_oracle), ("fall", fall_oracle),
         ):
             if sha256_file(binary) != expected_oracles[name]["executable_sha256"]:
                 raise AtlasAnalysisError(
@@ -161,13 +165,20 @@ def materialize(
                 )
         with OracleProcess(cm_oracle, bsp, "cm", limits) as current_cm:
             with OracleProcess(pmove_oracle, bsp, "pmove", limits) as current_pmove:
-                with HookOracleProcess(
+                with FallOracleProcess(
+                    fall_oracle,
+                    max_requests=limits.max_oracle_requests,
+                    batch_size=limits.oracle_batch,
+                    batch_timeout_seconds=limits.oracle_batch_timeout_seconds,
+                    exit_timeout_seconds=limits.process_exit_timeout_seconds,
+                ) as current_fall, HookOracleProcess(
                     hook_oracle, str(hook_admission["physics_identity"]), limits,
                 ) as current_hook:
                     for name, identity in (
                         ("collision", current_cm.identity),
                         ("pmove", current_pmove.identity),
                         ("hook", current_hook.identity),
+                        ("fall", current_fall.identity),
                     ):
                         if any(
                             identity.get(field) != expected_oracles[name][field]
@@ -176,6 +187,32 @@ def materialize(
                             raise AtlasAnalysisError(
                                 f"existing hook materialization {name} identity changed"
                             )
+                    live = {
+                        "collision": current_cm.identity,
+                        "pmove": current_pmove.identity,
+                        "hook": current_hook.identity,
+                        "fall": current_fall.identity,
+                    }
+                    sealed = b1_seal.as_dict()["identities"]
+                    for name in live:
+                        seal_name = "collision" if name == "collision" else name
+                        if any(
+                            live[name][field] != sealed[seal_name][field]
+                            for field in ("tool_identity", "physics_identity")
+                        ):
+                            raise AtlasAnalysisError(
+                                f"persistent {name} identity differs from retained B1 seal"
+                            )
+        for name, binary, expected in (
+            ("collision", cm_oracle, b1_seal.cm_executable_sha256),
+            ("pmove", pmove_oracle, b1_seal.pmove_executable_sha256),
+            ("hook", hook_oracle, b1_seal.hook_executable_sha256),
+            ("fall", fall_oracle, b1_seal.fall_executable_sha256),
+        ):
+            if sha256_file(binary) != expected:
+                raise AtlasAnalysisError(
+                    f"existing hook materialization {name} executable changed after admission"
+                )
         return document
     if b"# bundle_admissible: false" not in source_projection:
         raise AtlasAnalysisError("source hook projection is not explicitly non-admissible")
@@ -213,6 +250,7 @@ def materialize(
             ) as hook:
                 nodes, edges, spawn_indices, _drop_classifications = _build_navigation(
                     cm, pmove, fall, bsp, spawns, origin, limits, candidate_points,
+                    _dynamic_mover_dependency_index(metadata),
                 )
                 reachable = _reachable_nodes(edges, spawn_indices)
                 geometries: set[tuple] = set()
@@ -276,6 +314,13 @@ def materialize(
                         "physics_identity": hook.identity["physics_identity"],
                         "requests": hook.requests,
                     },
+                    "fall": {
+                        "executable_sha256": sha256_file(fall.binary),
+                        "tool_identity": fall.identity["tool_identity"],
+                        "physics_identity": fall.identity["physics_identity"],
+                        "requests": fall.requests,
+                    },
+                    "b1_runtime_authority_seal": b1_seal.as_dict(),
                     "hook_parity_attestation_sha256": sha256_file(
                         hook_parity_attestation
                     ),
@@ -295,6 +340,13 @@ def materialize(
         or sha256_file(runtime_sidecar) != source_projection_sha256
         or sha256_file(hook_parity_attestation)
         != oracle_records["hook_parity_attestation_sha256"]
+        or any(
+            sha256_file(binary) != oracle_records[name]["executable_sha256"]
+            for name, binary in (
+                ("collision", cm_oracle), ("pmove", pmove_oracle),
+                ("hook", hook_oracle), ("fall", fall_oracle),
+            )
+        )
     ):
         raise AtlasAnalysisError("hook materialization input changed during replay")
     document = {
@@ -319,7 +371,8 @@ def materialize(
             "verifier_version": "b2-a-v2",
         },
         "request_count": sum(
-            oracle_records[name]["requests"] for name in ("collision", "pmove", "hook")
+            oracle_records[name]["requests"]
+            for name in ("collision", "pmove", "hook", "fall")
         ),
     }
     document = validate_materialization(document)

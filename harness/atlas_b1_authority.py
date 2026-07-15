@@ -797,7 +797,17 @@ def _validate_cm_identity(
     model = _mapping(record["model0"], "CM model0")
     _exact_keys(model, {"mins", "maxs", "headnode"}, "CM model0")
     for name in ("mins", "maxs"):
-        _reject(not isinstance(model[name], list) or len(model[name]) != 3 or any(type(item) is not int for item in model[name]), f"CM model0.{name} is invalid")
+        _reject(
+            not isinstance(model[name], list)
+            or len(model[name]) != 3
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, (int, float))
+                or not math.isfinite(float(item))
+                for item in model[name]
+            ),
+            f"CM model0.{name} is not finite engine geometry",
+        )
     for name in ("headnode",):
         _reject(type(model[name]) is not int, f"CM model0.{name} is invalid")
     for name in ("clusters", "inline_models"):

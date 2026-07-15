@@ -150,6 +150,22 @@ def test_repository_gate_and_relocated_hook_attestation_are_admitted() -> None:
     assert admitted.hook_pullspeed == 1700.0
 
 
+def test_real_cm_finite_json_bounds_are_admitted_but_nonfinite_are_not() -> None:
+    gate = authority.load_b1_authority_gate(ROOT)
+    map_sha = "a" * 64
+    record = cm_identity(gate, map_sha)
+    record["model0"]["mins"] = [-4096.0, -2048.0, -128.0]
+    record["model0"]["maxs"] = [4096.0, 2048.0, 1024.0]
+    authority._validate_cm_identity(record, gate, map_sha)
+
+    record["model0"]["mins"][0] = -4095.5
+    authority._validate_cm_identity(record, gate, map_sha)
+
+    record["model0"]["mins"][0] = float("nan")
+    with pytest.raises(authority.B1AuthorityError, match="finite"):
+        authority._validate_cm_identity(record, gate, map_sha)
+
+
 @pytest.mark.parametrize("change", ["schema", "batch", "status", "green", "extra"])
 def test_gate_rejects_non_green_or_malformed_claims(tmp_path: Path, change: str) -> None:
     root = copied_authority_root(tmp_path)

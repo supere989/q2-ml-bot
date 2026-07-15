@@ -264,7 +264,9 @@ impl L1Graph {
                     "materialized traversal edge lacks evidence or validation version".to_owned(),
                 ));
             }
-            admission.validate_edge_type(edge.edge_type)?;
+            admission.validate_edge(
+                edge.edge_type, edge.evidence, edge.validation_version,
+            )?;
             adjacency[source as usize].push(EdgeRecord {
                 target,
                 edge_type: edge.edge_type,
@@ -328,7 +330,9 @@ impl L1Graph {
     pub fn validate(&self, admission: &EdgeAdmission, limits: &AtlasLimits) -> AtlasResult<()> {
         self.validate_structure(limits)?;
         for edge in &self.edges {
-            admission.validate_edge_type(edge.edge_type)?;
+            admission.validate_edge(
+                edge.edge_type, edge.evidence, edge.validation_version,
+            )?;
         }
         Ok(())
     }

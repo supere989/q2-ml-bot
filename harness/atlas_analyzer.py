@@ -540,6 +540,140 @@ class NavNode:
         }
 
 
+@dataclass(frozen=True)
+class _MoverDependencyIndex:
+    """Conservative dynamic-brush occupancy relevant to Pmove trajectories."""
+
+    envelopes: tuple[Aabb, ...]
+    globally_unknown: bool = False
+
+    def intersects_trajectory(
+        self, response: Mapping[str, Any], request: Mapping[str, Any] | None = None,
+    ) -> bool:
+        if self.globally_unknown:
+            return True
+        frames = response.get("frames")
+        if not isinstance(frames, list):
+            return True
+        previous: Aabb | None = None
+        if request is not None and frames:
+            initial = request.get("origin")
+            first = frames[0]
+            if (
+                isinstance(initial, list) and len(initial) == 3
+                and isinstance(first, Mapping)
+                and isinstance(first.get("mins"), list)
+                and isinstance(first.get("maxs"), list)
+                and len(first["mins"]) == 3 and len(first["maxs"]) == 3
+                and all(
+                    type(axis) in (int, float) and math.isfinite(axis)
+                    for values in (initial, first["mins"], first["maxs"])
+                    for axis in values
+                )
+            ):
+                previous = Aabb(
+                    tuple(initial[axis] + first["mins"][axis] for axis in range(3)),
+                    tuple(initial[axis] + first["maxs"][axis] for axis in range(3)),
+                )  # type: ignore[arg-type]
+            else:
+                return True
+        for frame in frames:
+            if not isinstance(frame, Mapping):
+                return True
+            origin = frame.get("origin")
+            mins = frame.get("mins")
+            maxs = frame.get("maxs")
+            if not all(
+                isinstance(value, list) and len(value) == 3
+                and all(type(axis) in (int, float) and math.isfinite(axis) for axis in value)
+                for value in (origin, mins, maxs)
+            ):
+                return True
+            player = Aabb(
+                tuple(origin[axis] + mins[axis] for axis in range(3)),
+                tuple(origin[axis] + maxs[axis] for axis in range(3)),
+            )  # type: ignore[arg-type]
+            swept = player if previous is None else Aabb(
+                tuple(min(previous.mins[axis], player.mins[axis]) for axis in range(3)),
+                tuple(max(previous.maxs[axis], player.maxs[axis]) for axis in range(3)),
+            )  # type: ignore[arg-type]
+            if any(
+                all(
+                    swept.maxs[axis] >= mover.mins[axis]
+                    and mover.maxs[axis] >= swept.mins[axis]
+                    for axis in range(3)
+                )
+                for mover in self.envelopes
+            ):
+                return True
+            previous = player
+        return False
+
+
+def _dynamic_mover_dependency_index(metadata: BspMetadata) -> _MoverDependencyIndex:
+    """Derive conservative mover envelopes without treating them as collision.
+
+    An unsupported mover law poisons all Pmove-derived traversal.  This is
+    intentionally fail closed: q2-pmove-oracle v1 has no mover-state conduit.
+    """
+
+    entities = {entity.index: entity for entity in metadata.entities}
+    envelopes: list[Aabb] = []
+    globally_unknown = False
+
+    def translated(bounds: Aabb, translation: Sequence[float]) -> Aabb:
+        return Aabb(
+            tuple(bounds.mins[axis] + translation[axis] for axis in range(3)),
+            tuple(bounds.maxs[axis] + translation[axis] for axis in range(3)),
+        )  # type: ignore[arg-type]
+
+    for record in metadata.entity_catalog.brush_submodels:
+        entity = entities[int(record["entity_index"])]
+        classname = entity.classname.casefold()
+        if not classname.startswith("func_") or classname in {
+            "func_areaportal", "func_wall", "func_object", "func_explosive",
+        }:
+            continue
+        model = metadata.models[int(record["model_index"])]
+        cmodel = Aabb(
+            tuple(value - 1.0 for value in model.mins),
+            tuple(value + 1.0 for value in model.maxs),
+        )  # type: ignore[arg-type]
+        if classname in {"func_door", "func_button", "func_water"}:
+            result = sliding_mover_semantics(entity, cmodel.mins, cmodel.maxs)
+            if result.is_exact and result.value is not None:
+                envelopes.append(result.value.potential_envelope.bounds)
+            else:
+                globally_unknown = True
+        elif classname in {"func_rotating", "func_door_rotating"}:
+            result = rotating_mover_semantics(entity, cmodel.mins, cmodel.maxs)
+            if result.is_exact and result.value is not None:
+                envelopes.append(result.value.potential_envelope.bounds)
+            else:
+                globally_unknown = True
+        elif classname == "func_train":
+            result = train_topology(entity, metadata.entities, cmodel.mins)
+            topology = result.value
+            positions = [] if topology is None else [
+                candidate.train_origin.value
+                for group in topology.groups for candidate in group.eligible
+                if candidate.train_origin.is_exact and candidate.train_origin.value is not None
+            ]
+            if not result.is_exact or not positions:
+                globally_unknown = True
+            else:
+                poses = [translated(cmodel, position) for position in positions]
+                envelopes.append(Aabb(
+                    tuple(min(pose.mins[axis] for pose in poses) for axis in range(3)),
+                    tuple(max(pose.maxs[axis] for pose in poses) for axis in range(3)),
+                ))  # type: ignore[arg-type]
+        else:
+            # func_plat and unimplemented mover classes have no admitted path
+            # law.  Current-pose bounds cannot prove their future occupancy.
+            globally_unknown = True
+    return _MoverDependencyIndex(tuple(envelopes), globally_unknown)
+
+
 def _origin(entity: EntityMetadata) -> tuple[float, float, float]:
     words = entity.value("origin").split()
     if len(words) != 3:
@@ -710,6 +844,66 @@ def _mutually_reachable_spawn_pairs(
     ]
 
 
+def _complete_pmove_source_set(
+    nodes: Mapping[tuple[int, int, int], NavNode],
+    edges: Sequence[Mapping[str, Any]],
+    spawn_indices: Mapping[int, tuple[int, int, int]],
+    maximum: int,
+) -> tuple[list[tuple[int, int, int]], dict[str, Any]]:
+    """Select a bounded deterministic prefix with complete omission accounting."""
+
+    outgoing: dict[tuple[int, int, int], int] = defaultdict(int)
+    for edge in edges:
+        outgoing[tuple(edge["source"])] += 1
+    ordered = sorted(nodes, key=lambda item: (item[2], item[1], item[0]))
+    result = list(dict.fromkeys(spawn_indices.values()))
+    result.extend(key for key in ordered if outgoing[key] < 4 and key not in result)
+    selected = result[:maximum]
+    omitted = result[maximum:]
+    return selected, {
+        "schema": "q2-atlas-pmove-source-accounting-v1",
+        "selection_rule": "spawn-first-then-zyx-low-outdegree-prefix-v1",
+        "maximum": maximum,
+        "total": len(result),
+        "selected": len(selected),
+        "omitted": len(omitted),
+        "selected_sources_sha256": sha256_bytes(canonical_json([list(key) for key in selected])),
+        "omitted_sources_sha256": sha256_bytes(canonical_json([list(key) for key in omitted])),
+        "omitted_sources_emit_pmove_edges": False,
+    }
+
+
+def _movement_edge_stance(source: NavNode, target: NavNode) -> str | None:
+    if source.standing_clear and target.standing_clear:
+        return "standing"
+    if source.crouched_clear and target.crouched_clear:
+        return "crouched"
+    return None
+
+
+def _exact_landing_key(
+    record: Mapping[str, Any], origin: tuple[int, int, int],
+) -> tuple[int, int, int] | None:
+    classification = record.get("classification")
+    if not isinstance(classification, Mapping) or (
+        classification.get("classification") != "Exact"
+        or classification.get("lethal") is True
+    ):
+        return None
+    landing = classification.get("landing")
+    if not isinstance(landing, Mapping):
+        raise AtlasAnalysisError("exact trajectory lacks first landing")
+    return _grid_index(landing["origin"], origin, 16)
+
+
+def _apply_stock_drop_hazards(
+    hazards: dict[str, Any], summary: Mapping[str, Any],
+) -> None:
+    """Record exact lethal landings without inventing void/uncontained facts."""
+
+    hazards["lethal_drop_edges"] = int(summary["exact_lethal"])
+
+
 def _build_navigation(
     cm: OracleProcess,
     pmove: OracleProcess | None,
@@ -719,6 +913,8 @@ def _build_navigation(
     origin: tuple[int, int, int],
     limits: AnalyzerLimits,
     candidate_points: Sequence[tuple[float, float, float]] = (),
+    mover_dependencies: _MoverDependencyIndex = _MoverDependencyIndex(()),
+    movement_accounting: dict[str, Any] | None = None,
 ) -> tuple[
     dict[tuple[int, int, int], NavNode],
     list[dict],
@@ -870,24 +1066,29 @@ def _build_navigation(
             raise AtlasAnalysisError(
                 "Pmove traversal lacks mandatory exact fall authority"
             )
-        requests = []
-        metadata = []
+        requests: list[dict[str, Any]] = []
+        movement_metadata: list[tuple[
+            tuple[int, int, int], str, int, str, dict[str, Any]
+        ]] = []
         outgoing = defaultdict(int)
         for edge in edges:
             outgoing[tuple(edge["source"])] += 1
-        ordered_nodes = sorted(nodes, key=lambda item: (item[2], item[1], item[0]))
-        candidates = list(dict.fromkeys(spawn_indices.values()))
-        candidates.extend(
-            key for key in ordered_nodes if outgoing[key] < 4 and key not in candidates
+        candidates, source_accounting = _complete_pmove_source_set(
+            nodes, edges, spawn_indices, limits.max_pmove_sources,
         )
-        for key in candidates[:limits.max_pmove_sources]:
+        if movement_accounting is not None:
+            movement_accounting.update(source_accounting)
+        spawn_keys = set(spawn_indices.values())
+        for key in candidates:
             source = nodes[key]
+            stance = "standing" if source.standing_clear else "crouched"
+            pm_flags = 4 if stance == "standing" else 5
             for yaw in (0, 90, 180, 270):
                 walk_id = f"pmove-walk:{key[0]}:{key[1]}:{key[2]}:{yaw}"
                 walk_request = {
                     "id": walk_id, "op": "simulate",
                     "origin": list(source.position), "velocity": [0.0, 0.0, 0.0],
-                    "pm_type": 0, "pm_flags": 4, "pm_time": 0,
+                    "pm_type": 0, "pm_flags": pm_flags, "pm_time": 0,
                     "gravity": pmove.identity["parameters"]["gravity"],
                     "airaccelerate": pmove.identity["parameters"]["airaccelerate"],
                     "delta_angles_short": [0, 0, 0], "snapinitial": False,
@@ -897,8 +1098,9 @@ def _build_navigation(
                     ],
                 }
                 requests.append(walk_request)
-                metadata.append((key, "ground", yaw, walk_request))
-                if outgoing[key] < 2 or key in spawn_indices.values():
+                movement_metadata.append((key, "ground", yaw, stance, walk_request))
+                # A crouched-only source may never create a standing jump edge.
+                if stance == "standing" and (outgoing[key] < 2 or key in spawn_keys):
                     jump_id = f"pmove-jump:{key[0]}:{key[1]}:{key[2]}:{yaw}"
                     jump_request = {
                         "id": jump_id, "op": "simulate",
@@ -913,35 +1115,43 @@ def _build_navigation(
                                 {"msec": 50, "angles": [0, yaw, 0], "forwardmove": 300}
                                 for _ in range(15)
                             ],
-                            ],
+                        ],
                     }
                     requests.append(jump_request)
-                    metadata.append((key, "jump", yaw, jump_request))
+                    movement_metadata.append((key, "jump", yaw, stance, jump_request))
+
+        # Reserve the full prospective trajectory authority workload before the
+        # first candidate simulation write.  No cap may yield a prefix Atlas.
+        worst_case = len(requests)
+        if pmove.requests + 2 * worst_case > limits.max_oracle_requests:
+            raise AtlasAnalysisError(
+                "Pmove trajectory preflight exceeds complete oracle budget"
+            )
+        if fall.requests + 2 * worst_case > fall.max_requests:
+            raise AtlasAnalysisError(
+                "fall trajectory preflight exceeds complete oracle budget"
+            )
+
         pmove_results = pmove.call(requests)
         exact_candidates: list[DropTrajectory] = []
-        for (source_key, mode, yaw, request), result in zip(metadata, pmove_results):
-            target_key = _grid_index(result["final"]["origin"], origin, 16)
-            target = nodes.get(target_key)
-            vertical = (
-                None if target is None
-                else target.position[2] - nodes[source_key].position[2]
-            )
-            any_airborne = any(not frame["grounded"] for frame in result["frames"])
-            if (
-                (mode == "ground" and any_airborne)
-                or (
-                    mode == "jump" and result["final"]["grounded"]
-                    and vertical is not None and vertical < -18
-                )
-            ):
+        for (source_key, mode, yaw, stance, request), result in zip(
+            movement_metadata, pmove_results
+        ):
+            if any(not frame["grounded"] for frame in result["frames"]):
                 radians = math.radians(yaw)
                 exact_candidates.append(DropTrajectory(
-                    identifier=f"drop:{source_key[0]}:{source_key[1]}:{source_key[2]}:{mode}:{yaw}",
+                    identifier=(
+                        f"drop:{source_key[0]}:{source_key[1]}:"
+                        f"{source_key[2]}:{mode}:{yaw}"
+                    ),
                     source_l1=source_key,
                     direction=(round(math.cos(radians)), round(math.sin(radians))),
                     mode=mode,
                     request=request,
                     response=result,
+                    dynamic_movers=mover_dependencies.intersects_trajectory(
+                        result, request
+                    ),
                 ))
         try:
             drop_classifications = classify_drop_trajectories(
@@ -951,55 +1161,76 @@ def _build_navigation(
         except ExactDropAnalysisError as error:
             raise AtlasAnalysisError(str(error)) from error
         drop_by_id = {item["id"]: item for item in drop_classifications}
-        for (source_key, mode, yaw, request), result in zip(metadata, pmove_results):
-            target_key = _grid_index(result["final"]["origin"], origin, 16)
-            if target_key == source_key or target_key not in nodes or not result["final"]["grounded"]:
-                continue
-            vertical = nodes[target_key].position[2] - nodes[source_key].position[2]
+
+        for (source_key, mode, yaw, source_stance, request), result in zip(
+            movement_metadata, pmove_results
+        ):
+            any_airborne = any(not frame["grounded"] for frame in result["frames"])
             drop_record = None
-            if mode == "jump":
-                if not any(not frame["grounded"] for frame in result["frames"]):
-                    continue
-                kind = "jump"
-                if vertical < -18:
-                    drop_record = drop_by_id.get(
-                        f"drop:{source_key[0]}:{source_key[1]}:{source_key[2]}:{mode}:{yaw}"
-                    )
-            elif vertical < -18:
-                kind = "controlled_drop"
-                drop_record = drop_by_id.get(
-                    f"drop:{source_key[0]}:{source_key[1]}:{source_key[2]}:{mode}:{yaw}"
-                )
-            elif abs(vertical) <= 18.0:
-                kind = "step"
-            else:
-                continue
             risk = 0
             evidence = EVIDENCE_PMOVE_V1
             validation_version = VALIDATION_VERSION
-            if vertical < -18 and drop_record is None:
-                # No exact Pmove->fall admission means no lower landing edge.
+            if mover_dependencies.intersects_trajectory(result, request):
+                # Airborne cases are retained as explicit Unknown records by
+                # exact-drop replay; no mover-dependent traversal is emitted.
                 continue
-            if drop_record is not None:
+            if any_airborne:
+                identifier = (
+                    f"drop:{source_key[0]}:{source_key[1]}:"
+                    f"{source_key[2]}:{mode}:{yaw}"
+                )
+                drop_record = drop_by_id.get(identifier)
+                if drop_record is None:
+                    raise AtlasAnalysisError("airborne trajectory lacks complete accounting")
                 classification = drop_record["classification"]
                 if (
                     classification.get("classification") != "Exact"
                     or classification.get("lethal") is True
                 ):
                     continue
+                # The exact replay validates and truncates at the first
+                # false->true grounded transition.  Later movement/final state
+                # is deliberately irrelevant to edge topology.
+                target_key = _exact_landing_key(drop_record, origin)
+                if target_key is None:
+                    continue
                 risk = {
                     "none": 0, "footstep": 0, "short": 8192,
                     "fall": 32768, "far": 65535,
                 }.get(classification.get("severity"), 65535)
-                evidence = DROP_EVIDENCE_EXACT
-                validation_version = DROP_VALIDATION_VERSION
-            key = (source_key, target_key, kind, "standing")
+                evidence = drop_record["evidence"]
+                validation_version = drop_record["validation_version"]
+            else:
+                if mode != "ground" or not result["final"]["grounded"]:
+                    continue
+                target_key = _grid_index(result["final"]["origin"], origin, 16)
+
+            target = nodes.get(target_key)
+            if target is None or target_key == source_key:
+                continue
+            vertical = target.position[2] - nodes[source_key].position[2]
+            if mode == "jump":
+                if not any_airborne:
+                    continue
+                kind = "jump"
+            elif vertical < -18:
+                if not any_airborne or drop_record is None:
+                    continue
+                kind = "controlled_drop"
+            elif abs(vertical) <= 18.0:
+                kind = "step"
+            else:
+                continue
+            stance = _movement_edge_stance(nodes[source_key], target)
+            if stance is None or (source_stance == "crouched" and stance == "standing"):
+                continue
+            key = (source_key, target_key, kind, stance)
             if key in edge_keys:
                 continue
             edge_keys.add(key)
             edges.append({
                 "source": list(source_key), "target": list(target_key), "edge_type": kind,
-                "stance": "standing", "flags": 0, "blocker": 0,
+                "stance": stance, "flags": 0, "blocker": 0,
                 "cost": 4096, "risk": risk, "confidence": 65535,
                 "evidence": evidence, "validation_version": validation_version,
                 "auxiliary": 0xFFFFFFFF,
@@ -1017,15 +1248,23 @@ def _admissions(
     provenance_sha256: str,
     cm: OracleProcess,
     pmove: OracleProcess | None,
+    fall: FallOracleProcess,
     hook: HookOracleProcess | None = None,
     hook_attestation: Path | None = None,
     b1_runtime_authority_seal: Mapping[str, Any] | None = None,
 ) -> dict:
     def tool(binary: Path, identity: dict) -> dict:
+        names = {
+            "q2-cm-oracle-v1": "q2-cm-oracle",
+            "q2-pmove-oracle-v1": "q2-pmove-oracle",
+            "q2-fall-oracle-v1": "q2-fall-oracle",
+            "q2-hook-oracle-v1": "q2-hook-oracle",
+        }
         return {
-            "name": "q2-cm-oracle" if identity["schema"] == "q2-cm-oracle-v1" else "q2-pmove-oracle",
+            "name": names[identity["schema"]],
             "schema": identity["schema"], "version": 1,
             "executable_sha256": sha256_file(binary),
+            "tool_identity_sha256": identity["tool_identity"],
             "physics_identity_sha256": identity["physics_identity"],
         }
 
@@ -1048,6 +1287,21 @@ def _admissions(
         "b1_runtime_authority_seal": dict(b1_runtime_authority_seal),
         "collision_oracle": collision,
     }
+    fall_parameters = fall.identity["parameters"]
+    fall_record = {
+        "tool": tool(fall.binary, fall.identity),
+        "parameters": {
+            "fall_damagemod_f32_bits": struct.unpack(
+                "<I", struct.pack("<f", fall_parameters["fall_damagemod"])
+            )[0],
+            "deathmatch": fall_parameters["deathmatch"],
+            "dmflags": fall_parameters["dmflags"],
+            "constants": fall.identity["constants"],
+        },
+        "source": dict(fall.identity["source"]),
+    }
+    fall_record["contract_sha256"] = sha256_bytes(_rust_struct_json(fall_record))
+    output["fall_oracle"] = fall_record
     if pmove is not None:
         parameters = pmove.identity["parameters"]
         pmove_source = {**pmove.identity["source"], "build_contract": build_contract}
@@ -1097,6 +1351,7 @@ def _admissions(
             "schema": "q2-hook-oracle-v1",
             "version": 1,
             "executable_sha256": sha256_file(hook.binary),
+            "tool_identity_sha256": identity["tool_identity"],
             "physics_identity_sha256": identity["physics_identity"],
         }
         hook_source = {
@@ -1383,7 +1638,6 @@ def _l0_chunks(
     cm: OracleProcess | None = None,
     metadata: BspMetadata | None = None,
     admitted_hooks: Sequence[Mapping[str, Any]] = (),
-    exact_drops: Sequence[Mapping[str, Any]] = (),
     semantic_summary: dict[str, int] | None = None,
     surface_summary: dict[str, Any] | None = None,
     budget_state: L0BudgetState | None = None,
@@ -1656,37 +1910,6 @@ def _l0_chunks(
                 current = (contents & CONTENTS_CURRENT_MASK) >> 18
                 if current:
                     set_scalar(point, "current_direction", current)
-
-        # Drop/void facts come only from the exact Pmove landing transition and
-        # exact Lithium fall-damage oracle.  The old fixed-distance vertical
-        # trace and height threshold are intentionally absent.  Unknown
-        # trajectories remain conservative forbidden boundary cells without a
-        # fabricated severity or lethal/void label.
-        for item in exact_drops:
-            source_key = tuple(item["source_l1"])
-            direction = tuple(item["direction"])
-            source = nodes.get(source_key)
-            if source is None:
-                raise AtlasAnalysisError("exact drop source is absent from L1")
-            point = (
-                source.position[0] + direction[0] * 16,
-                source.position[1] + direction[1] * 16,
-                source.position[2],
-            )
-            result = item["classification"]
-            if result.get("classification") == "Unknown":
-                set_bit(point, "unknown")
-                set_bit(point, "standing_forbidden_origin")
-                set_bit(point, "crouched_forbidden_origin")
-                mark_semantic(point, "drop_unknown")
-            elif (
-                result.get("classification") == "Exact"
-                and result.get("lethal") is True
-            ):
-                set_bit(point, "standing_forbidden_origin")
-                set_bit(point, "crouched_forbidden_origin")
-                mark_semantic(point, "lethal_drop")
-                set_scalar(point, "hazard_severity", 255)
 
     if metadata is not None:
         entities = {entity.index: entity for entity in metadata.entities}
@@ -2205,6 +2428,7 @@ def _write_canonical_atlas_manifest(
     oracle_records = {
         "b1_runtime_authority_seal": admissions["b1_runtime_authority_seal"],
         "collision_oracle": admissions["collision_oracle"],
+        "fall_oracle": admissions["fall_oracle"],
     }
     if "pmove_oracle" in admissions:
         oracle_records["pmove_oracle"] = admissions["pmove_oracle"]
@@ -3037,7 +3261,9 @@ def _validate_hook_materialization_binding(
     cm_oracle: Path | None,
     pmove_oracle: Path | None,
     hook_oracle: Path | None,
+    fall_oracle: Path | None,
     hook_attestation: Path | None,
+    b1_runtime_authority_seal: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bind a valid materialization to claims, BSP, and executable bytes."""
     try:
@@ -3063,8 +3289,15 @@ def _validate_hook_materialization_binding(
     ]["meta_sha256"]:
         raise AtlasAnalysisError("hook materialization metadata identity differs")
     materialized_oracles = document["oracles"]
+    if (
+        b1_runtime_authority_seal is None
+        or materialized_oracles["b1_runtime_authority_seal"]
+        != dict(b1_runtime_authority_seal)
+    ):
+        raise AtlasAnalysisError("hook materialization retained B1 seal differs")
     for name, binary in (
-        ("collision", cm_oracle), ("pmove", pmove_oracle), ("hook", hook_oracle),
+        ("collision", cm_oracle), ("pmove", pmove_oracle),
+        ("hook", hook_oracle), ("fall", fall_oracle),
     ):
         if binary is None or sha256_file(binary) != materialized_oracles[name][
             "executable_sha256"
@@ -3084,7 +3317,7 @@ def _validate_materialized_oracle_identities(
     process_identities: Mapping[str, Mapping[str, Any] | None],
 ) -> None:
     """Reject a live oracle whose reported identity differs from the seal."""
-    for name in ("collision", "pmove", "hook"):
+    for name in ("collision", "pmove", "hook", "fall"):
         identity = process_identities.get(name)
         expected = materialized_oracles[name]
         if identity is None or any(
@@ -3182,7 +3415,9 @@ def analyze_map(
             cm_oracle=cm_oracle,
             pmove_oracle=pmove_oracle,
             hook_oracle=hook_oracle,
+            fall_oracle=fall_oracle,
             hook_attestation=hook_attestation,
+            b1_runtime_authority_seal=b1_authority_seal.as_dict(),
         )
         materialized_oracles = hook_materialization["oracles"]
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -3223,6 +3458,7 @@ def analyze_map(
         fall_context = None
         pmove_context = None
         hook_context = None
+        pmove_source_accounting: dict[str, Any] = {}
         try:
             fall_context = FallOracleProcess(
                 fall_oracle,
@@ -3272,6 +3508,7 @@ def analyze_map(
                     "collision": cm.identity,
                     "pmove": None if pmove_context is None else pmove_context.identity,
                     "hook": None if hook_context is None else hook_context.identity,
+                    "fall": fall_context.identity,
                 }
                 _validate_materialized_oracle_identities(
                     materialized_oracles, process_identities
@@ -3279,6 +3516,8 @@ def analyze_map(
             nodes, edges, spawn_indices, drop_classifications = _build_navigation(
                 cm, pmove_context, fall_context, bsp, player_spawns, origin, limits,
                 claim_seed_points,
+                _dynamic_mover_dependency_index(metadata),
+                pmove_source_accounting,
             )
             spawn_reachability = _spawn_reachability(edges, spawn_indices)
             visibility = _visibility(cm, nodes, limits)
@@ -3403,27 +3642,19 @@ def analyze_map(
             drop_summary = summarize_drop_classifications(drop_classifications)
             compiled_non_hook["hazards"].update({
                 "classification_status": "oracle",
-                "evidence": EVIDENCE_CM_TRACE_V1 | DROP_EVIDENCE_EXACT,
+                "evidence": EVIDENCE_CM_TRACE_V1 | drop_summary["evidence"],
                 "validation_version": DROP_VALIDATION_VERSION,
                 "drop_classification": drop_summary,
             })
             if generator_claims is None:
-                compiled_non_hook["hazards"]["lethal_drop_edges"] = (
-                    drop_summary["exact_lethal"]
+                _apply_stock_drop_hazards(
+                    compiled_non_hook["hazards"], drop_summary,
                 )
-                compiled_non_hook["hazards"]["uncontained_drop_edges"] = (
-                    drop_summary["unknown_omitted"]
-                )
-                if drop_summary["exact_lethal"]:
-                    compiled_non_hook["hazards"]["types"] = sorted(set(
-                        compiled_non_hook["hazards"]["types"] + ["void"]
-                    ))
             l0_semantics: dict[str, int] = {}
             surface_evidence: dict[str, Any] = {}
             l0_chunks = _l0_chunks(
                 nodes, player_spawns, origin, cm=cm, metadata=metadata,
                 admitted_hooks=compiled_hooks["edges"],
-                exact_drops=drop_classifications,
                 semantic_summary=l0_semantics,
                 surface_summary=surface_evidence,
             )
@@ -3433,7 +3664,7 @@ def analyze_map(
                     l0_plane_counts[plane] += len(cells)
             l0_plane_counts = dict(sorted(l0_plane_counts.items()))
             admissions = _admissions(
-                metadata.sha256, provenance_sha256, cm, pmove_context,
+                metadata.sha256, provenance_sha256, cm, pmove_context, fall_context,
                 hook_context if compiled_hooks["edges"] else None,
                 hook_attestation,
                 b1_authority_seal.as_dict(),
@@ -3553,6 +3784,8 @@ def analyze_map(
         Path(__file__).resolve().parents[1] / "tools/atlas_cold_worker.py",
         Path(__file__).resolve().parents[1] / "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md",
         Path(__file__).resolve().parents[1] / "docs/MULTIRES-LATTICE-MAP-ATLAS-PLAN-2026-07-14.md",
+        Path(__file__).resolve().parents[1] / "docs/multires/B1-GATE.json",
+        Path(__file__).resolve().parents[1] / "docs/multires/B2-EXACT-DROP-REPLAY.md",
     ]
     analyzer_inputs.extend(sorted(
         (Path(__file__).resolve().parents[1] / "crates/q2-lattice/src").rglob("*.rs")
@@ -3702,6 +3935,7 @@ def analyze_map(
             "lighting": compiled_non_hook["lighting"],
             "hooks": compiled_hooks,
             "route_claims": compiled_non_hook["route_claims"],
+            "pmove_source_accounting": pmove_source_accounting,
         },
         "artifacts": artifacts,
         "counts": {

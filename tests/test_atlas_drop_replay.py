@@ -387,6 +387,25 @@ class DropReplayTests(unittest.TestCase):
                 self.assertNotIn("safe", result)
                 self.assertEqual([kind for kind, _ in fixture.calls], ["pmove"])
 
+    def test_first_landing_is_authoritative_when_final_reaches_another_floor(self) -> None:
+        frames = [
+            state(0, -600, False, origin_fixed=(0, 0, 512)),
+            state(1, 0, True, origin_fixed=(0, 0, 193)),
+            state(2, -200, False, origin_fixed=(128, 0, 256)),
+            state(3, 0, True, origin_fixed=(256, 0, 64)),
+        ]
+        fixture = OracleFixture(
+            frames, pmove_sha256=self.pmove_sha256,
+            fall_sha256=self.fall_sha256, map_sha256=self.map_sha256,
+        )
+        result = self.replay(fixture, replay_id="first-landing-only")
+        self.assertEqual(result["classification"], "Exact")
+        self.assertEqual(result["landing"]["command_index"], 1)
+        self.assertEqual(result["landing"]["origin_fixed"], [0, 0, 193])
+        self.assertNotEqual(
+            result["landing"]["origin_fixed"], frames[-1]["origin_fixed"]
+        )
+
     def test_invalid_water_cadence_dynamic_mover_and_missing_fall_fail_closed(self) -> None:
         invalid_water = self.fixture(-1000, waterlevel=4)
         water_result = self.replay(invalid_water)

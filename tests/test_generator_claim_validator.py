@@ -8,6 +8,7 @@ import struct
 import pytest
 
 from harness.hook_claims_v2 import (
+    HookClaimsV2Error,
     canonical_json as hook_canonical_json,
     load_candidates,
     render_runtime_sidecar,
@@ -87,6 +88,37 @@ def _fake_materialize(map_path: Path) -> None:
     accepted_hook_attestation = b1_gate["artifacts"]["hook_parity_attestation"][
         "sha256"
     ]
+    oracle_records = {
+        name: {
+            "executable_sha256": format(index + 1, "x") * 64,
+            "tool_identity": format(index + 2, "x") * 64,
+            "physics_identity": format(index + 3, "x") * 64,
+            "requests": 1,
+        }
+        for index, name in enumerate(("collision", "pmove", "hook", "fall"))
+    }
+    b1_seal = {
+        "schema": "q2-b1-runtime-authority-seal-v1",
+        "normative_documents": dict(b1_gate["normative_documents"]),
+        "hook_parity_attestation_sha256": accepted_hook_attestation,
+        "fixture_bsp_sha256": b1_gate["artifacts"]["hook_parity_attestation"][
+            "fixture_bsp_sha256"
+        ],
+        "analysis_bsp_sha256": file_sha256(bsp_path),
+        "executables": {
+            "cm_sha256": oracle_records["collision"]["executable_sha256"],
+            "pmove_sha256": oracle_records["pmove"]["executable_sha256"],
+            "hook_sha256": oracle_records["hook"]["executable_sha256"],
+            "fall_sha256": oracle_records["fall"]["executable_sha256"],
+        },
+        "identities": {
+            name: {
+                field: oracle_records[name][field]
+                for field in ("tool_identity", "physics_identity")
+            }
+            for name in ("collision", "pmove", "hook", "fall")
+        },
+    }
     document = validate_materialization({
         "schema": "q2-hook-claim-materialization-v2",
         "map": map_path.stem, "passed": True,
@@ -99,22 +131,17 @@ def _fake_materialize(map_path: Path) -> None:
         "runtime_records_sha256": runtime_records_sha256(selected),
         "selected_records": selected,
         "validation_traces": traces,
-        "oracles": {
-            name: {
-                "executable_sha256": str(index + 1) * 64,
-                "tool_identity": str(index + 2) * 64,
-                "physics_identity": str(index + 3) * 64,
-                "requests": 1,
-            }
-            for index, name in enumerate(("collision", "pmove", "hook"))
-        } | {"hook_parity_attestation_sha256": accepted_hook_attestation},
+        "oracles": oracle_records | {
+            "hook_parity_attestation_sha256": accepted_hook_attestation,
+            "b1_runtime_authority_seal": b1_seal,
+        },
         "replay": {
             "analyzer": "q2-hook-claim-materializer",
             "analyzer_version": "b2-c-v2",
             "verifier": "q2-atlas-analyzer-exact-hook-replay",
             "verifier_version": "b2-a-v2",
         },
-        "request_count": 3,
+        "request_count": 4,
     })
     payload = hook_canonical_json(document) + b"\n"
     digest = sha256_bytes(payload)
@@ -680,30 +707,13 @@ def test_analysis_hook_parity_digest_must_equal_exact_b1_attestation(generated):
 
 
 def test_claim_materialization_cannot_carry_non_b1_hook_parity(generated):
-    map_path, _old_claims, analysis_path = generated
+    map_path, _old_claims, _analysis_path = generated
     stem = map_path.with_suffix("")
     materialization_path = Path(f"{stem}.hook-materialization.json")
     materialization = json.loads(materialization_path.read_text())
     materialization["oracles"]["hook_parity_attestation_sha256"] = "aa" * 32
-    materialization = validate_materialization(materialization)
-    materialization_bytes = hook_canonical_json(materialization) + b"\n"
-    materialization_path.write_bytes(materialization_bytes)
-    runtime_path = stem.with_suffix(".json")
-    runtime_path.write_bytes(render_runtime_sidecar(
-        map_path.stem, file_sha256(map_path.with_suffix(".bsp")),
-        sha256_bytes(materialization_bytes), materialization["selected_records"],
-    ))
-    claims = build_generator_claims(map_path)
-    analysis = _analysis(map_path, claims)
-    _write_authority_artifacts(map_path, analysis, analysis_path)
-    analysis_path.write_bytes(canonical_bytes(analysis))
-
-    report = validate_generated_map(map_path, analysis_path)
-
-    assert report["passed"] is False
-    assert "claims carry a non-B1 parity" in "\n".join(
-        report["criteria"]["hooks"]["failures"]
-    )
+    with pytest.raises(HookClaimsV2Error, match="B1 seal binding differs"):
+        validate_materialization(materialization)
 
 
 @pytest.mark.parametrize(

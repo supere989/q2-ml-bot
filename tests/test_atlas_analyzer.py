@@ -19,9 +19,14 @@ from harness.atlas_analyzer import (
     FROZEN_L0_BIT_PLANE_NAMES,
     FROZEN_L0_SCALAR_PLANE_NAMES,
     NavNode,
+    _MoverDependencyIndex,
+    _apply_stock_drop_hazards,
     _atlas_channels,
     _analyze_hook_claims,
+    _complete_pmove_source_set,
+    _exact_landing_key,
     _l0_chunks,
+    _movement_edge_stance,
     _process_tree_rss_bytes,
     _run_measured_process,
     _surface_candidate_scope,
@@ -29,6 +34,7 @@ from harness.atlas_analyzer import (
     analyze_map,
     sha256_file,
 )
+from harness.atlas_entity_semantics import Aabb
 from harness.ibsp38 import EntityMetadata
 
 
@@ -99,7 +105,7 @@ def test_synthetic_fixture_cold_rebuilds_all_artifacts(tmp_path: Path) -> None:
         "license_evidence": "generated in test", "redistribution": "redistributable",
     }
     limits = AnalyzerLimits(
-        max_l1_nodes=2_000, max_l1_edges=10_000, max_pmove_sources=32,
+        max_l1_nodes=2_000, max_l1_edges=10_000, max_pmove_sources=128,
     )
     candidate = analyze_map(
         bsp, tmp_path / "candidate", "atlas-fixture", provenance,
@@ -521,3 +527,73 @@ def test_measured_process_kills_process_group_on_sampler_failure(monkeypatch) ->
     assert captured == {
         "start_new_session": True, "pid": 23456, "sig": signal.SIGKILL,
     }
+
+
+def _test_node(
+    key: tuple[int, int, int], *, standing: bool, crouched: bool,
+) -> NavNode:
+    return NavNode(
+        key, tuple(float(axis * 16) for axis in key), standing, crouched,
+        True, 0, (0.0, 0.0, 1.0),
+    )
+
+
+def test_pmove_source_cap_has_complete_omission_accounting_before_oracle_calls() -> None:
+    nodes = {
+        (0, 0, 0): _test_node((0, 0, 0), standing=True, crouched=True),
+        (1, 0, 0): _test_node((1, 0, 0), standing=True, crouched=True),
+    }
+    calls = {"pmove": 0, "fall": 0}
+    selected, accounting = _complete_pmove_source_set(
+        nodes, [], {1: (0, 0, 0)}, 1,
+    )
+    assert selected == [(0, 0, 0)]
+    assert accounting["total"] == 2
+    assert accounting["selected"] == 1
+    assert accounting["omitted"] == 1
+    assert accounting["omitted_sources_emit_pmove_edges"] is False
+    assert calls == {"pmove": 0, "fall": 0}
+
+
+def test_crouched_only_source_cannot_emit_standing_movement_edge() -> None:
+    source = _test_node((0, 0, 0), standing=False, crouched=True)
+    target = _test_node((1, 0, 0), standing=True, crouched=True)
+    assert _movement_edge_stance(source, target) == "crouched"
+
+
+def test_exact_edge_target_uses_first_landing_not_later_final_state() -> None:
+    record = {
+        "classification": {
+            "classification": "Exact",
+            "lethal": False,
+            "landing": {"origin": [16.0, 0.0, 0.0], "command_index": 2},
+        },
+        "final": {"origin": [160.0, 0.0, -64.0]},
+    }
+    assert _exact_landing_key(record, (0, 0, 0)) == (1, 0, 0)
+
+
+def test_dynamic_mover_swept_path_dependence_is_detected() -> None:
+    dependency = _MoverDependencyIndex((
+        Aabb((20.0, -4.0, -24.0), (24.0, 4.0, 32.0)),
+    ))
+    request = {"origin": [0.0, 0.0, 0.0]}
+    response = {"frames": [{
+        "origin": [32.0, 0.0, 0.0],
+        "mins": [-16.0, -16.0, -24.0],
+        "maxs": [16.0, 16.0, 32.0],
+    }]}
+    assert dependency.intersects_trajectory(response, request)
+
+
+def test_unknown_and_lethal_solid_landings_do_not_invent_void_or_uncontained() -> None:
+    hazards = {
+        "types": ["lava"], "lethal_drop_edges": 0,
+        "uncontained_drop_edges": 0,
+    }
+    _apply_stock_drop_hazards(
+        hazards, {"exact_lethal": 1, "unknown_omitted": 7},
+    )
+    assert hazards["lethal_drop_edges"] == 1
+    assert hazards["uncontained_drop_edges"] == 0
+    assert "void" not in hazards["types"]

@@ -304,9 +304,10 @@ def validate_materialization(value: Any) -> dict[str, Any]:
     if [trace["claim_id"] for trace in traces] != ids:
         raise HookClaimsV2Error("validation traces differ from selected records")
     oracles = _mapping(document["oracles"], {
-        "collision", "pmove", "hook", "hook_parity_attestation_sha256",
+        "collision", "pmove", "hook", "fall",
+        "hook_parity_attestation_sha256", "b1_runtime_authority_seal",
     }, "materialization oracles")
-    for name in ("collision", "pmove", "hook"):
+    for name in ("collision", "pmove", "hook", "fall"):
         oracle = _mapping(oracles[name], {
             "executable_sha256", "tool_identity", "physics_identity", "requests",
         }, f"materialization {name} oracle")
@@ -314,6 +315,58 @@ def validate_materialization(value: Any) -> dict[str, Any]:
             _sha(oracle[key], f"materialization {name}.{key}")
         _integer(oracle["requests"], f"materialization {name}.requests", 1)
     _sha(oracles["hook_parity_attestation_sha256"], "hook parity attestation digest")
+    seal = _mapping(oracles["b1_runtime_authority_seal"], {
+        "schema", "normative_documents", "hook_parity_attestation_sha256",
+        "fixture_bsp_sha256", "analysis_bsp_sha256", "executables", "identities",
+    }, "materialization B1 runtime authority seal")
+    if seal["schema"] != "q2-b1-runtime-authority-seal-v1":
+        raise HookClaimsV2Error("materialization B1 seal schema differs")
+    normative = _mapping(
+        seal["normative_documents"], {"design_sha256", "plan_sha256"},
+        "materialization B1 normative documents",
+    )
+    executables = _mapping(
+        seal["executables"],
+        {"cm_sha256", "pmove_sha256", "hook_sha256", "fall_sha256"},
+        "materialization B1 executables",
+    )
+    identities = _mapping(
+        seal["identities"], {"collision", "pmove", "hook", "fall"},
+        "materialization B1 identities",
+    )
+    for name, digest in (
+        *(normative.items()),
+        ("hook_parity_attestation_sha256", seal["hook_parity_attestation_sha256"]),
+        ("fixture_bsp_sha256", seal["fixture_bsp_sha256"]),
+        ("analysis_bsp_sha256", seal["analysis_bsp_sha256"]),
+        *(executables.items()),
+    ):
+        _sha(digest, f"materialization B1 {name}")
+    for name in ("collision", "pmove", "hook", "fall"):
+        identity = _mapping(
+            identities[name], {"tool_identity", "physics_identity"},
+            f"materialization B1 {name} identity",
+        )
+        _sha(identity["tool_identity"], f"materialization B1 {name} tool")
+        _sha(identity["physics_identity"], f"materialization B1 {name} physics")
+        if any(
+            identity[field] != oracles[name][field]
+            for field in ("tool_identity", "physics_identity")
+        ):
+            raise HookClaimsV2Error(
+                f"materialization {name} identity differs from retained B1 seal"
+            )
+    if (
+        seal["hook_parity_attestation_sha256"]
+        != oracles["hook_parity_attestation_sha256"]
+        or seal["analysis_bsp_sha256"] != bsp["sha256"]
+        or any(
+            oracles[name]["executable_sha256"]
+            != executables["cm_sha256" if name == "collision" else f"{name}_sha256"]
+            for name in ("collision", "pmove", "hook", "fall")
+        )
+    ):
+        raise HookClaimsV2Error("materialization B1 seal binding differs")
     replay = _mapping(document["replay"], {
         "analyzer", "analyzer_version", "verifier", "verifier_version",
     }, "materialization replay")

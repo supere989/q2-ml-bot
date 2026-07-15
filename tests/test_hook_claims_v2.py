@@ -246,6 +246,37 @@ def _materialization() -> dict:
             "first_grounded_frame_index": 0,
             "sha256": validation_trace_sha256(record["claim_id"], fixed, 0),
         })
+    oracle_records = {
+        name: {
+            "executable_sha256": format(index + 5, "x") * 64,
+            "tool_identity": format(index + 6, "x") * 64,
+            "physics_identity": format(index + 7, "x") * 64,
+            "requests": index + 1,
+        }
+        for index, name in enumerate(("collision", "pmove", "hook", "fall"))
+    }
+    seal = {
+        "schema": "q2-b1-runtime-authority-seal-v1",
+        "normative_documents": {
+            "design_sha256": "a" * 64, "plan_sha256": "b" * 64,
+        },
+        "hook_parity_attestation_sha256": "c" * 64,
+        "fixture_bsp_sha256": "d" * 64,
+        "analysis_bsp_sha256": "1" * 64,
+        "executables": {
+            "cm_sha256": oracle_records["collision"]["executable_sha256"],
+            "pmove_sha256": oracle_records["pmove"]["executable_sha256"],
+            "hook_sha256": oracle_records["hook"]["executable_sha256"],
+            "fall_sha256": oracle_records["fall"]["executable_sha256"],
+        },
+        "identities": {
+            name: {
+                field: oracle_records[name][field]
+                for field in ("tool_identity", "physics_identity")
+            }
+            for name in ("collision", "pmove", "hook", "fall")
+        },
+    }
     return {
         "schema": "q2-hook-claim-materialization-v2",
         "map": "fixture", "passed": True,
@@ -258,22 +289,17 @@ def _materialization() -> dict:
         "runtime_records_sha256": runtime_records_sha256(records),
         "selected_records": records,
         "validation_traces": traces,
-        "oracles": {
-            name: {
-                "executable_sha256": str(index + 5) * 64,
-                "tool_identity": str(index + 6) * 64,
-                "physics_identity": str(index + 7) * 64,
-                "requests": index + 1,
-            }
-            for index, name in enumerate(("collision", "pmove", "hook"))
-        } | {"hook_parity_attestation_sha256": "8" * 64},
+        "oracles": oracle_records | {
+            "hook_parity_attestation_sha256": "c" * 64,
+            "b1_runtime_authority_seal": seal,
+        },
         "replay": {
             "analyzer": "q2-hook-claim-materializer",
             "analyzer_version": "b2-c-v2",
             "verifier": "q2-atlas-analyzer-exact-hook-replay",
             "verifier_version": "b2-a-v2",
         },
-        "request_count": 6,
+        "request_count": 10,
     }
 
 
@@ -325,17 +351,24 @@ def _binding_fixture(tmp_path: Path) -> tuple[dict, dict, dict[str, Path]]:
     document = _materialization()
     paths = {
         name: tmp_path / name
-        for name in ("collision", "pmove", "hook", "parity")
+        for name in ("collision", "pmove", "hook", "fall", "parity")
     }
     for name, path in paths.items():
         path.write_bytes(f"{name} authority\n".encode())
-    for name in ("collision", "pmove", "hook"):
+    for name in ("collision", "pmove", "hook", "fall"):
         document["oracles"][name]["executable_sha256"] = hashlib.sha256(
             paths[name].read_bytes()
         ).hexdigest()
+        seal_name = "cm_sha256" if name == "collision" else f"{name}_sha256"
+        document["oracles"]["b1_runtime_authority_seal"]["executables"][seal_name] = (
+            document["oracles"][name]["executable_sha256"]
+        )
     document["oracles"]["hook_parity_attestation_sha256"] = hashlib.sha256(
         paths["parity"].read_bytes()
     ).hexdigest()
+    document["oracles"]["b1_runtime_authority_seal"][
+        "hook_parity_attestation_sha256"
+    ] = document["oracles"]["hook_parity_attestation_sha256"]
     validate_materialization(document)
     claims = {
         "schema": "q2-generator-claims-v2",
@@ -361,7 +394,11 @@ def _bind(document: dict, claims: dict, paths: dict[str, Path]) -> dict:
         cm_oracle=paths["collision"],
         pmove_oracle=paths["pmove"],
         hook_oracle=paths["hook"],
+        fall_oracle=paths["fall"],
         hook_attestation=paths["parity"],
+        b1_runtime_authority_seal=document["oracles"][
+            "b1_runtime_authority_seal"
+        ],
     )
 
 
@@ -390,9 +427,14 @@ def test_materialization_binds_canonical_bsp_meta_executables_and_parity(
     with pytest.raises(AtlasAnalysisError, match="BSP identity"):
         _bind(bsp_changed, changed_claims, paths)
 
-    paths["collision"].write_bytes(b"mutated collision authority\n")
-    with pytest.raises(AtlasAnalysisError, match="collision executable identity"):
-        _bind(document, claims, paths)
+    for name in ("collision", "pmove", "hook", "fall"):
+        original = paths[name].read_bytes()
+        paths[name].write_bytes(f"mutated {name} authority\n".encode())
+        with pytest.raises(
+            AtlasAnalysisError, match=f"{name} executable identity"
+        ):
+            _bind(document, claims, paths)
+        paths[name].write_bytes(original)
 
 
 def test_materialization_rejects_parity_and_live_tool_or_physics_mutation(
@@ -408,7 +450,7 @@ def test_materialization_rejects_parity_and_live_tool_or_physics_mutation(
             "tool_identity": document["oracles"][name]["tool_identity"],
             "physics_identity": document["oracles"][name]["physics_identity"],
         }
-        for name in ("collision", "pmove", "hook")
+        for name in ("collision", "pmove", "hook", "fall")
     }
     _validate_materialized_oracle_identities(document["oracles"], identities)
     for name in identities:

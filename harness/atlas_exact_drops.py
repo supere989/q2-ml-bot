@@ -61,6 +61,28 @@ def _require_sha256(value: Any, label: str) -> str:
     return value
 
 
+def _decode_json_object(raw: bytes) -> dict[str, Any]:
+    """Decode one strict oracle record (RFC JSON, unique object keys)."""
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"nonfinite JSON token {value}")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON field {key}")
+            result[key] = item
+        return result
+
+    value = json.loads(
+        raw, parse_constant=reject_constant, object_pairs_hook=unique_object,
+    )
+    if not isinstance(value, dict):
+        raise ValueError("oracle response is not an object")
+    return value
+
+
 class FallOracleProcess:
     """One persistent, request-bounded q2-fall-oracle NDJSON process."""
 
@@ -102,15 +124,11 @@ class FallOracleProcess:
                 raw, _, remainder = self._buffer.partition(b"\n")
                 self._buffer[:] = remainder
                 try:
-                    value = json.loads(raw)
-                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    value = _decode_json_object(raw)
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
                     raise ExactDropAnalysisError(
                         "fall oracle emitted invalid JSON"
                     ) from error
-                if not isinstance(value, dict):
-                    raise ExactDropAnalysisError(
-                        "fall oracle response is not an object"
-                    )
                 records.append(value)
             if len(records) == count:
                 break
@@ -333,6 +351,20 @@ def classify_drop_trajectories(
     identity_requests = [
         pmove_stages[index]["identity_request"] for index in pmove_indices
     ]
+    pmove_budget = getattr(pmove_process, "max_requests", None)
+    if pmove_budget is None:
+        pmove_budget = pmove_process.limits.max_oracle_requests
+    if pmove_process.requests + len(identity_requests) > pmove_budget:
+        raise ExactDropAnalysisError(
+            "exact drop Pmove request preflight exceeds oracle budget"
+        )
+    # Every trajectory reaching Pmove admission may require a fall identity
+    # plus an evaluation.  Reserve the worst case before either authority is
+    # written so a cap can never produce a partially classified set.
+    if fall_process.requests + 2 * len(pmove_indices) > fall_process.max_requests:
+        raise ExactDropAnalysisError(
+            "exact drop fall request preflight exceeds oracle budget"
+        )
     pmove_identities = pmove_process.call(identity_requests)
     prepared: list[dict[str, Any]] = [dict(stage) for stage in pmove_stages]
     identities_by_index: dict[int, Mapping[str, Any]] = {}
@@ -378,6 +410,11 @@ def classify_drop_trajectories(
                 fall_executable_sha256=_sha256_file(fall_process.binary),
                 map_sha256=pmove_process.identity["map_sha256"],
             )
+        is_exact = exact.get("classification") == "Exact"
+        pmove_validated = (
+            index in identities_by_index
+            and exact.get("reason") != "unsupported_dynamic_mover"
+        )
         results.append({
             "schema": DROP_CLASSIFICATION_SCHEMA,
             "id": trajectory.identifier,
@@ -385,8 +422,11 @@ def classify_drop_trajectories(
             "direction": list(trajectory.direction),
             "mode": trajectory.mode,
             "classification": exact,
-            "evidence": DROP_EVIDENCE_EXACT,
-            "validation_version": DROP_VALIDATION_VERSION,
+            "evidence": (
+                DROP_EVIDENCE_EXACT if is_exact
+                else DROP_EVIDENCE_PMOVE if pmove_validated else 0
+            ),
+            "validation_version": DROP_VALIDATION_VERSION if pmove_validated else 0,
         })
     if record_cursor != len(fall_records):
         raise ExactDropAnalysisError("fall response accounting differs")
@@ -409,9 +449,14 @@ def summarize_drop_classifications(
             exact_lethal += 1
         else:
             exact_safe += 1
+    aggregate_evidence = DROP_EVIDENCE_PMOVE
+    for item in classifications:
+        evidence = item.get("evidence")
+        if type(evidence) is int:
+            aggregate_evidence |= evidence
     return {
         "classification_status": "oracle",
-        "evidence": DROP_EVIDENCE_EXACT,
+        "evidence": aggregate_evidence,
         "validation_version": DROP_VALIDATION_VERSION,
         "candidate_count": len(classifications),
         "exact_safe": exact_safe,
