@@ -36,6 +36,7 @@ MASK_SHOT = 100_663_299
 CONTENTS_LAVA = 8
 STANDING_MINS = [-16, -16, -24]
 STANDING_MAXS = [16, 16, 32]
+PMOVE_FIXED_QUANTUM = 0.125
 INFINITE_COST_Q8 = 0xFFFFFFFF
 MIN_FLOOR_LIGHT_VALUE = 650.0
 MIN_INTERIOR_LIGHT_VALUE = 800.0
@@ -676,13 +677,14 @@ def _project_route_point(
     point = tuple(value / 1000.0 for value in point_milliunits)
     support = cm.call([_box_request(
         f"route-support:{identifier}",
-        (point[0], point[1], point[2] + 32.0),
+        (point[0], point[1], point[2] + PMOVE_FIXED_QUANTUM),
         (point[0], point[1], point[2] - 64.0),
         STANDING_MINS, STANDING_MAXS, MASK_PLAYERSOLID,
     )])[0]
     plane = support.get("plane")
     if (
         support.get("startsolid")
+        or support.get("allsolid")
         or not isinstance(support.get("fraction"), (int, float))
         or support["fraction"] >= 1
         or not isinstance(support.get("endpos"), list)
@@ -695,18 +697,48 @@ def _project_route_point(
     grounded = tuple(float(value) for value in support["endpos"])
     nominal = _grid_index(grounded, origin)
     candidates = [
-        (key, node) for key, node in nodes.items()
-        if key[0] == nominal[0] and key[1] == nominal[1] and abs(key[2] - nominal[2]) <= 2
+        (key, node, tuple(float(value) for value in node.position))
+        for key, node in nodes.items()
+        if (
+            abs(key[0] - nominal[0]) <= 1
+            and abs(key[1] - nominal[1]) <= 1
+            and abs(key[2] - nominal[2]) <= 2
+            and bool(getattr(node, "standing_clear", True))
+            and math.dist(node.position, grounded) <= 16.0
+        )
     ]
     candidates.sort(key=lambda item: (
-        math.dist(item[1].position, grounded), item[0][2], item[0][1], item[0][0]
+        math.dist(item[2], grounded), item[0][2], item[0][1], item[0][0],
     ))
     if not candidates:
         raise GeneratedClaimProbeError(f"{identifier} has no nearby compiled L1 origin")
-    key, node = candidates[0]
-    if math.dist(node.position, grounded) > 16.0:
-        raise GeneratedClaimProbeError(f"{identifier} support differs from compiled L1 origin")
-    return key
+    if candidates[0][2] == grounded:
+        return candidates[0][0]
+    # Several exact authored endpoints may quantize to one occupied L1 key.
+    # Search only the bounded neighboring stencil and bind a nearby graph
+    # representative with exact standing-hull clearance in both directions.
+    connector_results = cm.call([
+        _box_request(
+            f"route-connector:{identifier}:{ordinal}:{direction}",
+            grounded if direction == "forward" else position,
+            position if direction == "forward" else grounded,
+            STANDING_MINS, STANDING_MAXS, MASK_PLAYERSOLID,
+        )
+        for ordinal, (_, _, position) in enumerate(candidates)
+        for direction in ("forward", "reverse")
+    ])
+    for ordinal, (key, _, _) in enumerate(candidates):
+        pair = connector_results[ordinal * 2:ordinal * 2 + 2]
+        if all(
+            not result.get("startsolid")
+            and not result.get("allsolid")
+            and result.get("fraction") == 1
+            for result in pair
+        ):
+            return key
+    raise GeneratedClaimProbeError(
+        f"{identifier} has no compiled connector to a nearby L1 origin"
+    )
 
 
 def _route_cost(

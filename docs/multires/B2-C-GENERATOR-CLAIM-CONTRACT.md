@@ -80,12 +80,18 @@ The generated path requires every criterion below:
    positive oracle containment evidence. Aggregate hazard types must include
    every claimed type. Compiled hurt fields first intersect the ordinary
    reachable-surface chunk permit. If that intersection is empty, a distinct
-   hazard permit may retain the exact chunk immediately below each evidenced
-   reachable boundary floor column. This one-chunk downward band exists for
-   fixed-point grounded-origin alignment only: it never admits interior floor
-   columns, horizontal dilation, a two-chunk gap, or the trigger's full AABB.
-   Only the inclusive AABB intersection inside an admitted chunk is stored,
-   under the same prospective 1200-chunk/16-MiB L0 budgets.
+   hazard permit may retain the exact chunk immediately below a bounded floor
+   strip. For generated maps, only the normalized lethal-edge segments select
+   those strips, using the same inward witness as the later compiled safety
+   challenge; source metadata is candidate scope and never supplies a cell.
+   Stock analysis may use evidenced reachable boundary floor columns. This
+   one-chunk downward band exists for fixed-point grounded-origin alignment
+   only: it never admits unrelated wall/ceiling boundaries, interior floor
+   fill, horizontal dilation, a two-chunk gap, or the trigger's full AABB. Only
+   the inclusive compiled AABB intersection inside an admitted chunk is
+   stored, under the same prospective 1200-chunk/16-MiB L0 budgets. The later
+   CM probes must still prove every proposed generated floor, void, guard, and
+   lethal catch exactly.
 7. Compiled lethal-edge count matches the safety contract, all lethal exterior
    edges are guarded, and no uncontained edge remains.
 8. qrad lightdata is nonempty and at most 2 MiB, has a nonzero digest and
@@ -104,7 +110,19 @@ The generated path requires every criterion below:
    endpoints, finite cost, and compiled connectivity. A route fails cost
    consistency only when its total differs by more than 1024 units **and** by
    more than 2x; the joint threshold accounts for the legacy room-centre cost
-   model while still rejecting gross/tampered claims.
+   model while still rejecting gross/tampered claims. Endpoint support begins
+   one exact 1/8-unit Pmove quantum above the claimed player origin. Likewise,
+   navigation flood and non-spawn seed discovery retain their bounded raised
+   search first, then use a grounded 1/8-unit support trace when the raised
+   standing hull is rejected by a legal low overhang. When multiple authored
+   endpoints alias one L1 key, projection searches only the adjacent L1
+   stencil within 16 units and requires exact bidirectional standing-hull CM
+   connectors before selecting by distance and stable `(z, y, x)` order.
+   Neither path invents headroom or connectivity: compiled support normals,
+   exact standing-hull edge sweeps, and the resulting Atlas graph remain
+   authoritative. Generator source components also treat exact horizontal or
+   ceiling contact as solid while preserving legal contact with the floor;
+   a player-width gap is not a source-only route witness.
 
 Any missing, failed, `unknown`, non-oracle, unbound, or malformed fact rejects
 promotion. Claim values are never consulted as fallback evidence.

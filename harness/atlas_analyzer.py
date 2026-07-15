@@ -86,6 +86,7 @@ PMOVE_DROP_HORIZON_FRAMES = 40
 PMOVE_LADDER_CLIMB_FRAMES = 44
 PMOVE_LADDER_SETTLE_HORIZON_FRAMES = 52
 PMOVE_TRAJECTORY_BATCH_SIZE = 32
+PMOVE_FIXED_QUANTUM = 0.125
 MAX_L0_SEMANTIC_SCRATCH_BYTES = 16 * 1024 * 1024
 MASK_PLAYERSOLID = 33_619_971
 MASK_SHOT = 100_663_299
@@ -869,9 +870,19 @@ def _candidate_floor_requests(
 ) -> list[dict]:
     requests = []
     for ordinal, (_, point) in enumerate(candidates):
-        requests.append(_box_request(
-            f"floor:{ordinal}", (point[0], point[1], point[2] + 18),
-            (point[0], point[1], point[2] - 32), STANDING_MINS, STANDING_MAXS,
+        requests.extend((
+            _box_request(
+                f"floor-raised:{ordinal}",
+                (point[0], point[1], point[2] + 18),
+                (point[0], point[1], point[2] - 32),
+                STANDING_MINS, STANDING_MAXS,
+            ),
+            _box_request(
+                f"floor-nominal:{ordinal}",
+                (point[0], point[1], point[2] + PMOVE_FIXED_QUANTUM),
+                (point[0], point[1], point[2] - 32),
+                STANDING_MINS, STANDING_MAXS,
+            ),
         ))
     return requests
 
@@ -921,7 +932,10 @@ def _ground_navigation_seeds(
     begin inside a low ceiling even when the authored spawn is legal.
 
     Non-spawn destinations retain the bounded raised floor search because an
-    authored item/teleporter point is not necessarily a player origin.
+    authored item/teleporter point is not necessarily a player origin.  A
+    second exact-Pmove-quantum start proves legal support when the raised hull
+    begins inside a low overhang; the raised result remains preferred when
+    both are valid.
     """
 
     spawn_ordinals = [
@@ -935,15 +949,44 @@ def _ground_navigation_seeds(
         for ordinal, (_, point, is_spawn) in enumerate(seeds) if is_spawn
     ])
     clear_by_ordinal = dict(zip(spawn_ordinals, spawn_clear))
-    support = cm.call([
-        _box_request(
-            f"seed-floor:{ordinal}",
-            point if is_spawn else (point[0], point[1], point[2] + 32),
-            (point[0], point[1], point[2] - 96),
-            STANDING_MINS, STANDING_MAXS,
-        )
-        for ordinal, (_, point, is_spawn) in enumerate(seeds)
-    ])
+    support_requests = []
+    support_ranges = []
+    for ordinal, (_, point, is_spawn) in enumerate(seeds):
+        start = len(support_requests)
+        if is_spawn:
+            support_requests.append(_box_request(
+                f"seed-floor:{ordinal}", point,
+                (point[0], point[1], point[2] - 96),
+                STANDING_MINS, STANDING_MAXS,
+            ))
+        else:
+            support_requests.extend((
+                _box_request(
+                    f"seed-floor-raised:{ordinal}",
+                    (point[0], point[1], point[2] + 32),
+                    (point[0], point[1], point[2] - 96),
+                    STANDING_MINS, STANDING_MAXS,
+                ),
+                _box_request(
+                    f"seed-floor-nominal:{ordinal}",
+                    (point[0], point[1], point[2] + PMOVE_FIXED_QUANTUM),
+                    (point[0], point[1], point[2] - 96),
+                    STANDING_MINS, STANDING_MAXS,
+                ),
+            ))
+        support_ranges.append((start, len(support_requests)))
+    support_results = cm.call(support_requests)
+    support = []
+    for start, end in support_ranges:
+        candidates = support_results[start:end]
+        support.append(next((
+            floor for floor in candidates
+            if (
+                not floor["startsolid"] and not floor["allsolid"]
+                and floor["fraction"] < 1
+                and floor["plane"]["normal"][2] >= 0.7
+            )
+        ), candidates[0]))
     grounded: list[tuple[float, float, float] | None] = []
     for ordinal, ((_, _, is_spawn), floor) in enumerate(zip(seeds, support)):
         if is_spawn:
@@ -2083,12 +2126,19 @@ def _build_navigation(
                 point = _center(candidate_key, origin, 16)
                 candidates.append((candidate_key, point))
                 sources.append(source_key)
-        floors = cm.call(_candidate_floor_requests(candidates))
+        floor_results = cm.call(_candidate_floor_requests(candidates))
         accepted: list[tuple[tuple[int, int, int], tuple[float, float, float], tuple[int, int, int], dict]] = []
-        for source_key, (_, _), floor in zip(sources, candidates, floors):
-            candidate = _supported_floor_candidate(source_key, floor, origin)
-            if candidate is None:
+        for ordinal, (source_key, (_, _)) in enumerate(zip(sources, candidates)):
+            selected = next((
+                (candidate, floor)
+                for floor in floor_results[ordinal * 2:ordinal * 2 + 2]
+                if (candidate := _supported_floor_candidate(
+                    source_key, floor, origin,
+                )) is not None
+            ), None)
+            if selected is None:
                 continue
+            candidate, floor = selected
             point, key = candidate
             # The bounded floor trace may find a supported player-origin cell
             # more than one L1 band above or below its neighbor. Retain that
@@ -2846,6 +2896,73 @@ def _hurt_boundary_chunks(
     return tuple(sorted(chunks, key=_zyx))
 
 
+def _claimed_hurt_boundary_chunks(
+    safety: Mapping[str, Any],
+    origin: tuple[int, int, int],
+) -> tuple[tuple[int, int, int], ...]:
+    """Scope generated hurt retention to claimed lethal-edge floor strips.
+
+    Generator safety metadata remains a candidate, never collision authority.
+    Its exact edge segments bound where the analyzer may look; the compiled
+    trigger AABB supplies every retained cell and the later CM safety probes
+    independently challenge the edge, guard, floor, void, and lethal catch.
+    The inward witness offset is identical to that compiled probe, while the
+    segment is covered at L0-chunk granularity without voxelizing unrelated
+    walls, ceilings, or interior obstacle boundaries.
+    """
+
+    chunks: set[tuple[int, int, int]] = set()
+    edges = safety.get("lethal_edges")
+    if not isinstance(edges, list) or not edges:
+        raise AtlasAnalysisError("generated hurt scope lacks lethal-edge candidates")
+    for ordinal, edge in enumerate(edges):
+        if not isinstance(edge, Mapping):
+            raise AtlasAnalysisError(
+                f"generated lethal-edge candidate {ordinal} is malformed"
+            )
+        side = edge.get("side")
+        segment = edge.get("segment")
+        if (
+            side not in {"west", "east", "south", "north"}
+            or not isinstance(segment, list)
+            or len(segment) != 5
+            or any(isinstance(value, bool) or not isinstance(value, int)
+                   for value in segment)
+        ):
+            raise AtlasAnalysisError(
+                f"generated lethal-edge candidate {ordinal} is malformed"
+            )
+        x0, y0, x1, y1, floor_z = segment
+        if side in {"west", "east"}:
+            if x0 != x1 or y0 >= y1:
+                raise AtlasAnalysisError(
+                    f"generated lethal-edge candidate {ordinal} geometry differs"
+                )
+            x = x0 + 32.125 if side == "west" else x0 - 32.125
+            lower = _grid_index((x, y0, floor_z), origin, 4)
+            upper = _grid_index(
+                (x, y1 - 1e-6, floor_z), origin, 4,
+            )
+        else:
+            if y0 != y1 or x0 >= x1:
+                raise AtlasAnalysisError(
+                    f"generated lethal-edge candidate {ordinal} geometry differs"
+                )
+            y = y0 + 32.125 if side == "south" else y0 - 32.125
+            lower = _grid_index((x0, y, floor_z), origin, 4)
+            upper = _grid_index(
+                (x1 - 1e-6, y, floor_z), origin, 4,
+            )
+        low_chunk = _l0_chunk_key(lower)
+        high_chunk = _l0_chunk_key(upper)
+        for chunk_y in range(low_chunk[1], high_chunk[1] + 1):
+            for chunk_x in range(low_chunk[0], high_chunk[0] + 1):
+                chunks.add((chunk_x, chunk_y, low_chunk[2] - 1))
+    if not chunks:
+        raise AtlasAnalysisError("generated hurt scope retained no boundary chunks")
+    return tuple(sorted(chunks, key=_zyx))
+
+
 def _surface_request_upper_bound(
     groups: Sequence[SurfaceCandidateGroup],
 ) -> int:
@@ -2991,6 +3108,7 @@ def _l0_chunks(
     budget_state: L0BudgetState | None = None,
     compact_output: bool = False,
     semantic_scratch_max_bytes: int = MAX_L0_SEMANTIC_SCRATCH_BYTES,
+    generated_safety: Mapping[str, Any] | None = None,
 ) -> list[dict]:
     chunks: dict[tuple[int, int, int], dict[str, Any]] = {}
     # Semantic evidence needs exact union counts, not a second materialized
@@ -3308,7 +3426,9 @@ def _l0_chunks(
         entities = {entity.index: entity for entity in metadata.entities}
         retained_chunks = set(surface_scope.authorized_chunks)
         hurt_boundary_chunks = set(
-            _hurt_boundary_chunks(surface_scope, nodes, origin)
+            _claimed_hurt_boundary_chunks(generated_safety, origin)
+            if generated_safety is not None
+            else _hurt_boundary_chunks(surface_scope, nodes, origin)
         )
 
         def translated(bounds: Aabb, translation: Sequence[float]) -> Aabb:
@@ -5255,6 +5375,7 @@ def analyze_map(
                 semantic_summary=l0_semantics,
                 surface_summary=surface_evidence,
                 compact_output=True,
+                generated_safety=generator_safety,
             )
             l0_plane_counts: dict[str, int] = defaultdict(int)
             l0_scalar_cell_count = 0

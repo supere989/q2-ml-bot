@@ -10,6 +10,7 @@ import pytest
 
 from harness.generated_claim_probes import (
     GeneratedClaimProbeError,
+    _project_route_point,
     _trigger_hurt_runtime_bounds,
     analyze_non_hook_claims,
     generated_bsp_provenance,
@@ -212,6 +213,98 @@ def _compiled_fixture() -> tuple[SimpleNamespace, dict, list, list]:
         {"region_id": 1, "origin_milliunits": [24_000, 8_000, 24_000]},
     ]
     return metadata, nodes, edges, spawns
+
+
+def test_route_projection_starts_at_pmove_quantum_under_low_overhang() -> None:
+    class LowOverhangCm:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def call(self, requests):
+            self.requests.extend(requests)
+            if requests[0]["id"].startswith("route-support:"):
+                assert len(requests) == 1
+                return [{
+                    "fraction": 0.001462,
+                    "startsolid": False,
+                    "allsolid": False,
+                    "endpos": [2368.0, 1856.0, 216.03125],
+                    "plane": {"normal": [0.0, 0.0, 1.0]},
+                }]
+            assert all(
+                request["id"].startswith("route-connector:")
+                for request in requests
+            )
+            return [
+                {
+                    "fraction": 1,
+                    "startsolid": False,
+                    "allsolid": False,
+                    "endpos": request["end"],
+                    "plane": {"normal": [0.0, 0.0, 0.0]},
+                }
+                for request in requests
+            ]
+
+    cm = LowOverhangCm()
+    aliased_key = (180, 116, 45)
+    expected_key = (179, 115, 45)
+    # The first-writer representative is 17 units away in the nominal cell.
+    # Three adjacent representatives are tied at sqrt(128) and exact
+    # bidirectional connector evidence selects stable (z, y, x) order.
+    nodes = {
+        aliased_key: SimpleNamespace(position=(2376.0, 1871.0, 216.03125)),
+        expected_key: SimpleNamespace(position=(2360.0, 1848.0, 216.03125)),
+        (180, 115, 45): SimpleNamespace(position=(2376.0, 1848.0, 216.03125)),
+        (179, 116, 45): SimpleNamespace(position=(2360.0, 1864.0, 216.03125)),
+    }
+
+    projected = _project_route_point(
+        cm, [2_368_000, 1_856_000, 216_000], nodes,
+        (-512, 0, -512), "route:0001:segment:0005:target",
+    )
+
+    assert projected == expected_key
+    assert cm.requests[0]["start"] == [2368.0, 1856.0, 216.125]
+    assert cm.requests[0]["end"] == [2368.0, 1856.0, 152.0]
+    assert cm.requests[1]["start"] == [2368.0, 1856.0, 216.03125]
+    assert cm.requests[1]["end"] == [2360.0, 1848.0, 216.03125]
+    assert cm.requests[2]["start"] == [2360.0, 1848.0, 216.03125]
+    assert cm.requests[2]["end"] == [2368.0, 1856.0, 216.03125]
+
+
+def test_route_projection_rejects_one_way_neighbor_connector() -> None:
+    class OneWayCm:
+        def call(self, requests):
+            if requests[0]["id"].startswith("route-support:"):
+                return [{
+                    "fraction": 0.001,
+                    "startsolid": False, "allsolid": False,
+                    "endpos": [704.0, 1728.0, 24.03125],
+                    "plane": {"normal": [0.0, 0.0, 1.0]},
+                }]
+            return [
+                {
+                    "fraction": 1 if index % 2 == 0 else 0.5,
+                    "startsolid": False, "allsolid": False,
+                }
+                for index, _ in enumerate(requests)
+            ]
+
+    nodes = {
+        (75, 139, 33): SimpleNamespace(
+            position=(696.0, 1720.0, 24.03125),
+        ),
+    }
+
+    with pytest.raises(
+        GeneratedClaimProbeError,
+        match="no compiled connector to a nearby L1 origin",
+    ):
+        _project_route_point(
+            OneWayCm(), [704_000, 1_728_000, 24_000], nodes,
+            (-512, -512, -512), "route:0002:segment:0032:target",
+        )
 
 
 def _safety_fixture() -> dict:

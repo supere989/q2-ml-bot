@@ -169,9 +169,13 @@ def _standing_components(
         z0 = floor_z
         z1 = floor_z + PLAYER_STANDING_HEIGHT
         return not any(
-            obstacle_x1 > x0 and obstacle_x0 < x1
-            and obstacle_y1 > y0 and obstacle_y0 < y1
-            and obstacle_z1 > z0 and obstacle_z0 < z1
+            # Quake's swept hull treats side and ceiling contact as blocked;
+            # strict XY comparisons incorrectly admit an exact 32-unit gap
+            # for a 32-unit-wide player.  Floor contact remains legal, hence
+            # the intentionally asymmetric vertical comparisons.
+            obstacle_x1 >= x0 and obstacle_x0 <= x1
+            and obstacle_y1 >= y0 and obstacle_y0 <= y1
+            and obstacle_z1 > z0 and obstacle_z0 <= z1
             for obstacle_x0, obstacle_y0, obstacle_z0,
             obstacle_x1, obstacle_y1, obstacle_z1 in obstacles
         )

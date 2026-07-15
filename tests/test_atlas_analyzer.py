@@ -30,11 +30,13 @@ from harness.atlas_analyzer import (
     _analyze_hook_claims,
     _authored_item_destinations,
     _build_navigation,
+    _candidate_floor_requests,
     _complete_pmove_source_set,
     _drop_settle_request,
     _dynamic_mover_dependency_index,
     _exact_landing_key,
     _ground_navigation_seeds,
+    _claimed_hurt_boundary_chunks,
     _hurt_boundary_chunks,
     _l0_chunks,
     _ladder_contact_requests,
@@ -229,6 +231,56 @@ def test_q2dm5_low_ceiling_spawns_ground_from_engine_origin() -> None:
     assert [request["start"] for request in floor_requests] == [
         [-96.0, 448.0, 57.0], [-592.0, -72.0, 289.0],
     ]
+
+
+class _LowOverhangDestinationCm:
+    def __init__(self) -> None:
+        self.seen: list[dict] = []
+
+    def call(self, requests):
+        self.seen.extend(requests)
+        output = []
+        for request in requests:
+            if request["id"].startswith("seed-floor-raised:"):
+                output.append({
+                    "startsolid": True, "allsolid": False, "fraction": 0,
+                    "endpos": request["start"],
+                    "plane": {"normal": [0.0, 0.0, 0.0]},
+                })
+            elif request["id"].startswith("seed-floor-nominal:"):
+                output.append({
+                    "startsolid": False, "allsolid": False,
+                    "fraction": 0.001462,
+                    "endpos": [2368.0, 1856.0, 216.03125],
+                    "plane": {"normal": [0.0, 0.0, 1.0]},
+                })
+            else:
+                raise AssertionError(request["id"])
+        return output
+
+
+def test_nonspawn_seed_uses_nominal_support_under_low_overhang() -> None:
+    cm = _LowOverhangDestinationCm()
+
+    grounded, support = _ground_navigation_seeds(
+        cm, [(32, (2368.0, 1856.0, 216.0), False)],
+    )
+
+    assert grounded == [(2368.0, 1856.0, 216.03125)]
+    assert support[0]["startsolid"] is False
+    assert [request["start"][2] for request in cm.seen] == [248.0, 216.125]
+
+
+def test_navigation_floor_candidates_preserve_raised_then_nominal_order() -> None:
+    requests = _candidate_floor_requests([
+        ((78, 112, 39), (1256.0, 1800.0, 120.0)),
+    ])
+
+    assert [request["id"] for request in requests] == [
+        "floor-raised:0", "floor-nominal:0",
+    ]
+    assert [request["start"][2] for request in requests] == [138.0, 120.125]
+    assert [request["end"][2] for request in requests] == [88.0, 88.0]
 
 
 def test_q2dm5_supported_drop_floor_is_retained_without_inferred_edge() -> None:
@@ -868,6 +920,34 @@ def test_fixed_point_floor_boundary_admits_only_one_lower_hurt_chunk() -> None:
         })
     assert expanded_compact == chunks
     assert compact_semantics == semantics
+
+
+def test_generated_hurt_scope_uses_only_lethal_edge_floor_strips() -> None:
+    safety = {
+        "lethal_edges": [
+            {"side": "west", "segment": [0, 0, 0, 512, 0]},
+            {"side": "north", "segment": [512, 512, 1024, 512, 0]},
+        ],
+    }
+
+    chunks = _claimed_hurt_boundary_chunks(safety, (-512, -512, -512))
+
+    assert chunks == tuple(
+        [(8, y, 7) for y in range(8, 16)]
+        + [(x, 15, 7) for x in range(16, 24)]
+    )
+    assert len(chunks) == 16
+
+
+def test_generated_hurt_scope_rejects_malformed_or_empty_edges() -> None:
+    with pytest.raises(AtlasAnalysisError, match="lacks lethal-edge"):
+        _claimed_hurt_boundary_chunks({"lethal_edges": []}, (0, 0, 0))
+    with pytest.raises(AtlasAnalysisError, match="geometry differs"):
+        _claimed_hurt_boundary_chunks({
+            "lethal_edges": [
+                {"side": "west", "segment": [0, 0, 16, 512, 0]},
+            ],
+        }, (0, 0, 0))
 
 
 def test_fixed_point_hurt_boundary_does_not_cross_two_chunk_gap() -> None:

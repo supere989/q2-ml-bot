@@ -5,7 +5,12 @@ import math
 import pytest
 
 from maps.generator import generate_map
-from maps.routes import ROUTE_ARCHETYPES, RouteGraphError, build_route_graph
+from maps.routes import (
+    ROUTE_ARCHETYPES,
+    RouteGraphError,
+    _standing_components,
+    build_route_graph,
+)
 
 
 def room(x: int, *, y: int = 0, floor_z: int = 0,
@@ -179,6 +184,24 @@ def test_final_wall_splits_one_room_into_distinct_route_components() -> None:
         all(nodes[node_id]["x"] < 120 for node_id in route["node_ids"])
         for route in graph["routes"]
     )
+
+
+def test_exact_player_width_gap_is_blocked_by_hull_contact() -> None:
+    rooms = [room(0, width=256, depth=128)]
+    nodes = [
+        {"id": 0, "room": 0, "x": 48, "y": 48, "z": 24},
+        {"id": 1, "room": 0, "x": 208, "y": 48, "z": 24},
+    ]
+    # The two solids leave y=32..64: exactly the player's 32-unit width.
+    # A hull centered at y=48 touches both faces and CM rejects the sweep.
+    wall = [
+        blocker(96, 0, 0, 160, 32, 96),
+        blocker(96, 64, 0, 160, 128, 96),
+    ]
+
+    components = _standing_components(rooms, nodes, wall, [])
+
+    assert components[0] != components[1]
 
 
 def test_metadata_connection_never_bridges_disjoint_floor_components() -> None:
@@ -391,6 +414,25 @@ def test_open_seed_91470002_repairs_mandatory_control_route(tmp_path) -> None:
     control = next(route for route in routes["routes"]
                    if route["archetype"] == "control")
     assert len(control["node_ids"]) >= 2
+
+
+def test_retired_arena_open_contact_route_repairs_within_component(
+    tmp_path,
+) -> None:
+    map_path, _ = generate_map(
+        "contact_route_regression", 71430402, tmp_path, style="arena_open"
+    )
+    routes = json.loads(map_path.with_suffix(".routes.json").read_text())
+
+    _assert_complete_generated_routes(routes)
+    nodes = {node["id"]: node for node in routes["nodes"]}
+    assert nodes[5]["source_component"] == 2
+    assert nodes[11]["source_component"] == 0
+    survival = next(
+        route for route in routes["routes"]
+        if route["archetype"] == "survival"
+    )
+    assert survival["node_ids"] == [11, 10, 0, 40, 1, 14]
 
 
 @pytest.mark.parametrize(
