@@ -333,11 +333,18 @@ horizontal surface, retain their minimum semantic height, and register every
 accepted tower for the final global challenge. A replacement requires a new
 committed declaration and entirely new seeds.
 
+The tower-surface fix, exact 71431503 regression, and immutable 71431 failure
+record were committed before replacement cohort `b2g26_final_71432` was
+declared. Its 28 new members use seeds 71432000 through 71432603 under the same
+all-or-nothing, declared-before-generation policy. The current alias and
+immutable named copy are byte-identical; no 71431 source or later-stage member
+is an input to 71432.
+
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
 replacement declaration. It must never name retired cohort 71426, 71427,
-71428, 71429, or 71430.
+71428, 71429, 71430, or 71431.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V4 hook candidates under the pinned B1 authorities. Materialization

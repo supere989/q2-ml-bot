@@ -100,6 +100,7 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "b2g26_final_71429",
         "b2g26_final_71430",
         "b2g26_final_71431",
+        "b2g26_final_71432",
         "80 units",
         "62-unit",
         "one-chunk hurt-boundary",

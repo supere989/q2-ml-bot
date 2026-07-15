@@ -92,7 +92,7 @@
         "analysis"
       ],
       "properties": {
-        "cohort_id": {"const": "b2g26_final_71431"},
+        "cohort_id": {"const": "b2g26_final_71432"},
         "declaration": {"$ref": "#/$defs/file"},
         "declaration_sha256": {"$ref": "#/$defs/sha256"},
         "source": {"$ref": "#/$defs/source_stage"},
