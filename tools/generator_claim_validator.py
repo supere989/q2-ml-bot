@@ -77,6 +77,11 @@ FULL_COLD_SUFFIXES = FULL_COLD_EXACT_SUFFIXES + FULL_COLD_SEMANTIC_SUFFIXES
 STOCK_PROVENANCE = ROOT / "docs/multires/stock-q2dm1-q2dm8.provenance.json"
 STOCK_INVENTORY = ROOT / "tests/fixtures/corpus/stock-q2dm1-q2dm8.json"
 CLAIM_ID_RE = re.compile(r"^[a-z0-9:_-]{1,127}$")
+DROP_UNKNOWN_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+PROMOTION_ALLOWED_DROP_UNKNOWN_REASONS = frozenset({
+    "no_landing",
+    "unsupported_dynamic_mover",
+})
 HEX = frozenset("0123456789abcdef")
 
 
@@ -177,6 +182,37 @@ def _integer(value: object, label: str, *, minimum: int | None = None) -> int:
     if minimum is not None and value < minimum:
         raise ClaimValidationError(f"{label} must be at least {minimum}")
     return value
+
+
+def _validate_drop_unknown_reasons(
+    drop: Mapping[str, Any], label: str, failures: list[str],
+) -> None:
+    """Require complete canonical Unknown accounting and admissible reasons."""
+
+    reason_counts = _mapping(
+        drop.get("unknown_reason_counts"), f"{label} Unknown reason counts",
+    )
+    if list(reason_counts) != sorted(reason_counts):
+        failures.append(f"{label} Unknown reason counts are not canonically sorted")
+    accounted = 0
+    for reason, value in reason_counts.items():
+        count = _integer(
+            value, f"{label} Unknown reason {reason!r} count", minimum=1,
+        )
+        accounted += count
+        if not isinstance(reason, str) or not DROP_UNKNOWN_REASON_RE.fullmatch(reason):
+            failures.append(f"{label} Unknown reason {reason!r} is malformed")
+        elif reason not in PROMOTION_ALLOWED_DROP_UNKNOWN_REASONS:
+            failures.append(
+                f"{label} Unknown reason {reason} is not promotion-admissible"
+            )
+    unknown = _integer(
+        drop.get("unknown_omitted"), f"{label} unknown omitted", minimum=0,
+    )
+    if accounted != unknown:
+        failures.append(
+            f"{label} Unknown reason counts do not cover every omitted candidate"
+        )
 
 
 def _finite(value: object, label: str, *, minimum: float | None = None) -> float:
@@ -1220,7 +1256,7 @@ def _validate_hazards(
     _exact_keys(drop, {
         "classification_status", "evidence", "validation_version",
         "candidate_count", "exact_safe", "exact_lethal", "unknown_omitted",
-        "severity_counts",
+        "unknown_reason_counts", "severity_counts",
     }, "exact drop classification")
     if drop.get("classification_status") != ORACLE_STATUS:
         failures.append("drop classification is not oracle-authoritative")
@@ -1242,6 +1278,7 @@ def _validate_hazards(
         drop.get("candidate_count"), "drop candidate count", minimum=0
     ):
         failures.append("drop classification counts do not cover every candidate")
+    _validate_drop_unknown_reasons(drop, "drop classification", failures)
     exact_count = drop_counts[0] + drop_counts[1]
     if exact_count and drop_evidence != 10:
         failures.append("exact drop classifications lack Pmove+fall evidence")
@@ -1696,7 +1733,7 @@ def validate_stock_analysis(
         required_drop_keys = {
             "classification_status", "evidence", "validation_version",
             "candidate_count", "exact_safe", "exact_lethal", "unknown_omitted",
-            "severity_counts",
+            "unknown_reason_counts", "severity_counts",
         }
         if set(drop) != required_drop_keys:
             hazard_failures.append("stock drop classification contract differs")
@@ -1724,6 +1761,9 @@ def validate_stock_analysis(
                 drop.get("candidate_count"), "stock drop candidate count", minimum=0,
             ):
                 hazard_failures.append("stock drop counts do not cover every candidate")
+            _validate_drop_unknown_reasons(
+                drop, "stock drop classification", hazard_failures,
+            )
             if sum(stock_counts[:2]) and stock_drop_evidence != 10:
                 hazard_failures.append("stock exact drops lack Pmove+fall evidence")
             if _integer(

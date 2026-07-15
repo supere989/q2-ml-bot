@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import select
 import subprocess
 import time
@@ -30,6 +31,7 @@ DROP_EVIDENCE_PMOVE = 2
 DROP_EVIDENCE_FALL = 8
 DROP_EVIDENCE_EXACT = DROP_EVIDENCE_PMOVE | DROP_EVIDENCE_FALL
 DROP_VALIDATION_VERSION = 1
+UNKNOWN_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 class ExactDropAnalysisError(RuntimeError):
@@ -441,11 +443,25 @@ def summarize_drop_classifications(
 ) -> dict[str, Any]:
     exact_safe = exact_lethal = unknown = 0
     severity: dict[str, int] = {}
+    unknown_reasons: dict[str, int] = {}
     for item in classifications:
         result = item.get("classification")
-        if not isinstance(result, Mapping) or result.get("classification") != "Exact":
+        if not isinstance(result, Mapping):
+            raise ExactDropAnalysisError(
+                "drop classification result is not an object"
+            )
+        classification = result.get("classification")
+        if classification == "Unknown":
+            reason = result.get("reason")
+            if not isinstance(reason, str) or not UNKNOWN_REASON_RE.fullmatch(reason):
+                raise ExactDropAnalysisError(
+                    "Unknown drop classification reason is malformed"
+                )
             unknown += 1
+            unknown_reasons[reason] = unknown_reasons.get(reason, 0) + 1
             continue
+        if classification != "Exact":
+            raise ExactDropAnalysisError("drop classification state differs")
         name = str(result.get("severity"))
         severity[name] = severity.get(name, 0) + 1
         if result.get("lethal") is True:
@@ -467,6 +483,7 @@ def summarize_drop_classifications(
         "exact_safe": exact_safe,
         "exact_lethal": exact_lethal,
         "unknown_omitted": unknown,
+        "unknown_reason_counts": dict(sorted(unknown_reasons.items())),
         "severity_counts": dict(sorted(severity.items())),
     }
 

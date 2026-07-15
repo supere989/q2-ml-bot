@@ -6,6 +6,7 @@ import pytest
 
 from harness.atlas_exact_drops import (
     DropTrajectory,
+    ExactDropAnalysisError,
     _decode_json_object,
     classify_drop_trajectories,
     summarize_drop_classifications,
@@ -90,6 +91,7 @@ def test_dynamic_mover_unknown_has_no_exact_evidence_or_oracle_calls(
     assert result["validation_version"] == 0
     summary = summarize_drop_classifications([result])
     assert summary["unknown_omitted"] == 1
+    assert summary["unknown_reason_counts"] == {"unsupported_dynamic_mover": 1}
     assert summary["evidence"] == 0
     assert summary["validation_version"] == 0
     assert summary["evidence"] != 10
@@ -104,8 +106,45 @@ def test_empty_drop_summary_has_no_attempted_authority_evidence() -> None:
         "exact_safe": 0,
         "exact_lethal": 0,
         "unknown_omitted": 0,
+        "unknown_reason_counts": {},
         "severity_counts": {},
     }
+
+
+def test_unknown_reason_summary_is_canonical_and_covers_every_omission() -> None:
+    results = [
+        {
+            "classification": {
+                "classification": "Unknown", "reason": reason,
+            },
+            "evidence": 0,
+        }
+        for reason in (
+            "unsupported_dynamic_mover", "no_landing", "no_landing",
+        )
+    ]
+
+    summary = summarize_drop_classifications(results)
+
+    assert list(summary["unknown_reason_counts"]) == [
+        "no_landing", "unsupported_dynamic_mover",
+    ]
+    assert summary["unknown_reason_counts"] == {
+        "no_landing": 2, "unsupported_dynamic_mover": 1,
+    }
+    assert sum(summary["unknown_reason_counts"].values()) == summary[
+        "unknown_omitted"
+    ]
+
+
+@pytest.mark.parametrize("reason", [None, "", "Invalid-Pmove", "x" * 65])
+def test_unknown_reason_summary_rejects_malformed_reason(reason) -> None:
+    with pytest.raises(ExactDropAnalysisError, match="reason is malformed"):
+        summarize_drop_classifications([{
+            "classification": {
+                "classification": "Unknown", "reason": reason,
+            },
+        }])
 
 
 @pytest.mark.parametrize(

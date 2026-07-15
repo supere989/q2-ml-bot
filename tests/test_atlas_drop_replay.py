@@ -461,6 +461,7 @@ class DropReplayTests(unittest.TestCase):
         summary = exact.summarize_drop_classifications([result])
         self.assertEqual(summary["evidence"], 0)
         self.assertEqual(summary["validation_version"], 0)
+        self.assertEqual(summary["unknown_reason_counts"], {"no_landing": 1})
 
     def test_batched_analyzer_uses_replay_id_for_original_oracle_response(self) -> None:
         fixture = self.fixture(-600)

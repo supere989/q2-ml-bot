@@ -259,6 +259,7 @@ def _analysis(map_path: Path, claims: dict) -> dict:
                     "exact_safe": 0,
                     "exact_lethal": 0,
                     "unknown_omitted": 0,
+                    "unknown_reason_counts": {},
                     "severity_counts": {},
                 },
             },
@@ -526,6 +527,33 @@ def _mutate_analysis(
     return analysis_path
 
 
+def _set_unknown_drop_summary(value: dict, reasons: dict[str, int]) -> None:
+    unknown = sum(reasons.values())
+    value["compiled_world"]["hazards"]["drop_classification"].update({
+        "classification_status": "oracle",
+        "evidence": 0,
+        "validation_version": 0,
+        "candidate_count": unknown,
+        "exact_safe": 0,
+        "exact_lethal": 0,
+        "unknown_omitted": unknown,
+        "unknown_reason_counts": reasons,
+        "severity_counts": {},
+    })
+    value["compiled_world"]["hazards"][
+        "exact_lethal_candidates_omitted"
+    ] = 0
+
+
+def _reseal_analysis(
+    map_path: Path, analysis_path: Path, mutation,
+) -> None:
+    value = json.loads(analysis_path.read_text())
+    mutation(value)
+    _write_authority_artifacts(map_path, value, analysis_path)
+    analysis_path.write_bytes(canonical_bytes(value))
+
+
 def _inflate_first_route(value: dict) -> None:
     first = value["compiled_world"]["route_claims"][0]
     first["cost_q8"] += 10000 * 256
@@ -559,6 +587,133 @@ def test_complete_compiled_world_proof_passes(generated):
     assert report["passed"] is True
     assert all(criterion["passed"] for criterion in report["criteria"].values())
     assert report["mode"] == "generated_v6_promotion"
+
+
+def test_generated_promotion_allows_accounted_fail_closed_drop_reasons(generated):
+    map_path, _claims, analysis_path = generated
+    for reason in ("no_landing", "unsupported_dynamic_mover"):
+        _reseal_analysis(
+            map_path,
+            analysis_path,
+            lambda value, reason=reason: _set_unknown_drop_summary(
+                value, {reason: 3},
+            ),
+        )
+
+        report = validate_generated_map(map_path, analysis_path)
+
+        assert report["passed"] is True
+        assert report["criteria"]["hazards"]["passed"] is True
+
+
+def test_generated_promotion_rejects_drop_authority_defect_reasons(generated):
+    map_path, _claims, analysis_path = generated
+    defective = (
+        "invalid_pmove_evidence",
+        "invalid_fall_evidence",
+        "invalid_contract",
+        "authority_digest_mismatch",
+        "oracle_failure",
+        "pmove_oracle_failure",
+        "fall_oracle_failure",
+    )
+    for reason in defective:
+        _reseal_analysis(
+            map_path,
+            analysis_path,
+            lambda value, reason=reason: _set_unknown_drop_summary(
+                value, {reason: 4},
+            ),
+        )
+
+        report = validate_generated_map(map_path, analysis_path)
+
+        assert report["passed"] is False
+        failures = "\n".join(report["criteria"]["hazards"]["failures"])
+        assert f"Unknown reason {reason} is not promotion-admissible" in failures
+
+
+def test_generated_promotion_rejects_incomplete_or_malformed_reason_counts(
+    generated,
+):
+    map_path, _claims, analysis_path = generated
+    _reseal_analysis(
+        map_path,
+        analysis_path,
+        lambda value: _set_unknown_drop_summary(value, {"no_landing": 2}),
+    )
+    _reseal_analysis(
+        map_path,
+        analysis_path,
+        lambda value: value["compiled_world"]["hazards"][
+            "drop_classification"
+        ].update(unknown_omitted=3, candidate_count=3),
+    )
+    report = validate_generated_map(map_path, analysis_path)
+    assert report["passed"] is False
+    assert "reason counts do not cover every omitted candidate" in "\n".join(
+        report["criteria"]["hazards"]["failures"]
+    )
+
+    _reseal_analysis(
+        map_path,
+        analysis_path,
+        lambda value: _set_unknown_drop_summary(value, {"Invalid-Pmove": 1}),
+    )
+    report = validate_generated_map(map_path, analysis_path)
+    assert report["passed"] is False
+    assert "Unknown reason 'Invalid-Pmove' is malformed" in "\n".join(
+        report["criteria"]["hazards"]["failures"]
+    )
+
+
+def test_duplicate_unknown_reason_json_key_is_rejected(generated):
+    map_path, _claims, analysis_path = generated
+    _reseal_analysis(
+        map_path,
+        analysis_path,
+        lambda value: _set_unknown_drop_summary(value, {"no_landing": 1}),
+    )
+    payload = analysis_path.read_text()
+    original = '"unknown_reason_counts":{"no_landing":1}'
+    assert original in payload
+    analysis_path.write_text(payload.replace(
+        original,
+        '"unknown_reason_counts":{"no_landing":1,"no_landing":1}',
+        1,
+    ))
+
+    with pytest.raises(ClaimValidationError, match="duplicate JSON key"):
+        validate_generated_map(map_path, analysis_path)
+
+
+def test_noncanonical_unknown_reason_key_order_is_rejected(generated):
+    map_path, _claims, analysis_path = generated
+    _reseal_analysis(
+        map_path,
+        analysis_path,
+        lambda value: _set_unknown_drop_summary(value, {
+            "no_landing": 1, "unsupported_dynamic_mover": 1,
+        }),
+    )
+    payload = analysis_path.read_text()
+    canonical = (
+        '"unknown_reason_counts":{"no_landing":1,'
+        '"unsupported_dynamic_mover":1}'
+    )
+    noncanonical = (
+        '"unknown_reason_counts":{"unsupported_dynamic_mover":1,'
+        '"no_landing":1}'
+    )
+    assert canonical in payload
+    analysis_path.write_text(payload.replace(canonical, noncanonical, 1))
+
+    report = validate_generated_map(map_path, analysis_path)
+
+    assert report["passed"] is False
+    assert "reason counts are not canonically sorted" in "\n".join(
+        report["criteria"]["hazards"]["failures"]
+    )
 
 
 def test_self_declared_pass_without_full_cold_artifacts_rejects(generated):
@@ -946,6 +1101,32 @@ def test_stock_hazard_cannot_pass_without_oracle_evidence(
     assert report["passed"] is False
     assert "analyzer follow-up must emit" in "\n".join(
         report["criteria"]["stock_hazard_classification"]["failures"]
+    )
+
+
+def test_stock_promotion_rejects_all_unknown_invalid_pmove_evidence(
+    generated, tmp_path: Path,
+):
+    bsp, analysis, provenance, inventory = _stock_fixture(generated, tmp_path)
+    _reseal_analysis(
+        bsp,
+        analysis,
+        lambda value: _set_unknown_drop_summary(
+            value, {"invalid_pmove_evidence": 12},
+        ),
+    )
+
+    report = validate_stock_analysis(
+        bsp, analysis, stock_provenance_path=provenance,
+        stock_inventory_path=inventory,
+    )
+
+    assert report["passed"] is False
+    assert (
+        "Unknown reason invalid_pmove_evidence is not promotion-admissible"
+        in "\n".join(
+            report["criteria"]["stock_hazard_classification"]["failures"]
+        )
     )
 
 
