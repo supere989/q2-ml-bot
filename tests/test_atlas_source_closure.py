@@ -25,4 +25,5 @@ def test_analyzer_and_promotion_share_one_complete_source_closure() -> None:
     assert rust
     assert rust.issubset(relative)
     assert "harness/atlas_source_closure.py" in relative
+    assert "harness/atlas_teleporter_edges.py" in relative
     assert _expected_analyzer_sha256() == atlas_analyzer_authority_sha256(ROOT)

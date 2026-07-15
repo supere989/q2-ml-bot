@@ -15,6 +15,7 @@ ATLAS_ANALYZER_FIXED_INPUTS = (
     "harness/atlas_exact_drops.py",
     "harness/atlas_entity_semantics.py",
     "harness/atlas_surface_bands.py",
+    "harness/atlas_teleporter_edges.py",
     "harness/generated_claim_probes.py",
     "harness/hook_claims_v2.py",
     "harness/ibsp38.py",
