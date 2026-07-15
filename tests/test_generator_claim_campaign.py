@@ -77,6 +77,12 @@ FAILURE_71436 = (
 DECLARATION_71436 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71436-DECLARATION.json"
 )
+FAILURE_71437 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71437-FAILURE.json"
+)
+DECLARATION_71437 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71437-DECLARATION.json"
+)
 SHADOW_71430 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71430-SHADOW-8CE1E75.json"
 )
@@ -136,6 +142,9 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "b2g26_final_71435",
         "b2g26_final_71436",
         "b2g26_final_71437",
+        "B2-GENERATED-COHORT-71437-FAILURE.json",
+        "lane-wall static blockers",
+        "No replacement cohort has been declared.",
         "80 units",
         "62-unit",
         "reserved interior",
@@ -893,6 +902,194 @@ def test_71436_failure_record_is_canonical_exact_and_no_salvage() -> None:
         "exists_at_capture": False,
         "path_from_b2_artifact_root": (
             "generated-final-71436-73d55811-report.json"
+        ),
+        "published": False,
+    }
+    admission = failure["admission"]
+    assert admission["permanently_non_admissible"] is True
+    assert admission["replacement_declaration_status"] == (
+        "pending-implementation-fix"
+    )
+    for key in (
+        "source_stage_published", "compiled_stage_published",
+        "materialized_stage_published", "claims_stage_published",
+        "analysis_stage_published", "older_population_reuse_allowed",
+        "passing_subset_allowed", "regeneration_under_same_declaration_allowed",
+        "replacement_member_allowed", "retired_artifact_reuse_allowed",
+        "retry_under_same_declaration_allowed", "salvage_allowed",
+        "substitution_allowed",
+    ):
+        assert admission[key] is False
+
+
+def test_71437_failure_record_is_canonical_exact_and_no_salvage() -> None:
+    payload = FAILURE_71437.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71437"
+    assert failure["status"] == "permanently-failed-first-source-freeze"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71437-DECLARATION.json",
+        "sha256": hashlib.sha256(DECLARATION_71437.read_bytes()).hexdigest(),
+    }
+    assert failure["evidence"]["implementation"] == {
+        "atlas_analyzer_authority_file_count": 29,
+        "atlas_analyzer_authority_sha256": (
+            "73d558112b4659c8508e2c848361d5df"
+            "ba032ee9d616acd379dce73bb0fa08a4"
+        ),
+        "generator_sha256": (
+            "32d05457fd51108ae67d36584ff369207"
+            "aa583b2d7a02c675a0f5f74c9383c22"
+        ),
+        "git_clean": True,
+        "repository_commit": "a87f66c025ea7449d8a09dca517e7a9b6943b2e0",
+        "repository_tree": "4a6b414f19c575b9e7cbdf3ffd4de40314b8e65e",
+        "routes_sha256": (
+            "406b552eb195f6f0fd6a75b689c5ee2"
+            "df141b158d7118502c07698eeddae86d7"
+        ),
+    }
+    message = (
+        "could not place 8 clear, separated, map-spanning deathmatch spawns "
+        "in one source standing component; legal_candidates=487, "
+        "component_bounds=[0:count=28,span=64x832; "
+        "1:count=151,span=1984x832; 2:count=12,span=64x576; "
+        "3:count=95,span=448x1344; 4:count=1,span=0x0; "
+        "5:count=12,span=768x64; 6:count=160,span=1472x960; "
+        "7:count=20,span=64x576; 8:count=8,span=64x192]"
+    )
+    expected_failure = {
+        "grid": 5,
+        "map": "b2g26_canyon_71437202",
+        "message": message,
+        "ordinal": 10,
+        "seed": 71437202,
+        "style": "canyon",
+    }
+    assert failure["failure"]["first_failure"] == expected_failure
+    assert failure["evidence"]["failed_member"] == {
+        "files": {},
+        "grid": 5,
+        "map": expected_failure["map"],
+        "missing_suffixes": [
+            ".map", ".json", ".meta.json", ".lattice.json", ".routes.json",
+        ],
+        "ordinal": expected_failure["ordinal"],
+        "seed": expected_failure["seed"],
+        "style": expected_failure["style"],
+    }
+    assert failure["operator_transcript"] == {
+        "exception": "RuntimeError",
+        "exit_code": 1,
+        "stack_terminal": "maps/generator.py:_place_combat_spawns",
+        "stderr_terminal": message,
+    }
+    assert failure["evidence"]["primary_population"] == {
+        "actual_file_count": 50,
+        "complete_member_count": 10,
+        "complete_ordinal_range": [0, 9],
+        "expected_file_count": 140,
+        "last_complete_map": "b2g26_canyon_71437201",
+        "missing_file_count": 90,
+        "partial_member_file_count": 0,
+        "path_from_artifact_root": "source",
+        "stage_membership_sha256": (
+            "8d1d138f367c70c7924f8a592453e501"
+            "c3e99118a3a0934244960d090499611c"
+        ),
+        "total_bytes": 3715165,
+    }
+    assert failure["evidence"]["cold_population"] == {
+        "actual_file_count": 0,
+        "complete_member_count": 0,
+        "expected_file_count": 140,
+        "generation_begun": False,
+        "missing_file_count": 140,
+        "partial_member_file_count": 0,
+        "path_from_artifact_root": "source-cold",
+        "stage_membership_sha256": (
+            "bf7a444c21a1c041ac3d16a456db305"
+            "a9e36c7c719ce83e6643433e6ce6c337d"
+        ),
+        "total_bytes": 0,
+    }
+    assert failure["evidence"]["prior_population_reuse_audit"] == {
+        "cohorts": [
+            f"b2g26_final_{cohort}" for cohort in range(71429, 71437)
+        ],
+        "content_sha256_overlap_count": 0,
+        "filename_overlap_count": 0,
+        "no_content_or_filename_reuse": True,
+    }
+    assert failure["failure"]["spawn_search_diagnostic"] == {
+        "component_bounds": [
+            {"component": 0, "count": 28, "span_x": 64, "span_y": 832},
+            {"component": 1, "count": 151, "span_x": 1984, "span_y": 832},
+            {"component": 2, "count": 12, "span_x": 64, "span_y": 576},
+            {"component": 3, "count": 95, "span_x": 448, "span_y": 1344},
+            {"component": 4, "count": 1, "span_x": 0, "span_y": 0},
+            {"component": 5, "count": 12, "span_x": 768, "span_y": 64},
+            {"component": 6, "count": 160, "span_x": 1472, "span_y": 960},
+            {"component": 7, "count": 20, "span_x": 64, "span_y": 576},
+            {"component": 8, "count": 8, "span_x": 64, "span_y": 192},
+        ],
+        "component_count": 9,
+        "legal_candidate_count": 487,
+        "required_map_span": [1024, 1024],
+        "single_component_meeting_required_map_span": False,
+    }
+    assert failure["failure"]["blocker_forensics"] == {
+        "decisive_blocker_class": "lane-wall static blockers",
+        "method": (
+            "deterministic in-memory stage replay at the captured clean "
+            "implementation; no member artifact was published"
+        ),
+        "post_lane_walls": {
+            "component_count": 8,
+            "legal_candidate_count": 603,
+            "single_component_meeting_required_map_span": False,
+            "widest_components": [
+                {"component": 1, "count": 199, "span_x": 1984, "span_y": 960},
+                {"component": 5, "count": 192, "span_x": 1472, "span_y": 960},
+            ],
+        },
+        "pre_lane_walls": {
+            "component_count": 5,
+            "legal_candidate_count": 776,
+            "map_spanning_component": {
+                "component": 1,
+                "count": 524,
+                "span_x": 1984,
+                "span_y": 1856,
+            },
+            "single_component_meeting_required_map_span": True,
+        },
+    }
+    assert failure["failure"]["phase"] == "primary-generation-spawn-contract"
+    assert failure["failure"]["root_cause"] == (
+        "spawn-arena floor normalization initially left a 2880-by-1856 "
+        "candidate component and hallway/tower blockers still left a "
+        "1984-by-1856 component, but lane-wall static blockers were the first "
+        "stage to split the remaining map-spanning component into subdomains "
+        "whose widest spans were 1984-by-960 and 1472-by-960; later cover, "
+        "corner, and objective blockers reduced the final pool to 487 "
+        "candidates across 9 components, every component failed the required "
+        "1024-by-1024 span, and the placer correctly refused split starts or "
+        "relaxed admission"
+    )
+    assert failure["failure"]["publication_contract"] == {
+        "cold_generation_begun": False,
+        "failed_member_file_count": 0,
+        "last_complete_ordinal": 9,
+        "source_freeze_report_created": False,
+    }
+    assert failure["evidence"]["source_freeze_report"] == {
+        "exists_at_capture": False,
+        "path_from_b2_artifact_root": (
+            "generated-final-71437-73d55811-report.json"
         ),
         "published": False,
     }

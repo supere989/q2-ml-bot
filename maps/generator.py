@@ -138,6 +138,11 @@ TOWER_H_MIN, TOWER_H_MAX = 192, 288   # hook-required (> JUMP_H), within HOOK_MA
 LANE_WALL_H  = 128         # tall enough to block jumps → must flank
 LANE_WALL_T  = 32
 LANE_GAP     = 192         # central gap in lane walls
+# Keep each lane-wall endpoint on the arena-center side of the complete
+# protected spawn-clearance hull.  This is the same geometry that defines the
+# ring's inner boundary in _normalize_spawn_arena_floor, so the anchor arena
+# retains its defining lanes without weakening any certified spawn witness.
+LANE_EDGE_INSET = SPAWN_EDGE_MARGIN + PLAYER_XY_HALF + SPAWN_SOLID_MARGIN
 LAVA_DEPTH   = 8
 LAVA_MIN, LAVA_MAX = 224, 384   # pool edge length
 
@@ -645,6 +650,11 @@ class MapGenerator:
         self.hook_claim_candidates_v4: List[Tuple[str, HookClaimCandidateV4]] = []
         self.spawn_points: List[Tuple[int, int, int]] = []
         self.spawn_blockers: List[SolidBox] = []
+        # Four connected standing-volume bands reserve a deterministic arena
+        # perimeter before any platform or emitted structure is planned.
+        self._spawn_protected_domains: List[SolidBox] = []
+        self._spawn_protected_witnesses: List[Tuple[int, int, int]] = []
+        self._spawn_protected_anchor: Optional[Room] = None
         self.light_occluders: List[SolidBox] = []
         self.light_regions: List[FloorLightRegion] = []
         self.light_sources: List[LightSource] = []
@@ -859,7 +869,7 @@ class MapGenerator:
         )
 
     def _normalize_spawn_arena_floor(self) -> None:
-        """Keep one full arena floor available as a standing component.
+        """Keep one arena perimeter available as a standing component.
 
         Overlapping terrace plates are intentional, but a higher ordinary
         room can otherwise cut every large arena into a long, narrow exposed
@@ -876,6 +886,9 @@ class MapGenerator:
         """
         arenas = [room for room in self.rooms if room.kind == "arena"]
         if not arenas:
+            self._spawn_protected_domains = []
+            self._spawn_protected_witnesses = []
+            self._spawn_protected_anchor = None
             return
         anchor = max(
             arenas,
@@ -886,6 +899,7 @@ class MapGenerator:
                 -room.wx,
             ),
         )
+        self._spawn_protected_anchor = anchor
         safe_ceiling = anchor.floor_z + MIN_SAFE_HEADROOM + 8
         for room in self.rooms:
             if room is anchor or not self._room_footprints_overlap(anchor, room):
@@ -900,6 +914,103 @@ class MapGenerator:
             standing_top = anchor.floor_z + MIN_SAFE_HEADROOM
             if ceiling_top > standing_bottom and ceiling_bottom < standing_top:
                 room.ceil_z = max(room.ceil_z, safe_ceiling)
+
+        # Candidate centers begin SPAWN_EDGE_MARGIN units inside the room.
+        # Protect their full generous spawn-clearance hull along a connected
+        # perimeter ring.  The four bands overlap at the corners, provide more
+        # than 1024 units of span on both axes, and leave the arena center free
+        # for ordinary cover/objective geometry.
+        spawn_half = PLAYER_XY_HALF + SPAWN_SOLID_MARGIN
+        outer_inset = SPAWN_EDGE_MARGIN - spawn_half
+        inner_inset = SPAWN_EDGE_MARGIN + spawn_half
+        z0 = anchor.floor_z + 1
+        z1 = anchor.floor_z + MIN_SAFE_HEADROOM
+        x0, x1 = anchor.wx + outer_inset, anchor.wx + anchor.w - outer_inset
+        y0, y1 = anchor.wy + outer_inset, anchor.wy + anchor.d - outer_inset
+        inner_x0 = anchor.wx + inner_inset
+        inner_x1 = anchor.wx + anchor.w - inner_inset
+        inner_y0 = anchor.wy + inner_inset
+        inner_y1 = anchor.wy + anchor.d - inner_inset
+        self._spawn_protected_domains = [
+            SolidBox(x0, y0, z0, inner_x0, y1, z1),
+            SolidBox(inner_x1, y0, z0, x1, y1, z1),
+            SolidBox(x0, y0, z0, x1, inner_y0, z1),
+            SolidBox(x0, inner_y1, z0, x1, y1, z1),
+        ]
+
+        low_x = anchor.wx + SPAWN_EDGE_MARGIN
+        high_x = anchor.wx + anchor.w - SPAWN_EDGE_MARGIN
+        low_y = anchor.wy + SPAWN_EDGE_MARGIN
+        high_y = anchor.wy + anchor.d - SPAWN_EDGE_MARGIN
+        mid_x = low_x + ((high_x - low_x) // 128) * 64
+        mid_y = low_y + ((high_y - low_y) // 128) * 64
+        origin_z = anchor.floor_z + 24
+        self._spawn_protected_witnesses = [
+            (low_x, low_y, origin_z),
+            (mid_x, low_y, origin_z),
+            (high_x, low_y, origin_z),
+            (high_x, mid_y, origin_z),
+            (high_x, high_y, origin_z),
+            (mid_x, high_y, origin_z),
+            (low_x, high_y, origin_z),
+            (low_x, mid_y, origin_z),
+        ]
+
+    def _overlaps_spawn_protected_domain(self, box: SolidBox) -> bool:
+        return any(
+            self._boxes_overlap(box, protected)
+            for protected in self._spawn_protected_domains
+        )
+
+    def _assert_spawn_protected_domain_clear(self) -> None:
+        """Fail closed if any final source obstacle enters the reservation."""
+        for kind, obstacles in (
+            ("spawn blocker", self.spawn_blockers),
+            ("lava pool", self.lava_pools),
+        ):
+            for index, obstacle in enumerate(obstacles):
+                if self._overlaps_spawn_protected_domain(obstacle):
+                    raise RuntimeError(
+                        f"{kind} {index} overlaps the protected spawn domain"
+                    )
+
+    def _assert_spawn_protected_capacity(self) -> None:
+        """Prove the reserved ring still owns an exact admissible spawn set."""
+        self._assert_spawn_protected_domain_clear()
+        if not self._spawn_protected_witnesses:
+            return
+        anchor = self._spawn_protected_anchor
+        witnesses = self._spawn_protected_witnesses
+        if anchor is None or len(witnesses) != DM_SPAWN_COUNT:
+            raise RuntimeError("protected spawn domain lacks eight witnesses")
+        if len(set(witnesses)) != DM_SPAWN_COUNT:
+            raise RuntimeError("protected spawn witnesses are not unique")
+        if not self._spawn_span_ok(witnesses):
+            raise RuntimeError("protected spawn witnesses lack map span")
+        if min(
+            math.hypot(left[0] - right[0], left[1] - right[1])
+            for index, left in enumerate(witnesses)
+            for right in witnesses[index + 1:]
+        ) < MIN_SPAWN_SEPARATION:
+            raise RuntimeError("protected spawn witnesses lack separation")
+        if not all(
+            self._spawn_is_locally_clear(anchor, x, y, z)
+            for x, y, z in witnesses
+        ):
+            raise RuntimeError("protected spawn witness is not locally clear")
+
+        from maps.routes import source_endpoint_components
+
+        components = source_endpoint_components(
+            self.rooms, witnesses, self.spawn_blockers, self.lava_pools,
+        )
+        if (
+            len(components) != DM_SPAWN_COUNT
+            or len(set(components.values())) != 1
+        ):
+            raise RuntimeError(
+                "protected spawn witnesses do not share one source component"
+            )
 
     def build_layout(self, grid_n: int = 5):
         """Generate room graph using Prim's MST + extra edges on grid_n × grid_n."""
@@ -1008,19 +1119,24 @@ class MapGenerator:
         # or items placed there would be inside solid rock. Boundary contact
         # (standing ON a plate) does not count as overlap.
         for room in self.rooms:
-            self.spawn_blockers.append(SolidBox(
+            self._admit_spawn_blocker(SolidBox(
                 room.wx, room.wy, -WALL_T,
-                room.wx + room.w, room.wy + room.d, room.floor_z))
+                room.wx + room.w, room.wy + room.d, room.floor_z),
+                required=True,
+            )
             # Ceilings too: a low corridor ceiling can overhang a higher
             # neighbouring terrace at head height. (-8 also covers light strips.)
-            self.spawn_blockers.append(SolidBox(
+            self._admit_spawn_blocker(SolidBox(
                 room.wx, room.wy, room.ceil_z - 8,
-                room.wx + room.w, room.wy + room.d, room.ceil_z + WALL_T))
+                room.wx + room.w, room.wy + room.d, room.ceil_z + WALL_T),
+                required=True,
+            )
 
         # The skybox/kill plane is a final containment fallback, not playable
         # traversal.  Seal every edge of the union of room floor plates so a
         # normal movement or knockback path cannot enter that death volume.
         self._plan_lethal_drop_guards()
+        self._assert_spawn_protected_capacity()
 
     def _plan_lethal_drop_guards(self) -> None:
         """Build guard walls around playable floor-union edges facing void."""
@@ -1088,7 +1204,7 @@ class MapGenerator:
         for edge, wall in planned:
             self.lethal_edges.append(edge)
             self.lethal_guard_walls.append(wall)
-            self.spawn_blockers.append(wall)
+            self._admit_spawn_blocker(wall, required=True)
             self.light_occluders.append(wall)
 
     def _lethal_edge_has_standing_witness(self, side: str,
@@ -1168,11 +1284,16 @@ class MapGenerator:
                 if any(horizontal_sandwich_gap(surface, existing) is not None
                        for existing in self.horizontal_surfaces):
                     continue
+                if not self._admit_spawn_blocker(
+                    surface.box, register=False
+                ):
+                    continue
                 accepted = (plat_z, plat_w, plat_d, plat_x0, plat_y0, surface)
                 break
             if accepted is None:
                 continue
             plat_z, plat_w, plat_d, plat_x0, plat_y0, surface = accepted
+            self._admit_spawn_blocker(surface.box, required=True)
             room.platforms.append({
                 'z': plat_z, 'thick': 16,
                 'x0': plat_x0, 'y0': plat_y0,
@@ -1182,9 +1303,6 @@ class MapGenerator:
             # With terraces, a platform from one room can overhang another
             # room's floor at body height — keep spawns/items out of it.
             # (Covers the railing strip at z-8 too.)
-            self.spawn_blockers.append(SolidBox(
-                plat_x0, plat_y0, plat_z - 8,
-                plat_x0 + plat_w, plat_y0 + plat_d, plat_z + 16))
             self.light_occluders.append(SolidBox(
                 plat_x0, plat_y0, plat_z - 8,
                 plat_x0 + plat_w, plat_y0 + plat_d, plat_z + 16))
@@ -1257,9 +1375,11 @@ class MapGenerator:
             ]
 
         for x0, y0, x1, y1 in blocks:
+            box = SolidBox(x0, y0, fz, x1, y1, fz + cover_h)
+            if not self._admit_spawn_blocker(box):
+                continue
             w.add_brush(x0, y0, fz, x1, y1, fz + cover_h,
                         tf=self.pal['metal'], tc=self.pal['metal'], tw=self.pal['trim'])
-            self.spawn_blockers.append(SolidBox(x0, y0, fz, x1, y1, fz + cover_h))
 
     @staticmethod
     def _boxes_overlap(a: SolidBox, b: SolidBox) -> bool:
@@ -1269,7 +1389,29 @@ class MapGenerator:
             a.z1 <= b.z0 or a.z0 >= b.z1
         )
 
+    def _admit_spawn_blocker(
+        self, box: SolidBox, *, register: bool = True,
+        required: bool = False,
+    ) -> bool:
+        """Centrally admit a standing solid before any brush is emitted.
+
+        Optional geometry receives ``False`` when it would enter the protected
+        spawn ring.  Required shell geometry fails closed.  This is the only
+        method allowed to append to ``spawn_blockers``.
+        """
+        if self._overlaps_spawn_protected_domain(box):
+            if required:
+                raise RuntimeError(
+                    "required standing solid overlaps the protected spawn domain"
+                )
+            return False
+        if register:
+            self.spawn_blockers.append(box)
+        return True
+
     def _structure_is_clear(self, box: SolidBox) -> bool:
+        if not self._admit_spawn_blocker(box, register=False):
+            return False
         if any(self._boxes_overlap(box, blocker)
                for blocker in self.spawn_blockers):
             return False
@@ -1317,6 +1459,10 @@ class MapGenerator:
         for room in self.rooms:
             if room.kind != 'corridor':
                 continue
+            # The low-ceiling corridor room remains an authored hallway even
+            # when its optional side-wall assembly is suppressed to preserve
+            # the protected spawn ring.
+            self.hallway_count += 1
             fz = room.floor_z
             top = room.ceil_z
             thickness = 24
@@ -1338,13 +1484,17 @@ class MapGenerator:
                     SolidBox(cx + passage_half, room.wy + 32, fz,
                              cx + passage_half + thickness, room.wy + room.d - 32, top),
                 ]
+            if not all(
+                self._admit_spawn_blocker(box, register=False)
+                for box in walls
+            ):
+                continue
             for box in walls:
+                self._admit_spawn_blocker(box, required=True)
                 self.writer.add_brush(
                     box.x0, box.y0, box.z0, box.x1, box.y1, box.z1,
                     tf=self.pal['wall'], tc=self.pal['ceil'], tw=self.pal['wall'],
                 )
-                self.spawn_blockers.append(box)
-            self.hallway_count += 1
 
     def _emit_corner_pockets(self):
         """Place L-shaped cover pockets at arena edges for real corner play."""
@@ -1390,11 +1540,11 @@ class MapGenerator:
                         pocket_x, pocket_y, room.floor_z):
                     continue
                 for box in (horizontal, vertical):
+                    self._admit_spawn_blocker(box, required=True)
                     self.writer.add_brush(
                         box.x0, box.y0, box.z0, box.x1, box.y1, box.z1,
                         tf=self.pal['trim'], tc=self.pal['trim'], tw=self.pal['wall'],
                     )
-                    self.spawn_blockers.append(box)
                 self._interior_zone_specs.append((
                     f"corner_{self.corner_count}", "corner_pocket",
                     pocket_bounds, room.floor_z, room.ceil_z,
@@ -1470,11 +1620,11 @@ class MapGenerator:
                        for existing in self.horizontal_surfaces):
                     continue
                 for box in (*walls, roof):
+                    self._admit_spawn_blocker(box, required=True)
                     self.writer.add_brush(
                         box.x0, box.y0, box.z0, box.x1, box.y1, box.z1,
                         tf=self.pal['metal'], tc=self.pal['ceil'], tw=self.pal['wall'],
                     )
-                    self.spawn_blockers.append(box)
                 self.light_occluders.append(roof)
                 self.horizontal_surfaces.append(roof_surface)
                 cx, cy = x0 + size // 2, y0 + size // 2
@@ -1504,6 +1654,7 @@ class MapGenerator:
             if dz <= JUMP_H:
                 continue
             n = (dz + STAIR_STEP_H - 1) // STAIR_STEP_H
+            steps: List[SolidBox] = []
 
             if a.gx != b.gx:    # east/west neighbours: stairs run along X
                 bx = max(a.gx, b.gx) * GRID_SIZE      # shared cell boundary
@@ -1518,12 +1669,10 @@ class MapGenerator:
                     sx1 = bx + run_dir * (n - i) * STAIR_STEP_D
                     sx0 = bx + run_dir * (n - i + 1) * STAIR_STEP_D
                     x0, x1 = min(sx0, sx1), max(sx0, sx1)
-                    w.add_brush(x0, cy - STAIR_WIDTH // 2, low.floor_z,
-                                x1, cy + STAIR_WIDTH // 2, step_top,
-                                tf=self.pal['trim'], tc=self.pal['trim'], tw=self.pal['trim'])
-                    self.spawn_blockers.append(SolidBox(
+                    steps.append(SolidBox(
                         x0, cy - STAIR_WIDTH // 2, low.floor_z,
-                        x1, cy + STAIR_WIDTH // 2, step_top))
+                        x1, cy + STAIR_WIDTH // 2, step_top,
+                    ))
             else:               # north/south neighbours: stairs run along Y
                 by = max(a.gy, b.gy) * GRID_SIZE
                 x0r = max(a.wx, b.wx)
@@ -1537,12 +1686,25 @@ class MapGenerator:
                     sy1 = by + run_dir * (n - i) * STAIR_STEP_D
                     sy0 = by + run_dir * (n - i + 1) * STAIR_STEP_D
                     y0, y1 = min(sy0, sy1), max(sy0, sy1)
-                    w.add_brush(cx - STAIR_WIDTH // 2, y0, low.floor_z,
-                                cx + STAIR_WIDTH // 2, y1, step_top,
-                                tf=self.pal['trim'], tc=self.pal['trim'], tw=self.pal['trim'])
-                    self.spawn_blockers.append(SolidBox(
+                    steps.append(SolidBox(
                         cx - STAIR_WIDTH // 2, y0, low.floor_z,
-                        cx + STAIR_WIDTH // 2, y1, step_top))
+                        cx + STAIR_WIDTH // 2, y1, step_top,
+                    ))
+
+            # A partial staircase is neither safe traversal nor truthful map
+            # metadata.  Reserve or emit the complete run atomically.
+            if not steps or any(
+                not self._admit_spawn_blocker(step, register=False)
+                for step in steps
+            ):
+                continue
+            for step in steps:
+                self._admit_spawn_blocker(step, required=True)
+                w.add_brush(
+                    step.x0, step.y0, step.z0,
+                    step.x1, step.y1, step.z1,
+                    tf=self.pal['trim'], tc=self.pal['trim'], tw=self.pal['trim'],
+                )
             self.stair_count += 1
 
     def _place_objectives(self):
@@ -1581,7 +1743,7 @@ class MapGenerator:
                     )
                 ):
                     continue
-                self.spawn_blockers.append(box)
+                self._admit_spawn_blocker(box, required=True)
                 quad_site = self._floor_item_spot(
                     room, tx + TOWER_BASE // 2, ty + TOWER_BASE // 2,
                     TOWER_BASE + 128,
@@ -1597,9 +1759,9 @@ class MapGenerator:
         if chosen is None:
             return
         room, tx, ty, fz, top, box, surface, quad_site = chosen
+        self._admit_spawn_blocker(box, required=True)
         w.add_brush(tx, ty, fz, tx + TOWER_BASE, ty + TOWER_BASE, top,
                     tf=self.pal['light'], tc=self.pal['metal'], tw=self.pal['metal'])
-        self.spawn_blockers.append(box)
         self.horizontal_surfaces.append(surface)
         quad_x, quad_y, quad_z = quad_site
         self._reserve_item_origin(quad_site, "item_quad objective")
@@ -1642,9 +1804,9 @@ class MapGenerator:
                     )
                 ):
                     continue
+                self._admit_spawn_blocker(box, required=True)
                 w.add_brush(tx, ty, fz, tx + TOWER_BASE, ty + TOWER_BASE, top,
                             tf=self.pal['metal'], tc=self.pal['metal'], tw=self.pal['wall'])
-                self.spawn_blockers.append(box)
                 self.horizontal_surfaces.append(surface)
                 cx_t = tx + TOWER_BASE // 2
                 cy_t = ty + TOWER_BASE // 2
@@ -1666,38 +1828,49 @@ class MapGenerator:
             cx = room.wx + room.w // 2
             cy = room.wy + room.d // 2
             along_x = rng.random() < 0.5
+            segments: List[SolidBox] = []
             for side in (-1, 1):
                 if along_x:
                     wy = cy + side * room.d // 4
-                    seg_x0 = room.wx + 128
-                    seg_x1 = room.wx + room.w - 128
+                    seg_x0 = room.wx + LANE_EDGE_INSET
+                    seg_x1 = room.wx + room.w - LANE_EDGE_INSET
                     gap0 = cx - LANE_GAP // 2
                     gap1 = cx + LANE_GAP // 2
                     for x0, x1 in ((seg_x0, gap0), (gap1, seg_x1)):
                         if x1 - x0 < 64:
                             continue
-                        w.add_brush(x0, wy - LANE_WALL_T // 2, fz,
-                                    x1, wy + LANE_WALL_T // 2, fz + LANE_WALL_H,
-                                    tf=self.pal['wall'], tc=self.pal['trim'], tw=self.pal['wall'])
-                        self.spawn_blockers.append(SolidBox(
+                        segments.append(SolidBox(
                             x0, wy - LANE_WALL_T // 2, fz,
-                            x1, wy + LANE_WALL_T // 2, fz + LANE_WALL_H))
+                            x1, wy + LANE_WALL_T // 2, fz + LANE_WALL_H,
+                        ))
                 else:
                     wx_ = cx + side * room.w // 4
-                    seg_y0 = room.wy + 128
-                    seg_y1 = room.wy + room.d - 128
+                    seg_y0 = room.wy + LANE_EDGE_INSET
+                    seg_y1 = room.wy + room.d - LANE_EDGE_INSET
                     gap0 = cy - LANE_GAP // 2
                     gap1 = cy + LANE_GAP // 2
                     for y0, y1 in ((seg_y0, gap0), (gap1, seg_y1)):
                         if y1 - y0 < 64:
                             continue
-                        w.add_brush(wx_ - LANE_WALL_T // 2, y0, fz,
-                                    wx_ + LANE_WALL_T // 2, y1, fz + LANE_WALL_H,
-                                    tf=self.pal['wall'], tc=self.pal['trim'], tw=self.pal['wall'])
-                        self.spawn_blockers.append(SolidBox(
+                        segments.append(SolidBox(
                             wx_ - LANE_WALL_T // 2, y0, fz,
-                            wx_ + LANE_WALL_T // 2, y1, fz + LANE_WALL_H))
-                self.lane_wall_count += 1
+                            wx_ + LANE_WALL_T // 2, y1, fz + LANE_WALL_H,
+                        ))
+            if len(segments) != 4 or any(
+                not self._admit_spawn_blocker(segment, register=False)
+                for segment in segments
+            ):
+                continue
+            for segment in segments:
+                self._admit_spawn_blocker(segment, required=True)
+                w.add_brush(
+                    segment.x0, segment.y0, segment.z0,
+                    segment.x1, segment.y1, segment.z1,
+                    tf=self.pal['wall'], tc=self.pal['trim'], tw=self.pal['wall'],
+                )
+            # Historical count is one per parallel wall, each split into two
+            # brush segments around the central gap.
+            self.lane_wall_count += 2
 
     def _emit_lava_pools(self):
         """Sunken lava hazards with mega-health beside them: risk/reward
@@ -1728,6 +1901,7 @@ class MapGenerator:
             if placement is None:
                 continue
             size, px, py, box = placement
+            self._admit_spawn_blocker(box, required=True)
             # Pool sits on the floor with a low rim so it reads as terrain
             w.add_brush(px - 16, py - 16, fz, px + size + 16, py + size + 16, fz + 12,
                         tf=self.pal['trim'], tc=self.pal['trim'], tw=self.pal['trim'])
@@ -1735,7 +1909,6 @@ class MapGenerator:
                         tf=T_LAVA, tc=T_LAVA, tw=T_LAVA,
                         surf_flags=SURF_LIGHT | SURF_WARP, value=120,
                         contents=CONTENTS_LAVA)
-            self.spawn_blockers.append(box)
             # The padded rim/clearance box is a placement blocker, not the
             # hazardous volume.  Claims and Dyn priors bind the exact emitted
             # CONTENTS_LAVA brush so compiled-world probes do not inherit 16u
@@ -1772,10 +1945,18 @@ class MapGenerator:
 
     def _item_origin_available(self, origin: Tuple[int, int, int]) -> bool:
         """Return whether an item can exclusively claim this exact origin."""
-        return origin not in self._item_origins and origin not in self.spawn_points
+        return (
+            origin not in self._item_origins
+            and origin not in self.spawn_points
+            and origin not in self._spawn_protected_witnesses
+        )
 
     def _reserve_item_origin(self, origin: Tuple[int, int, int], label: str) -> None:
         """Reserve an emitted item origin, failing closed on any collision."""
+        if origin in self._spawn_protected_witnesses:
+            raise RuntimeError(
+                f"item origin enters protected spawn witness for {label}: {origin}"
+            )
         if not self._item_origin_available(origin):
             raise RuntimeError(f"duplicate item origin for {label}: {origin}")
         self._item_origins.add(origin)
@@ -2214,19 +2395,46 @@ class MapGenerator:
                                cx + COVER_W // 2, cy + COVER_W // 2, fz + COVER_H)
                 if not self._structure_is_clear(box):
                     continue
+                self._admit_spawn_blocker(box, required=True)
                 w.add_brush(box.x0, box.y0, box.z0, box.x1, box.y1, box.z1,
                             tf=self.pal['trim'], tc=self.pal['trim'], tw=self.pal['wall'])
-                self.spawn_blockers.append(box)
                 self.cover_count += 1
                 placed += 1
 
     def _place_combat_spawns(self):
-        """Place a validated, well-separated set of deathmatch starts.
+        """Emit the final-geometry certified deathmatch spawn set.
 
-        Prefer a wide ring in a big arena, then perform exact component-bound
-        selection when no ring passes.  Both paths enforce the same clearance,
-        separation, map-span, and shared-source-component gates; neither may
-        relax or rescue a failed layout."""
+        Generated layouts consume the eight canonical protected-ring witnesses
+        only after their clearance, escape, separation, dual span, and exact
+        source component are revalidated. Hand-constructed no-arena fixtures
+        retain the same strict component-bound selector. Neither path relaxes
+        or rescues a failed layout."""
+        self._assert_spawn_protected_capacity()
+        if self._spawn_protected_witnesses:
+            anchor = self._spawn_protected_anchor
+            if anchor is None:
+                raise RuntimeError("protected spawn selector lacks its anchor")
+            center_x = anchor.wx + anchor.w // 2
+            center_y = anchor.wy + anchor.d // 2
+            placed = [
+                (
+                    x, y, z,
+                    int(round((math.degrees(math.atan2(
+                        center_y - y, center_x - x,
+                    )) + 360.0) % 360.0)),
+                )
+                for x, y, z in self._spawn_protected_witnesses
+            ]
+            self.spawn_points.extend(
+                (x, y, z) for x, y, z, _yaw in placed
+            )
+            if self._shared_spawn_source_component(self.spawn_points) is None:
+                raise RuntimeError(
+                    "protected spawn selector lost its source component"
+                )
+            self._emit_spawn_entities(placed)
+            return
+
         arenas = sorted(
             (r for r in self.rooms if r.kind == 'arena'),
             key=lambda r: r.w * r.d, reverse=True,

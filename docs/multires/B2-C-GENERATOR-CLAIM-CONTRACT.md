@@ -473,25 +473,52 @@ Implementation fix commit `57f4082` and the immutable 71436 named declaration
 and failure archive all preceded the declaration of replacement cohort
 `b2g26_final_71437`. Its 28 entirely new members use seeds 71437000 through
 71437603 under the same all-or-nothing, declared-before-generation policy.
-The current alias and immutable 71437 named copy are byte-identical. No 71436
-artifact is reusable by 71437: all primary, cold, compiled, materialized,
-claims, analysis, validation, Dyn, and report paths must be fresh. In
-particular, never reuse archived root
+The alias and immutable 71437 named copy were byte-identical when declared and
+remain so as a fail-closed historical boundary. No 71436 artifact was reusable
+by 71437: all primary, cold, compiled, materialized, claims, analysis,
+validation, Dyn, and report paths had to be fresh. In particular, generation
+did not reuse archived root
 `/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71436-73d55811`;
-create a new empty authority-bound root such as
+it began in the fresh authority-bound root
 `/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71437-${ATLAS_AUTHORITY_SHA256:0:8}`
-with new empty `source` and `source-cold` directories, and place the exclusive
-report at the fresh sibling path
+with new empty `source` and `source-cold` directories and reserved the fresh
+exclusive sibling report path
 `/home/raymondj/multires-artifacts/atlas-v1/B2/generated-final-71437-${ATLAS_AUTHORITY_SHA256:0:8}-report.json`.
+
+The first and only 71437 source-generation attempt failed at ordinal 10,
+`b2g26_canyon_71437202`. Final geometry had 487 locally legal candidates in
+nine source standing components, but every component failed the required
+1024-by-1024 map span. Deterministic forensics identified lane-wall static blockers
+as the first stage to split the last map-spanning component;
+later cover, corner, and objective blockers reduced the candidate pool but did
+not cause the first loss of admission. Only the fresh ordinal-0-through-9
+prefix was written. Cold generation never began, no source-freeze report or
+later stage was published, and exact evidence is archived in
+`B2-GENERATED-COHORT-71437-FAILURE.json`. Cohort 71437 is permanently retired.
+Its prefix and every associated artifact and path cannot be retried, salvaged,
+reused, or substituted. No replacement cohort has been declared.
+
+Before any replacement may be declared, source construction reserves four
+connected standing-volume bands around one deterministic arena perimeter and
+certifies eight exact final spawn witnesses on that ring. Every later standing
+solid is admitted through one protected-domain check; compound hallway,
+lane-wall, and staircase assemblies are admitted and emitted all-or-none. The
+final selector consumes the certified witnesses only after rechecking local
+clearance and escape, separation, dual-axis span, and one exact source standing
+component. Lane-wall endpoints begin at the ring's inner boundary, preserving
+the two sight-blocking walls and central gaps that define lane arenas without
+entering the reserved circulation volume. These implementation invariants do
+not authorize generation; a separate clean commit must still declare an
+entirely fresh cohort and artifact root.
 
 ## Offline workflow
 
 The commands in this section use `COHORT_ID` from the committed authoritative
 replacement declaration. It must never name retired cohort 71426, 71427,
-71428, 71429, 71430, 71431, 71432, 71433, 71434, 71435, or 71436. There is
-exactly one declaration authorized for this workflow:
-`b2g26_final_71437`. Generation must begin only from a clean commit containing
-that declaration and must use the fresh authority-bound paths above.
+71428, 71429, 71430, 71431, 71432, 71433, 71434, 71435, 71436, or 71437. There
+is currently no declaration authorized for this workflow; the commands below
+remain a template for use only after an implementation fix and a separately
+committed fresh declaration with entirely new members and paths.
 
 Generate and compile the BSP beside its source files first. Then materialize
 only the V4 hook candidates under the pinned B1 authorities. Materialization
