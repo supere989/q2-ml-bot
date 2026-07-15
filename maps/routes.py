@@ -46,6 +46,11 @@ ITEM_AXIS = {
 DEFAULT_AXIS = ("value", 0.3)
 
 ROUTE_ARCHETYPES = ["offense", "survival", "control", "balanced"]
+PLAYER_ORIGIN_FLOOR_OFFSET = 24.0
+# Generated endpoints are normally exact integers at floor + 24.  Keep the
+# admissible band below Quake's 18-unit stair step so a distinct ledge or
+# platform cannot inherit the room below through an XY-only match.
+ROOM_FLOOR_BAND_TOLERANCE = 8.0
 
 
 def _period(cls: str) -> float:
@@ -75,19 +80,30 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
                       hook_required_edges=None) -> dict:
     """items: list of (cls, x, y, z). spawns: list of (x, y, z)."""
     # --- room centres + danger ---
-    rc = [(r.wx + r.w / 2, r.wy + r.d / 2, r.floor_z) for r in rooms]
+    rc = [
+        (r.wx + r.w / 2, r.wy + r.d / 2,
+         r.floor_z + PLAYER_ORIGIN_FLOOR_OFFSET)
+        for r in rooms
+    ]
     lava_c = [((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, (b.z0 + b.z1) / 2)
               for b in lava_pools]
 
-    def room_of(x, y):
-        for i, r in enumerate(rooms):
-            if r.wx <= x <= r.wx + r.w and r.wy <= y <= r.wy + r.d:
-                return i
-        # nearest room centre fallback
-        return min(
-            range(len(rc)),
-            key=lambda i: math.hypot(x - rc[i][0], y - rc[i][1]),
-        ) if rc else -1
+    def room_of(x, y, z):
+        compatible = []
+        for index, current in enumerate(rooms):
+            if not (
+                current.wx <= x <= current.wx + current.w
+                and current.wy <= y <= current.wy + current.d
+            ):
+                continue
+            floor_error = abs(
+                z - (current.floor_z + PLAYER_ORIGIN_FLOOR_OFFSET)
+            )
+            if floor_error <= ROOM_FLOOR_BAND_TOLERANCE:
+                compatible.append((floor_error, index))
+        # Overlapping generated rooms are legal.  Resolve their vertical
+        # bands by closest floor, then stable room ordinal for exact ties.
+        return min(compatible)[1] if compatible else -1
 
     def edge_risk(ca, cb) -> float:
         if not lava_c:
@@ -100,7 +116,7 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
     adj: Dict[int, List[Tuple[int, float, float]]] = {i: [] for i in range(len(rooms))}
     edges = []
     for c in connections:
-        if c.a >= len(rc) or c.b >= len(rc):
+        if not (0 <= c.a < len(rc) and 0 <= c.b < len(rc)):
             continue
         dist = _dist(rc[c.a], rc[c.b])
         risk = edge_risk(rc[c.a], rc[c.b])
@@ -108,6 +124,11 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
         adj[c.b].append((c.a, dist, risk))
         edges.append({"a": c.a, "b": c.b, "kind": c.kind,
                       "dist": round(dist), "risk": risk})
+    for neighbors in adj.values():
+        neighbors.sort(key=lambda value: (value[0], value[1], value[2]))
+    edges.sort(key=lambda value: (
+        value["a"], value["b"], value["kind"], value["dist"], value["risk"]
+    ))
 
     # --- nodes: items + spawns ---
     nodes = []
@@ -117,13 +138,14 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
         nid = len(nodes)
         node = {"id": nid, "type": "item", "class": cls,
                 "x": int(x), "y": int(y), "z": int(z),
-                "room": room_of(x, y), "respawn_s": _period(cls),
+                "room": room_of(x, y, z), "respawn_s": _period(cls),
                 "axis": axis, "value": val}
         nodes.append(node)
         item_nodes.append(node)
     for x, y, z in spawns:
         nodes.append({"id": len(nodes), "type": "spawn",
-                      "x": int(x), "y": int(y), "z": int(z), "room": room_of(x, y)})
+                      "x": int(x), "y": int(y), "z": int(z),
+                      "room": room_of(x, y, z)})
 
     # --- all-pairs shortest path over rooms (Dijkstra; rooms are few) ---
     def dijkstra(src):
@@ -143,13 +165,26 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
 
     room_dist = {i: dijkstra(i) for i in range(len(rooms))}
 
-    def route_cost(ra, rb):
+    def route_cost(source, target):
+        ra = source["room"]
+        rb = target["room"]
         if ra < 0 or rb < 0 or ra >= len(rooms) or rb >= len(rooms):
             return math.inf
-        return room_dist[ra].get(rb, math.inf)
+        source_point = (source["x"], source["y"], source["z"])
+        target_point = (target["x"], target["y"], target["z"])
+        if ra == rb:
+            return _dist(source_point, target_point)
+        inter_room = room_dist[ra].get(rb, math.inf)
+        if not math.isfinite(inter_room):
+            return math.inf
+        return (
+            _dist(source_point, rc[ra])
+            + inter_room
+            + _dist(rc[rb], target_point)
+        )
 
     # --- generate archetype routes: value-weighted greedy loops ---
-    def gen_route(archetype, start_room):
+    def gen_route(archetype, start):
         if archetype == "offense":
             pool = [n for n in item_nodes if n["axis"] in ("offense", "value")]
         elif archetype == "survival":
@@ -159,36 +194,36 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
         pool = [n for n in pool if n["room"] >= 0]
         if not pool:
             return None
-        visited, seq, cur = [], [], start_room
+        visited, seq, current = [], [], start
         budget = 6 if archetype != "control" else max(6, len(pool))
         remaining = list(pool)
         while remaining and len(seq) < budget:
-            # pick best value/cost item reachable from current room
+            # Pick the best reachable value using endpoint-aware 3D cost.
+            # Distinct same-room points therefore never receive a fake zero.
             def score(n):
-                c = route_cost(cur, n["room"])
+                c = route_cost(current, n)
                 if not math.isfinite(c):
                     return -math.inf
-                if c <= 0:
-                    c = 1.0
                 return n["value"] / (1.0 + c / 1024.0)
             reachable = [
                 node for node in remaining
-                if math.isfinite(route_cost(cur, node["room"]))
+                if math.isfinite(route_cost(current, node))
             ]
             if not reachable:
                 break
-            nxt = max(reachable, key=score)
+            nxt = max(reachable, key=lambda node: (score(node), -node["id"]))
             seq.append(nxt)
             visited.append(nxt["id"])
-            cur = nxt["room"]
+            current = nxt
             remaining.remove(nxt)
         if len(seq) < 2:
             return None
         # close the loop back to start
-        total = sum(route_cost(seq[i]["room"], seq[i + 1]["room"])
-                    for i in range(len(seq) - 1))
-        total += route_cost(start_room, seq[0]["room"])
-        total += route_cost(seq[-1]["room"], start_room)
+        loop = [start, *seq, start]
+        total = sum(route_cost(source, target)
+                    for source, target in zip(loop, loop[1:]))
+        if not math.isfinite(total):
+            return None
         risk = round(sum(edge_risk(rc[seq[i]["room"]], rc[seq[i + 1]["room"]])
                          for i in range(len(seq) - 1)) / max(1, len(seq) - 1), 3)
         return {
@@ -201,15 +236,25 @@ def build_route_graph(rooms, connections, items, spawns, lava_pools,
             "value": round(sum(n["value"] for n in seq), 2),
         }
 
-    spawn_rooms = [room_of(x, y) for x, y, z in spawns] or [0]
+    spawn_nodes = [
+        node for node in nodes
+        if node["type"] == "spawn" and node["room"] >= 0
+    ]
+    first_spawn_by_room = {}
+    for node in spawn_nodes:
+        first_spawn_by_room.setdefault(node["room"], node)
+    # Retain the original spawn-room rotation, but use its canonical first
+    # node because the claim normalizer resolves a route's start the same way.
+    route_starts = [first_spawn_by_room[node["room"]] for node in spawn_nodes]
     routes = []
-    for i, arch in enumerate(ROUTE_ARCHETYPES):
-        sr = spawn_rooms[i % len(spawn_rooms)]
-        r = gen_route(arch, sr)
-        if r:
-            r["id"] = len(routes)
-            r["start_room"] = sr
-            routes.append(r)
+    if route_starts:
+        for i, arch in enumerate(ROUTE_ARCHETYPES):
+            start = route_starts[i % len(route_starts)]
+            r = gen_route(arch, start)
+            if r:
+                r["id"] = len(routes)
+                r["start_room"] = start["room"]
+                routes.append(r)
 
     return {
         "version": 1,
