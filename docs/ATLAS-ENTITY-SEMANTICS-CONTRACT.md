@@ -43,7 +43,11 @@ mapping. Quake parses keys in source order, case-insensitively; `angle` and
   targets, and open terminals remain explicit.
 - Rotators: class-specific X/Y flag precedence, REVERSE, integer/default
   rotating-door distance, START_OPEN endpoint swap, and entity-origin pivot.
-  Swept bounds are potential envelopes only.
+  A rotating door's potential envelope is the analytic swept AABB over its
+  exact declared angle interval, including interior extrema of every model-box
+  corner. A continuous rotator uses the corresponding exact full-axis-cycle
+  spatial envelope. Swept bounds remain potential envelopes only: neither
+  instantaneous pose nor collision/passability is promoted from that geometry.
 - `trigger_hurt`: runtime touch is inclusive linked-AABB overlap, not convex
   brush contact. Toggleable state has zero static runtime confidence; a
   non-toggle state is exact.

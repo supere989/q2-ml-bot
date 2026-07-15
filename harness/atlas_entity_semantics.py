@@ -832,6 +832,131 @@ def _rotated_model_aabb(model: Aabb, origin: Vec3, angles: Vec3) -> Aabb:
     )
 
 
+def _rotated_model_point(point: Vec3, origin: Vec3, angles: Vec3) -> Vec3:
+    forward, right, up = _angle_basis(angles)
+    return tuple(
+        origin[axis]
+        + forward[axis] * point[0]
+        - right[axis] * point[1]
+        + up[axis] * point[2]
+        for axis in range(3)
+    )  # type: ignore[return-value]
+
+
+def _rotation_component(axis: RotationAxis) -> int:
+    # Quake Euler storage is PITCH, YAW, ROLL.  Its rotating-mover X flag
+    # advances ROLL, Y advances PITCH, and the default Z axis advances YAW.
+    return {
+        RotationAxis.X: 2,
+        RotationAxis.Y: 0,
+        RotationAxis.Z: 1,
+    }[axis]
+
+
+def _harmonic_interval_bounds(
+    constant: float,
+    cosine: float,
+    sine: float,
+    start_radians: float,
+    end_radians: float,
+) -> tuple[float, float]:
+    """Bound ``constant + cosine*cos(t) + sine*sin(t)`` on an interval."""
+
+    lower = min(start_radians, end_radians)
+    upper = max(start_radians, end_radians)
+    radius = math.hypot(cosine, sine)
+    if radius == 0.0:
+        return constant, constant
+    if upper - lower >= math.tau:
+        minimum = constant - radius
+        maximum = constant + radius
+    else:
+        def value(angle: float) -> float:
+            return constant + cosine * math.cos(angle) + sine * math.sin(angle)
+
+        values = [value(lower), value(upper)]
+        # The derivative is zero at phase + k*pi.  Include the immediately
+        # adjacent candidates as well: an out-of-interval extremum can only
+        # widen this potential envelope, and avoids an inward rounding error
+        # when an extremum lies exactly on an endpoint.
+        phase = math.atan2(sine, cosine)
+        first = math.ceil((lower - phase) / math.pi) - 1
+        last = math.floor((upper - phase) / math.pi) + 1
+        for multiple in range(first, last + 1):
+            angle = phase + multiple * math.pi
+            if lower - 1e-12 <= angle <= upper + 1e-12:
+                values.append(value(angle))
+        minimum = min(values)
+        maximum = max(values)
+
+    # The envelope is dependency authority, so round the changing dimensions
+    # outwards.  An invariant dimension remains byte-for-byte exact (notably
+    # the X bounds of an X-axis door).
+    return (
+        math.nextafter(minimum, -math.inf),
+        math.nextafter(maximum, math.inf),
+    )
+
+
+def _swept_rotated_model_aabb(
+    model: Aabb,
+    origin: Vec3,
+    axis: RotationAxis,
+    start_angles: Vec3,
+    end_angles: Vec3,
+) -> Aabb:
+    """Conservative AABB for every pose in a one-axis Euler interval.
+
+    With the two other Euler components fixed, every world coordinate of a
+    model-box corner is ``c + a*cos(theta) + b*sin(theta)``.  Endpoint-only
+    unions are insufficient because a coordinate extremum can occur strictly
+    inside the interval.  Evaluate all eight corners and every analytic
+    derivative zero, including full-cycle intervals without iteration.
+    """
+
+    component = _rotation_component(axis)
+    if any(
+        start_angles[index] != end_angles[index]
+        for index in range(3) if index != component
+    ):
+        raise ValueError("rotating mover interval changes more than its declared axis")
+
+    zero_angles = list(start_angles)
+    zero_angles[component] = 0.0
+    quarter_angles = list(zero_angles)
+    quarter_angles[component] = 90.0
+    half_angles = list(zero_angles)
+    half_angles[component] = 180.0
+    start_radians = math.radians(start_angles[component])
+    end_radians = math.radians(end_angles[component])
+
+    minima = [math.inf, math.inf, math.inf]
+    maxima = [-math.inf, -math.inf, -math.inf]
+    for x in (model.mins[0], model.maxs[0]):
+        for y in (model.mins[1], model.maxs[1]):
+            for z in (model.mins[2], model.maxs[2]):
+                point: Vec3 = (x, y, z)
+                at_zero = _rotated_model_point(
+                    point, origin, tuple(zero_angles),  # type: ignore[arg-type]
+                )
+                at_quarter = _rotated_model_point(
+                    point, origin, tuple(quarter_angles),  # type: ignore[arg-type]
+                )
+                at_half = _rotated_model_point(
+                    point, origin, tuple(half_angles),  # type: ignore[arg-type]
+                )
+                for world_axis in range(3):
+                    constant = (at_zero[world_axis] + at_half[world_axis]) * 0.5
+                    cosine = (at_zero[world_axis] - at_half[world_axis]) * 0.5
+                    sine = at_quarter[world_axis] - constant
+                    lower, upper = _harmonic_interval_bounds(
+                        constant, cosine, sine, start_radians, end_radians,
+                    )
+                    minima[world_axis] = min(minima[world_axis], lower)
+                    maxima[world_axis] = max(maxima[world_axis], upper)
+    return Aabb(tuple(minima), tuple(maxima))  # type: ignore[arg-type]
+
+
 def rotating_mover_semantics(
     entity: EntityLike, model_mins: Sequence[float], model_maxs: Sequence[float],
 ) -> AuthorityResult[RotatingMoverSemantics]:
@@ -886,16 +1011,21 @@ def rotating_mover_semantics(
             _rotated_model_aabb(model.value, origin.value, endpoint_angles),
         )
 
-    radius = max(
-        math.sqrt(x * x + y * y + z * z)
-        for x in (model.value.mins[0], model.value.maxs[0])
-        for y in (model.value.mins[1], model.value.maxs[1])
-        for z in (model.value.mins[2], model.value.maxs[2])
-    )
-    envelope = Aabb(
-        tuple(value - radius for value in origin.value),  # type: ignore[arg-type]
-        tuple(value + radius for value in origin.value),  # type: ignore[arg-type]
-    )
+    if endpoint_angles is None:
+        # func_rotating has no terminal pose, but its declared axis proves the
+        # exact spatial envelope of one complete cycle.  Instantaneous pose and
+        # collision remain Unknown through the GeometryClaim boundary below.
+        sweep_end = list(current_angles)
+        component = _rotation_component(axis)
+        sweep_end[component] += -360.0 if reverse else 360.0
+        envelope = _swept_rotated_model_aabb(
+            model.value, origin.value, axis, current_angles,
+            tuple(sweep_end),  # type: ignore[arg-type]
+        )
+    else:
+        envelope = _swept_rotated_model_aabb(
+            model.value, origin.value, axis, start_angles, endpoint_angles,
+        )
     return AuthorityResult.exact(RotatingMoverSemantics(
         classname=classname,
         axis=axis,

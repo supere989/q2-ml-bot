@@ -264,7 +264,13 @@ def test_func_rotating_axis_precedence_reverse_and_claim_boundary() -> None:
     assert semantics.reference_pose.transform_authority is Authority.EXACT
     assert semantics.reference_pose.collision_authority is Authority.UNKNOWN
     assert semantics.potential_envelope.classification is GeometryClassification.POTENTIAL_SWEPT_ENVELOPE
-    assert semantics.potential_envelope.bounds.mins[0] < 100 < semantics.potential_envelope.bounds.maxs[0]
+    assert semantics.potential_envelope.collision_authority is Authority.UNKNOWN
+    # Continuous rotation has an exact full-cycle spatial envelope about its
+    # declared axis, while its instantaneous pose remains non-authoritative.
+    # The retained yaw tilts that axis, so X varies, but more tightly than the
+    # old all-axis corner-radius sphere (about 81.67 through 118.33 here).
+    assert semantics.potential_envelope.bounds.mins[0] > 81.7
+    assert semantics.potential_envelope.bounds.maxs[0] < 118.3
 
 
 def test_rotating_door_clears_angles_parses_integer_distance_and_start_open() -> None:
@@ -287,6 +293,101 @@ def test_rotating_door_clears_angles_parses_integer_distance_and_start_open() ->
     assert semantics.end_angles == (0.0, 0.0, 0.0)
     assert semantics.movedir == (0.0, 0.0, 1.0)
     assert semantics.endpoint_pose is not None
+
+
+def test_q2dm6_rotating_door_sweep_keeps_exact_x_axis_bounds() -> None:
+    # q2dm6 entity 57 / model *2 after the CM loader's one-unit expansion.
+    door = entity(
+        57,
+        "func_door_rotating",
+        ("origin", "0 -556 -252"),
+        ("targetname", "t9"),
+        ("spawnflags", "64"),
+        ("speed", "30"),
+        ("distance", "-32"),
+    )
+    semantics = exact(rotating_mover_semantics(
+        door, (-49.0, -5.0, -12.0), (49.0, 221.0, 132.0),
+    ))
+    swept = semantics.potential_envelope.bounds
+    assert swept.mins[0] == -49.0
+    assert swept.maxs[0] == 49.0
+    assert swept.mins[1] > -567.0
+    assert swept.maxs[1] < -298.0
+    assert swept.mins[2] > -380.0
+    assert swept.maxs[2] < -119.0
+    assert semantics.potential_envelope.collision_authority is Authority.UNKNOWN
+
+
+def test_rotating_door_sweep_includes_strict_interior_corner_extremum() -> None:
+    # For local point (1,-1,0) rotated around Z from 0 through 90 degrees,
+    # world X is cos(theta)+sin(theta): both endpoints are 1, but the strict
+    # interior maximum at 45 degrees is sqrt(2).
+    door = entity(1, "func_door_rotating", ("distance", "90"))
+    semantics = exact(rotating_mover_semantics(
+        door, (1.0, -1.0, 0.0), (1.0, -1.0, 0.0),
+    ))
+    assert semantics.reference_pose.bounds.maxs[0] == pytest.approx(1.0)
+    assert semantics.endpoint_pose is not None
+    assert semantics.endpoint_pose.bounds.maxs[0] == pytest.approx(1.0)
+    assert semantics.potential_envelope.bounds.maxs[0] >= math.sqrt(2.0)
+
+
+@pytest.mark.parametrize(
+    ("spawnflags", "invariant_axis"),
+    ((64, 0), (128, 1), (0, 2)),
+)
+def test_rotating_door_swept_bounds_contain_sampled_corner_poses(
+    spawnflags: int, invariant_axis: int,
+) -> None:
+    """Property fixture: sampled poses/corners never escape analytic bounds."""
+
+    mins = (-7.0, -11.0, -5.0)
+    maxs = (13.0, 17.0, 19.0)
+    origin = (101.0, -203.0, 307.0)
+    door = entity(
+        1, "func_door_rotating",
+        ("origin", "101 -203 307"),
+        ("distance", "137"),
+        ("spawnflags", str(spawnflags)),
+    )
+    semantics = exact(rotating_mover_semantics(door, mins, maxs))
+    swept = semantics.potential_envelope.bounds
+    assert swept.mins[invariant_axis] == origin[invariant_axis] + mins[invariant_axis]
+    assert swept.maxs[invariant_axis] == origin[invariant_axis] + maxs[invariant_axis]
+
+    component = {0: 2, 1: 0, 2: 1}[invariant_axis]
+    for sample in range(138):
+        angles = [0.0, 0.0, 0.0]
+        angles[component] = float(sample)
+        pitch, yaw, roll = (math.radians(value) for value in angles)
+        sp, cp = math.sin(pitch), math.cos(pitch)
+        sy, cy = math.sin(yaw), math.cos(yaw)
+        sr, cr = math.sin(roll), math.cos(roll)
+        forward = (cp * cy, cp * sy, -sp)
+        right = (-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp)
+        up = (cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp)
+        for x in (mins[0], maxs[0]):
+            for y in (mins[1], maxs[1]):
+                for z in (mins[2], maxs[2]):
+                    point = tuple(
+                        origin[axis] + forward[axis] * x
+                        - right[axis] * y + up[axis] * z
+                        for axis in range(3)
+                    )
+                    assert all(
+                        swept.mins[axis] <= point[axis] <= swept.maxs[axis]
+                        for axis in range(3)
+                    )
+
+
+def test_unsupported_rotating_class_remains_unknown() -> None:
+    result = rotating_mover_semantics(
+        entity(1, "func_train"), (-1.0, -1.0, -1.0), (1.0, 1.0, 1.0),
+    )
+    assert result.authority is Authority.UNKNOWN
+    assert result.value is None
+    assert "unsupported rotating mover" in result.reason
 
 
 def test_trigger_hurt_uses_exact_linked_aabb_dilation() -> None:

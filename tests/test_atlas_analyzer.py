@@ -875,6 +875,79 @@ def test_func_plat_localizes_unknown_to_exact_vertical_swept_envelope() -> None:
     )
 
 
+def test_q2dm6_rotating_door_dependency_uses_tight_axis_sweep() -> None:
+    door = EntityMetadata(
+        57, "func_door_rotating", (
+            ("classname", "func_door_rotating"), ("model", "*1"),
+            ("origin", "0 -556 -252"), ("targetname", "t9"),
+            ("spawnflags", "64"), ("speed", "30"), ("distance", "-32"),
+        ),
+    )
+    metadata = SimpleNamespace(
+        entities=(door,),
+        models=(
+            SimpleNamespace(mins=(-1024.0,) * 3, maxs=(1024.0,) * 3),
+            # q2dm6 model *2 raw dmodel bounds; the dependency builder applies
+            # the collision loader's one-unit expansion.
+            SimpleNamespace(
+                mins=(-48.0, -4.0, -11.0), maxs=(48.0, 220.0, 131.0),
+            ),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 57, "model_index": 1},
+        )),
+    )
+    dependency = _dynamic_mover_dependency_index(metadata)
+    assert not dependency.globally_unknown
+
+    # The standing hull at the isolated route's x=-72 column ends at -56;
+    # the exact X-axis sweep starts at x=-49, so mover state is irrelevant.
+    left_route = {"frames": [{
+        "origin": [-72.0, -584.0, -232.0],
+        "mins": [-16.0, -16.0, -24.0],
+        "maxs": [16.0, 16.0, 32.0],
+    }]}
+    assert not dependency.intersects_trajectory(
+        left_route, {"origin": [-72.0, -600.0, -232.0]},
+    )
+
+    overlapping = {"frames": [{
+        "origin": [-48.0, -560.0, -232.0],
+        "mins": [-16.0, -16.0, -24.0],
+        "maxs": [16.0, 16.0, 32.0],
+    }]}
+    assert dependency.intersects_trajectory(
+        overlapping, {"origin": [-48.0, -576.0, -232.0]},
+    )
+
+
+def test_continuous_rotator_full_cycle_localizes_unknown() -> None:
+    rotating = EntityMetadata(
+        1, "func_rotating", (
+            ("classname", "func_rotating"), ("model", "*1"),
+            ("origin", "100 0 0"), ("spawnflags", "4"),
+        ),
+    )
+    metadata = SimpleNamespace(
+        entities=(rotating,),
+        models=(
+            SimpleNamespace(mins=(-1024.0,) * 3, maxs=(1024.0,) * 3),
+            SimpleNamespace(mins=(-8.0,) * 3, maxs=(8.0,) * 3),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 1, "model_index": 1},
+        )),
+    )
+    dependency = _dynamic_mover_dependency_index(metadata)
+    assert not dependency.globally_unknown
+    remote = {"frames": [{
+        "origin": [0.0, 0.0, 0.0],
+        "mins": [-16.0, -16.0, -24.0],
+        "maxs": [16.0, 16.0, 32.0],
+    }]}
+    assert not dependency.intersects_trajectory(remote, {"origin": [0.0, 0.0, 0.0]})
+
+
 class _ExactPlatformNavigationCm:
     def __init__(self) -> None:
         self.requests = 0
