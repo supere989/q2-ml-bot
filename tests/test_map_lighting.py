@@ -236,6 +236,67 @@ def test_generated_spawns_have_safe_columns_and_escape_paths(tmp_path):
     assert result["static_ok"] is True
 
 
+def test_lethal_guards_reject_arena_vertical_low_headroom_overlap():
+    generator = MapGenerator(seed=1, style="arena_vertical")
+    generator.rooms = [
+        # The high arena supplies the selected floor-union surface.
+        Room(
+            gx=1, gy=0, wx=512, wy=0, w=1536, d=1536,
+            floor_z=96, ceil_z=538, kind="arena",
+        ),
+        # This lower room reproduces the overlap from arena_vertical seed
+        # 91470501: its 129u ceiling crosses the high floor's standing column.
+        Room(
+            gx=1, gy=1, wx=512, wy=512, w=1024, d=1024,
+            floor_z=0, ceil_z=129, kind="room",
+        ),
+    ]
+    for room in generator.rooms:
+        generator.spawn_blockers.extend([
+            SolidBox(
+                room.wx, room.wy, -16,
+                room.wx + room.w, room.wy + room.d, room.floor_z,
+            ),
+            SolidBox(
+                room.wx, room.wy, room.ceil_z - 8,
+                room.wx + room.w, room.wy + room.d, room.ceil_z + 16,
+            ),
+        ])
+
+    generator._plan_lethal_drop_guards()
+
+    segments = {
+        tuple(edge["segment"]) for edge in generator.lethal_edges
+    }
+    assert (512, 512, 512, 1536, 96) not in segments
+    # The adjacent high-floor edge has full arena headroom and remains guarded.
+    assert (512, 0, 512, 512, 96) in segments
+    assert len(generator.lethal_edges) == len(generator.lethal_guard_walls)
+
+
+def test_lethal_guard_keeps_edge_with_alternate_clear_witness():
+    generator = MapGenerator(seed=1, style="arena_vertical")
+    generator.rooms = [
+        Room(
+            gx=0, gy=0, wx=0, wy=0, w=512, d=512,
+            floor_z=0, ceil_z=256, kind="arena",
+        )
+    ]
+    generator.spawn_blockers.extend([
+        SolidBox(0, 0, -16, 512, 512, 0),
+        SolidBox(0, 0, 248, 512, 512, 272),
+        # Obstruct only the west edge's first (midpoint) standing witness.
+        SolidBox(16, 224, 32, 64, 288, 88),
+    ])
+
+    generator._plan_lethal_drop_guards()
+
+    assert {
+        edge["side"] for edge in generator.lethal_edges
+    } == {"west", "east", "south", "north"}
+    assert len(generator.lethal_edges) == 4
+
+
 def test_validator_rejects_missing_lethal_drop_guard(tmp_path):
     generate_map("guarded", 42, tmp_path, style="arena_vertical")
     map_path = tmp_path / "guarded.map"

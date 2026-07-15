@@ -78,6 +78,16 @@ KILL_PLANE_SPAWNFLAGS = 12 # trigger_hurt: SILENT | NO_PROTECTION
 KILL_PLANE_SURFACE_VALUE = 31337 # hook-impact marker; must match g_local.h
 LETHAL_GUARD_HEIGHT = 96   # higher than a normal jump; contains void edges
 LETHAL_GUARD_THICKNESS = WALL_T
+# Keep source-side lethal-edge witnesses identical to the compiled challenge:
+# first prefer the midpoint, then try a bounded deterministic spread along the
+# exact segment.  The inward offset clears the 16u guard and 16u hull radius by
+# one Pmove fixed-point quantum.
+LETHAL_EDGE_SAMPLE_FRACTIONS = (
+    0.5, 0.1, 0.9, 0.25, 0.75, 0.05, 0.95, 0.33, 0.67, 0.4, 0.6,
+)
+LETHAL_EDGE_INWARD_OFFSET = (
+    LETHAL_GUARD_THICKNESS + PLAYER_XY_HALF + PMOVE_FIXED_QUANTUM
+)
 
 # Hook zone flags — must match ml_bridge.h
 HOOK_CEILING  = 1
@@ -870,7 +880,7 @@ class MapGenerator:
         self._plan_lethal_drop_guards()
 
     def _plan_lethal_drop_guards(self) -> None:
-        """Build guard walls around every floor-union edge facing the void."""
+        """Build guard walls around playable floor-union edges facing void."""
         self.lethal_edges = []
         self.lethal_guard_walls = []
         if not self.rooms:
@@ -898,6 +908,7 @@ class MapGenerator:
             ("south", 0, -1), ("north", 0, 1),
         )
         thickness = LETHAL_GUARD_THICKNESS
+        planned: List[Tuple[dict, SolidBox]] = []
         for (ix, iy), floor_z in sorted(covered.items()):
             x0, x1 = xs[ix], xs[ix + 1]
             y0, y1 = ys[iy], ys[iy + 1]
@@ -924,10 +935,41 @@ class MapGenerator:
                                     x1, y1,
                                     floor_z + LETHAL_GUARD_HEIGHT)
                     edge = [x0, y1, x1, y1, floor_z]
-                self.lethal_edges.append({"side": side, "segment": edge})
-                self.lethal_guard_walls.append(wall)
-                self.spawn_blockers.append(wall)
-                self.light_occluders.append(wall)
+                if not self._lethal_edge_has_standing_witness(side, edge):
+                    continue
+                planned.append(({"side": side, "segment": edge}, wall))
+
+        # Do not let an earlier planned guard influence a later source-geometry
+        # witness.  All claims are challenged against the same pre-guard solid
+        # set, then published together.
+        for edge, wall in planned:
+            self.lethal_edges.append(edge)
+            self.lethal_guard_walls.append(wall)
+            self.spawn_blockers.append(wall)
+            self.light_occluders.append(wall)
+
+    def _lethal_edge_has_standing_witness(self, side: str,
+                                          segment: List[int]) -> bool:
+        """Return whether the edge has one deterministic safe interior stand.
+
+        Floor-union construction selects the highest overlapping room floor.
+        A lower room's ceiling or a platform can nevertheless occupy the
+        standing column above that floor.  Publishing such a location as a
+        playable lethal edge makes the compiled claim probe start solid.
+        """
+        outward = {
+            "west": (-1.0, 0.0), "east": (1.0, 0.0),
+            "south": (0.0, -1.0), "north": (0.0, 1.0),
+        }[side]
+        x0, y0, x1, y1, floor_z = segment
+        for fraction in LETHAL_EDGE_SAMPLE_FRACTIONS:
+            edge_x = x0 + (x1 - x0) * fraction
+            edge_y = y0 + (y1 - y0) * fraction
+            interior_x = edge_x - outward[0] * LETHAL_EDGE_INWARD_OFFSET
+            interior_y = edge_y - outward[1] * LETHAL_EDGE_INWARD_OFFSET
+            if self._player_column_is_clear(interior_x, interior_y, floor_z):
+                return True
+        return False
 
     def _make_connection(self, ia: int, ib: int):
         a, b = self.rooms[ia], self.rooms[ib]
