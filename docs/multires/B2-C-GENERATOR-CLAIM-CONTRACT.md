@@ -109,6 +109,18 @@ The generated path requires every criterion below:
 Any missing, failed, `unknown`, non-oracle, unbound, or malformed fact rejects
 promotion. Claim values are never consulted as fallback evidence.
 
+The analyzer-to-packer transport is solely
+`q2-atlas-build-plan-v2`. Each admitted L0 bitplane is exactly 512 bytes and
+each scalar plane exactly 4096 bytes, encoded as canonical lowercase hex.
+Build-plan v1 index arrays are retired and rejected. This compact transport is
+an implementation representation only: the frozen Atlas planes, cell
+ordinals, prospective budget accounting, and Rust verifier output are
+unchanged. It prevents source-language object overhead from becoming the
+limiting resource for a sparse but broadly intersecting hazard band. Exact
+semantic-union accounting uses the same 4096-bit chunk representation and is
+prospectively capped at 16 MiB of bitmap payload; exceeding that separate
+scratch bound rejects analysis before allocating the next bitmap.
+
 ## Stock analysis is separate
 
 `--mode stock` applies authored-map analysis quality only, but it uses the same

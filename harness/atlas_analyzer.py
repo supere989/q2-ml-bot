@@ -74,7 +74,7 @@ from .atlas_teleporter_edges import (
 
 
 SCHEMA = "q2-atlas-analysis-v1"
-BUILD_PLAN_SCHEMA = "q2-atlas-build-plan-v1"
+BUILD_PLAN_SCHEMA = "q2-atlas-build-plan-v2"
 EVIDENCE_CM_TRACE_V1 = 1
 EVIDENCE_PMOVE_V1 = 2
 EVIDENCE_HOOK_LAW_V1 = 4
@@ -86,6 +86,7 @@ PMOVE_DROP_HORIZON_FRAMES = 40
 PMOVE_LADDER_CLIMB_FRAMES = 44
 PMOVE_LADDER_SETTLE_HORIZON_FRAMES = 52
 PMOVE_TRAJECTORY_BATCH_SIZE = 32
+MAX_L0_SEMANTIC_SCRATCH_BYTES = 16 * 1024 * 1024
 MASK_PLAYERSOLID = 33_619_971
 MASK_SHOT = 100_663_299
 CONTENTS_SOLID = 1
@@ -2988,9 +2989,20 @@ def _l0_chunks(
     semantic_summary: dict[str, int] | None = None,
     surface_summary: dict[str, Any] | None = None,
     budget_state: L0BudgetState | None = None,
+    compact_output: bool = False,
+    semantic_scratch_max_bytes: int = MAX_L0_SEMANTIC_SCRATCH_BYTES,
 ) -> list[dict]:
     chunks: dict[tuple[int, int, int], dict[str, Any]] = {}
-    semantic_cells: dict[str, set[tuple[int, int, int]]] = defaultdict(set)
+    # Semantic evidence needs exact union counts, not a second materialized
+    # copy of every global cell tuple.  A generated kill plane can retain
+    # millions of cells; Python tuple/set accounting for those cells alone can
+    # exceed the cold producer's 512 MiB RSS limit even though the immutable L0
+    # encoding is only a few MiB.  Store one 4096-bit bitmap per semantic/chunk
+    # instead (512 bytes, matching the frozen 16^3 L0 chunk geometry).
+    semantic_cells: dict[
+        str, dict[tuple[int, int, int], bytearray]
+    ] = defaultdict(dict)
+    semantic_scratch_bytes = 0
     budget = budget_state or L0BudgetState()
     accounted_bits = {
         (chunk.key, plane) for chunk in budget.chunks for plane in chunk.bitplanes
@@ -3040,7 +3052,9 @@ def _l0_chunks(
         chunk = tuple(value // 16 for value in l0)
         local = tuple(value % 16 for value in l0)
         linear = local[0] + 16 * local[1] + 256 * local[2]
-        item = chunks.setdefault(chunk, {"key": list(chunk), "bits": defaultdict(set), "scalars": {}})
+        item = chunks.setdefault(
+            chunk, {"key": list(chunk), "bits": {}, "scalars": {}}
+        )
         return item, linear
 
     def set_index(l0: tuple[int, int, int], plane: str) -> None:
@@ -3048,7 +3062,8 @@ def _l0_chunks(
         admit_bitplane(chunk, plane)
         # Allocation is deliberately after the cumulative prospective check.
         item, linear = item_for(l0)
-        item["bits"][plane].add(linear)
+        bitmap = item["bits"].setdefault(plane, bytearray(512))
+        bitmap[linear // 8] |= 1 << (linear % 8)
 
     def set_bit(point: Sequence[float], plane: str) -> None:
         set_index(_grid_index(point, origin, 4), plane)
@@ -3061,11 +3076,27 @@ def _l0_chunks(
         chunk = _l0_chunk_key(l0)
         admit_scalarplane(chunk, plane)
         item, linear = item_for(l0)
-        values = item["scalars"].setdefault(plane, {})
-        values[linear] = max(value, values.get(linear, 0))
+        values = item["scalars"].setdefault(plane, bytearray(4096))
+        values[linear] = max(value, values[linear])
+
+    def mark_semantic_index(index: tuple[int, int, int], name: str) -> None:
+        nonlocal semantic_scratch_bytes
+        chunk = _l0_chunk_key(index)
+        local = tuple(value % 16 for value in index)
+        linear = local[0] + 16 * local[1] + 256 * local[2]
+        bitmap = semantic_cells[name].get(chunk)
+        if bitmap is None:
+            if semantic_scratch_bytes + 512 > semantic_scratch_max_bytes:
+                raise AtlasAnalysisError(
+                    "L0 semantic scratch exceeds bounded sparse accounting"
+                )
+            bitmap = bytearray(512)
+            semantic_cells[name][chunk] = bitmap
+            semantic_scratch_bytes += 512
+        bitmap[linear // 8] |= 1 << (linear % 8)
 
     def mark_semantic(point: Sequence[float], name: str) -> None:
-        semantic_cells[name].add(_grid_index(point, origin, 4))
+        mark_semantic_index(_grid_index(point, origin, 4), name)
 
     def fill_bounds(
         mins: Sequence[float], maxs: Sequence[float], plane: str,
@@ -3101,7 +3132,7 @@ def _l0_chunks(
                     index = (x, y, z)
                     set_index(index, plane)
                     for name in semantic_names(semantic):
-                        semantic_cells[name].add(index)
+                        mark_semantic_index(index, name)
                     if scalar is not None:
                         point = _center(index, origin, 4)
                         set_scalar(point, scalar[0], scalar[1])
@@ -3434,10 +3465,14 @@ def _l0_chunks(
             for chunk, clipped_low, clipped_high in clips:
                 item = chunks.setdefault(
                     chunk,
-                    {"key": list(chunk), "bits": defaultdict(set), "scalars": {}},
+                    {"key": list(chunk), "bits": {}, "scalars": {}},
                 )
-                mover_cells = item["bits"]["mover_swept_envelope"]
-                unknown_cells = item["bits"]["unknown"]
+                mover_cells = item["bits"].setdefault(
+                    "mover_swept_envelope", bytearray(512)
+                )
+                unknown_cells = item["bits"].setdefault(
+                    "unknown", bytearray(512)
+                )
                 for z in range(clipped_low[2], clipped_high[2] + 1):
                     local_z = z % 16
                     for y in range(clipped_low[1], clipped_high[1] + 1):
@@ -3445,8 +3480,10 @@ def _l0_chunks(
                         row = 16 * local_y + 256 * local_z
                         for x in range(clipped_low[0], clipped_high[0] + 1):
                             linear = x % 16 + row
-                            mover_cells.add(linear)
-                            unknown_cells.add(linear)
+                            byte_index = linear // 8
+                            mask = 1 << (linear % 8)
+                            mover_cells[byte_index] |= mask
+                            unknown_cells[byte_index] |= mask
 
         def record_inline_unknown(
             entity: EntityMetadata, model_index: int, reason: str,
@@ -3796,8 +3833,11 @@ def _l0_chunks(
             "l0_accounted_bytes": budget.encoded_bytes,
             "l0_max_chunks": budget.max_chunks,
             "l0_max_bytes": budget.max_bytes,
+            "l0_semantic_scratch_bytes": semantic_scratch_bytes,
+            "l0_semantic_scratch_max_bytes": semantic_scratch_max_bytes,
         })
     output = []
+    mover_count = 0
     for key in sorted(chunks, key=lambda item: (item[2], item[1], item[0])):
         item = chunks[key]
         unknown_bits = set(item["bits"]) - FROZEN_L0_BIT_PLANE_NAMES
@@ -3807,21 +3847,51 @@ def _l0_chunks(
                 f"L0 planes differ from frozen Rust schema: "
                 f"bits={sorted(unknown_bits)}, scalars={sorted(unknown_scalars)}"
             )
-        item["bits"] = {name: sorted(values) for name, values in sorted(item["bits"].items())}
-        item["scalars"] = {
-            name: [[linear, value] for linear, value in sorted(values.items())]
-            for name, values in sorted(item["scalars"].items())
-        }
+        mover_count += sum(
+            byte.bit_count()
+            for byte in item["bits"].get("mover_swept_envelope", ())
+        )
+        if compact_output:
+            item["bitmaps"] = {
+                name: bytes(bitmap).hex()
+                for name, bitmap in sorted(item["bits"].items())
+            }
+            item["scalar_values"] = {
+                name: bytes(values).hex()
+                for name, values in sorted(item["scalars"].items())
+            }
+            del item["bits"]
+            del item["scalars"]
+        else:
+            item["bits"] = {
+                name: [
+                    byte_index * 8 + bit
+                    for byte_index, byte in enumerate(bitmap)
+                    for bit in range(8)
+                    if byte & (1 << bit)
+                ]
+                for name, bitmap in sorted(item["bits"].items())
+            }
+            item["scalars"] = {
+                name: [
+                    [linear, value]
+                    for linear, value in enumerate(values)
+                    if value
+                ]
+                for name, values in sorted(item["scalars"].items())
+            }
         output.append(item)
     if semantic_summary is not None:
         semantic_summary.update({
-            name: len(cells) for name, cells in sorted(semantic_cells.items())
+            name: sum(
+                byte.bit_count()
+                for bitmap in semantic_chunks.values()
+                for byte in bitmap
+            )
+            for name, semantic_chunks in sorted(semantic_cells.items())
         })
         # Dynamic mover envelopes have a dedicated immutable bitplane, so its
-        # exact union count does not require a second map-wide tuple set.
-        mover_count = sum(
-            len(item["bits"].get("mover_swept_envelope", ())) for item in output
-        )
+        # exact union count does not require a second map-wide semantic bitmap.
         if mover_count:
             semantic_summary["mover_dynamic_unknown"] = mover_count
     return output
@@ -5184,11 +5254,19 @@ def analyze_map(
                 admitted_hooks=compiled_hooks["edges"],
                 semantic_summary=l0_semantics,
                 surface_summary=surface_evidence,
+                compact_output=True,
             )
             l0_plane_counts: dict[str, int] = defaultdict(int)
+            l0_scalar_cell_count = 0
             for chunk in l0_chunks:
-                for plane, cells in chunk["bits"].items():
-                    l0_plane_counts[plane] += len(cells)
+                for plane, bitmap_hex in chunk["bitmaps"].items():
+                    l0_plane_counts[plane] += sum(
+                        byte.bit_count() for byte in bytes.fromhex(bitmap_hex)
+                    )
+                for values_hex in chunk["scalar_values"].values():
+                    l0_scalar_cell_count += sum(
+                        bool(value) for value in bytes.fromhex(values_hex)
+                    )
             l0_plane_counts = dict(sorted(l0_plane_counts.items()))
             if generator_claims is not None:
                 try:
@@ -5511,9 +5589,7 @@ def analyze_map(
             "l1_edges": len(edges), "l2_cells": pack_result["l2_cells"],
             "l3_cells": pack_result["l3_cells"],
             "l0_bit_cells": sum(l0_plane_counts.values()),
-            "l0_scalar_cells": sum(
-                len(cells) for chunk in l0_chunks for cells in chunk["scalars"].values()
-            ),
+            "l0_scalar_cells": l0_scalar_cell_count,
         },
         "l0_plane_counts": l0_plane_counts,
         "confidence_summary": {

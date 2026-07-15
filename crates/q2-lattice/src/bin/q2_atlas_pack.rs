@@ -28,8 +28,8 @@ struct Plan {
 #[serde(deny_unknown_fields)]
 struct ChunkPlan {
     key: [i32; 3],
-    bits: BTreeMap<String, Vec<usize>>,
-    scalars: BTreeMap<String, Vec<[usize; 2]>>,
+    bitmaps: BTreeMap<String, String>,
+    scalar_values: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -108,6 +108,31 @@ fn scalar_plane(name: &str) -> Result<L0ScalarPlane, String> {
         "confidence" => L0ScalarPlane::Confidence,
         _ => return Err(format!("unknown L0 scalar plane {name}")),
     })
+}
+
+fn decode_compact_plane(name: &str, value: &str, expected_bytes: usize) -> Result<Vec<u8>, String> {
+    if value.len() != expected_bytes * 2 {
+        return Err(format!(
+            "compact L0 plane {name} has {} hex characters, expected {}",
+            value.len(),
+            expected_bytes * 2
+        ));
+    }
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(expected_bytes);
+    for offset in (0..bytes.len()).step_by(2) {
+        let nibble = |byte: u8| -> Result<u8, String> {
+            match byte {
+                b'0'..=b'9' => Ok(byte - b'0'),
+                b'a'..=b'f' => Ok(byte - b'a' + 10),
+                _ => Err(format!(
+                    "compact L0 plane {name} is not canonical lowercase hex"
+                )),
+            }
+        };
+        decoded.push((nibble(bytes[offset])? << 4) | nibble(bytes[offset + 1])?);
+    }
+    Ok(decoded)
 }
 
 fn edge_type(name: &str) -> Result<EdgeType, String> {
@@ -442,7 +467,7 @@ fn run() -> Result<(), String> {
     }
     let plan_bytes = fs::read(&arguments[1]).map_err(|error| error.to_string())?;
     let plan: Plan = serde_json::from_slice(&plan_bytes).map_err(|error| error.to_string())?;
-    if plan.schema != "q2-atlas-build-plan-v1" {
+    if plan.schema != "q2-atlas-build-plan-v2" {
         return Err("unsupported Atlas build-plan schema".to_owned());
     }
     let admission = plan
@@ -454,21 +479,28 @@ fn run() -> Result<(), String> {
     let mut l0 = SparseL0::new();
     for item in plan.chunks {
         let mut chunk = L0Chunk::new(index(item.key));
-        for (name, cells) in item.bits {
+        for (name, encoded) in item.bitmaps {
             let plane = bit_plane(&name)?;
-            for cell in cells {
-                chunk
-                    .set_bit(plane, cell, true)
-                    .map_err(|error| error.to_string())?;
+            let bitmap = decode_compact_plane(&name, &encoded, 512)?;
+            for (byte_index, byte) in bitmap.into_iter().enumerate() {
+                for bit in 0..8 {
+                    if byte & (1 << bit) != 0 {
+                        chunk
+                            .set_bit(plane, byte_index * 8 + bit, true)
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
             }
         }
-        for (name, cells) in item.scalars {
+        for (name, encoded) in item.scalar_values {
             let plane = scalar_plane(&name)?;
-            for [cell, value] in cells {
-                let value = u8::try_from(value).map_err(|_| "L0 scalar exceeds u8")?;
-                chunk
-                    .set_scalar(plane, cell, value)
-                    .map_err(|error| error.to_string())?;
+            let values = decode_compact_plane(&name, &encoded, 4096)?;
+            for (cell, value) in values.into_iter().enumerate() {
+                if value != 0 {
+                    chunk
+                        .set_scalar(plane, cell, value)
+                        .map_err(|error| error.to_string())?;
+                }
             }
         }
         l0.insert(chunk, &limits)
@@ -675,5 +707,16 @@ mod tests {
         assert!(parse_peak_rss_bytes("VmRSS:\t12345 kB\n").is_err());
         assert!(parse_peak_rss_bytes("VmHWM:\t12345 MB\n").is_err());
         assert!(parse_peak_rss_bytes("VmHWM:\t0 kB\n").is_err());
+    }
+
+    #[test]
+    fn compact_plane_decoder_is_exact_and_rejects_noncanonical_input() {
+        assert_eq!(
+            decode_compact_plane("hurt", "0001ff", 3).unwrap(),
+            [0, 1, 255]
+        );
+        assert!(decode_compact_plane("hurt", "0001", 3).is_err());
+        assert!(decode_compact_plane("hurt", "00FF00", 3).is_err());
+        assert!(decode_compact_plane("hurt", "00g000", 3).is_err());
     }
 }

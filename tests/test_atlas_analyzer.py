@@ -15,6 +15,7 @@ import zstandard
 from harness.atlas_analyzer import (
     AtlasAnalysisError,
     AnalyzerLimits,
+    BUILD_PLAN_SCHEMA,
     CONTENTS_LADDER,
     CONTENTS_LAVA,
     CONTENTS_PLAYERCLIP,
@@ -668,6 +669,11 @@ def test_train_marks_exact_ordinary_segment_sweep_unknown() -> None:
 
 def test_python_l0_names_match_frozen_rust_packer_schema() -> None:
     source = (ROOT / "crates/q2-lattice/src/bin/q2_atlas_pack.rs").read_text()
+    assert BUILD_PLAN_SCHEMA == "q2-atlas-build-plan-v2"
+    assert 'plan.schema != "q2-atlas-build-plan-v2"' in source
+    assert "q2-atlas-build-plan-v1" not in source
+    assert "bitmaps: BTreeMap<String, String>" in source
+    assert "scalar_values: BTreeMap<String, String>" in source
     for name in FROZEN_L0_BIT_PLANE_NAMES:
         assert f'"{name}" => L0BitPlane::' in source
     for name in FROZEN_L0_SCALAR_PLANE_NAMES:
@@ -833,6 +839,36 @@ def test_fixed_point_floor_boundary_admits_only_one_lower_hurt_chunk() -> None:
     assert semantics["hurt:1:raw"] > 0
     assert semantics["hurt:1:expanded"] > 0
 
+    compact_semantics: dict[str, int] = {}
+    compact = _l0_chunks(
+        nodes, [], origin, metadata=metadata,
+        semantic_summary=compact_semantics, compact_output=True,
+    )
+    expanded_compact = []
+    for chunk in compact:
+        expanded_compact.append({
+            "key": chunk["key"],
+            "bits": {
+                name: [
+                    byte_index * 8 + bit
+                    for byte_index, byte in enumerate(bytes.fromhex(encoded))
+                    for bit in range(8)
+                    if byte & (1 << bit)
+                ]
+                for name, encoded in chunk["bitmaps"].items()
+            },
+            "scalars": {
+                name: [
+                    [linear, value]
+                    for linear, value in enumerate(bytes.fromhex(encoded))
+                    if value
+                ]
+                for name, encoded in chunk["scalar_values"].items()
+            },
+        })
+    assert expanded_compact == chunks
+    assert compact_semantics == semantics
+
 
 def test_fixed_point_hurt_boundary_does_not_cross_two_chunk_gap() -> None:
     trigger = EntityMetadata(
@@ -868,6 +904,39 @@ def test_fixed_point_hurt_boundary_does_not_cross_two_chunk_gap() -> None:
     assert chunks == []
     assert "hurt:2:raw" not in semantics
     assert "hurt:2:expanded" not in semantics
+
+
+def test_hurt_semantic_scratch_is_prospectively_bounded() -> None:
+    trigger = EntityMetadata(
+        index=2,
+        classname="trigger_hurt",
+        properties=(("model", "*1"), ("spawnflags", "12")),
+    )
+    metadata = SimpleNamespace(
+        entities=(trigger,),
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0)),
+            SimpleNamespace(mins=(-1, -1, -1), maxs=(1, 1, 1)),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 2, "model_index": 1},
+        )),
+    )
+    nodes = {
+        (0, 0, 0): NavNode(
+            (0, 0, 0), (0.0, 0.0, 24.0),
+            True, True, True, 0, (0.0, 0.0, 1.0),
+        ),
+    }
+
+    with pytest.raises(
+        AtlasAnalysisError,
+        match="L0 semantic scratch exceeds bounded sparse accounting",
+    ):
+        _l0_chunks(
+            nodes, [], (0, 0, 0), metadata=metadata,
+            semantic_summary={}, semantic_scratch_max_bytes=511,
+        )
 
 
 def test_hurt_boundary_excludes_compatible_interior_columns() -> None:
@@ -962,7 +1031,7 @@ def test_retained_hurt_above_two_million_cells_uses_authoritative_budget() -> No
 
     chunks = _l0_chunks(
         nodes, [], (0, 0, 0), metadata=metadata,
-        semantic_summary=semantics,
+        semantic_summary=semantics, compact_output=True,
     )
 
     assert len(chunks) == 677
@@ -1018,6 +1087,10 @@ def test_overlapping_hurts_keep_distinct_deterministic_sparse_counts() -> None:
     for entity_index in (3, 9):
         assert first_semantics[f"hurt:{entity_index}:raw"] > 0
         assert first_semantics[f"hurt:{entity_index}:expanded"] > 0
+    assert first_semantics["hurt_expanded"] < sum(
+        first_semantics[f"hurt:{entity_index}:expanded"]
+        for entity_index in (3, 9)
+    )
 
 
 def test_hurt_sparse_planes_reserve_all_chunks_before_materialization() -> None:
