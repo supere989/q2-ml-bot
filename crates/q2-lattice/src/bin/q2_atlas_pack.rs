@@ -124,6 +124,7 @@ fn edge_type(name: &str) -> Result<EdgeType, String> {
         "mover" => EdgeType::Mover,
         "teleporter" => EdgeType::Teleporter,
         "hook" => EdgeType::Hook,
+        "ladder" => EdgeType::Ladder,
         _ => return Err(format!("unknown edge type {name}")),
     })
 }

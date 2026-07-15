@@ -15,6 +15,7 @@ import zstandard
 from harness.atlas_analyzer import (
     AtlasAnalysisError,
     AnalyzerLimits,
+    CONTENTS_LADDER,
     CONTENTS_LAVA,
     CONTENTS_PLAYERCLIP,
     FROZEN_L0_BIT_PLANE_NAMES,
@@ -33,6 +34,9 @@ from harness.atlas_analyzer import (
     _exact_landing_key,
     _ground_navigation_seeds,
     _l0_chunks,
+    _ladder_contact_requests,
+    _ladder_contact_trace_admits,
+    _ladder_request_candidates_for_source,
     _movement_edge_cost_q8,
     _movement_edge_kind,
     _movement_edge_stance,
@@ -701,10 +705,11 @@ def test_measured_process_kills_process_group_on_sampler_failure(monkeypatch) ->
 
 def _test_node(
     key: tuple[int, int, int], *, standing: bool, crouched: bool,
+    contents: int = 0,
 ) -> NavNode:
     return NavNode(
         key, tuple(float(axis * 16) for axis in key), standing, crouched,
-        True, 0, (0.0, 0.0, 1.0),
+        True, contents, (0.0, 0.0, 1.0),
     )
 
 
@@ -743,7 +748,7 @@ def test_pmove_source_cap_has_complete_omission_accounting_before_oracle_calls()
     assert accounting["omitted"] == 1
     assert accounting["omitted_sources_emit_pmove_edges"] is False
     assert accounting["selection_rule"] == (
-        "spawn-first-component-frontier-proportional-farthest-v2"
+        "spawn-ladder-component-frontier-proportional-farthest-v3"
     )
     assert calls == {"pmove": 0, "fall": 0}
 
@@ -771,6 +776,28 @@ def test_pmove_source_cap_fails_before_omitting_a_unique_spawn() -> None:
         _complete_pmove_source_set(
             nodes, _walk_edges(keys), {1: (0, 0, 0), 2: (1, 0, 0)}, 1,
         )
+
+
+def test_pmove_sources_retain_every_exact_ladder_node_before_sampling() -> None:
+    spawn = (0, 0, 0)
+    ladder = (100, 0, 0)
+    nodes = {
+        spawn: _test_node(spawn, standing=True, crouched=True),
+        ladder: _test_node(
+            ladder, standing=True, crouched=True, contents=CONTENTS_LADDER,
+        ),
+    }
+    selected, accounting = _complete_pmove_source_set(
+        nodes, [], {1: spawn}, 2,
+    )
+    assert selected == [spawn, ladder]
+    assert accounting["omitted"] == 0
+
+    with pytest.raises(
+        AtlasAnalysisError,
+        match="cannot retain every exact ladder-content source",
+    ):
+        _complete_pmove_source_set(nodes, [], {1: spawn}, 1)
 
 
 def test_pmove_sources_cover_remote_spawn_component_frontiers_before_secondaries() -> None:
@@ -871,6 +898,15 @@ def test_movement_edge_kind_does_not_turn_flat_ground_into_step() -> None:
     assert _movement_edge_kind(
         "jump", any_airborne=True, vertical=0.0,
     ) == "jump"
+    assert _movement_edge_kind(
+        "ladder", any_airborne=True, vertical=344.0,
+    ) == "ladder"
+    assert _movement_edge_kind(
+        "ladder", any_airborne=True, vertical=18.0,
+    ) is None
+    assert _movement_edge_kind(
+        "ladder", any_airborne=False, vertical=344.0,
+    ) is None
 
 
 def test_movement_edge_cost_uses_exact_path_through_first_landing() -> None:
@@ -913,6 +949,87 @@ def test_dual_clear_source_builds_canonical_stance_complete_requests() -> None:
     assert all(len(record[4]["commands"]) == 16 for record in jumps)
 
 
+def test_ladder_requests_require_source_contents_and_mirror_engine_contact() -> None:
+    key = (1, 2, 3)
+    ordinary = _test_node(key, standing=True, crouched=True)
+    assert _ladder_request_candidates_for_source(
+        key, ordinary, parameters={"gravity": 800, "airaccelerate": 0},
+    ) == []
+
+    ladder = _test_node(
+        key, standing=True, crouched=True, contents=CONTENTS_LADDER,
+    )
+    candidates = _ladder_request_candidates_for_source(
+        key, ladder, parameters={"gravity": 800, "airaccelerate": 0},
+    )
+    assert len(candidates) == 8
+    assert {record[3] for record in candidates} == {"standing", "crouched"}
+    assert all(record[1] == "ladder" for record in candidates)
+    assert all(len(record[4]["commands"]) == 44 for record in candidates)
+    assert all(
+        command["angles"][0] == -30
+        and command["forwardmove"] == 300
+        and "upmove" not in command
+        for record in candidates for command in record[4]["commands"]
+    )
+
+
+def test_ladder_contacts_replay_exact_frame_start_hulls_through_landing() -> None:
+    key = (1, 2, 3)
+    source = _test_node(
+        key, standing=True, crouched=False, contents=CONTENTS_LADDER,
+    )
+    candidates = _ladder_request_candidates_for_source(
+        key, source, parameters={"gravity": 800, "airaccelerate": 0},
+    )
+    record = candidates[0]
+    response = {"frames": [
+        {
+            "origin": [17.0, 32.0, 48.0],
+            "mins": [-16.0, -16.0, -24.0],
+            "maxs": [16.0, 16.0, 32.0],
+        },
+        {
+            "origin": [18.0, 32.0, 48.0],
+            "mins": [-16.0, -16.0, -24.0],
+            "maxs": [16.0, 16.0, 32.0],
+        },
+        *[
+            {
+                "origin": [18.0, 32.0, 48.0],
+                "mins": [-16.0, -16.0, -24.0],
+                "maxs": [16.0, 16.0, 32.0],
+            }
+            for _ in range(42)
+        ],
+    ]}
+    contacts = _ladder_contact_requests(
+        record, response, through_command_index=1,
+    )
+    assert len(contacts) == 2
+    # Command zero starts from the Pmove oracle's exact 1/8-unit input snap.
+    assert contacts[0]["start"] == [16.0, 32.0, 48.0]
+    assert contacts[0]["end"] == [17.0, 32.0, 48.0]
+    # Command one starts at the prior exact Pmove output, not the source.
+    assert contacts[1]["start"] == [17.0, 32.0, 48.0]
+    assert contacts[1]["end"] == [18.0, 32.0, 48.0]
+    assert contacts[1]["mins"] == [-16.0, -16.0, -24.0]
+    assert contacts[1]["maxs"] == [16.0, 16.0, 32.0]
+    assert all(contact["mask"] == 33_619_971 for contact in contacts)
+
+
+def test_ladder_contact_predicate_matches_pmove_special_movement() -> None:
+    responses = [
+        {"fraction": 0.5, "contents": CONTENTS_LADDER},
+        {"fraction": 1.0, "contents": CONTENTS_LADDER},
+        {"fraction": 0.5, "contents": 1},
+        {"fraction": 1.0, "contents": 1},
+    ]
+    assert [_ladder_contact_trace_admits(item) for item in responses] == [
+        True, False, False, False,
+    ]
+
+
 def test_exact_edge_target_uses_first_landing_not_later_final_state() -> None:
     record = {
         "classification": {
@@ -945,6 +1062,24 @@ def test_airborne_probe_gets_one_continuous_neutral_settle_replay() -> None:
         {"msec": 50, "angles": [0, 90, 0]} for _ in range(4)
     ]
     assert request["commands"][-1]["forwardmove"] == 300
+
+
+def test_ladder_probe_gets_exactly_eight_neutral_settle_frames() -> None:
+    source = _test_node(
+        (1, 2, 3), standing=True, crouched=False, contents=CONTENTS_LADDER,
+    )
+    request = _ladder_request_candidates_for_source(
+        (1, 2, 3), source,
+        parameters={"gravity": 800, "airaccelerate": 0},
+    )[0][4]
+    response = {"frames": [{"grounded": False} for _ in range(44)]}
+    extended = _drop_settle_request(request, response, horizon_frames=52)
+    assert extended is not None
+    assert len(extended["commands"]) == 52
+    assert extended["commands"][:44] == request["commands"]
+    assert extended["commands"][44:] == [
+        {"msec": 50, "angles": [-30, 0, 0]} for _ in range(8)
+    ]
 
 
 def test_landed_or_grounded_probe_does_not_get_settle_replay() -> None:

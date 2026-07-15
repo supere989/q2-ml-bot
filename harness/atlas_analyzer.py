@@ -82,6 +82,8 @@ VALIDATION_VERSION = 1
 PMOVE_GROUND_HORIZON_FRAMES = 4
 PMOVE_JUMP_HORIZON_FRAMES = 16
 PMOVE_DROP_HORIZON_FRAMES = 40
+PMOVE_LADDER_CLIMB_FRAMES = 44
+PMOVE_LADDER_SETTLE_HORIZON_FRAMES = 52
 PMOVE_TRAJECTORY_BATCH_SIZE = 32
 MASK_PLAYERSOLID = 33_619_971
 MASK_SHOT = 100_663_299
@@ -1037,9 +1039,10 @@ def _complete_pmove_source_set(
 ) -> tuple[list[tuple[int, int, int]], dict[str, Any]]:
     """Select deterministic component/frontier-stratified Pmove sources.
 
-    The walk graph is the only topology authority here.  Spawn keys lead the
-    order, followed by one frontier representative for every weak walk-graph
-    component not already covered by a frontier spawn.  Remaining capacity is
+    The walk graph is the topology authority for ordinary boundary sampling.
+    Spawn keys lead the order, followed by every exact ladder-content source,
+    then one frontier representative for every weak walk-graph component not
+    already covered by a frontier spawn or ladder node. Remaining capacity is
     apportioned by the exact selected/available frontier ratio; within a
     component, deterministic farthest-point sampling prevents a coordinate
     prefix from starving remote or high boundary transitions.
@@ -1134,18 +1137,34 @@ def _complete_pmove_source_set(
     priority = list(spawn_order)
     priority_set = set(priority)
 
-    # Tier 2: before any component receives a secondary frontier source, every
+    # Tier 2: every node whose exact point contents contain CONTENTS_LADDER.
+    # Ladder traversal is contact-local; coordinate sampling may not omit a
+    # legal contact source and thereby make a one-way topology artifact.
+    ladder_order = sorted(
+        (key for key, node in nodes.items() if node.contents & CONTENTS_LADDER),
+        key=zyx,
+    )
+    for key in ladder_order:
+        if key not in priority_set:
+            priority.append(key)
+            priority_set.add(key)
+    if len(priority) > maximum:
+        raise AtlasAnalysisError(
+            "Pmove source cap cannot retain every exact ladder-content source"
+        )
+
+    # Tier 3: before any component receives a secondary frontier source, every
     # walk component gets a frontier representative.  A frontier spawn already
-    # satisfies this tier for its component.  Otherwise choose the frontier
-    # farthest from that component's spawn(s), or its canonical first frontier
-    # when the component contains no spawn.
+    # satisfies this tier for its component, as does a retained ladder frontier.
+    # Otherwise choose the frontier farthest from that component's already
+    # mandatory sources, or its canonical first frontier when it has none.
     for component_id, component_frontiers in enumerate(frontiers):
         if not component_frontiers or frontier_sets[component_id] & priority_set:
             continue
-        component_spawns = [
-            key for key in spawn_order if component_of[key] == component_id
+        component_mandatory = [
+            key for key in priority if component_of[key] == component_id
         ]
-        representative = farthest(component_frontiers, component_spawns)
+        representative = farthest(component_frontiers, component_mandatory)
         priority.append(representative)
         priority_set.add(representative)
     if len(priority) > maximum:
@@ -1153,7 +1172,7 @@ def _complete_pmove_source_set(
             "Pmove source cap cannot retain mandatory component-frontier coverage"
         )
 
-    # Tier 3: proportionally cover all remaining frontiers.  Exact rational
+    # Tier 4: proportionally cover all remaining frontiers.  Exact rational
     # ratios avoid float-dependent ordering.  Farthest-point selection is
     # anchored by both spawn and already-selected frontier sources.
     frontier_selected = [
@@ -1178,7 +1197,10 @@ def _complete_pmove_source_set(
         }
         for component_id, candidates in enumerate(remaining)
     ]
-    target_count = min(maximum, len(spawn_seen | set().union(*frontier_sets)))
+    target_count = min(
+        maximum,
+        len(spawn_seen | set(ladder_order) | set().union(*frontier_sets)),
+    )
     while len(priority) < target_count:
         active = [
             component_id for component_id, candidates in enumerate(remaining)
@@ -1225,7 +1247,7 @@ def _complete_pmove_source_set(
     return selected, {
         "schema": "q2-atlas-pmove-source-accounting-v1",
         "selection_rule": (
-            "spawn-first-component-frontier-proportional-farthest-v2"
+            "spawn-ladder-component-frontier-proportional-farthest-v3"
         ),
         "maximum": maximum,
         "total": len(result),
@@ -1262,6 +1284,8 @@ def _movement_edge_kind(
 
     if mode == "jump":
         return "jump" if any_airborne else None
+    if mode == "ladder":
+        return "ladder" if any_airborne and vertical > 18.0 else None
     if mode != "ground":
         return None
     if any_airborne:
@@ -1361,6 +1385,143 @@ def _movement_requests_for_source(
                 }
                 records.append((key, "jump", yaw, stance, jump_request))
     return records
+
+
+def _ladder_request_candidates_for_source(
+    key: tuple[int, int, int], source: NavNode,
+    *, parameters: Mapping[str, Any],
+) -> list[MovementRecord]:
+    """Build complete bounded Pmove probes from an exact ladder-content source.
+
+    Point contents makes the source mandatory but does not prove contact. The
+    engine contact law is replayed at every exact frame-start hull later,
+    through the first safe landing; approaching a ladder can establish contact
+    even when the source hull itself does not touch it.
+    """
+
+    if not source.contents & CONTENTS_LADDER:
+        return []
+    candidates: list[MovementRecord] = []
+    for stance in ("standing", "crouched"):
+        if stance == "standing" and not source.standing_clear:
+            continue
+        if stance == "crouched" and not source.crouched_clear:
+            continue
+        for yaw in (0, 90, 180, 270):
+            suffix = "" if stance == "standing" else ":crouched"
+            identifier = (
+                f"drop:{key[0]}:{key[1]}:{key[2]}:"
+                f"ladder:{yaw}{suffix}"
+            )
+            command: dict[str, Any] = {
+                "msec": 50, "angles": [-30, yaw, 0], "forwardmove": 300,
+            }
+            request = {
+                "id": f"{identifier}:pmove",
+                "op": "simulate", "origin": list(source.position),
+                "velocity": [0.0, 0.0, 0.0], "pm_type": 0,
+                "pm_flags": 4 if stance == "standing" else 5,
+                "pm_time": 0, "gravity": parameters["gravity"],
+                "airaccelerate": parameters["airaccelerate"],
+                "delta_angles_short": [0, 0, 0], "snapinitial": False,
+                "commands": [
+                    dict(command) for _ in range(PMOVE_LADDER_CLIMB_FRAMES)
+                ],
+            }
+            candidates.append((key, "ladder", yaw, stance, request))
+    return candidates
+
+
+def _pmove_initial_origin(request: Mapping[str, Any]) -> list[float]:
+    """Mirror q2-pmove-oracle's lroundf world-to-1/8-unit conversion."""
+
+    origin = request.get("origin")
+    if not isinstance(origin, list) or len(origin) != 3:
+        raise AtlasAnalysisError("ladder Pmove request lacks an initial origin")
+    snapped: list[float] = []
+    for value in origin:
+        if type(value) not in (int, float) or not math.isfinite(float(value)):
+            raise AtlasAnalysisError("ladder Pmove initial origin is not finite")
+        scaled = float(value) * 8.0
+        fixed = (
+            math.floor(scaled + 0.5)
+            if scaled >= 0 else math.ceil(scaled - 0.5)
+        )
+        if not -32768 <= fixed <= 32767:
+            raise AtlasAnalysisError("ladder Pmove initial origin exceeds fixed range")
+        snapped.append(fixed * 0.125)
+    return snapped
+
+
+def _ladder_contact_requests(
+    record: MovementRecord, response: Mapping[str, Any],
+    *, through_command_index: int,
+) -> list[dict[str, Any]]:
+    """Replay PM_CheckSpecialMovement at exact trajectory frame starts.
+
+    Pmove runs PM_CheckDuck before its one-unit flat-forward ladder trace. The
+    current output frame therefore supplies the exact hull used for that
+    command, while the prior output frame supplies its exact fixed-point start
+    origin. Command zero starts at the oracle's exact 1/8-unit input snap.
+    """
+
+    _, mode, yaw, _, request = record
+    if mode != "ladder":
+        raise AtlasAnalysisError("non-ladder trajectory requested ladder contacts")
+    commands = request.get("commands")
+    frames = response.get("frames")
+    if (
+        not isinstance(commands, list) or not isinstance(frames, list)
+        or len(commands) != len(frames)
+    ):
+        raise AtlasAnalysisError("ladder trajectory frame accounting differs")
+    if not 0 <= through_command_index < len(frames):
+        raise AtlasAnalysisError("ladder contact landing index is out of range")
+    identifier = request.get("id")
+    if not isinstance(identifier, str) or not identifier.endswith(":pmove"):
+        raise AtlasAnalysisError("ladder Pmove request ID is not canonical")
+    radians = math.radians(yaw)
+    direction = (round(math.cos(radians)), round(math.sin(radians)))
+    initial = _pmove_initial_origin(request)
+    requests: list[dict[str, Any]] = []
+    for command_index in range(through_command_index + 1):
+        frame = frames[command_index]
+        if not isinstance(frame, Mapping):
+            raise AtlasAnalysisError("ladder trajectory frame is invalid")
+        start = initial if command_index == 0 else frames[command_index - 1].get("origin")
+        mins = frame.get("mins")
+        maxs = frame.get("maxs")
+        if not all(
+            isinstance(value, list) and len(value) == 3
+            and all(type(axis) in (int, float) and math.isfinite(float(axis)) for axis in value)
+            for value in (start, mins, maxs)
+        ):
+            raise AtlasAnalysisError("ladder frame-start hull is not finite")
+        end = [
+            float(start[0]) + direction[0],
+            float(start[1]) + direction[1],
+            float(start[2]),
+        ]
+        requests.append(_box_request(
+            f"{identifier.removesuffix(':pmove')}:contact:{command_index}",
+            start, end, mins, maxs,
+        ))
+    return requests
+
+
+def _ladder_contact_trace_admits(response: Mapping[str, Any]) -> bool:
+    """Apply the exact PM_CheckSpecialMovement fraction/contents predicate."""
+
+    fraction = response.get("fraction")
+    contents = response.get("contents")
+    return bool(
+        type(fraction) in (int, float)
+        and math.isfinite(float(fraction))
+        and float(fraction) < 1.0
+        and isinstance(contents, int)
+        and not isinstance(contents, bool)
+        and contents & CONTENTS_LADDER
+    )
 
 
 def _drop_settle_request(
@@ -1972,9 +2133,10 @@ def _build_navigation(
         if len(edges) > limits.max_l1_edges:
             raise AtlasAnalysisError("platform traversal exceeded L1 edge budget")
 
-    # Exact Pmove validates step/drop/jump traversal only from a bounded,
-    # deterministic set of spawn and CM-boundary nodes. Atlas v1 omits all
-    # unprobed movement candidates; it never extrapolates a usercmd result.
+    # Exact Pmove validates step/drop/jump traversal from a bounded,
+    # deterministic set of spawn and CM-boundary nodes, plus every exact
+    # ladder-content source. Atlas v1 omits all unprobed movement candidates;
+    # it never extrapolates a usercmd result.
     drop_classifications: list[dict[str, Any]] = []
     if pmove is not None:
         if fall is None:
@@ -1995,11 +2157,20 @@ def _build_navigation(
         trajectory_batches = 0
         settle_replays = 0
         spawn_keys = set(spawn_indices.values())
+        ladder_candidates = [
+            candidate
+            for key in candidates
+            for candidate in _ladder_request_candidates_for_source(
+                key, nodes[key], parameters=pmove.identity["parameters"],
+            )
+        ]
         # Reserve the full prospective trajectory authority workload before
         # the first candidate simulation write. Both legal source stances are
         # replayed: preferring standing at a dual-clear node would make a real
-        # crouch-only exit invisible. No cap may yield a prefix Atlas.
-        worst_case = sum(
+        # crouch-only exit invisible. Every ladder replay may require one CM
+        # contact trace at each of its 52 frame starts, so that complete worst
+        # case is reserved before Pmove. No cap may yield a prefix Atlas.
+        ordinary_worst_case = sum(
             4 * (
                 int(nodes[key].standing_clear)
                 + int(nodes[key].crouched_clear)
@@ -2010,6 +2181,17 @@ def _build_navigation(
             )
             for key in candidates
         )
+        worst_case = ordinary_worst_case + len(ladder_candidates)
+        maximum_ladder_contact_traces = (
+            len(ladder_candidates) * PMOVE_LADDER_SETTLE_HORIZON_FRAMES
+        )
+        if (
+            cm.requests + maximum_ladder_contact_traces
+            > cm.limits.max_oracle_requests
+        ):
+            raise AtlasAnalysisError(
+                "ladder contact preflight exceeds complete collision oracle budget"
+            )
         if pmove.requests + 3 * worst_case > limits.max_oracle_requests:
             raise AtlasAnalysisError(
                 "Pmove trajectory preflight exceeds complete oracle budget"
@@ -2025,18 +2207,34 @@ def _build_navigation(
                 raise AtlasAnalysisError("Pmove traversal ID is not canonical")
             return identifier.removesuffix(":pmove")
 
+        ladder_candidate_ids = [
+            trajectory_identifier(record[4]) for record in ladder_candidates
+        ]
+        ladder_contact_trace_ids: list[str] = []
+        ladder_contact_admitted_ids: list[str] = []
+        ladder_contact_admitted: set[str] = set()
+        ladder_contact_eligible = 0
+        ladder_contact_trace_count = 0
+
         def process_movement_batch(records: list[MovementRecord]) -> None:
             """Consume one bounded response window and release its frames."""
 
+            nonlocal ladder_contact_eligible, ladder_contact_trace_count
             nonlocal settle_replays, trajectory_batches
             trajectory_batches += 1
             pmove_results = pmove.call([record[4] for record in records])
             settle_indices: list[int] = []
             settle_requests: list[dict[str, Any]] = []
-            for index, ((_, _, _, _, request), result) in enumerate(zip(
+            for index, ((_, mode, _, _, request), result) in enumerate(zip(
                 records, pmove_results
             )):
-                extended = _drop_settle_request(request, result)
+                horizon = (
+                    PMOVE_LADDER_SETTLE_HORIZON_FRAMES
+                    if mode == "ladder" else PMOVE_DROP_HORIZON_FRAMES
+                )
+                extended = _drop_settle_request(
+                    request, result, horizon_frames=horizon,
+                )
                 if extended is not None:
                     settle_indices.append(index)
                     settle_requests.append(extended)
@@ -2076,6 +2274,61 @@ def _build_navigation(
                 raise AtlasAnalysisError(str(error)) from error
             drop_classifications.extend(classified)
             drop_by_id = {item["id"]: item for item in classified}
+
+            # A source point inside a ladder-content volume may need approach
+            # motion before the player hull touches the ladder brush. Mirror
+            # PM_CheckSpecialMovement at every exact trajectory frame start
+            # through the first safe landing, then retain a per-trajectory
+            # contact decision for edge admission below.
+            contact_requests: list[dict[str, Any]] = []
+            contact_ranges: list[tuple[str, int, int]] = []
+            for record, result in zip(records, pmove_results):
+                _, mode, _, _, request = record
+                if mode != "ladder" or mover_dependencies.intersects_trajectory(
+                    result, request
+                ):
+                    continue
+                if not any(not frame["grounded"] for frame in result["frames"]):
+                    continue
+                identifier = trajectory_identifier(request)
+                drop_record = drop_by_id.get(identifier)
+                if drop_record is None:
+                    raise AtlasAnalysisError(
+                        "airborne ladder trajectory lacks complete accounting"
+                    )
+                classification = drop_record["classification"]
+                if (
+                    classification.get("classification") != "Exact"
+                    or classification.get("lethal") is True
+                ):
+                    continue
+                landing_command_index = classification["landing"][
+                    "command_index"
+                ]
+                requests = _ladder_contact_requests(
+                    record, result,
+                    through_command_index=landing_command_index,
+                )
+                start = len(contact_requests)
+                contact_requests.extend(requests)
+                contact_ranges.append((identifier, start, len(contact_requests)))
+                ladder_contact_eligible += 1
+                ladder_contact_trace_count += len(requests)
+                ladder_contact_trace_ids.extend(
+                    str(request["id"]) for request in requests
+                )
+            contact_results = cm.call(contact_requests)
+            if len(contact_results) != len(contact_requests):
+                raise AtlasAnalysisError(
+                    "ladder contact response accounting differs"
+                )
+            for identifier, start, end in contact_ranges:
+                if any(
+                    _ladder_contact_trace_admits(response)
+                    for response in contact_results[start:end]
+                ):
+                    ladder_contact_admitted.add(identifier)
+                    ladder_contact_admitted_ids.append(identifier)
 
             for (source_key, mode, _, source_stance, request), result in zip(
                 records, pmove_results
@@ -2125,6 +2378,13 @@ def _build_navigation(
                     }.get(classification.get("severity"), 65535)
                     evidence = drop_record["evidence"]
                     validation_version = drop_record["validation_version"]
+                    if (
+                        mode == "ladder"
+                        and trajectory_identifier(request)
+                        not in ladder_contact_admitted
+                    ):
+                        trajectory_outcomes["omitted_no_ladder_contact"] += 1
+                        continue
                 else:
                     if mode != "ground" or not result["final"]["grounded"]:
                         trajectory_outcomes["omitted_untyped_motion"] += 1
@@ -2151,6 +2411,11 @@ def _build_navigation(
                     # fixed-cost step that bypasses the intervening graph.
                     trajectory_outcomes["omitted_flat_or_untyped_ground"] += 1
                     continue
+                if kind == "ladder":
+                    # Contact was admitted before this replay. The exact safe
+                    # first landing contributes Pmove|Fall, so the typed edge
+                    # carries the complete CM|Pmove|Fall authority closure.
+                    evidence |= EVIDENCE_CM_TRACE_V1
                 stance = _movement_edge_stance(
                     nodes[source_key], target, source_stance,
                 )
@@ -2175,6 +2440,10 @@ def _build_navigation(
                     "validation_version": validation_version,
                     "auxiliary": 0xFFFFFFFF,
                 })
+                if len(edges) > limits.max_l1_edges:
+                    raise AtlasAnalysisError(
+                        "Pmove traversal exceeded L1 edge budget"
+                    )
                 trajectory_outcomes[f"emitted_{stance}_{kind}"] += 1
 
         movement_batch: list[MovementRecord] = []
@@ -2193,6 +2462,8 @@ def _build_navigation(
                 parameters=pmove.identity["parameters"],
             ):
                 enqueue(record)
+        for record in ladder_candidates:
+            enqueue(record)
         if movement_batch:
             process_movement_batch(movement_batch)
         if movement_accounting is not None:
@@ -2203,6 +2474,33 @@ def _build_navigation(
                     f"{edge['stance']}_{edge['edge_type']}"
                 ] += 1
             requested_total = sum(trajectory_counts.values())
+            movement_accounting["ladder_contact_accounting"] = {
+                "schema": "q2-atlas-ladder-contact-accounting-v1",
+                "source_nodes": len({record[0] for record in ladder_candidates}),
+                "candidate_trajectories": len(ladder_candidates),
+                "maximum_prospective_traces": maximum_ladder_contact_traces,
+                "safe_landing_trajectories_challenged": ladder_contact_eligible,
+                "candidate_traces": ladder_contact_trace_count,
+                "admitted_contact_trajectories": len(
+                    ladder_contact_admitted_ids
+                ),
+                "rejected_no_ladder_contact": (
+                    ladder_contact_eligible - len(ladder_contact_admitted_ids)
+                ),
+                "unchallenged_without_exact_safe_landing": (
+                    len(ladder_candidates) - ladder_contact_eligible
+                ),
+                "candidate_ids_sha256": sha256_bytes(
+                    canonical_json(ladder_candidate_ids)
+                ),
+                "trace_ids_sha256": sha256_bytes(
+                    canonical_json(ladder_contact_trace_ids)
+                ),
+                "admitted_ids_sha256": sha256_bytes(
+                    canonical_json(ladder_contact_admitted_ids)
+                ),
+                "unadmitted_trajectories_emit_ladder_edges": False,
+            }
             movement_accounting["trajectory_accounting"] = {
                 "schema": "q2-atlas-pmove-trajectory-accounting-v1",
                 "batch_size": PMOVE_TRAJECTORY_BATCH_SIZE,
@@ -2210,6 +2508,10 @@ def _build_navigation(
                 "ground_horizon_frames": PMOVE_GROUND_HORIZON_FRAMES,
                 "jump_horizon_frames": PMOVE_JUMP_HORIZON_FRAMES,
                 "settle_horizon_frames": PMOVE_DROP_HORIZON_FRAMES,
+                "ladder_climb_frames": PMOVE_LADDER_CLIMB_FRAMES,
+                "ladder_settle_horizon_frames": (
+                    PMOVE_LADDER_SETTLE_HORIZON_FRAMES
+                ),
                 "requested": dict(sorted(trajectory_counts.items())),
                 "requested_total": requested_total,
                 "settle_replays": settle_replays,

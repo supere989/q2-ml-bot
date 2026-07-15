@@ -501,6 +501,10 @@ fn graph_trajectory_edges_require_admitted_optional_oracles() {
     assert!(two_node_graph(EdgeType::ControlledDrop, 1, 1, &pmove_only).is_err());
     assert!(two_node_graph(EdgeType::ControlledDrop, 2, 1, &pmove_only).is_err());
     assert!(two_node_graph(EdgeType::ControlledDrop, 10, 1, &pmove_only).is_ok());
+    assert!(two_node_graph(EdgeType::Ladder, 1, 1, &pmove_only).is_err());
+    assert!(two_node_graph(EdgeType::Ladder, 10, 1, &pmove_only).is_err());
+    assert!(two_node_graph(EdgeType::Ladder, 11, 2, &pmove_only).is_err());
+    assert!(two_node_graph(EdgeType::Ladder, 11, 1, &pmove_only).is_ok());
     assert!(two_node_graph(EdgeType::Hook, 1, 1, &pmove_only).is_err());
 
     let full = oracle_admissions(&bsp, true, true).admit(&bsp).unwrap();
@@ -524,12 +528,26 @@ fn every_materialized_edge_requires_nonzero_evidence_and_validation_version() {
         EdgeType::Mover,
         EdgeType::Teleporter,
         EdgeType::Hook,
+        EdgeType::Ladder,
     ] {
         assert!(two_node_graph(edge_type, 0, 1, &admission).is_err());
         assert!(two_node_graph(edge_type, 1, 0, &admission).is_err());
-        let evidence = if edge_type == EdgeType::ControlledDrop { 10 } else { 1 };
+        let evidence = match edge_type {
+            EdgeType::ControlledDrop => 10,
+            EdgeType::Ladder => 11,
+            _ => 1,
+        };
         assert!(two_node_graph(edge_type, evidence, 1, &admission).is_ok());
     }
+}
+
+#[test]
+fn edge_type_v1_discriminants_remain_stable_when_ladder_is_appended() {
+    assert_eq!(EdgeType::Walk as u8, 0);
+    assert_eq!(EdgeType::ControlledDrop as u8, 4);
+    assert_eq!(EdgeType::Teleporter as u8, 10);
+    assert_eq!(EdgeType::Hook as u8, 11);
+    assert_eq!(EdgeType::Ladder as u8, 12);
 }
 
 #[test]

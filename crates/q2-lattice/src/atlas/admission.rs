@@ -874,10 +874,13 @@ impl EdgeAdmission {
     }
 
     pub(crate) fn validate_edge(
-        self, edge_type: EdgeType, evidence: u16, validation_version: u16,
+        self,
+        edge_type: EdgeType,
+        evidence: u16,
+        validation_version: u16,
     ) -> AtlasResult<()> {
         match edge_type {
-            EdgeType::Jump | EdgeType::ControlledDrop if !self.pmove => {
+            EdgeType::Jump | EdgeType::ControlledDrop | EdgeType::Ladder if !self.pmove => {
                 Err(AtlasError::InvalidFormat(format!(
                     "{edge_type:?} edge requires an admitted pmove oracle"
                 )))
@@ -886,13 +889,17 @@ impl EdgeAdmission {
                 "Hook edge requires admitted hook, pmove, and q2ded parity contracts".to_owned(),
             )),
             EdgeType::ControlledDrop
-                if !(self.pmove
-                    && self.fall
-                    && evidence == 10
-                    && validation_version == 1) =>
+                if !(self.pmove && self.fall && evidence == 10 && validation_version == 1) =>
             {
                 Err(AtlasError::InvalidFormat(
                     "ControlledDrop requires exact Pmove|Fall evidence v1".to_owned(),
+                ))
+            }
+            EdgeType::Ladder
+                if !(self.pmove && self.fall && evidence == 11 && validation_version == 1) =>
+            {
+                Err(AtlasError::InvalidFormat(
+                    "Ladder requires exact CM|Pmove|Fall contact/landing evidence v1".to_owned(),
                 ))
             }
             _ => Ok(()),

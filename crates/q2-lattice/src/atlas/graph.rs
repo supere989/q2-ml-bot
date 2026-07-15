@@ -32,6 +32,7 @@ pub enum EdgeType {
     Mover = 9,
     Teleporter = 10,
     Hook = 11,
+    Ladder = 12,
 }
 
 impl EdgeType {
@@ -49,6 +50,7 @@ impl EdgeType {
             9 => Ok(Self::Mover),
             10 => Ok(Self::Teleporter),
             11 => Ok(Self::Hook),
+            12 => Ok(Self::Ladder),
             _ => Err(AtlasError::InvalidFormat(format!(
                 "unknown L1 edge type {value}"
             ))),
