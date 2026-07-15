@@ -195,6 +195,15 @@ admissible only when `tools/run_generator_cohort.py` finds every declared file
 and no unexpected regular file or symlink. A missing member plus an undeclared
 replacement still fails even when the raw file or map count remains 28.
 
+Fresh replacement cohort `b2g26_final_71440` is explicitly authorized by that
+alias and the byte-identical immutable named declaration
+`B2-GENERATED-COHORT-71440-DECLARATION.json`, both SHA-256
+`d71b86a109bb359f927457d3904cef3116d83c59104cc85b3a87dd43ddc791b2`.
+Its 28 rows use only fresh seeds 71440000..71440003, 71440100..71440103,
+71440200..71440203, 71440300..71440303, 71440400..71440403,
+71440500..71440503, and 71440600..71440603 in declaration order. No producer
+or artifact stage has been run for 71440 yet.
+
 The stages are separate, non-nested directory roots:
 
 - `materialized` contains the five declared generator source files, the BSP,
@@ -545,9 +554,10 @@ from reuse, copying, execution, or substitution. Exact evidence is archived in
 release-build, and residual artifact associated with it are permanently
 retired. Replacement cohort `b2g26_final_71439` was then declared with entirely
 new seeds 71439000 through 71439603, four per concrete style. The authoritative
-alias and immutable 71439 named declaration remain canonical and byte-identical
-with SHA-256
+alias and immutable 71439 named declaration were canonical and byte-identical
+at declaration with SHA-256
 `374b1052ea4a15404dfd52ebf831f9d5eccda488ea5a51d3d41d0e83ee083811`.
+The named copy remains immutable historical authority after the alias advanced.
 
 The sole 71439 source freeze, from clean commit `3568b18` and tree `22a685f`,
 passed all 28 members: both exact 140-file populations matched, all route and
@@ -578,22 +588,31 @@ Its local source and cold populations, WSL source and compiled publication,
 materialization staging residual, reports, logs, and immutable producer
 snapshot are evidence only for this cohort. None may be retried, resumed,
 reused, copied forward, salvaged, substituted, executed for cohort purposes,
-or admitted. The alias and assembler remain deliberately pinned to retired
-71439 so all producer and gate entry points fail closed through the retirement
-registry. No replacement cohort is authorized.
+or admitted. The immutable named declaration still fails closed through the
+retirement registry. The current alias, assembler, and gate schema have advanced
+only to fresh 71440; that authorization does not admit or revive any 71439 byte.
 
 The interpreter boundary is now a pre-declaration authority, not a check to
-discover after compilation. Before any later replacement may be declared, an
-exact clean producer snapshot must pass the language-floor scan on
-`DESKTOP-RTX2080` with
+discover after compilation. The exact clean immediate-predecessor
+implementation snapshot at commit
+`8d89df4a787e261f8a4fb935908191f8df7634b2`, tree
+`0a0f48f7686c860cc7c5afc6d3b3252ef0952681`, git-archive SHA-256
+`4ea65f725f7ea9e2b08b8da60a6ace7b785a704ef036495ace3d0ce5c66b7fdb`,
+and tracked-content manifest SHA-256
+`2e050906f6b3710573a6050b96ccdb901f0772cea1ba05960c5212846c10cd18`
+passed the mandatory no-write pre-declaration scan on `DESKTOP-RTX2080` with
 `/usr/bin/python3.10 -B tools/check_python_syntax_floor.py --root SNAPSHOT`.
-Its materializer imports must then pass under the pinned execution runtime
+It did not contain the 71440 declaration and is not a 71440 producer snapshot.
+After the declaration commit, an exact clean snapshot of that declaration-bearing
+commit must repeat the syntax scan and materializer import/CLI preflights under
+the pinned execution runtime before any source generation or WSL cohort
+bootstrap. The pinned execution runtime is
 `/home/raymond/miniconda3/bin/python`: CPython 3.11.4, executable SHA-256
 `b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4`,
 with zstandard 0.19.0 init/backend SHA-256 values
 `8a65cd4ab44112e1433a097daee7ce8600047995f3289f13d758bb001c06a553`
 and `40ece7fa91097e53ee4785cef01baae3f220f8dc891e20d94d4e07a1d77c9120`.
-The system Python lacks zstandard and must not run materialization. Both checks
+The system Python lacks zstandard and must not run materialization. All checks
 use `-B`, create no bytecode or cohort paths, and finish before generation.
 Python 3.14's
 `ast.parse(feature_version=(3,10))` did not reject the PEP-701 f-string that
@@ -602,18 +621,18 @@ check.
 
 ## Offline workflow
 
-The alias, assembler, and B2 gate schema remain bound to retired cohort 71439.
-There is no current authorized `COHORT_ID`. The commands below preserve the
-producer contract and terminal 71439 invocation shape for forensics only; they
-are non-executable while that binding remains. They must never name retired
-cohort 71426, 71427, 71428, 71429, 71430, 71431, 71432, 71433, 71434, 71435,
-71436, 71437, 71438, or 71439. This closure does not authorize a replacement,
-new artifact root, or producer invocation.
+The alias, assembler, and B2 gate schema are bound to authorized cohort
+`b2g26_final_71440`. The current `COHORT_ID` is therefore
+`b2g26_final_71440`, but declaration publication is not producer progress and
+no 71440 artifact root exists yet. Every new output leaf must be fresh and
+absent. Commands must never name retired cohort 71426, 71427, 71428, 71429,
+71430, 71431, 71432, 71433, 71434, 71435, 71436, 71437, 71438, or 71439, and
+no retired population, report, Dyn evidence, or compiled byte may be copied
+into the 71440 path.
 
-The declaration-aware compiler remains the required shape for a separately
-authorized future cohort. Do not hand-run `q2tool`, glob maps, or use
-`maps/compile.sh`. Every leaf would have to be absent before a single attempt;
-the following retired-71439 transcript must not be run:
+The declaration-aware compiler remains the required 71440 shape.
+Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every leaf must be
+absent before the sole attempt:
 
 ```sh
 python tools/compile_generated_cohort.py \
@@ -640,8 +659,8 @@ membership error leaves no compiled publication; its staging, logs, and report
 are terminal failure evidence and cannot be resumed, retried, copied into a
 new cohort, or used as a passing subset.
 
-The following atomic materialization shape records the sole terminal 71439
-attempt and must not be run again. Materialization discovers
+The following pinned-runtime atomic materialization shape applies to the fresh
+71440 attempt. It must never be pointed at a 71439 path. Materialization discovers
 the first grounded compiled Pmove landing without constraining it to the
 generator hint; independent analysis later requires the sealed exact landing
 and ordered trace to replay identically:

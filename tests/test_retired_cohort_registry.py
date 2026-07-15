@@ -189,18 +189,20 @@ def test_genuinely_fresh_declaration_is_admitted(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("declaration_path", [CURRENT_ALIAS, NAMED_71439])
-def test_alias_and_named_71439_are_retired(
-    declaration_path: Path,
-) -> None:
-    declaration, declaration_sha256 = cohort.load_declaration(declaration_path)
+def test_current_alias_71440_is_admitted_but_named_71439_is_retired() -> None:
+    current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
+    assert current["cohort_id"] == "b2g26_final_71440"
+    assert registry.require_unretired_declaration(
+        CURRENT_ALIAS, current, current_sha256
+    ) is None
 
+    declaration, declaration_sha256 = cohort.load_declaration(NAMED_71439)
     assert declaration["cohort_id"] == "b2g26_final_71439"
     with pytest.raises(
         registry.RetiredCohortRegistryError, match="71439.*permanently retired"
     ):
         registry.require_unretired_declaration(
-            declaration_path, declaration, declaration_sha256
+            NAMED_71439, declaration, declaration_sha256
         )
 
 
@@ -307,7 +309,7 @@ def test_generate_cli_reports_retirement_without_traceback_or_outputs(
         "run_generator_cohort.py",
         "generate",
         "--declaration",
-        str(CURRENT_ALIAS),
+        str(NAMED_71439),
         "--output-dir",
         str(root / "source"),
         "--cold-dir",
@@ -330,7 +332,7 @@ def test_materialize_cli_reports_retirement_without_traceback_or_outputs(
 ) -> None:
     root = tmp_path / "materialize-cli"
     arguments = [
-        "--declaration", str(CURRENT_ALIAS),
+        "--declaration", str(NAMED_71439),
         "--compiled-dir", str(root / "compiled"),
         "--stage-dir", str(root / "stage"),
         "--materialized-dir", str(root / "materialized"),
@@ -359,7 +361,7 @@ def test_claim_prepare_cli_reports_retirement_without_traceback_or_outputs(
 
     assert claim_campaign.main([
         "prepare",
-        "--declaration", str(CURRENT_ALIAS),
+        "--declaration", str(NAMED_71439),
         "--materialized-dir", str(root / "materialized"),
         "--claims-dir", str(root / "claims"),
         "--output", str(root / "report.json"),
@@ -378,7 +380,7 @@ def test_atlas_build_cli_reports_retirement_without_traceback_or_outputs(
     root = tmp_path / "atlas-cli"
 
     assert atlas_campaign.main([
-        "--declaration", str(CURRENT_ALIAS),
+        "--declaration", str(NAMED_71439),
         "--claims-dir", str(root / "claims"),
         "--analysis-dir", str(root / "analysis"),
         "--diagnostics-dir", str(root / "diagnostics"),
