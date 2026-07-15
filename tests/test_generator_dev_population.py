@@ -159,7 +159,7 @@ def fake_generator_factory(
                 *(by_id[node_id] for node_id in route["node_ids"]),
                 nodes[4],
             ]
-            route["dist"] = round(sum(
+            route["dist"] = math.ceil(sum(
                 math.dist(
                     (source["x"], source["y"], source["z"]),
                     (target["x"], target["y"], target["z"]),
@@ -235,14 +235,19 @@ def test_complete_double_generation_publishes_canonical_development_report(
     assert report["route_count"] == 224
     assert report["all_route_archetypes_exactly_once"] is True
     assert report["globally_unique_item_origins"] is True
-    assert report["all_item_nodes_floor_assigned"] is True
+    assert "all_item_nodes_floor_assigned" not in report
     assert report["item_spawn_origin_collisions"] == 0
     assert report["minimum_distinct_item_endpoints_per_route"] == 2
     assert report["all_route_endpoints_are_items"] is True
-    assert report["published_dist_matches_endpoint_loop"] is True
+    assert report["published_dist_covers_endpoint_loop_geometry"] is True
+    assert "published_dist_matches_endpoint_loop" not in report
+    assert report["total_deathmatch_spawn_count"] == 56 * 8
+    assert report["deathmatch_spawn_count_per_map"] == 8
+    assert report["all_maps_have_exactly_eight_deathmatch_spawns"] is True
+    assert report["all_spawns_share_source_standing_component"] is True
     assert report["duplicate_route_endpoints"] == 0
     assert report["zero_length_route_legs"] == 0
-    assert report["all_spawns_and_route_endpoints_floor_assigned"] is True
+    assert "all_spawns_and_route_endpoints_floor_assigned" not in report
     assert report[
         "all_selected_endpoints_share_source_standing_component"
     ] is True

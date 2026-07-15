@@ -116,6 +116,43 @@ def _origin(ent: Dict[str, str]) -> Optional[Tuple[float, float, float]]:
     return tuple(float(match.group(i)) for i in range(1, 4))
 
 
+def deathmatch_spawn_origins(
+    map_path: Path,
+) -> Tuple[Tuple[float, float, float], ...]:
+    """Parse the exact unique deathmatch origins authored in one ``.map``.
+
+    This is deliberately independent of generator objects and sidecars.  The
+    source-freeze path uses it to bind route spawn nodes to the entities the
+    game compiler will actually consume.
+    """
+    try:
+        entities = _parse_entities(map_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"{map_path.stem} source map is unreadable: {exc}") from exc
+    spawn_entities = [
+        entity for entity in entities
+        if entity.get("classname") == "info_player_deathmatch"
+    ]
+    origins = []
+    for ordinal, entity in enumerate(spawn_entities):
+        origin = _origin(entity)
+        if origin is None:
+            raise ValueError(
+                f"{map_path.stem} deathmatch spawn {ordinal} has no canonical origin"
+            )
+        origins.append(origin)
+    if len(origins) != 8:
+        raise ValueError(
+            f"{map_path.stem} source map must contain exactly eight deathmatch "
+            f"spawn origins, found {len(origins)}"
+        )
+    if len(set(origins)) != len(origins):
+        raise ValueError(
+            f"{map_path.stem} source map deathmatch spawn origins are not unique"
+        )
+    return tuple(sorted(origins))
+
+
 def _parse_brush_geometry(text: str) -> List[BrushGeometry]:
     brushes: List[BrushGeometry] = []
     depth = 0

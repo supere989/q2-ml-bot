@@ -464,7 +464,7 @@ def _assert_complete_generated_routes(routes: dict) -> None:
             )
             for left, right in zip(sequence, sequence[1:])
         )
-        assert route["dist"] + 0.5 >= geometric
+        assert route["dist"] >= geometric
         assert 0.0 <= route["risk"] <= 1.0
 
 

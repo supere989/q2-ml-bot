@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +60,8 @@ from tools.run_generator_cohort import (  # noqa: E402
     repository_binding,
     verify_stage_membership,
 )
+from tools.source_route_contract import ROUTE_CONTRACT_SCHEMA  # noqa: E402
+from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
 
 
 GATE_SCHEMA = "q2-multires-b2-gate-v1"
@@ -431,6 +434,7 @@ def _validate_source_freeze(
             "replacement_allowed", "salvage_allowed", "declaration_sha256",
             "implementation", "map_count", "style_counts",
             "unique_layout_count", "route_contract_pass_count",
+            "spawn_origin_binding_pass_count",
             "source_suffixes", "cold_rebuild", "maps", "failures", "passed",
         },
         "source-freeze report",
@@ -442,6 +446,9 @@ def _validate_source_freeze(
     _require(report.get("map_count") == 28, "source-freeze map count differs")
     _require(report.get("unique_layout_count") == 28, "source-freeze layout uniqueness differs")
     _require(report.get("route_contract_pass_count") == 28, "source-freeze routes are incomplete")
+    _validate_source_spawn_origin_binding_pass_count(
+        report.get("spawn_origin_binding_pass_count")
+    )
     _require(report.get("passed") is True and report.get("failures") == [], "source-freeze is not green")
     _require(report.get("bundle_admissible") is False, "source freeze cannot claim bundle admission")
     _require(report.get("atlas_admissible") is False, "source freeze cannot claim Atlas admission")
@@ -474,7 +481,8 @@ def _validate_source_freeze(
             record,
             {
                 "ordinal", "map", "seed", "style", "grid", "metadata",
-                "source_static", "route_contract", "source_files",
+                "source_static", "route_contract", "spawn_origin_binding",
+                "source_files",
             },
             f"source-freeze {declared['map']}",
         )
@@ -493,17 +501,14 @@ def _validate_source_freeze(
             and source_static.get("static_ok") is True,
             f"source-freeze static validation differs for {declared['map']}",
         )
-        route_contract = _mapping(
-            record.get("route_contract"),
-            f"source-freeze route contract {declared['map']}",
+        route_contract = _validate_source_route_contract(
+            record.get("route_contract"), declared["map"]
         )
-        _require(
-            route_contract.get(
-                "all_selected_endpoints_share_source_standing_component"
-            ) is True
-            and route_contract.get("exact_start_nodes_declared") is True
-            and route_contract.get("room_edges_used_as_reachability") is False,
-            f"source-freeze route contract failed for {declared['map']}",
+        _validate_source_spawn_origin_binding(
+            record.get("spawn_origin_binding"),
+            route_contract,
+            paths.source_dir / f"{declared['map']}.map",
+            declared["map"],
         )
         files = _mapping(record.get("source_files"), "source-freeze file identities")
         _exact_keys(files, set(SOURCE_SUFFIXES), "source-freeze file identities")
@@ -523,6 +528,161 @@ def _validate_source_freeze(
         "cold_membership_sha256": _sha256_bytes(canonical_bytes(cold)),
         "map_count": 28,
     }
+
+
+def _validate_source_route_contract(
+    value: object, map_id: str
+) -> Mapping[str, Any]:
+    """Admit every source-route predicate required by the frozen B2 contract."""
+    route_contract = _mapping(
+        value, f"source-freeze route contract {map_id}"
+    )
+    _require(
+        route_contract.get("schema") == ROUTE_CONTRACT_SCHEMA,
+        f"source-freeze route contract schema differs for {map_id}",
+    )
+    _require(
+        _integer(
+            route_contract.get("spawn_count"),
+            f"source-freeze route contract spawn count {map_id}",
+        ) == 8,
+        f"source-freeze route contract spawn count differs for {map_id}",
+    )
+    _require(
+        route_contract.get("all_spawns_share_source_standing_component") is True,
+        f"source-freeze route contract spawn component failed for {map_id}",
+    )
+    _require(
+        route_contract.get("published_dist_covers_endpoint_loop_geometry") is True,
+        f"source-freeze route contract endpoint-loop geometry failed for {map_id}",
+    )
+    _require(
+        route_contract.get(
+            "all_selected_endpoints_share_source_standing_component"
+        ) is True
+        and route_contract.get("exact_start_nodes_declared") is True
+        and route_contract.get("room_edges_used_as_reachability") is False,
+        f"source-freeze route contract failed for {map_id}",
+    )
+    return route_contract
+
+
+def _validate_source_spawn_origin_binding_pass_count(value: object) -> None:
+    _require(
+        _integer(value, "source-freeze spawn-origin binding pass count") == 28,
+        "source-freeze spawn-origin bindings are incomplete",
+    )
+
+
+def _spawn_origin_rows(value: object, label: str) -> list[list[float]]:
+    rows = _list(value, label)
+    _require(len(rows) == 8, f"{label} must contain exactly eight origins")
+    normalized: list[list[float]] = []
+    for index, value_row in enumerate(rows):
+        row = _list(value_row, f"{label} {index}")
+        _require(len(row) == 3, f"{label} {index} must contain three coordinates")
+        coordinates: list[float] = []
+        for axis, coordinate in zip("xyz", row):
+            try:
+                normalized_coordinate = float(coordinate)
+            except (TypeError, ValueError, OverflowError):
+                normalized_coordinate = math.nan
+            _require(
+                not isinstance(coordinate, bool)
+                and isinstance(coordinate, (int, float))
+                and math.isfinite(normalized_coordinate),
+                f"{label} {index} {axis} must be finite numeric",
+            )
+            coordinates.append(normalized_coordinate)
+        normalized.append(coordinates)
+    _require(
+        len({tuple(row) for row in normalized}) == 8,
+        f"{label} must contain eight unique origins",
+    )
+    return normalized
+
+
+def _validate_source_spawn_origin_binding(
+    value: object,
+    route_contract: Mapping[str, Any],
+    source_map: Path,
+    map_id: str,
+) -> None:
+    binding = _mapping(value, f"source-freeze spawn-origin binding {map_id}")
+    _exact_keys(
+        binding,
+        {
+            "schema", "source_artifact", "source_parser",
+            "deathmatch_spawn_count", "spawn_origins",
+            "source_spawn_origins_sha256", "route_spawn_origins_sha256",
+            "route_contract_exact_match", "all_spawn_origins_unique",
+            "source_component", "all_spawns_share_source_standing_component",
+        },
+        f"source-freeze spawn-origin binding {map_id}",
+    )
+    _require(
+        binding.get("schema") == "q2-generator-source-spawn-origin-binding-v1",
+        f"source-freeze spawn-origin binding schema differs for {map_id}",
+    )
+    _require(
+        binding.get("source_artifact") == ".map"
+        and binding.get("source_parser")
+        == "tools.validate_maps.deathmatch_spawn_origins-v1",
+        f"source-freeze spawn-origin authority differs for {map_id}",
+    )
+    try:
+        parsed_source_origins = deathmatch_spawn_origins(source_map)
+    except ValueError as exc:
+        raise B2GateError(str(exc)) from exc
+    source_origins = [list(origin) for origin in parsed_source_origins]
+    binding_origins = _spawn_origin_rows(
+        binding.get("spawn_origins"),
+        f"source-freeze bound source origins {map_id}",
+    )
+    route_origins = _spawn_origin_rows(
+        route_contract.get("spawn_origins"),
+        f"source-freeze route origins {map_id}",
+    )
+    _require(
+        _integer(
+            binding.get("deathmatch_spawn_count"),
+            f"source-freeze deathmatch spawn count {map_id}",
+        ) == 8
+        and len(source_origins) == 8,
+        f"source-freeze deathmatch spawn count differs for {map_id}",
+    )
+    _require(
+        binding_origins == source_origins,
+        f"source-freeze bound origins differ from source map for {map_id}",
+    )
+    _require(
+        route_origins == source_origins,
+        f"source-freeze route origins differ from source map for {map_id}",
+    )
+    source_sha256 = _sha256_bytes(canonical_bytes(source_origins))
+    route_sha256 = _sha256_bytes(canonical_bytes(route_origins))
+    _require(
+        binding.get("source_spawn_origins_sha256") == source_sha256
+        and binding.get("route_spawn_origins_sha256") == route_sha256
+        and route_contract.get("spawn_origins_sha256") == route_sha256,
+        f"source-freeze spawn-origin digest binding differs for {map_id}",
+    )
+    route_component = route_contract.get("spawn_source_component")
+    _require(
+        isinstance(route_component, int)
+        and not isinstance(route_component, bool)
+        and route_component >= 0
+        and binding.get("source_component") == route_component,
+        f"source-freeze spawn-origin component binding differs for {map_id}",
+    )
+    _require(
+        binding.get("route_contract_exact_match") is True
+        and binding.get("all_spawn_origins_unique") is True
+        and binding.get("all_spawns_share_source_standing_component") is True
+        and route_contract.get("all_spawn_origins_unique") is True
+        and route_contract.get("all_spawns_share_source_standing_component") is True,
+        f"source-freeze spawn-origin binding predicates failed for {map_id}",
+    )
 
 
 def _validate_compiled_and_static(

@@ -18,7 +18,6 @@ from typing import Any, Mapping, Sequence
 
 ROUTE_CONTRACT_SCHEMA = "q2-generator-source-route-contract-v2"
 ROUTE_ARCHETYPES = ("offense", "survival", "control", "balanced")
-MAX_ENDPOINT_DISTANCE_ERROR = 0.5
 
 
 class SourceRouteContractError(ValueError):
@@ -165,7 +164,12 @@ def validate_source_route_contract(
                 )
             item_origins[origin] = node_id
         else:
-            spawn_origins.setdefault(origin, node_id)
+            if origin in spawn_origins:
+                raise SourceRouteContractError(
+                    f"{map_id} deathmatch spawn origins are not unique: nodes "
+                    f"{spawn_origins[origin]} and {node_id} share {origin}"
+                )
+            spawn_origins[origin] = node_id
             spawn_by_room.setdefault(room, []).append(node)
     for room_spawns in spawn_by_room.values():
         room_spawns.sort(key=lambda node: int(node["id"]))
@@ -308,8 +312,7 @@ def validate_source_route_contract(
         # chord loop, but walls and other final blockers are expected to make
         # it longer.  The independently compiled Atlas still owns collision,
         # connectivity, and authoritative cost.
-        geometric_shortfall = geometric_distance - published_distance
-        if geometric_shortfall > MAX_ENDPOINT_DISTANCE_ERROR:
+        if published_distance < geometric_distance:
             raise SourceRouteContractError(
                 f"{map_id} route {route_index} dist {published_distance:g} "
                 "falls below endpoint-loop geometry "
@@ -357,18 +360,20 @@ def validate_source_route_contract(
         "route_count": len(routes_value),
         "item_origin_count": len(item_origins),
         "spawn_count": spawn_count,
+        "spawn_origins": [list(origin) for origin in sorted(spawn_origins)],
+        "spawn_origins_sha256": _sha256(
+            [list(origin) for origin in sorted(spawn_origins)]
+        ),
         "spawn_source_component": spawn_source_component,
         "route_endpoint_count": route_endpoint_count,
         "routes": normalized_routes,
         "zero_length_route_legs": 0,
         "minimum_distinct_item_endpoints_per_route": 2,
         "all_route_endpoints_are_items": True,
-        "published_dist_matches_endpoint_loop": True,
         "published_dist_covers_endpoint_loop_geometry": True,
-        "all_item_nodes_floor_assigned": True,
         "item_spawn_origin_collisions": 0,
-        "all_spawns_and_route_endpoints_floor_assigned": True,
         "all_spawns_share_source_standing_component": True,
+        "all_spawn_origins_unique": True,
         "globally_unique_item_origins": True,
         "all_selected_endpoints_share_source_standing_component": True,
         "exact_start_nodes_declared": True,

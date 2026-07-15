@@ -18,6 +18,9 @@ from tools.assemble_b2_gate import (
     _dyn_source_authority,
     _expected_71436_rows,
     _validate_dyn_evidence,
+    _validate_source_route_contract,
+    _validate_source_spawn_origin_binding,
+    _validate_source_spawn_origin_binding_pass_count,
     _validate_test_report,
     _parser,
 )
@@ -29,6 +32,7 @@ from tools.run_b2_test_suite import (
     _rename_noreplace,
 )
 import tools.run_compiled_static_campaign as compiled_static_campaign
+from tools.source_route_contract import ROUTE_CONTRACT_SCHEMA
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -301,6 +305,181 @@ def test_exact_directory_membership_rejects_extra_and_symlink(tmp_path: Path) ->
     (root / "link").symlink_to(root / "only")
     with pytest.raises(B2GateError, match="symlinks"):
         _exact_directory_files(root, {"only"}, "fixture")
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid", "message"),
+    [
+        ("schema", "q2-generator-source-route-contract-v1", "schema differs"),
+        ("spawn_count", 7, "spawn count differs"),
+        (
+            "all_spawns_share_source_standing_component",
+            False,
+            "spawn component failed",
+        ),
+        (
+            "published_dist_covers_endpoint_loop_geometry",
+            False,
+            "endpoint-loop geometry failed",
+        ),
+    ],
+)
+def test_source_route_gate_fails_closed_on_required_predicates(
+    field: str, invalid: object, message: str
+) -> None:
+    route_contract = {
+        "schema": ROUTE_CONTRACT_SCHEMA,
+        "spawn_count": 8,
+        "all_spawns_share_source_standing_component": True,
+        "published_dist_covers_endpoint_loop_geometry": True,
+        "all_selected_endpoints_share_source_standing_component": True,
+        "exact_start_nodes_declared": True,
+        "room_edges_used_as_reachability": False,
+    }
+    _validate_source_route_contract(route_contract, "fixture")
+    route_contract[field] = invalid
+    with pytest.raises(B2GateError, match=message):
+        _validate_source_route_contract(route_contract, "fixture")
+
+
+def _write_source_spawn_binding_fixture(
+    tmp_path: Path,
+) -> tuple[Path, dict, dict]:
+    origins = [
+        [float(128 + index * 64), float(256 + (index % 2) * 64), 24.0]
+        for index in range(8)
+    ]
+    source_map = tmp_path / "fixture.map"
+    source_map.write_text(
+        "".join(
+            "{\n"
+            '"classname" "info_player_deathmatch"\n'
+            f'"origin" "{origin[0]:g} {origin[1]:g} {origin[2]:g}"\n'
+            "}\n"
+            for origin in origins
+        ),
+        encoding="utf-8",
+    )
+    origins_sha256 = _sha256(canonical_bytes(origins))
+    route_contract = {
+        "spawn_origins": [list(origin) for origin in origins],
+        "spawn_origins_sha256": origins_sha256,
+        "spawn_source_component": 3,
+        "all_spawn_origins_unique": True,
+        "all_spawns_share_source_standing_component": True,
+    }
+    binding = {
+        "schema": "q2-generator-source-spawn-origin-binding-v1",
+        "source_artifact": ".map",
+        "source_parser": "tools.validate_maps.deathmatch_spawn_origins-v1",
+        "deathmatch_spawn_count": 8,
+        "spawn_origins": [list(origin) for origin in origins],
+        "source_spawn_origins_sha256": origins_sha256,
+        "route_spawn_origins_sha256": origins_sha256,
+        "route_contract_exact_match": True,
+        "all_spawn_origins_unique": True,
+        "source_component": 3,
+        "all_spawns_share_source_standing_component": True,
+    }
+    return source_map, route_contract, binding
+
+
+def test_source_spawn_origin_gate_accepts_exact_artifact_binding(
+    tmp_path: Path,
+) -> None:
+    source_map, route_contract, binding = _write_source_spawn_binding_fixture(
+        tmp_path
+    )
+    _validate_source_spawn_origin_binding_pass_count(28)
+    _validate_source_spawn_origin_binding(
+        binding, route_contract, source_map, "fixture"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid", "message"),
+    [
+        ("schema", "retired", "schema differs"),
+        ("source_artifact", ".lattice.json", "authority differs"),
+        ("source_parser", "unbound-parser", "authority differs"),
+        ("deathmatch_spawn_count", 7, "spawn count differs"),
+        ("spawn_origins", None, "differ from source map"),
+        ("source_spawn_origins_sha256", "00" * 32, "digest binding differs"),
+        ("route_spawn_origins_sha256", "11" * 32, "digest binding differs"),
+        ("route_contract_exact_match", False, "predicates failed"),
+        ("all_spawn_origins_unique", False, "predicates failed"),
+        ("source_component", 4, "component binding differs"),
+        (
+            "all_spawns_share_source_standing_component",
+            False,
+            "predicates failed",
+        ),
+    ],
+)
+def test_source_spawn_origin_gate_rejects_adversarial_binding_fields(
+    tmp_path: Path, field: str, invalid: object, message: str
+) -> None:
+    source_map, route_contract, binding = _write_source_spawn_binding_fixture(
+        tmp_path
+    )
+    if field == "spawn_origins":
+        binding[field][0][0] += 1.0
+    else:
+        binding[field] = invalid
+    with pytest.raises(B2GateError, match=message):
+        _validate_source_spawn_origin_binding(
+            binding, route_contract, source_map, "fixture"
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid", "message"),
+    [
+        ("spawn_origins", None, "differ from source map"),
+        ("spawn_origins_sha256", "22" * 32, "digest binding differs"),
+        ("spawn_source_component", None, "component binding differs"),
+        ("all_spawn_origins_unique", False, "predicates failed"),
+        (
+            "all_spawns_share_source_standing_component",
+            False,
+            "predicates failed",
+        ),
+    ],
+)
+def test_source_spawn_origin_gate_rejects_adversarial_route_fields(
+    tmp_path: Path, field: str, invalid: object, message: str
+) -> None:
+    source_map, route_contract, binding = _write_source_spawn_binding_fixture(
+        tmp_path
+    )
+    if field == "spawn_origins":
+        route_contract[field][0][0] += 1.0
+    else:
+        route_contract[field] = invalid
+    with pytest.raises(B2GateError, match=message):
+        _validate_source_spawn_origin_binding(
+            binding, route_contract, source_map, "fixture"
+        )
+
+
+def test_source_spawn_origin_gate_rejects_incomplete_aggregate() -> None:
+    with pytest.raises(B2GateError, match="bindings are incomplete"):
+        _validate_source_spawn_origin_binding_pass_count(27)
+
+
+def test_source_spawn_origin_gate_rejects_duplicate_source_entities(
+    tmp_path: Path,
+) -> None:
+    source_map, route_contract, binding = _write_source_spawn_binding_fixture(
+        tmp_path
+    )
+    text = source_map.read_text(encoding="utf-8")
+    text = text.replace('"origin" "576 320 24"', '"origin" "128 256 24"')
+    source_map.write_text(text, encoding="utf-8")
+    with pytest.raises(B2GateError, match="origins are not unique"):
+        _validate_source_spawn_origin_binding(
+            binding, route_contract, source_map, "fixture"
+        )
 
 
 def test_canonical_dyn_fixture_binds_atlas_and_rejects_stale_authority(

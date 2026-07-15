@@ -140,6 +140,20 @@ def test_split_spawn_components_are_rejected_before_route_publication() -> None:
         validate_source_route_contract(graph, MAP_ID)
 
 
+def test_duplicate_route_spawn_origins_are_rejected() -> None:
+    graph = _graph()
+    first = graph["nodes"][4]
+    duplicate = graph["nodes"][-1]
+    for axis in "xyz":
+        duplicate[axis] = first[axis]
+
+    with pytest.raises(
+        SourceRouteContractError,
+        match="deathmatch spawn origins are not unique",
+    ):
+        validate_source_route_contract(graph, MAP_ID)
+
+
 @pytest.mark.parametrize("delta", (-1, 1), ids=("seven", "nine"))
 def test_exactly_eight_spawn_nodes_are_required(delta: int) -> None:
     graph = _graph()
@@ -246,13 +260,21 @@ def test_source_geodesic_may_exceed_endpoint_loop_geometry() -> None:
 
     assert route["source_geodesic_overhead"] == pytest.approx(2048.0)
     assert report["published_dist_covers_endpoint_loop_geometry"] is True
+    assert "published_dist_matches_endpoint_loop" not in report
 
 
 def test_published_distance_cannot_undercut_endpoint_loop_geometry() -> None:
     graph = _graph()
-    graph["routes"][0]["dist"] -= 1.0
+    graph["routes"][0]["dist"] -= 0.001
 
     with pytest.raises(
         SourceRouteContractError, match="falls below endpoint-loop geometry"
     ):
         validate_source_route_contract(graph, MAP_ID)
+
+
+def test_unproven_floor_assignment_booleans_are_not_published() -> None:
+    report = validate_source_route_contract(_graph(), MAP_ID)
+
+    assert "all_item_nodes_floor_assigned" not in report
+    assert "all_spawns_and_route_endpoints_floor_assigned" not in report

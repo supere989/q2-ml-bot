@@ -420,8 +420,12 @@ def _route_contract(routes: Mapping[str, Any]) -> tuple[list[dict], list[dict]]:
             math.dist(source, target)
             for source, target in zip(origins, origins[1:])
         )
-        normalized_claimed_distance = max(claimed_distance, geometric_distance)
-        if normalized_claimed_distance <= 0:
+        if claimed_distance < geometric_distance:
+            raise ClaimValidationError(
+                f"{route_id} distance {claimed_distance:g} falls below "
+                f"endpoint-loop geometry {geometric_distance:.6f}"
+            )
+        if claimed_distance <= 0:
             raise ClaimValidationError(f"{route_id} has no measurable route")
         segment_ids = []
         for segment_index, (source, target) in enumerate(zip(path, path[1:])):
@@ -445,7 +449,7 @@ def _route_contract(routes: Mapping[str, Any]) -> tuple[list[dict], list[dict]]:
             {
                 "route_id": route_id,
                 "archetype": archetype,
-                "claimed_cost_q8": round(normalized_claimed_distance * Q8),
+                "claimed_cost_q8": round(claimed_distance * Q8),
                 "segment_claim_ids": segment_ids,
             }
         )

@@ -65,6 +65,12 @@ FAILURE_71434 = (
 DECLARATION_71434 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71434-DECLARATION.json"
 )
+FAILURE_71435 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71435-FAILURE.json"
+)
+DECLARATION_71435 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71435-DECLARATION.json"
+)
 SHADOW_71430 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71430-SHADOW-8CE1E75.json"
 )
@@ -614,6 +620,145 @@ def test_71434_failure_record_is_canonical_exact_and_no_salvage() -> None:
         "claims_stage_published", "analysis_stage_published",
     ):
         assert admission[key] is False
+
+
+def test_71435_failure_record_is_canonical_exact_and_no_salvage() -> None:
+    payload = FAILURE_71435.read_bytes()
+    failure = json.loads(payload)
+    assert payload == canonical_bytes(failure)
+
+    assert failure["schema"] == "q2-b2-generated-cohort-failure-v1"
+    assert failure["cohort_id"] == "b2g26_final_71435"
+    assert failure["status"] == "permanently-failed-compiled-validation"
+    assert failure["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71435-DECLARATION.json",
+        "sha256": hashlib.sha256(DECLARATION_71435.read_bytes()).hexdigest(),
+    }
+    assert failure["evidence"]["implementation"] == {
+        "atlas_analyzer_authority_file_count": 29,
+        "atlas_analyzer_authority_sha256": (
+            "1bd8727da427bc4af79983072852bdafe"
+            "8675eacb3a70ae769ec0c679cb2f9b9"
+        ),
+        "generator_sha256": (
+            "5eba7670e21c05087920880e1bf983bd"
+            "2a533824c41124a6ef996ad6c529b559"
+        ),
+        "git_clean": True,
+        "repository_commit": "1477938f29908a593e563316599d98e42164406a",
+        "repository_tree": "6064be90709082a27e09b6f218d80e7ddd5c8011",
+        "routes_sha256": (
+            "4ceb7bd5b6d5233e75218ab40dd5b16d"
+            "ac0f23aba14f04894fec26b698f531d7"
+        ),
+    }
+    assert failure["evidence"]["stage_results"] == {
+        "analysis": {
+            "actual_file_count": 224,
+            "expected_file_count": 224,
+            "map_count": 28,
+            "pass_count": 28,
+            "passed": True,
+        },
+        "claims": {
+            "actual_file_count": 224,
+            "expected_file_count": 224,
+            "map_count": 28,
+            "pass_count": 28,
+            "passed": True,
+        },
+        "compiled": {
+            "actual_file_count": 168,
+            "expected_file_count": 168,
+            "map_count": 28,
+            "static_pass_count": 28,
+            "passed": True,
+        },
+        "compiled_validation": {
+            "failure_count": 114,
+            "map_count": 28,
+            "pass_count": 0,
+            "passed": False,
+        },
+        "materialized": {
+            "actual_file_count": 196,
+            "expected_file_count": 196,
+            "map_count": 28,
+            "passed": True,
+        },
+        "source": {
+            "cold_file_count": 140,
+            "map_count": 28,
+            "passed": True,
+            "primary_file_count": 140,
+            "route_contract_pass_count": 28,
+            "unique_layout_count": 28,
+        },
+    }
+    assert failure["failure"] == {
+        "classification_counts": {
+            "dark_spawn_region_failures": 9,
+            "route_cost_failures": 12,
+            "spawn_connectivity_failures": 65,
+            "spawn_light_region_domain_failures": 28,
+        },
+        "phase": "compiled-generated-validation",
+        "root_causes": {
+            "lighting_darkness": (
+                "source lighting measured floor-plus-one samples with "
+                "horizontal radius and simplified overhead occlusion, while "
+                "compiled promotion measured spawn-eye origins with "
+                "three-dimensional radius and exact MASK_SHOT collision; "
+                "nine maps therefore retained real compiled darkness"
+            ),
+            "lighting_region_domain": (
+                "the validator compared the count of authored floor-light "
+                "tiles with the analyzer count of strongly connected spawn "
+                "navigation regions; all 28 compiled BSPs retained the exact "
+                "authored _ml_region tag set, so this comparison joined "
+                "unrelated domains"
+            ),
+            "route_cost": (
+                "source route selection retained only standing-component "
+                "membership and Euclidean endpoint distance, discarding "
+                "obstacle detour distance; Atlas correctly measured compiled "
+                "16-unit graph geodesics and twelve route totals exceeded "
+                "both frozen mismatch thresholds"
+            ),
+            "spawn_connectivity": (
+                "distributed spawn placement optimized separation and local "
+                "clearance without requiring all eight origins to share one "
+                "conservative standing component; nine maps remained split "
+                "under compiled directed reachability"
+            ),
+        },
+        "validation_summary": {
+            "compiled_route_claim_count": 1487,
+            "compiled_route_claims_connected_finite_oracle": 1487,
+            "dark_navigation_region_count": 10,
+            "darkness_map_count": 9,
+            "route_failure_map_count": 6,
+            "route_summary_count": 112,
+            "source_floor_light_region_count": 720,
+            "spawn_connectivity_map_count": 9,
+            "spawn_navigation_region_count": 41,
+        },
+    }
+    assert failure["admission"] == {
+        "analysis_stage_published": True,
+        "claims_stage_published": True,
+        "compiled_stage_published": True,
+        "materialized_stage_published": True,
+        "older_population_reuse_allowed": False,
+        "passing_subset_allowed": False,
+        "permanently_non_admissible": True,
+        "regeneration_under_same_declaration_allowed": False,
+        "replacement_declaration_status": "pending-implementation-fix",
+        "replacement_member_allowed": False,
+        "retry_under_same_declaration_allowed": False,
+        "salvage_allowed": False,
+        "source_stage_published": True,
+    }
 
 
 def write_stage(directory: Path, stage: str) -> dict:

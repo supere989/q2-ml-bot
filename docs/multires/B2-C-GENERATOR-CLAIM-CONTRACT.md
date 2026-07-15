@@ -41,10 +41,17 @@ The generator retains the deterministic 16-unit standing-hull grid used to
 establish source components and publishes each route's shortest-path distance
 through that grid. Final lane walls, cover, buildings, towers, and lava are
 therefore present in route scoring and cost claims rather than being discarded
-after a Boolean connectivity decision. The canonical claim uses the greater
-of that source geodesic and the exact route endpoint sequence's geometric
-length. Neither value authorizes a path: the compiled analyzer still must
-prove every segment connected and emit its independent Atlas cost.
+after a Boolean connectivity decision. At source freeze, that distance is a
+clean-implementation-bound generator proposal: the validator does not
+reconstruct the generator's standing graph from the emitted artifacts or
+require independent shortest-path equality. It requires only that the proposal
+cover the exact route endpoint sequence's geometric length, and claim
+preparation rejects an undercut instead of silently normalizing it. The
+published integer source distance is rounded upward, so it may never fall below
+that endpoint-loop lower bound, even by a sub-unit rounding tolerance. Neither
+value authorizes a path: the compiled analyzer still must prove every segment
+connected and emit its independent Atlas cost under the joint absolute-and-ratio
+threshold in criterion 10.
 
 The analyzer accepts this document as an immutable input and echoes its digest
 as `generator_claims_sha256` in `q2-atlas-analysis-v1`. Generated promotion
@@ -97,8 +104,11 @@ The generated path requires every criterion below:
 7. Compiled lethal-edge count matches the safety contract, all lethal exterior
    edges are guarded, and no uncontained edge remains.
 8. qrad lightdata is nonempty and at most 2 MiB, has a nonzero digest and
-   lightmapped faces, the compiled spawn-region count matches the v6 lighting
-   contract, and no dark spawn region remains.
+   lightmapped faces, the exact compiled authored floor-light region-ID set
+   matches the v6 source metadata, and deterministic compiled traces prove
+   that no individual spawn is dark. Spawn navigation-region identity is a
+   separate connectivity domain and is not evidence of authored light-region
+   identity.
 9. Hook authority is admitted under the sole V4 contract, the B1 hook physics
    identity, and the exact SHA-256 of the accepted B1 hook-parity attestation.
    The analysis and
@@ -208,12 +218,18 @@ shared non-null standing component. The start spawn and every selected item
 endpoint must also share the route's declared component. If final source
 geometry has no one component that can hold all eight clear, separated,
 map-spanning starts, generation fails; it may not scatter starts across
-components. Room connection rows remain serialized diagnostics and risk
-priors; they are never reachability evidence. These component labels are still
-generator claims, not compiled collision authority. Independent Atlas route
-probes must challenge the exact endpoint loop and directed spawn reachability
-before admission. Version 1 sidecars are retired and rejected; there is no
-inferred start-spawn or room-edge fallback.
+components. Before publishing the source freeze, the validator independently
+parses `info_player_deathmatch` entities from the emitted `.map`, requires
+exactly eight unique canonical origins, and requires their sorted set to equal
+the route sidecar's eight unique spawn origins. The report binds the parsed
+origins and both canonical digests; a fabricated or stale route sidecar fails
+the entire cohort. Source route validation does not claim that item or spawn
+nodes have compiled floor support. Room connection rows remain serialized
+diagnostics and risk priors; they are never reachability evidence. These
+component labels are still generator claims, not compiled collision authority.
+Independent Atlas route probes must challenge the exact endpoint loop and
+directed spawn reachability before admission. Version 1 sidecars are retired
+and rejected; there is no inferred start-spawn or room-edge fallback.
 
 Preparation evaluates all 28 claim documents in declaration order before it
 publishes anything. If any build fails, no claims root or passing subset is

@@ -38,6 +38,7 @@ def fake_generator_factory(
     cold_route_mismatch: str | None = None,
     invalid_route: str | None = None,
     wrong_meta_seed: str | None = None,
+    route_spawn_defect: tuple[str, str] | None = None,
 ):
     def generate(
         name: str,
@@ -54,10 +55,29 @@ def fake_generator_factory(
             "grid": grid,
             "style": style,
         })
-        layout = f"map:{name}:seed:{seed}:style:{style}:grid:{grid}\n".encode()
+        base = seed * 10
+        source_spawns = [
+            {
+                "id": spawn_id,
+                "type": "spawn",
+                "x": base + 100 + (spawn_id - 4) * 64,
+                "y": 100 + (spawn_id % 2) * 64,
+                "z": 24,
+                "room": 0,
+                "source_component": 0,
+            }
+            for spawn_id in range(4, 12)
+        ]
+        layout = f"// map:{name}:seed:{seed}:style:{style}:grid:{grid}\n"
+        for spawn in source_spawns:
+            layout += (
+                "{\n\"classname\" \"info_player_deathmatch\"\n"
+                f"\"origin\" \"{spawn['x']} {spawn['y']} {spawn['z']}\"\n"
+                "}\n"
+            )
         if output.name == "cold" and name == cold_mismatch:
-            layout += b"cold-drift\n"
-        (output / f"{name}.map").write_bytes(layout)
+            layout += "// cold-drift\n"
+        (output / f"{name}.map").write_text(layout, encoding="utf-8")
         (output / f"{name}.json").write_text(
             "# raw hook projection\n# bundle_admissible: false\n",
             encoding="utf-8",
@@ -78,9 +98,16 @@ def fake_generator_factory(
             json.dumps(meta, sort_keys=True) + "\n", encoding="utf-8"
         )
         (output / f"{name}.lattice.json").write_text(
-            json.dumps({"map": name, "seed": seed}) + "\n", encoding="utf-8"
+            json.dumps({
+                "map": name,
+                "seed": seed,
+                "spawns": [
+                    {axis: spawn[axis] for axis in "xyz"}
+                    for spawn in source_spawns
+                ],
+            }) + "\n",
+            encoding="utf-8",
         )
-        base = seed * 10
         nodes = [
             {
                 "id": item_id,
@@ -94,18 +121,19 @@ def fake_generator_factory(
             }
             for item_id in range(4)
         ]
-        nodes.extend(
-            {
-                "id": spawn_id,
-                "type": "spawn",
-                "x": base + 100 + (spawn_id - 4) * 64,
-                "y": 100 + (spawn_id % 2) * 64,
-                "z": 24,
-                "room": 0,
-                "source_component": 0,
-            }
-            for spawn_id in range(4, 12)
-        )
+        route_spawns = [dict(spawn) for spawn in source_spawns]
+        if route_spawn_defect is not None and name == route_spawn_defect[0]:
+            defect = route_spawn_defect[1]
+            if defect == "stale":
+                route_spawns[-1]["x"] += 32
+            elif defect == "duplicate":
+                for axis in "xyz":
+                    route_spawns[-1][axis] = route_spawns[0][axis]
+            elif defect == "wrong_component":
+                route_spawns[-1]["source_component"] = 1
+            else:  # pragma: no cover - test helper misuse.
+                raise AssertionError(f"unknown route spawn defect {defect}")
+        nodes.extend(route_spawns)
         if name == invalid_route:
             nodes[1]["x"], nodes[1]["y"], nodes[1]["z"] = (
                 nodes[0]["x"], nodes[0]["y"], nodes[0]["z"]
@@ -124,7 +152,7 @@ def fake_generator_factory(
                 nodes[4], *(by_id[node_id] for node_id in route["node_ids"]),
                 nodes[4],
             ]
-            route["dist"] = round(sum(
+            route["dist"] = math.ceil(sum(
                 math.dist(
                     (source["x"], source["y"], source["z"]),
                     (target["x"], target["y"], target["z"]),
@@ -222,6 +250,7 @@ def test_generate_publishes_only_a_complete_double_built_source_freeze(
     assert report["map_count"] == 28
     assert report["unique_layout_count"] == 28
     assert report["route_contract_pass_count"] == 28
+    assert report["spawn_origin_binding_pass_count"] == 28
     assert all(
         row["route_contract"][
             "all_selected_endpoints_share_source_standing_component"
@@ -233,6 +262,19 @@ def test_generate_publishes_only_a_complete_double_built_source_freeze(
         and row["route_contract"][
             "all_spawns_share_source_standing_component"
         ] is True
+        for row in report["maps"]
+    )
+    assert all(
+        row["spawn_origin_binding"]["deathmatch_spawn_count"] == 8
+        and row["spawn_origin_binding"]["route_contract_exact_match"] is True
+        and row["spawn_origin_binding"]["all_spawn_origins_unique"] is True
+        and row["spawn_origin_binding"][
+            "all_spawns_share_source_standing_component"
+        ] is True
+        and row["spawn_origin_binding"]["spawn_origins"]
+        == row["route_contract"]["spawn_origins"]
+        and row["spawn_origin_binding"]["source_spawn_origins_sha256"]
+        == row["spawn_origin_binding"]["route_spawn_origins_sha256"]
         for row in report["maps"]
     )
     assert report["style_counts"] == {
@@ -299,6 +341,45 @@ def test_invalid_source_route_contract_rejects_whole_cohort(tmp_path: Path) -> N
             tmp_path / "cold",
             report_path,
             _generator=fake_generator_factory([], invalid_route=bad_map),
+            _static_validator=static_pass,
+            _binding=binding(),
+        )
+
+    assert not report_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("defect", "message"),
+    (
+        (
+            "stale",
+            "route spawn origins do not exactly match independently parsed "
+            "deathmatch entities",
+        ),
+        ("duplicate", "deathmatch spawn origins are not unique"),
+        (
+            "wrong_component",
+            "deathmatch spawn nodes must share one non-null source standing "
+            "component",
+        ),
+    ),
+)
+def test_source_freeze_rejects_unbound_route_spawn_claims(
+    tmp_path: Path, defect: str, message: str,
+) -> None:
+    declaration, _ = cohort.load_declaration(DECLARATION)
+    bad_map = declaration["maps"][1]["map"]
+    report_path = tmp_path / "source-freeze.json"
+
+    with pytest.raises(cohort.GeneratorCohortError, match=message):
+        cohort.generate_source_freeze(
+            DECLARATION,
+            tmp_path / "primary",
+            tmp_path / "cold",
+            report_path,
+            _generator=fake_generator_factory(
+                [], route_spawn_defect=(bad_map, defect)
+            ),
             _static_validator=static_pass,
             _binding=binding(),
         )

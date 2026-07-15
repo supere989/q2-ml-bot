@@ -192,8 +192,8 @@ def _route_results(claims: dict) -> list[dict]:
     ]
 
 
-def test_route_claim_preserves_obstacle_aware_source_geodesic() -> None:
-    routes = {
+def _source_route_fixture(*, distance: int) -> dict:
+    return {
         "version": 2,
         "nodes": [
             {
@@ -216,13 +216,28 @@ def test_route_claim_preserves_obstacle_aware_source_geodesic() -> None:
             "start_node_id": 2,
             "source_component": 0,
             "node_ids": [0, 1],
-            "dist": 2070,
+            "dist": distance,
         }],
     }
+
+
+def test_route_claim_preserves_obstacle_aware_source_geodesic() -> None:
+    routes = _source_route_fixture(distance=2070)
 
     _segments, summaries = _route_contract(routes)
 
     assert summaries[0]["claimed_cost_q8"] == 2070 * 256
+
+
+def test_route_claim_rejects_distance_below_exact_endpoint_loop() -> None:
+    # The exact loop is roughly 801 units. Claim preparation must not silently
+    # normalize an adversarial underclaim up to that geometric lower bound.
+    routes = _source_route_fixture(distance=800)
+
+    with pytest.raises(
+        ClaimValidationError, match="falls below endpoint-loop geometry",
+    ):
+        _route_contract(routes)
 
 
 def _analysis(map_path: Path, claims: dict) -> dict:

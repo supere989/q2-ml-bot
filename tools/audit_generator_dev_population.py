@@ -368,6 +368,7 @@ def audit_development_population(
     total_items = 0
     total_routes = 0
     total_endpoints = 0
+    total_spawns = 0
     for row in rows:
         map_id = str(row["map"])
         files = {}
@@ -429,6 +430,7 @@ def audit_development_population(
         total_items += int(routes["item_origin_count"])
         total_routes += int(routes["route_count"])
         total_endpoints += int(routes["route_endpoint_count"])
+        total_spawns += int(routes["spawn_count"])
         map_reports.append({
             **row,
             "metadata_identity": metadata,
@@ -439,6 +441,8 @@ def audit_development_population(
         })
 
     style_counts = Counter(str(row["style"]) for row in rows)
+    route_reports = [row["route_contract"] for row in map_reports]
+    spawn_counts = [int(route["spawn_count"]) for route in route_reports]
     report = {
         "schema": REPORT_SCHEMA,
         "population_id": POPULATION_ID,
@@ -486,10 +490,20 @@ def audit_development_population(
         "zero_length_route_legs": 0,
         "minimum_distinct_item_endpoints_per_route": 2,
         "all_route_endpoints_are_items": True,
-        "published_dist_matches_endpoint_loop": True,
-        "all_item_nodes_floor_assigned": True,
+        "published_dist_covers_endpoint_loop_geometry": all(
+            route["published_dist_covers_endpoint_loop_geometry"] is True
+            for route in route_reports
+        ),
+        "total_deathmatch_spawn_count": total_spawns,
+        "deathmatch_spawn_count_per_map": min(spawn_counts),
+        "all_maps_have_exactly_eight_deathmatch_spawns": all(
+            count == 8 for count in spawn_counts
+        ),
+        "all_spawns_share_source_standing_component": all(
+            route["all_spawns_share_source_standing_component"] is True
+            for route in route_reports
+        ),
         "item_spawn_origin_collisions": 0,
-        "all_spawns_and_route_endpoints_floor_assigned": True,
         "all_selected_endpoints_share_source_standing_component": True,
         "maps": map_reports,
         "failures": [],

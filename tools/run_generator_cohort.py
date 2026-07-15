@@ -500,6 +500,84 @@ def _default_static_validator(map_path: Path) -> Mapping[str, Any]:
     return static_validate(map_path, arguments)
 
 
+def _source_spawn_origin_binding(
+    map_path: Path,
+    route_contract: Mapping[str, Any],
+    map_id: str,
+) -> dict[str, Any]:
+    """Bind route spawn nodes to independently parsed source-map entities."""
+    from tools.validate_maps import deathmatch_spawn_origins
+
+    try:
+        source_origins = deathmatch_spawn_origins(map_path)
+    except ValueError as exc:
+        raise GeneratorCohortError(str(exc)) from exc
+    route_value = route_contract.get("spawn_origins")
+    if not isinstance(route_value, list):
+        raise GeneratorCohortError(
+            f"{map_id} route contract has no normalized spawn origins"
+        )
+    try:
+        route_origins = tuple(
+            tuple(float(coordinate) for coordinate in origin)
+            for origin in route_value
+        )
+    except (TypeError, ValueError) as exc:
+        raise GeneratorCohortError(
+            f"{map_id} route contract spawn origins are malformed"
+        ) from exc
+    route_unique = len(route_origins) == len(set(route_origins)) == 8
+    source_unique = len(source_origins) == len(set(source_origins)) == 8
+    source_component = route_contract.get("spawn_source_component")
+    shared_component = (
+        isinstance(source_component, int)
+        and not isinstance(source_component, bool)
+        and source_component >= 0
+        and route_contract.get(
+            "all_spawns_share_source_standing_component"
+        ) is True
+    )
+    exact_match = route_origins == source_origins
+    source_rows = [list(origin) for origin in source_origins]
+    route_rows = [list(origin) for origin in route_origins]
+    source_sha256 = sha256_bytes(canonical_bytes(source_rows))
+    route_sha256 = sha256_bytes(canonical_bytes(route_rows))
+    if route_contract.get("spawn_origins_sha256") != route_sha256:
+        raise GeneratorCohortError(
+            f"{map_id} normalized route spawn-origin digest is inconsistent"
+        )
+    if not route_unique:
+        raise GeneratorCohortError(
+            f"{map_id} route contract must contain eight unique spawn origins"
+        )
+    if not source_unique:
+        raise GeneratorCohortError(
+            f"{map_id} source map must contain eight unique spawn origins"
+        )
+    if not shared_component:
+        raise GeneratorCohortError(
+            f"{map_id} route spawns do not share one non-null source component"
+        )
+    if not exact_match:
+        raise GeneratorCohortError(
+            f"{map_id} route spawn origins do not exactly match independently "
+            "parsed deathmatch entities"
+        )
+    return {
+        "schema": "q2-generator-source-spawn-origin-binding-v1",
+        "source_artifact": ".map",
+        "source_parser": "tools.validate_maps.deathmatch_spawn_origins-v1",
+        "deathmatch_spawn_count": len(source_origins),
+        "spawn_origins": source_rows,
+        "source_spawn_origins_sha256": source_sha256,
+        "route_spawn_origins_sha256": route_sha256,
+        "route_contract_exact_match": exact_match,
+        "all_spawn_origins_unique": route_unique and source_unique,
+        "source_component": source_component,
+        "all_spawns_share_source_standing_component": shared_component,
+    }
+
+
 def _default_generator(
     name: str,
     seed: int,
@@ -646,6 +724,16 @@ def generate_source_freeze(
             raise GeneratorCohortError(str(exc)) from exc
         if route_contract != cold_route_contract:
             raise GeneratorCohortError(f"{name} cold route contract differs")
+        spawn_origin_binding = _source_spawn_origin_binding(
+            output_dir / f"{name}.map", route_contract, name
+        )
+        cold_spawn_origin_binding = _source_spawn_origin_binding(
+            cold_dir / f"{name}.map", cold_route_contract, name
+        )
+        if spawn_origin_binding != cold_spawn_origin_binding:
+            raise GeneratorCohortError(
+                f"{name} cold spawn-origin binding differs"
+            )
 
         source_files = {}
         for suffix in SOURCE_SUFFIXES:
@@ -674,6 +762,7 @@ def generate_source_freeze(
             "metadata": metadata,
             "source_static": static,
             "route_contract": route_contract,
+            "spawn_origin_binding": spawn_origin_binding,
             "source_files": source_files,
         })
 
@@ -694,6 +783,7 @@ def generate_source_freeze(
         "style_counts": dict(sorted(style_counts.items())),
         "unique_layout_count": len(map_hashes),
         "route_contract_pass_count": len(rows),
+        "spawn_origin_binding_pass_count": len(rows),
         "source_suffixes": list(SOURCE_SUFFIXES),
         "cold_rebuild": {
             "fresh_process_required": False,

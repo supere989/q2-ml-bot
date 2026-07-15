@@ -586,7 +586,9 @@ def build_route_graph(
             "node_ids": visited,
             "items": [n["class"] for n in seq],
             "respawn_s": [n["respawn_s"] for n in seq],
-            "dist": round(claimed_distance),
+            # Never round a source geodesic below the exact endpoint-loop
+            # geometry that it is required to cover at source freeze.
+            "dist": math.ceil(claimed_distance),
             "risk": risk,
             "value": round(sum(n["value"] for n in seq), 2),
         }
