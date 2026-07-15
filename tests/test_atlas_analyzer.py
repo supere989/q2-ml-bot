@@ -21,10 +21,12 @@ from harness.atlas_analyzer import (
     NavNode,
     _MoverDependencyIndex,
     _apply_stock_drop_hazards,
+    _add_exact_platform_navigation,
     _atlas_channels,
     _analyze_hook_claims,
     _build_navigation,
     _complete_pmove_source_set,
+    _drop_settle_request,
     _dynamic_mover_dependency_index,
     _exact_landing_key,
     _l0_chunks,
@@ -339,6 +341,60 @@ def test_inline_mover_uses_fixed_transformed_cm_and_unknown_dynamic_envelope() -
     assert all(request["origin"] == [0.0, 0.0, 0.0] for request in transformed)
     assert all(request["angles"] == [0.0, 0.0, 0.0] for request in transformed)
     assert all("model_index" not in request for request in transformed)
+    planes = {name for chunk in chunks for name in chunk["bits"]}
+    assert "mover_reference_solid" in planes
+    assert {"mover_swept_envelope", "unknown"} <= planes
+    assert semantics["mover_dynamic_unknown"] > 0
+    assert surfaces["inline_fixed_pose_count"] == 1
+    assert surfaces["inline_models"][0]["authority"] == "exact-fixed-transformed-cm"
+
+
+def test_platform_surface_uses_exact_current_pose_and_full_unknown_envelope() -> None:
+    platform = EntityMetadata(
+        index=1,
+        classname="func_plat",
+        properties=(
+            ("model", "*1"), ("origin", "0 0 0"),
+            ("height", "16"),
+        ),
+    )
+    metadata = SimpleNamespace(
+        entities=(platform,),
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0), headnode=0),
+            SimpleNamespace(
+                mins=(16.0, -8.0, 0.0), maxs=(24.0, 8.0, 16.0),
+                origin=(0.0, 0.0, 0.0), headnode=17,
+            ),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 1, "model_index": 1},
+        )),
+    )
+    nodes = {
+        (0, 0, -2): NavNode(
+            (0, 0, -2), (8.0, 8.0, -8.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        ),
+        (0, 0, 0): NavNode(
+            (0, 0, 0), (8.0, 8.0, 24.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        ),
+    }
+    cm = _ExactFloorCm()
+    surfaces = {}
+    semantics = {}
+    chunks = _l0_chunks(
+        nodes, [], (0, 0, 0), cm=cm, metadata=metadata,
+        surface_summary=surfaces, semantic_summary=semantics,
+    )
+    transformed = [
+        request for request in cm.seen
+        if request["op"] == "transformed_box_trace"
+    ]
+    assert transformed
+    # Untargeted platforms start linked at their exact lower endpoint.
+    assert all(request["origin"] == [0.0, 0.0, -16.0] for request in transformed)
     planes = {name for chunk in chunks for name in chunk["bits"]}
     assert "mover_reference_solid" in planes
     assert {"mover_swept_envelope", "unknown"} <= planes
@@ -706,6 +762,42 @@ def test_exact_edge_target_uses_first_landing_not_later_final_state() -> None:
     assert _exact_landing_key(record, (0, 0, 0)) == (1, 0, 0)
 
 
+def test_airborne_probe_gets_one_continuous_neutral_settle_replay() -> None:
+    request = {
+        "id": "drop:1:2:3:ground:90:pmove", "op": "simulate",
+        "commands": [
+            {"msec": 50, "angles": [0, 90, 0], "forwardmove": 300}
+            for _ in range(4)
+        ],
+    }
+    response = {"frames": [
+        {"grounded": True}, {"grounded": True},
+        {"grounded": False}, {"grounded": False},
+    ]}
+    extended = _drop_settle_request(request, response, horizon_frames=8)
+    assert extended is not None
+    assert extended["id"] == request["id"]
+    assert extended["commands"][:4] == request["commands"]
+    assert extended["commands"][4:] == [
+        {"msec": 50, "angles": [0, 90, 0]} for _ in range(4)
+    ]
+    assert request["commands"][-1]["forwardmove"] == 300
+
+
+def test_landed_or_grounded_probe_does_not_get_settle_replay() -> None:
+    request = {
+        "id": "drop:1:2:3:ground:0:pmove", "op": "simulate",
+        "commands": [{"msec": 50, "angles": [0, 0, 0]} for _ in range(4)],
+    }
+    assert _drop_settle_request(
+        request, {"frames": [{"grounded": True} for _ in range(4)]},
+    ) is None
+    assert _drop_settle_request(request, {"frames": [
+        {"grounded": True}, {"grounded": False},
+        {"grounded": False}, {"grounded": True},
+    ]}) is None
+
+
 def test_dynamic_mover_swept_path_dependence_is_detected() -> None:
     dependency = _MoverDependencyIndex((
         Aabb((20.0, -4.0, -24.0), (24.0, 4.0, 32.0)),
@@ -744,6 +836,173 @@ def test_inline_dynamic_classes_poison_intersecting_pmove(
         "maxs": [16.0, 16.0, 32.0],
     }]}
     assert dependency.intersects_trajectory(response, request)
+
+
+def test_func_plat_localizes_unknown_to_exact_vertical_swept_envelope() -> None:
+    entity = EntityMetadata(
+        1, "func_plat", (
+            ("classname", "func_plat"), ("model", "*1"),
+            ("origin", "100 0 80"), ("height", "40"),
+        ),
+    )
+    metadata = SimpleNamespace(
+        entities=(entity,),
+        models=(
+            SimpleNamespace(mins=(-1024.0,) * 3, maxs=(1024.0,) * 3),
+            SimpleNamespace(mins=(-8.0, -8.0, -4.0), maxs=(8.0, 8.0, 4.0)),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 1, "model_index": 1},
+        )),
+    )
+    dependency = _dynamic_mover_dependency_index(metadata)
+    assert not dependency.globally_unknown
+
+    remote = {"frames": [{
+        "origin": [0.0, 0.0, 0.0],
+        "mins": [-16.0, -16.0, -24.0],
+        "maxs": [16.0, 16.0, 32.0],
+    }]}
+    assert not dependency.intersects_trajectory(remote, {"origin": [0.0, 0.0, 0.0]})
+
+    through_platform = {"frames": [{
+        "origin": [100.0, 0.0, 50.0],
+        "mins": [-16.0, -16.0, -24.0],
+        "maxs": [16.0, 16.0, 32.0],
+    }]}
+    assert dependency.intersects_trajectory(
+        through_platform, {"origin": [100.0, 0.0, 50.0]},
+    )
+
+
+class _ExactPlatformNavigationCm:
+    def __init__(self) -> None:
+        self.requests = 0
+        self.limits = AnalyzerLimits(max_oracle_requests=10_000)
+
+    def call(self, requests):
+        self.requests += len(requests)
+        output = []
+        for request in requests:
+            if request["op"] == "point_contents":
+                output.append({
+                    "ok": True, "id": request["id"], "op": request["op"],
+                    "contents": 0,
+                })
+                continue
+            support = request["id"].startswith("platform-support:")
+            if support:
+                pose_z = float(request["origin"][2])
+                endpos = [32.0, 32.0, 40.0 + pose_z]
+                fraction = 0.5
+                normal = [0.0, 0.0, 1.0]
+                surface = {"name": "platform-top", "flags": 0, "value": 0}
+                contents = 1
+            else:
+                endpos = list(request["end"])
+                fraction = 1.0
+                normal = [0.0, 0.0, 0.0]
+                surface = {"name": "", "flags": 0, "value": 0}
+                contents = 0
+            output.append({
+                "ok": True, "id": request["id"], "op": request["op"],
+                "startsolid": False, "allsolid": False,
+                "fraction": fraction, "endpos": endpos, "contents": contents,
+                "plane": {"normal": normal, "dist": 0.0, "type": 0, "signbits": 0},
+                "surface": surface,
+            })
+        return output
+
+
+def test_exact_platform_adds_stateful_boarding_and_endpoint_edges() -> None:
+    platform = EntityMetadata(
+        1, "func_plat", (
+            ("classname", "func_plat"), ("model", "*1"),
+            ("height", "32"),
+        ),
+    )
+    metadata = SimpleNamespace(
+        entities=(platform,),
+        models=(
+            SimpleNamespace(mins=(-128.0,) * 3, maxs=(128.0,) * 3, headnode=0),
+            SimpleNamespace(
+                mins=(0.0, 0.0, 0.0), maxs=(64.0, 64.0, 16.0), headnode=17,
+            ),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 1, "model_index": 1},
+        )),
+    )
+    bottom_static = (5, 2, 0)
+    top_static = (5, 2, 2)
+    nodes = {
+        bottom_static: NavNode(
+            bottom_static, (80.0, 32.0, 8.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        ),
+        top_static: NavNode(
+            top_static, (80.0, 32.0, 40.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        ),
+    }
+    edges = []
+    edge_keys = set()
+    _add_exact_platform_navigation(
+        _ExactPlatformNavigationCm(), metadata, nodes, edges, edge_keys,
+        (0, 0, 0),
+    )
+    assert {(2, 2, 0), (2, 2, 2)} <= set(nodes)
+    assert len(edges) == 6
+    assert all(edge["edge_type"] == "mover" for edge in edges)
+    assert all(edge["blocker"] == 1 for edge in edges)
+    assert all(edge["evidence"] == 1 for edge in edges)
+    assert all(edge["validation_version"] == 1 for edge in edges)
+    assert all(edge["confidence"] == 32768 for edge in edges)
+    adjacency = {}
+    for edge in edges:
+        adjacency.setdefault(tuple(edge["source"]), set()).add(tuple(edge["target"]))
+    visited = {bottom_static}
+    pending = [bottom_static]
+    while pending:
+        for target in adjacency.get(pending.pop(), ()):
+            if target not in visited:
+                visited.add(target)
+                pending.append(target)
+    assert top_static in visited
+
+
+def test_target_disabled_platform_does_not_claim_activation_topology() -> None:
+    platform = EntityMetadata(
+        1, "func_plat", (
+            ("classname", "func_plat"), ("model", "*1"),
+            ("height", "32"), ("targetname", "manual"),
+        ),
+    )
+    metadata = SimpleNamespace(
+        entities=(platform,),
+        models=(
+            SimpleNamespace(mins=(-128.0,) * 3, maxs=(128.0,) * 3, headnode=0),
+            SimpleNamespace(
+                mins=(0.0, 0.0, 0.0), maxs=(64.0, 64.0, 16.0), headnode=17,
+            ),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 1, "model_index": 1},
+        )),
+    )
+    nodes = {
+        (5, 2, 0): NavNode(
+            (5, 2, 0), (80.0, 32.0, 8.0), True, True, True, 0,
+            (0.0, 0.0, 1.0),
+        ),
+    }
+    edges = []
+    _add_exact_platform_navigation(
+        _ExactPlatformNavigationCm(), metadata, nodes, edges, set(),
+        (0, 0, 0),
+    )
+    assert set(nodes) == {(5, 2, 0)}
+    assert edges == []
 
 
 def test_navigation_rejects_missing_dynamic_mover_authority() -> None:

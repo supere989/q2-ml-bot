@@ -251,6 +251,7 @@ def materialize(
                 nodes, edges, spawn_indices, _drop_classifications = _build_navigation(
                     cm, pmove, fall, bsp, spawns, origin, limits, candidate_points,
                     _dynamic_mover_dependency_index(metadata),
+                    metadata=metadata,
                 )
                 reachable = _reachable_nodes(edges, spawn_indices)
                 geometries: set[tuple] = set()

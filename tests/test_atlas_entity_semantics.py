@@ -15,6 +15,7 @@ from harness.atlas_entity_semantics import (
     L0PlaneKind,
     RotationAxis,
     entity_angles,
+    platform_mover_semantics,
     rotating_mover_semantics,
     set_movedir,
     sliding_mover_semantics,
@@ -110,6 +111,42 @@ def test_sliding_start_open_swaps_declared_poses_and_zero_lip_uses_default() -> 
     water_semantics = exact(sliding_mover_semantics(water, (0, 0, 0), (8, 8, 24)))
     assert water_semantics.lip == 0
     assert water_semantics.distance == 24
+
+
+def test_platform_uses_exact_vertical_endpoint_law_and_initial_pose() -> None:
+    platform = entity(
+        1, "func_plat", ("origin", "100 200 300"), ("lip", "0"),
+    )
+    semantics = exact(platform_mover_semantics(platform, (-32, -16, -8), (32, 16, 56)))
+    assert semantics.lip == 8
+    assert semantics.height is None
+    assert semantics.pos1 == (100.0, 200.0, 300.0)
+    assert semantics.pos2 == (100.0, 200.0, 244.0)
+    assert semantics.current_origin == semantics.pos2
+    assert not semantics.target_disabled
+    assert semantics.potential_envelope.bounds.mins == (68.0, 184.0, 236.0)
+    assert semantics.potential_envelope.bounds.maxs == (132.0, 216.0, 356.0)
+    assert semantics.potential_envelope.collision_authority is Authority.UNKNOWN
+
+    disabled = entity(
+        2, "func_plat", ("origin", "0 0 64"), ("height", "40.9"),
+        ("lip", "2"), ("targetname", "manual"),
+    )
+    explicit = exact(platform_mover_semantics(disabled, (0, 0, 0), (64, 64, 16)))
+    assert explicit.height == 40
+    assert explicit.pos2 == (0.0, 0.0, 24.0)
+    assert explicit.current_origin == explicit.pos1
+    assert explicit.target_disabled
+
+
+def test_platform_rejects_other_classes_and_malformed_origin() -> None:
+    assert platform_mover_semantics(
+        entity(1, "func_door"), (0, 0, 0), (8, 8, 8),
+    ).authority is Authority.UNKNOWN
+    malformed = entity(2, "func_plat", ("origin", "0 0"))
+    assert platform_mover_semantics(
+        malformed, (0, 0, 0), (8, 8, 8),
+    ).authority is Authority.UNKNOWN
 
 
 def test_train_unique_open_chain_is_exact_and_aligns_model_minimum() -> None:

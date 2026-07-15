@@ -29,6 +29,7 @@ from .atlas_entity_semantics import (
     L0PlaneKind,
     entity_angles,
     ordered_property,
+    platform_mover_semantics,
     rotating_mover_semantics,
     sliding_mover_semantics,
     train_topology,
@@ -72,6 +73,7 @@ EVIDENCE_PMOVE_V1 = 2
 EVIDENCE_HOOK_LAW_V1 = 4
 EVIDENCE_FALL_LAW_V1 = 8
 VALIDATION_VERSION = 1
+PMOVE_DROP_HORIZON_FRAMES = 40
 MASK_PLAYERSOLID = 33_619_971
 MASK_SHOT = 100_663_299
 CONTENTS_SOLID = 1
@@ -549,6 +551,48 @@ class _MoverDependencyIndex:
     envelopes: tuple[Aabb, ...]
     globally_unknown: bool = False
 
+    def intersects_box_path(
+        self,
+        points: Sequence[Sequence[float]],
+        mins: Sequence[float],
+        maxs: Sequence[float],
+    ) -> bool:
+        """Conservatively test swept hull segments against mover envelopes."""
+
+        if self.globally_unknown:
+            return True
+        if not points or any(len(point) != 3 for point in points):
+            return True
+        if len(mins) != 3 or len(maxs) != 3:
+            return True
+        if any(
+            type(value) not in (int, float) or not math.isfinite(value)
+            for vector in (*points, mins, maxs) for value in vector
+        ):
+            return True
+        hulls = [
+            Aabb(
+                tuple(point[axis] + mins[axis] for axis in range(3)),
+                tuple(point[axis] + maxs[axis] for axis in range(3)),
+            )  # type: ignore[arg-type]
+            for point in points
+        ]
+        segments = hulls[:1] + [
+            Aabb(
+                tuple(min(left.mins[axis], right.mins[axis]) for axis in range(3)),
+                tuple(max(left.maxs[axis], right.maxs[axis]) for axis in range(3)),
+            )  # type: ignore[arg-type]
+            for left, right in zip(hulls, hulls[1:])
+        ]
+        return any(
+            all(
+                segment.maxs[axis] >= mover.mins[axis]
+                and mover.maxs[axis] >= segment.mins[axis]
+                for axis in range(3)
+            )
+            for segment in segments for mover in self.envelopes
+        )
+
     def intersects_trajectory(
         self, response: Mapping[str, Any], request: Mapping[str, Any] | None = None,
     ) -> bool:
@@ -612,7 +656,9 @@ class _MoverDependencyIndex:
         return False
 
 
-def _dynamic_mover_dependency_index(metadata: BspMetadata) -> _MoverDependencyIndex:
+def _dynamic_mover_dependency_index(
+    metadata: BspMetadata, *, exclude_entity_index: int | None = None,
+) -> _MoverDependencyIndex:
     """Derive conservative mover envelopes without treating them as collision.
 
     An unsupported mover law poisons all Pmove-derived traversal.  This is
@@ -631,6 +677,8 @@ def _dynamic_mover_dependency_index(metadata: BspMetadata) -> _MoverDependencyIn
 
     for record in metadata.entity_catalog.brush_submodels:
         entity = entities[int(record["entity_index"])]
+        if entity.index == exclude_entity_index:
+            continue
         classname = entity.classname.casefold()
         if not classname.startswith("func_") or classname == "func_areaportal":
             continue
@@ -665,6 +713,12 @@ def _dynamic_mover_dependency_index(metadata: BspMetadata) -> _MoverDependencyIn
                 envelopes.append(result.value.potential_envelope.bounds)
             else:
                 globally_unknown = True
+        elif classname == "func_plat":
+            result = platform_mover_semantics(entity, cmodel.mins, cmodel.maxs)
+            if result.is_exact and result.value is not None:
+                envelopes.append(result.value.potential_envelope.bounds)
+            else:
+                globally_unknown = True
         elif classname in {"func_rotating", "func_door_rotating"}:
             result = rotating_mover_semantics(entity, cmodel.mins, cmodel.maxs)
             if result.is_exact and result.value is not None:
@@ -688,8 +742,8 @@ def _dynamic_mover_dependency_index(metadata: BspMetadata) -> _MoverDependencyIn
                     tuple(max(pose.maxs[axis] for pose in poses) for axis in range(3)),
                 ))  # type: ignore[arg-type]
         else:
-            # func_plat and unimplemented mover classes have no admitted path
-            # law.  Current-pose bounds cannot prove their future occupancy.
+            # Unimplemented mover classes have no admitted path law.
+            # Current-pose bounds cannot prove their future occupancy.
             globally_unknown = True
     return _MoverDependencyIndex(tuple(envelopes), globally_unknown)
 
@@ -1097,6 +1151,59 @@ def _movement_edge_stance(
     return None
 
 
+def _drop_settle_request(
+    request: Mapping[str, Any], response: Mapping[str, Any],
+    *, horizon_frames: int = PMOVE_DROP_HORIZON_FRAMES,
+) -> dict[str, Any] | None:
+    """Extend an airborne edge exit with neutral Pmove coast frames.
+
+    The first simulation remains the bounded four-frame ground probe or
+    sixteen-frame jump probe.  Only a trajectory that became airborne without
+    a false-to-true grounded transition is replayed from its original state
+    under the same canonical ID, with neutral commands appended.  The exact
+    oracle therefore returns one continuous trajectory; frames are never
+    stitched or ballistically extrapolated.
+    """
+
+    frames = response.get("frames")
+    commands = request.get("commands")
+    if not isinstance(frames, list) or not isinstance(commands, list):
+        raise AtlasAnalysisError("Pmove trajectory lacks frames or commands")
+    if len(frames) != len(commands) or not frames:
+        raise AtlasAnalysisError("Pmove trajectory frame count differs from request")
+    grounded: list[bool] = []
+    for frame in frames:
+        if not isinstance(frame, Mapping) or type(frame.get("grounded")) is not bool:
+            raise AtlasAnalysisError("Pmove trajectory has invalid grounded state")
+        grounded.append(frame["grounded"])
+    if not any(not value for value in grounded):
+        return None
+    if any(not grounded[index - 1] and grounded[index] for index in range(1, len(grounded))):
+        return None
+    if horizon_frames <= len(commands):
+        return None
+    last = commands[-1]
+    if not isinstance(last, Mapping):
+        raise AtlasAnalysisError("Pmove trajectory command is invalid")
+    msec = last.get("msec")
+    if type(msec) is not int or msec <= 0:
+        raise AtlasAnalysisError("Pmove trajectory command cadence is invalid")
+    coast: dict[str, Any] = {"msec": msec}
+    if "angles_short" in last:
+        coast["angles_short"] = list(last["angles_short"])
+    elif "angles" in last:
+        coast["angles"] = list(last["angles"])
+    else:
+        raise AtlasAnalysisError("Pmove trajectory command lacks view angles")
+    return {
+        **dict(request),
+        "commands": [
+            *[dict(command) for command in commands],
+            *[dict(coast) for _ in range(horizon_frames - len(commands))],
+        ],
+    }
+
+
 def _exact_landing_key(
     record: Mapping[str, Any], origin: tuple[int, int, int],
 ) -> tuple[int, int, int] | None:
@@ -1120,6 +1227,347 @@ def _apply_stock_drop_hazards(
     hazards["exact_lethal_candidates_omitted"] = int(summary["exact_lethal"])
 
 
+def _add_exact_platform_navigation(
+    cm: OracleProcess,
+    metadata: BspMetadata,
+    nodes: dict[tuple[int, int, int], NavNode],
+    edges: list[dict[str, Any]],
+    edge_keys: set[tuple[Any, ...]],
+    origin: tuple[int, int, int],
+) -> None:
+    """Add stateful ``func_plat`` boarding and endpoint edges.
+
+    Platform motion is not model-0 Pmove collision.  The pure entity law
+    supplies both vertical transforms; transformed CM must prove a supported,
+    clear standing origin at each pose, and both model-0 and transformed CM
+    must prove the short boarding corridor to a pre-existing static node.
+    Every admitted connector and ride remains typed ``mover`` with the edict
+    identity and reduced state confidence.  Target-disabled platforms are
+    omitted until trigger activation semantics are modeled.
+    """
+
+    entities = {entity.index: entity for entity in metadata.entities}
+
+    def transformed_request(
+        identifier: str,
+        start: Sequence[float],
+        end: Sequence[float],
+        mins: Sequence[float],
+        maxs: Sequence[float],
+        *, headnode: int,
+        pose_origin: Sequence[float],
+    ) -> dict[str, Any]:
+        return {
+            "id": identifier, "op": "transformed_box_trace",
+            "start": list(start), "end": list(end),
+            "mins": list(mins), "maxs": list(maxs),
+            "headnode": headnode, "mask": MASK_PLAYERSOLID,
+            "origin": list(pose_origin), "angles": [0.0, 0.0, 0.0],
+        }
+
+    def trace_clear(trace: Mapping[str, Any]) -> bool:
+        return (
+            trace.get("fraction") == 1
+            and trace.get("startsolid") is False
+            and trace.get("allsolid") is False
+        )
+
+    def add_edge(
+        source: tuple[int, int, int], target: tuple[int, int, int],
+        *, blocker: int, cost: int,
+    ) -> None:
+        key = (source, target, "mover", "standing")
+        if key in edge_keys:
+            return
+        edge_keys.add(key)
+        edges.append({
+            "source": list(source), "target": list(target),
+            "edge_type": "mover", "stance": "standing",
+            "flags": 0, "blocker": blocker,
+            "cost": min(max(cost, 4096), 0xFFFFFFFF),
+            "risk": 0, "confidence": 32768,
+            "evidence": EVIDENCE_CM_TRACE_V1,
+            "validation_version": VALIDATION_VERSION,
+            "auxiliary": 0xFFFFFFFF,
+        })
+
+    def supports_target(
+        trace: Mapping[str, Any], target: Sequence[float],
+    ) -> bool:
+        normal = (trace.get("plane") or {}).get("normal")
+        endpos = trace.get("endpos")
+        return (
+            trace.get("startsolid") is False
+            and trace.get("allsolid") is False
+            and type(trace.get("fraction")) in (int, float)
+            and 0 <= trace["fraction"] <= 1
+            and isinstance(normal, list) and len(normal) == 3 and normal[2] >= 0.7
+            and isinstance(endpos, list) and len(endpos) == 3
+            and all(abs(float(endpos[axis]) - target[axis]) <= 0.25 for axis in range(3))
+        )
+
+    def connector_clear(
+        source: NavNode, target: NavNode,
+        *, entity_index: int, label: str, headnode: int,
+        pose_origin: Sequence[float], direction: str,
+    ) -> bool:
+        """Validate same-level, step-up, or short safe-down boarding."""
+
+        delta = target.position[2] - source.position[2]
+        if abs(delta) > 18.0:
+            return False
+
+        def pair(
+            suffix: str, start: Sequence[float], end: Sequence[float],
+        ) -> list[dict[str, Any]]:
+            return [
+                _box_request(
+                    f"platform-{suffix}-world:{entity_index}:{label}:{direction}",
+                    start, end, STANDING_MINS, STANDING_MAXS,
+                ),
+                transformed_request(
+                    f"platform-{suffix}-inline:{entity_index}:{label}:{direction}",
+                    start, end, STANDING_MINS, STANDING_MAXS,
+                    headnode=headnode, pose_origin=pose_origin,
+                ),
+            ]
+
+        if abs(delta) <= 0.5:
+            return all(trace_clear(trace) for trace in cm.call(pair(
+                "board-level", source.position, target.position,
+            )))
+        if delta > 0:
+            # Pmove's canonical stair branch tests the elevated origin, moves
+            # forward at +18, then traces down exactly 18 units.  One of the
+            # two collision authorities must supply the target support; the
+            # other must remain clear to that same endpoint.
+            up = (
+                source.position[0], source.position[1], source.position[2] + 18.0,
+            )
+            forward = (target.position[0], target.position[1], up[2])
+            down = (target.position[0], target.position[1], source.position[2])
+            raised = cm.call(pair("board-step-raised", up, up))
+            forward_traces = cm.call(pair("board-step-forward", up, forward))
+            if not all(trace_clear(trace) for trace in (*raised, *forward_traces)):
+                return False
+            down_traces = cm.call(pair("board-step-down", forward, down))
+            return (
+                any(supports_target(trace, target.position) for trace in down_traces)
+                and all(
+                    trace_clear(trace) or supports_target(trace, target.position)
+                    for trace in down_traces
+                )
+            )
+
+        # Leaving a platform for a floor no more than STEPSIZE below first
+        # moves horizontally at the supported source height, then obtains the
+        # exact model-0/inline support with a bounded downward trace. This is a
+        # typed mover connector, not an unconditional static walk edge.
+        horizontal = (
+            target.position[0], target.position[1], source.position[2],
+        )
+        horizontal_traces = cm.call(pair(
+            "board-down-forward", source.position, horizontal,
+        ))
+        if not all(trace_clear(trace) for trace in horizontal_traces):
+            return False
+        down = (
+            target.position[0], target.position[1], target.position[2] - 2.0,
+        )
+        down_traces = cm.call(pair("board-down-support", horizontal, down))
+        return (
+            any(supports_target(trace, target.position) for trace in down_traces)
+            and all(
+                trace_clear(trace) or supports_target(trace, target.position)
+                for trace in down_traces
+            )
+        )
+
+    # Boarding searches may only terminate at nodes that existed before any
+    # platform endpoint was inserted.  One platform can never validate another
+    # platform's state-dependent support by graph proximity alone.
+    static_nodes = tuple(nodes.items())
+    for record in metadata.entity_catalog.brush_submodels:
+        entity = entities[int(record["entity_index"])]
+        if entity.classname.casefold() != "func_plat":
+            continue
+        model_index = int(record["model_index"])
+        model = metadata.models[model_index]
+        cmodel = Aabb(
+            tuple(value - 1.0 for value in model.mins),
+            tuple(value + 1.0 for value in model.maxs),
+        )  # type: ignore[arg-type]
+        result = platform_mover_semantics(entity, cmodel.mins, cmodel.maxs)
+        if not result.is_exact or result.value is None:
+            continue
+        platform = result.value
+        if platform.target_disabled:
+            continue
+        # A standing hull must fit wholly over the authored top face.  Merely
+        # touching a thin decorative brush is not a boardable lift.
+        if (
+            cmodel.maxs[0] - cmodel.mins[0] < 32.0
+            or cmodel.maxs[1] - cmodel.mins[1] < 32.0
+        ):
+            continue
+        other_movers = _dynamic_mover_dependency_index(
+            metadata, exclude_entity_index=entity.index,
+        )
+        pose_specs = (
+            ("bottom", platform.pos2, platform.endpoint_pose.bounds),
+            ("top", platform.pos1, platform.reference_pose.bounds),
+        )
+        proposed: list[
+            tuple[str, tuple[float, float, float], tuple[float, float, float]]
+        ] = []
+        support_requests: list[dict[str, Any]] = []
+        for label, pose_origin, bounds in pose_specs:
+            nominal = (
+                (bounds.mins[0] + bounds.maxs[0]) * 0.5,
+                (bounds.mins[1] + bounds.maxs[1]) * 0.5,
+                bounds.maxs[2] + 24.0,
+            )
+            proposed.append((label, pose_origin, nominal))
+            support_requests.append(transformed_request(
+                f"platform-support:{entity.index}:{label}",
+                (nominal[0], nominal[1], nominal[2] + 8.0),
+                (nominal[0], nominal[1], nominal[2] - 16.0),
+                STANDING_MINS, STANDING_MAXS,
+                headnode=model.headnode, pose_origin=pose_origin,
+            ))
+        supports = cm.call(support_requests)
+        endpoint_records: list[
+            tuple[str, tuple[float, float, float], tuple[int, int, int]]
+        ] = []
+        for (label, pose_origin, _), support in zip(proposed, supports):
+            normal = (support.get("plane") or {}).get("normal")
+            position = support.get("endpos")
+            if (
+                support.get("startsolid") is not False
+                or support.get("allsolid") is not False
+                or type(support.get("fraction")) not in (int, float)
+                or not 0 <= support["fraction"] < 1
+                or not isinstance(normal, list) or len(normal) != 3
+                or normal[2] < 0.7
+                or not isinstance(position, list) or len(position) != 3
+                or any(type(value) not in (int, float) or not math.isfinite(value)
+                       for value in position)
+            ):
+                continue
+            exact_position = tuple(float(value) for value in position)
+            clear_requests = [
+                _box_request(
+                    f"platform-world-stand:{entity.index}:{label}",
+                    exact_position, exact_position, STANDING_MINS, STANDING_MAXS,
+                ),
+                _box_request(
+                    f"platform-world-crouch:{entity.index}:{label}",
+                    exact_position, exact_position, CROUCHED_MINS, CROUCHED_MAXS,
+                ),
+                transformed_request(
+                    f"platform-inline-stand:{entity.index}:{label}",
+                    exact_position, exact_position, STANDING_MINS, STANDING_MAXS,
+                    headnode=model.headnode, pose_origin=pose_origin,
+                ),
+                transformed_request(
+                    f"platform-inline-crouch:{entity.index}:{label}",
+                    exact_position, exact_position, CROUCHED_MINS, CROUCHED_MAXS,
+                    headnode=model.headnode, pose_origin=pose_origin,
+                ),
+                {"id": f"platform-contents:{entity.index}:{label}",
+                 "op": "point_contents", "point": list(exact_position)},
+            ]
+            stand, crouch, inline_stand, inline_crouch, contents = cm.call(clear_requests)
+            if not trace_clear(stand) or not trace_clear(inline_stand):
+                continue
+            crouched_clear = trace_clear(crouch) and trace_clear(inline_crouch)
+            key = _grid_index(exact_position, origin, 16)
+            existing = nodes.get(key)
+            if existing is None:
+                nodes[key] = NavNode(
+                    key, exact_position, True, crouched_clear, True,
+                    int(contents["contents"]), tuple(float(value) for value in normal),
+                    floor_surface_flags=(support.get("surface") or {}).get("flags", 0),
+                    floor_surface_name=(support.get("surface") or {}).get("name", ""),
+                )
+            elif not existing.standing_clear:
+                continue
+            endpoint_records.append((label, pose_origin, key))
+
+        if len(endpoint_records) != 2:
+            # Remove an endpoint inserted for a platform whose other pose did
+            # not prove. Existing static nodes are never removed.
+            static_keys = {key for key, _ in static_nodes}
+            for _, _, key in endpoint_records:
+                if key not in static_keys:
+                    nodes.pop(key, None)
+            continue
+
+        connector_by_label: dict[str, tuple[int, int, int]] = {}
+        for label, pose_origin, endpoint_key in endpoint_records:
+            endpoint = nodes[endpoint_key]
+            candidates = [
+                (key, node) for key, node in static_nodes
+                if key != endpoint_key and node.standing_clear
+                and abs(node.position[2] - endpoint.position[2]) <= 18.0
+                and (
+                    (node.position[0] - endpoint.position[0]) ** 2
+                    + (node.position[1] - endpoint.position[1]) ** 2
+                ) <= 64.0 ** 2
+            ]
+            candidates.sort(key=lambda item: (
+                (item[1].position[0] - endpoint.position[0]) ** 2
+                + (item[1].position[1] - endpoint.position[1]) ** 2,
+                item[0][2], item[0][1], item[0][0],
+            ))
+            selected = None
+            for candidate_key, candidate in candidates:
+                if other_movers.intersects_box_path(
+                    (endpoint.position, candidate.position),
+                    STANDING_MINS, STANDING_MAXS,
+                ):
+                    continue
+                if (
+                    connector_clear(
+                        endpoint, candidate, entity_index=entity.index,
+                        label=label, headnode=model.headnode,
+                        pose_origin=pose_origin, direction="out",
+                    )
+                    and connector_clear(
+                        candidate, endpoint, entity_index=entity.index,
+                        label=label, headnode=model.headnode,
+                        pose_origin=pose_origin, direction="in",
+                    )
+                ):
+                    selected = candidate_key
+                    break
+            if selected is not None:
+                connector_by_label[label] = selected
+
+        if set(connector_by_label) != {"bottom", "top"}:
+            static_keys = {key for key, _ in static_nodes}
+            for _, _, key in endpoint_records:
+                if key not in static_keys:
+                    nodes.pop(key, None)
+            continue
+
+        endpoints = {label: key for label, _, key in endpoint_records}
+        travel_cost = round(abs(platform.pos1[2] - platform.pos2[2]) * 256.0)
+        for label in ("bottom", "top"):
+            endpoint_key = endpoints[label]
+            connector = connector_by_label[label]
+            add_edge(endpoint_key, connector, blocker=entity.index, cost=4096)
+            add_edge(connector, endpoint_key, blocker=entity.index, cost=4096)
+        add_edge(
+            endpoints["bottom"], endpoints["top"],
+            blocker=entity.index, cost=travel_cost,
+        )
+        add_edge(
+            endpoints["top"], endpoints["bottom"],
+            blocker=entity.index, cost=travel_cost,
+        )
+
+
 def _build_navigation(
     cm: OracleProcess,
     pmove: OracleProcess | None,
@@ -1131,6 +1579,7 @@ def _build_navigation(
     candidate_points: Sequence[tuple[float, float, float]] = (),
     mover_dependencies: _MoverDependencyIndex | None = None,
     movement_accounting: dict[str, Any] | None = None,
+    metadata: BspMetadata | None = None,
 ) -> tuple[
     dict[tuple[int, int, int], NavNode],
     list[dict],
@@ -1275,6 +1724,15 @@ def _build_navigation(
             if len(edges) > limits.max_l1_edges:
                 raise AtlasAnalysisError("L1 flood exceeded edge budget")
 
+    if metadata is not None:
+        _add_exact_platform_navigation(
+            cm, metadata, nodes, edges, edge_keys, origin,
+        )
+        if len(nodes) > limits.max_l1_nodes:
+            raise AtlasAnalysisError("platform endpoints exceeded L1 node budget")
+        if len(edges) > limits.max_l1_edges:
+            raise AtlasAnalysisError("platform traversal exceeded L1 edge budget")
+
     # Exact Pmove validates step/drop/jump traversal only from a bounded,
     # deterministic set of spawn and CM-boundary nodes. Atlas v1 omits all
     # unprobed movement candidates; it never extrapolates a usercmd result.
@@ -1302,7 +1760,9 @@ def _build_navigation(
             stance = "standing" if source.standing_clear else "crouched"
             pm_flags = 4 if stance == "standing" else 5
             for yaw in (0, 90, 180, 270):
-                walk_id = f"pmove-walk:{key[0]}:{key[1]}:{key[2]}:{yaw}"
+                walk_id = (
+                    f"drop:{key[0]}:{key[1]}:{key[2]}:ground:{yaw}:pmove"
+                )
                 walk_request = {
                     "id": walk_id, "op": "simulate",
                     "origin": list(source.position), "velocity": [0.0, 0.0, 0.0],
@@ -1319,7 +1779,9 @@ def _build_navigation(
                 movement_metadata.append((key, "ground", yaw, stance, walk_request))
                 # A crouched-only source may never create a standing jump edge.
                 if stance == "standing" and (outgoing[key] < 2 or key in spawn_keys):
-                    jump_id = f"pmove-jump:{key[0]}:{key[1]}:{key[2]}:{yaw}"
+                    jump_id = (
+                        f"drop:{key[0]}:{key[1]}:{key[2]}:jump:{yaw}:pmove"
+                    )
                     jump_request = {
                         "id": jump_id, "op": "simulate",
                         "origin": list(source.position), "velocity": [0.0, 0.0, 0.0],
@@ -1341,7 +1803,7 @@ def _build_navigation(
         # Reserve the full prospective trajectory authority workload before the
         # first candidate simulation write.  No cap may yield a prefix Atlas.
         worst_case = len(requests)
-        if pmove.requests + 2 * worst_case > limits.max_oracle_requests:
+        if pmove.requests + 3 * worst_case > limits.max_oracle_requests:
             raise AtlasAnalysisError(
                 "Pmove trajectory preflight exceeds complete oracle budget"
             )
@@ -1351,6 +1813,26 @@ def _build_navigation(
             )
 
         pmove_results = pmove.call(requests)
+        settle_indices: list[int] = []
+        settle_requests: list[dict[str, Any]] = []
+        for index, ((_, _, _, _, request), result) in enumerate(zip(
+            movement_metadata, pmove_results
+        )):
+            extended = _drop_settle_request(request, result)
+            if extended is None:
+                continue
+            settle_indices.append(index)
+            settle_requests.append(extended)
+        settled_results = pmove.call(settle_requests)
+        for index, request, result in zip(
+            settle_indices, settle_requests, settled_results
+        ):
+            source_key, mode, yaw, stance, _ = movement_metadata[index]
+            movement_metadata[index] = (
+                source_key, mode, yaw, stance, request,
+            )
+            pmove_results[index] = result
+
         exact_candidates: list[DropTrajectory] = []
         for (source_key, mode, yaw, stance, request), result in zip(
             movement_metadata, pmove_results
@@ -2424,6 +2906,28 @@ def _l0_chunks(
                 )
                 continue
 
+            if classname == "func_plat":
+                semantics_result = platform_mover_semantics(
+                    entity, cmodel_bounds.mins, cmodel_bounds.maxs
+                )
+                if not semantics_result.is_exact or semantics_result.value is None:
+                    record_inline_unknown(entity, model_index, semantics_result.reason)
+                    continue
+                semantics = semantics_result.value
+                current_bounds = (
+                    semantics.reference_pose.bounds
+                    if semantics.current_origin == semantics.pos1
+                    else semantics.endpoint_pose.bounds
+                )
+                discover_fixed_pose(
+                    entity, model_index, model.headnode, current_bounds,
+                    semantics.current_origin, (0.0, 0.0, 0.0),
+                )
+                fill_potential_envelope(
+                    semantics.potential_envelope.bounds, "mover_dynamic_unknown"
+                )
+                continue
+
             if classname == "func_train":
                 topology_result = train_topology(
                     entity, metadata.entities, cmodel_bounds.mins
@@ -2488,7 +2992,7 @@ def _l0_chunks(
                 )
                 continue
 
-            # No pure law currently proves func_plat or other mover endpoints.
+            # No pure law currently proves other mover endpoints.
             # Retain only a conservative potential envelope and Unknown bit;
             # never turn it into a surface or traversal edge.
             pose_origin = exact_origin(entity)
@@ -3801,6 +4305,7 @@ def analyze_map(
                 claim_seed_points,
                 _dynamic_mover_dependency_index(metadata),
                 pmove_source_accounting,
+                metadata,
             )
             spawn_reachability = _spawn_reachability(edges, spawn_indices)
             visibility = _visibility(cm, nodes, limits)

@@ -137,6 +137,26 @@ class SlidingMoverSemantics:
 
 
 @dataclass(frozen=True)
+class PlatformMoverSemantics:
+    """Exact ``func_plat`` endpoint transforms from ``SP_func_plat``.
+
+    Collision at either pose remains oracle-owned.  The union is a
+    conservative potential-occupancy envelope for deciding whether a
+    model-0-only movement replay depends on platform state.
+    """
+
+    lip: int
+    height: int | None
+    pos1: Vec3
+    pos2: Vec3
+    current_origin: Vec3
+    target_disabled: bool
+    reference_pose: GeometryClaim
+    endpoint_pose: GeometryClaim
+    potential_envelope: GeometryClaim
+
+
+@dataclass(frozen=True)
 class TrainCandidate:
     entity_index: int
     classname: str
@@ -518,6 +538,66 @@ def sliding_mover_semantics(
         potential_envelope=GeometryClaim(
             GeometryClassification.POTENTIAL_SWEPT_ENVELOPE,
             _union_aabb(reference_bounds, endpoint_bounds),
+        ),
+    ))
+
+
+def platform_mover_semantics(
+    entity: EntityLike, model_mins: Sequence[float], model_maxs: Sequence[float],
+) -> AuthorityResult[PlatformMoverSemantics]:
+    """Resolve the complete vertical pose envelope of a Quake II ``func_plat``.
+
+    This reproduces the position law in ``SP_func_plat``: the authored model
+    is the top pose, the bottom pose is lower by explicit integer ``height``
+    or by model height minus integer ``lip`` (default eight).  A platform with
+    a ``targetname`` starts disabled at the top pose; every other platform is
+    linked at the bottom pose.  Trigger timing and current state do not change
+    the conservative union of those two translated poses.
+    """
+
+    classname = _entity_classname(entity).casefold()
+    if classname != "func_plat":
+        return AuthorityResult.unknown(None, f"unsupported platform mover {classname!r}")
+    model = _model_bounds(model_mins, model_maxs)
+    origin = _entity_origin(entity)
+    for result in (model, origin):
+        if not result.is_exact or result.value is None:
+            return AuthorityResult.unknown(None, result.reason)
+    model_value = model.value
+    pos1 = origin.value
+
+    raw_lip = ordered_property(entity.properties, "lip")
+    lip = _c_atoi(raw_lip) if raw_lip is not None else 0
+    if lip == 0:
+        lip = 8
+    raw_height = ordered_property(entity.properties, "height")
+    parsed_height = _c_atoi(raw_height) if raw_height is not None else 0
+    height = parsed_height if parsed_height != 0 else None
+    travel = float(
+        parsed_height
+        if parsed_height != 0
+        else (model_value.maxs[2] - model_value.mins[2]) - lip
+    )
+    if not math.isfinite(travel):
+        return AuthorityResult.unknown(None, "platform travel is nonfinite")
+    pos2 = (pos1[0], pos1[1], pos1[2] - travel)
+    target_disabled = ordered_property(entity.properties, "targetname") is not None
+    current = pos1 if target_disabled else pos2
+
+    top_bounds = _translated_aabb(model_value.mins, model_value.maxs, pos1)
+    bottom_bounds = _translated_aabb(model_value.mins, model_value.maxs, pos2)
+    return AuthorityResult.exact(PlatformMoverSemantics(
+        lip=lip,
+        height=height,
+        pos1=pos1,
+        pos2=pos2,
+        current_origin=current,
+        target_disabled=target_disabled,
+        reference_pose=GeometryClaim(GeometryClassification.REFERENCE_POSE, top_bounds),
+        endpoint_pose=GeometryClaim(GeometryClassification.ENDPOINT_POSE, bottom_bounds),
+        potential_envelope=GeometryClaim(
+            GeometryClassification.POTENTIAL_SWEPT_ENVELOPE,
+            _union_aabb(top_bounds, bottom_bounds),
         ),
     ))
 

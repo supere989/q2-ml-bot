@@ -462,6 +462,69 @@ class DropReplayTests(unittest.TestCase):
         self.assertEqual(summary["evidence"], 0)
         self.assertEqual(summary["validation_version"], 0)
 
+    def test_batched_analyzer_uses_replay_id_for_original_oracle_response(self) -> None:
+        fixture = self.fixture(-600)
+
+        class PmoveProcess:
+            binary = self.pmove
+            requests = 0
+            max_requests = 100
+            identity = {
+                "parameters": {"gravity": 800, "airaccelerate": 0.0},
+                "tool_identity": fixture.pmove_tool_identity,
+                "physics_identity": fixture.pmove_physics_identity,
+                "map_sha256": self.map_sha256,
+            }
+
+            def call(process_self, requests):
+                process_self.requests += len(requests)
+                return [fixture._pmove_identity(request) for request in requests]
+
+        default_fall = {
+            "fall_damagemod": 1.0, "deathmatch": True, "dmflags": 0,
+        }
+
+        class FallProcess:
+            binary = self.fall
+            requests = 0
+            max_requests = 100
+            identity = {
+                "tool_identity": fixture.fall_tool_identity,
+                "physics_identity": fixture.fall_physics_identity(default_fall),
+            }
+
+            def call(process_self, requests):
+                process_self.requests += len(requests)
+                records = []
+                for request in requests:
+                    if request["op"] == "identity":
+                        records.append(fixture._fall_identity(request))
+                    else:
+                        records.append(fixture._fall_response(request))
+                return records
+
+        analyzer_request = {
+            **fixture.manifest(self.map, replay_id="integrated-id-binding")["pmove"],
+            "id": "integrated-id-binding:pmove",
+            "op": "simulate",
+        }
+        analyzer_response = fixture._pmove_response(analyzer_request)
+        assert analyzer_response["id"] == analyzer_request["id"]
+        result = exact.classify_drop_trajectories(
+            [exact.DropTrajectory(
+                identifier="integrated-id-binding",
+                source_l1=(3, 4, 5), direction=(0, 1), mode="ground",
+                request=analyzer_request, response=analyzer_response,
+            )],
+            bsp=self.map, pmove_process=PmoveProcess(),
+            fall_process=FallProcess(),
+        )[0]
+        self.assertEqual(result["classification"]["classification"], "Exact")
+        self.assertEqual(result["evidence"], 10)
+        self.assertEqual(result["validation_version"], 1)
+        self.assertEqual(result["classification"]["pmove_request"]["id"], analyzer_response["id"])
+        self.assertEqual(result["classification"]["landing"]["command_index"], 1)
+
     def test_first_landing_is_authoritative_when_final_reaches_another_floor(self) -> None:
         frames = [
             state(0, -600, False, origin_fixed=(0, 0, 512)),
