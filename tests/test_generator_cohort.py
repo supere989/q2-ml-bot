@@ -12,8 +12,8 @@ from tools import run_generator_cohort as cohort
 
 ROOT = Path(__file__).resolve().parents[1]
 DECLARATION = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-DECLARATION_71435 = (
-    ROOT / "docs/multires/B2-GENERATED-COHORT-71435-DECLARATION.json"
+DECLARATION_71436 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71436-DECLARATION.json"
 )
 HEX64 = "a" * 64
 GIT40 = "b" * 40
@@ -147,15 +147,15 @@ def static_pass(map_path: Path) -> dict[str, object]:
 
 def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> None:
     declaration, digest = cohort.load_declaration(DECLARATION)
-    assert DECLARATION.read_bytes() == DECLARATION_71435.read_bytes()
+    assert DECLARATION.read_bytes() == DECLARATION_71436.read_bytes()
     style_bases = (
-        ("open", 71435000),
-        ("towers", 71435100),
-        ("canyon", 71435200),
-        ("pits", 71435300),
-        ("arena_open", 71435400),
-        ("arena_vertical", 71435500),
-        ("arena_lanes", 71435600),
+        ("open", 71436000),
+        ("towers", 71436100),
+        ("canyon", 71436200),
+        ("pits", 71436300),
+        ("arena_open", 71436400),
+        ("arena_vertical", 71436500),
+        ("arena_lanes", 71436600),
     )
     expected = [
         {
@@ -171,7 +171,7 @@ def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> Non
     ]
 
     assert len(digest) == 64
-    assert declaration["cohort_id"] == "b2g26_final_71435"
+    assert declaration["cohort_id"] == "b2g26_final_71436"
     assert declaration["maps"] == expected
     assert declaration["selection"] == {
         "timing": "declared-before-generation",
