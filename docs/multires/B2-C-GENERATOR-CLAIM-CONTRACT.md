@@ -164,24 +164,25 @@ evidence, and a validation version; an unconditional pass is rejected. Stock
 analysis does **not** require generator tags, eight spawns, 98% tagged
 floor-light coverage, v6 hook claims, or v6 headroom/guard metadata.
 
-## Current producer gap (fail closed)
+## Full-cold producer closure (fail closed)
 
-The validator consumes `q2-atlas-full-cold-proof-v1`, but the analyzer at this
-integration point does not yet emit the cold-launch artifact digest sets or
-elapsed/timeout evidence. The analyzer must add these exact proof members:
+The analyzer now emits the complete `q2-atlas-full-cold-proof-v1` contract from
+one independently launched `tools/atlas_cold_worker.py` process. It publishes
+matching primary and cold `artifact_sha256` maps for the six byte-stable
+artifacts, matching `artifact_semantic_sha256` maps for both
+`.atlas.manifest.json` and `.analysis.manifest.json`, measured process-tree
+peak RSS, `elapsed_milliseconds`, and `timeout_limit_milliseconds` exactly
+`300000`. The analyzer rejects a byte or semantic mismatch, missing artifact,
+non-positive resource sample, more than 512 MiB peak RSS, or more than 300
+seconds elapsed before publishing a passed manifest.
 
-- `cold_artifact_sha256`, with the six exact artifact suffixes;
-- `cold_artifact_semantic_sha256`, with `.atlas.manifest.json`;
-- `elapsed_milliseconds`; and
-- `timeout_limit_milliseconds`, exactly `300000`.
-
-For stock maps it must also add
+Stock analysis likewise publishes
 `compiled_world.hazards.classification_status`, `evidence`, and
-`validation_version`. (The analyzer already emits
-`oracles.hook.attestation_sha256`; promotion now validates it against the exact
-B1-accepted attestation.) Until the producing analyzer publishes the missing
-facts from the independent process and oracle path, B2 promotion remains red.
-No validator-side fallback or inferred success is permitted.
+`validation_version` from the collision/drop oracle path. Promotion validates
+the hook attestation against the exact B1-accepted authority and independently
+checks the full-cold field set and digest membership. B2 remains red until a
+fresh declared cohort supplies passing producer evidence; no validator-side
+fallback, inferred success, or historical artifact is permitted.
 
 ## Exact cohort admission
 
