@@ -5,7 +5,26 @@
 replacement, salvage, partial, overwrite, or red-report mode. A failed input
 prints one refusal to stderr and writes no gate.
 
-Current status: cohort `b2g26_final_71439` passed its sole 28-member source
+Methodology amendment: 2026-07-16. The amended design and plan have new
+normative digests. Therefore every prior B1 seal and B2 gate/admission artifact
+is historical for future assembly. Before B2 qualification, create a fresh B1
+gate and authority seal that bind the amended documents and exact oracle
+binaries. The prior `B1-authorities-909b1e46` seal cannot authorize a new
+qualification or final cohort, even if its binaries are later verified as
+byte-identical.
+
+B2 assembly distinguishes artifact states. `built` means staging bytes exist;
+`published` means exact stage membership was atomically exposed but remains
+non-admissible; `validated` means that stage passed its named independent
+checks; `admitted` means all 28 final declared maps and every B2 gate passed.
+The assembler accepts only validated inputs and emits admission only after the
+complete predicate is green.
+
+A green B2 gate proves offline artifact, oracle, determinism, and performance
+integrity only. It does not prove policy learning, targeting, locomotion,
+reward quality, trainer cutover, or public readiness.
+
+Historical cohort `b2g26_final_71439` passed its sole 28-member source
 freeze and sole WSL compile, publishing an exact 168-file compiled stage. Its sole
 materialization then failed closed on the first map,
 `b2g26_open_71439000`, before any hook materialization. CPython 3.10.12 raised
@@ -26,7 +45,7 @@ remains pinned to its exact 28 map/seed rows, and the retirement registry still
 rejects it before any evidence can be assembled.
 
 Replacement cohort `b2g26_final_71440` was explicitly authorized. Its canonical
-named declaration and current alias remain byte-identical with SHA-256
+named declaration and then-current alias were byte-identical with SHA-256
 `d71b86a109bb359f927457d3904cef3116d83c59104cc85b3a87dd43ddc791b2`.
 They declare exactly 28 new rows in ordinal order: four each for `open`,
 `towers`, `canyon`, `pits`, `arena_open`, `arena_vertical`, and `arena_lanes`,
@@ -59,8 +78,9 @@ materialized, claims, stock, report, log, or producer-snapshot bytes may be
 retried, resumed, reused, copied, salvaged, substituted, or admitted. Its
 immutable named declaration remains rejected by the retirement registry.
 
-Fresh replacement cohort `b2g26_final_71441` is explicitly authorized. Its
-canonical named declaration and current alias are byte-identical with SHA-256
+Fresh replacement cohort `b2g26_final_71441` was explicitly authorized. Its
+canonical named declaration and then-current alias were byte-identical with
+SHA-256
 `5929532e0edae77b48073abccf4a4f3afdbacfb6905d1eadfb7f18d1dc5ba151`.
 They declare 28 fresh rows in ordinal order, four per concrete style, using
 seed blocks 71441000..71441003 through 71441600..71441603. The sole source
@@ -81,12 +101,24 @@ producer-snapshot bytes cannot be retried, repaired, resumed, reused, copied,
 salvaged, substituted, or admitted. Its immutable named declaration remains
 rejected by the retirement registry.
 
-Fresh replacement cohort `b2g26_final_71442` is explicitly authorized. Its
-canonical named declaration and current alias are byte-identical with SHA-256
+Historical declaration statement: fresh replacement cohort
+`b2g26_final_71442` was authorized by its then-current alias. Its canonical
+named declaration and alias were byte-identical with SHA-256
 `fe4b86bbb0ab331dca4f7fd1418106c69ba4d4ea34b36774cb7e9259d27502bc`.
 They declare 28 fresh rows in ordinal order, four per concrete style, using
-seed blocks 71442000..71442003 through 71442600..71442603. No 71442 producer,
-artifact, report, Dyn, test, gate, deployment, or training action exists yet.
+seed blocks 71442000..71442003 through 71442600..71442603. Its sole source
+freeze, compilation, source/static campaign, materialization, claims
+preparation, and 28-map Atlas construction completed. Compiled promotion then
+passed 25/28 and rejected four spawn rows across three maps because compiled
+CM evidence measured only 92 units of the required 96-unit spawn column.
+`B2-GENERATED-COHORT-71442-FAILURE.json` is the exact terminal authority.
+
+Cohort 71442 is permanently retired. None of its source, compiled,
+materialized, claims, analysis, report, test, or WSL bytes may be retried,
+repaired, resumed, reused, copied forward, salvaged, substituted, or admitted.
+No Dyn, assembled gate, deployment, or training action ran. There is no active
+final cohort; a replacement declaration is forbidden until the fresh B1 seal
+and disposable qualification lane are green.
 
 The exact clean immediate-predecessor implementation snapshot at commit
 `8d89df4a787e261f8a4fb935908191f8df7634b2` and tree
@@ -96,8 +128,7 @@ was `4ea65f725f7ea9e2b08b8da60a6ace7b785a704ef036495ace3d0ce5c66b7fdb`
 and its tracked-content manifest SHA-256 was
 `2e050906f6b3710573a6050b96ccdb901f0772cea1ba05960c5212846c10cd18`.
 That snapshot did not contain the 71440 declaration and is not a 71440
-producer snapshot. After the declaration is committed, an exact clean snapshot
-of that declaration-bearing commit must repeat
+producer snapshot. Every future declaration-bearing commit must repeat
 `python3.10 -B tools/check_python_syntax_floor.py --root SNAPSHOT` and the
 materializer import/CLI preflights under the actual pinned runtime before any
 source generation or WSL cohort bootstrap. The pinned runtime is
@@ -112,33 +143,51 @@ zstandard. These repeated checks must finish before source generation or WSL
 cohort bootstrap; a local newer-Python parse is not sufficient because Python 3.14
 accepted the PEP-701 construct that terminated 71439 on Python 3.10.
 
-The assembler's declaration check admits only the exact fresh 71442 rows. It
-rejects the immutable named 71441 declaration as retired before reading
-campaign evidence. Existing clean-repository, source-freeze, Atlas, test,
-manifest, and Dyn requirements remain the frozen gate contract. All evidence
-through 71441 is historical only.
+The assembler must reject declarations for retired cohorts 71426 through
+71442 before reading campaign evidence. A future final declaration is eligible
+only after the fresh B1 seal and non-admissible qualification report pass.
+Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
+requirements remain part of the frozen gate contract; all earlier B1/B2
+admission evidence is historical only.
 
 ## Frozen producer-report contract
 
-No 71442 producer report exists yet. The authorized, authority-bound 71442
-cohort must supply every item below from fresh roots. This authorization does
-not permit a 71441 retry or reuse of any retired byte.
+There is no authorized final-cohort producer report. First produce a canonical
+disposable qualification report with `non_admissible: true`. It must bind the
+fresh amended-document B1 seal, real q2tool/BSP/CM golden fixtures (`+9` spawn
+lift; 104 and 105 fail; 106 passes), and one 28-map qualification campaign.
+Every golden and infrastructure preflight must pass, and at least 20 maps must
+complete the full lifecycle through promotion validation. Qualification bytes
+or passing subsets can never satisfy the final gate.
+
+After qualification is green, a separately committed fresh declaration may
+authorize one immutable/no-retry final producer attempt. Its required order is
+source/source-static, real compilation, compiled-CM preflight,
+materialization/claims, full Atlas/cold rebuild, compiled promotion, then Dyn,
+tests, and assembly. Every item below comes from fresh final-cohort roots.
 
 - `tools/run_generator_cohort.py generate` is the only authorized producer for
-  the exact 71442 source freeze from two distinct fresh directories.
-- `tools/compile_generated_cohort.py` is the only authorized 71442
+  the exact final source freeze from two distinct fresh directories.
+- `tools/compile_generated_cohort.py` is the only authorized final
   compiled-stage producer. Its canonical report
   retains per-map terminal logs and exit status, and publishes only the exact
   168-file declaration with atomic no-replace semantics.
-- `tools/materialize_generated_cohort.py` is the only authorized 71442
+- The compiled-CM preflight consumes every real BSP with the fresh-sealed CM
+  authority and binds declaration, BSP, oracle, and implementation digests. It
+  must pass exact 28/28 spawn identity, engine-linked stance/support/96-unit
+  column, separation, escape, basic hazard containment, and lightdata checks
+  before materialization. Copied `.map` validation cannot fill this report.
+- `tools/materialize_generated_cohort.py` is the only authorized final
   cohort-level V4 stage producer. Its canonical report
   publishes only the exact 196-file declaration with atomic no-replace
   semantics. Its B1 authorities are explicit immutable inputs, never files
   discovered beside a cohort.
 - `tools/run_generator_cohort.py verify-stage` writes canonical compiled and
   materialized membership reports. `tools/run_compiled_static_campaign.py`
-  writes canonical `q2-generator-v6-compiled-static-campaign-v1` evidence with
-  all 28 independently recomputed `static_validate` rows.
+  writes historical-schema `q2-generator-v6-compiled-static-campaign-v1`
+  evidence with all 28 independently recomputed `static_validate` rows. This
+  is source/static evidence despite its schema name; it is not compiled-CM
+  evidence.
 - `tools/run_generator_claim_campaign.py prepare` writes the exact claims
   stage and prepare report.
 - `tools/run_generated_atlas_campaign.py` atomically writes the exact 224-file
@@ -224,9 +273,10 @@ compiled input, and publishes exactly 196 files only through
 logs, and report roots are terminal, non-admissible, non-reusable evidence:
 no retry, resume, subset, copy-forward, or future-cohort reuse is permitted.
 
-The reusable WSL authority directory
+The historical WSL authority directory
 `/home/raymond/q2-multires-isolated/B1-authorities-909b1e46` is an independent
-B1 input bundle, not a cohort artifact. Its canonical
+B1 input bundle for its original normative digests, not a cohort artifact. Its
+canonical
 `CONTENT-MANIFEST.json` SHA-256 is
 `8d163d87a6919fc5d7f3761b17aa1aeaae7e71a5c505b80392a315802e11a92f`.
 Its exact seven filenames are `B1-GATE.json`, `CONTENT-MANIFEST.json`,
@@ -234,23 +284,25 @@ Its exact seven filenames are `B1-GATE.json`, `CONTENT-MANIFEST.json`,
 `q2-hook-oracle`, and `q2-pmove-oracle`. Those immutable B1 bytes may be
 referenced independently by the terminal 71439 attempt, but the directory must
 remain outside all cohort roots and cannot prove cohort membership or progress.
-The B1 bundle remains reusable authority; it does not authorize reuse of any
-71439 byte.
+The binary bytes may be inputs to a fresh B1 verification, but the old seal is
+historical and cannot authorize future qualification or assembly. A fresh B1
+seal must bind the amended design/plan digests. Neither operation authorizes
+reuse of any retired cohort byte.
 
 ## Assembly template
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. The alias admits fresh 71442 identity, but this command
-still fails closed and creates no output until all newly produced 71442
-evidence is complete and green.
+clean-tree authority. No current alias authorizes execution. This template
+becomes executable only after the fresh B1 seal, green non-admissible
+qualification report, and separately committed final declaration exist.
 
 ```sh
 python tools/assemble_b2_gate.py \
   --design docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md \
   --plan docs/MULTIRES-LATTICE-MAP-ATLAS-PLAN-2026-07-14.md \
   --repo-root "$PWD" \
-  --b1-gate docs/multires/B1-GATE.json \
+  --b1-gate "$FRESH_B1_GATE" \
   --cm-oracle "$CM_ORACLE" \
   --pmove-oracle "$PMOVE_ORACLE" \
   --hook-oracle "$HOOK_ORACLE" \
@@ -264,6 +316,7 @@ python tools/assemble_b2_gate.py \
   --compiled-dir "$COMPILED" \
   --compiled-membership-report "$COMPILED_MEMBERSHIP" \
   --compiled-static-report "$COMPILED_STATIC" \
+  --compiled-cm-preflight-report "$COMPILED_CM_PREFLIGHT" \
   --materialized-dir "$MATERIALIZED" \
   --materialized-membership-report "$MATERIALIZED_MEMBERSHIP" \
   --claims-dir "$CLAIMS" \
@@ -279,12 +332,15 @@ python tools/assemble_b2_gate.py \
   --dyn-evidence-executable "$DYN_EVIDENCE_EXECUTABLE" \
   --dyn-evidence-report "$DYN_EVIDENCE/b2-dyn-evidence.json" \
   --test-report "$TEST_EVIDENCE/b2-test-report.json" \
+  --qualification-report "$QUALIFICATION_REPORT" \
   --output "$OUT"
 ```
 
-The assembler independently reruns exact membership, all 28 generated claim
-validations, and all eight stock validations. It derives representative Atlas
-limits from the admitted analysis manifest selected by the Dyn report, rather
-than accepting a second budget assertion. The output is canonical compact,
-sorted JSON with one trailing newline and is created with exclusive-create
-semantics only after every B2 predicate is green.
+The assembler independently verifies that qualification is green and
+non-admissible, the fresh B1 seal binds the exact design/plan digests, the CM
+preflight passes all 28 final BSPs, exact membership holds, all 28 generated
+claim validations pass, and all eight stock validations pass. It derives
+representative Atlas limits from the admitted analysis manifest selected by
+the Dyn report rather than accepting a second budget assertion. The output is
+canonical compact, sorted JSON with one trailing newline and is created with
+exclusive-create semantics only after every B2 predicate is green.

@@ -1,6 +1,7 @@
 # B2-C generated-map compiled-world claim contract
 
-Status: offline prototype contract for B2 integration
+Status: offline prototype contract for B2 integration; methodology amended
+2026-07-16
 Schemas: `q2-generator-claims-v3`,
 `q2-generator-claim-validation-v1`, and
 `q2-generator-claim-campaign-v2`
@@ -16,6 +17,64 @@ Generator v6 `.map`, `.meta.json`, `.lattice.json`, hook-zone,
 are never collision, movement, hazard, lighting, or hook authority. The
 existing source/static validator remains a necessary generated-v6 criterion,
 but its success cannot fill a missing or unknown compiled Atlas fact.
+
+## Qualification and final-cohort methodology
+
+B2 has two strictly separate execution classes:
+
+- **Toolchain qualification** is disposable, retryable, and always
+  non-admissible. It exercises the exact pinned generator, q2tool,
+  CM/Pmove/hook authorities, materializer, analyzer, and validators before a
+  final declaration exists. Qualification artifacts, maps, seeds, reports, and
+  passing subsets can never satisfy a final-cohort gate.
+- **Final cohort execution** begins only after qualification is green. Its
+  declaration, inputs, stage roots, and reports are immutable and no-retry.
+  Any failure retires the complete final cohort under the existing rules.
+
+This amendment changes the normative design/plan digests. Every earlier B1
+seal and B2 admission artifact is historical for future gates. Before
+qualification, produce a fresh B1 gate and authority seal binding these exact
+documents and the exact oracle binaries. Byte-identical binaries do not make
+the prior `B1-authorities-909b1e46` seal admissible for a new qualification or
+final cohort.
+
+Qualification must include real q2tool-to-BSP-to-CM golden fixtures for the
+engine-linked spawn origin. The fixtures apply Quake's `+9` link lift and prove
+that room-ceiling boundaries at 104 and 105 units fail the compiled 96-unit
+column requirement while 106 units passes. Mock compilers, source-only geometry
+checks, or generator and validator code sharing one constant cannot satisfy
+this proof. It must also run one disposable representative 28-map campaign
+through the complete pipeline. Qualification is green only when every golden
+and infrastructure preflight passes and at least 20 maps complete the entire
+lifecycle through promotion validation. The threshold does not compensate for
+a systemic toolchain-stage failure.
+
+The final lifecycle order is normative:
+
+1. source generation and source/static validation
+2. real q2tool compilation
+3. cheap compiled-CM preflight over every declared BSP
+4. hook materialization and claim preparation
+5. full Atlas construction and deterministic cold rebuild
+6. compiled promotion/claim validation
+7. Dyn, performance, and assembled B2-gate evidence
+
+The compiled-CM preflight covers at least exact spawn identity, the engine
+link lift, standing/crouched stance, support, oracle-swept 96-unit column,
+separation, escape, basic hazard containment, and lightdata presence. It must
+consume the BSP and pinned collision authority. A copied `.map` source under a
+compiled directory is still source/static validation and must be named as
+such.
+
+Artifact states are not synonyms. `built` means staging bytes exist;
+`published` means exact stage membership was atomically exposed but remains
+non-admissible; `validated` means the stage passed its named independent
+checks; `admitted` means all 28 final declared maps and every applicable B2
+gate passed. Reports must carry the narrowest accurate state.
+
+Even admitted B2 evidence proves offline map/Atlas integrity only. It does not
+prove policy learning, targeting, locomotion, reward quality, trainer cutover,
+or public readiness.
 
 ## Canonical claim input
 
@@ -63,8 +122,9 @@ older analysis report inadmissible.
 
 The generated path requires every criterion below:
 
-1. B1 is green, collision admission is positive, the BSP identity matches,
-   and analysis confidence is complete/high. The collision executable must
+1. The fresh amended-document B1 seal/gate is green, collision admission is
+   positive, the BSP identity matches, and analysis confidence is
+   complete/high. The collision executable must
    equal the exact B1-admitted binary SHA-256 and the analyzer identity must
    reproduce its local admitted source-closure SHA-256. A self-declared
    `deterministic_rebuild` boolean is not rebuild evidence.
@@ -80,7 +140,8 @@ The generated path requires every criterion below:
    and resident Atlas, and 512 MiB packer RSS. Analysis, Atlas-manifest,
    header, and verifier identities and counts must agree.
 4. Existing source/static v6 validation passes against the same-name compiled
-   BSP.
+   BSP. This criterion validates authored source and lightdata diagnostics; it
+   is not the compiled-CM preflight and cannot establish collision clearance.
 5. Compiled spawn origins exactly match all eight claims. Every spawn is
    supported, standing/crouched clear, has an oracle-swept 96-unit column, has
    an escape edge, and is mutually connected to all other spawns. Compiled XY
@@ -651,14 +712,26 @@ with it are permanently retired. None may be retried, repaired, resumed,
 reused, copied forward, salvaged, substituted, or admitted. The immutable
 named declaration continues to fail closed through the retirement registry.
 
+Historical declaration statement:
+
 Fresh replacement cohort `b2g26_final_71442` is explicitly authorized by the
-current alias and byte-identical immutable named declaration
+then-current alias and byte-identical immutable named declaration
 `B2-GENERATED-COHORT-71442-DECLARATION.json`, both SHA-256
 `fe4b86bbb0ab331dca4f7fd1418106c69ba4d4ea34b36774cb7e9259d27502bc`.
 Its 28 rows use fresh seed blocks 71442000..71442003 through
-71442600..71442603, four per concrete style in declaration order. No 71442
-producer, artifact, report, Dyn, test, gate, deployment, or training action has
-run; declaration publication is not producer progress.
+71442600..71442603, four per concrete style in declaration order. Its sole
+source freeze, compilation, source/static campaign, materialization, claims
+preparation, and 28-map Atlas construction completed. The sole compiled
+promotion campaign then passed 25/28 and rejected four spawn rows across three
+maps because the pinned compiled-world evidence measured only 92 units of
+clearance against the required 96-unit spawn column. Exact evidence is
+archived in `B2-GENERATED-COHORT-71442-FAILURE.json`.
+
+Cohort 71442 is permanently retired. None of its source, compiled,
+materialized, claims, analysis, report, test, or WSL bytes may be retried,
+repaired, resumed, reused, copied forward, salvaged, substituted, or admitted.
+No Dyn, assembled gate, deployment, or training action ran. A replacement
+declaration is forbidden until the qualification methodology above is green.
 
 The interpreter boundary is now a pre-declaration authority, not a check to
 discover after compilation. The exact clean immediate-predecessor
@@ -671,10 +744,10 @@ and tracked-content manifest SHA-256
 passed the mandatory no-write pre-declaration scan on `DESKTOP-RTX2080` with
 `/usr/bin/python3.10 -B tools/check_python_syntax_floor.py --root SNAPSHOT`.
 It did not contain the 71440 declaration and is not a 71440 producer snapshot.
-After the declaration commit, an exact clean snapshot of that declaration-bearing
-commit must repeat the syntax scan and materializer import/CLI preflights under
-the pinned execution runtime before any source generation or WSL cohort
-bootstrap. The pinned execution runtime is
+For every future declaration, an exact clean snapshot of the
+declaration-bearing commit must repeat the syntax scan and materializer
+import/CLI preflights under the pinned execution runtime before any source
+generation or WSL cohort bootstrap. The pinned execution runtime is
 `/home/raymond/miniconda3/bin/python`: CPython 3.11.4, executable SHA-256
 `b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4`,
 with zstandard 0.19.0 init/backend SHA-256 values
@@ -689,14 +762,18 @@ check.
 
 ## Offline workflow
 
-The alias, assembler, and B2 gate schema are bound to authorized cohort
-`b2g26_final_71442`; the current `COHORT_ID` is therefore
-`b2g26_final_71442`. Every output leaf must be fresh and absent. Commands must
-never name retired cohorts 71426 through 71441, and no retired population,
-report, Dyn evidence, or compiled byte may be copied into the 71442 path.
+There is no active final `COHORT_ID`. The alias may continue to name retired
+71442 as historical authority, but it is not executable authorization. First
+run the disposable qualification lane and publish its canonical
+`non_admissible: true` report. Only after it is green may a separate commit
+declare a fresh final cohort with new seeds and fresh absent stage roots.
+Commands must never name retired cohorts 71426 through 71442, and no retired
+or qualification population, report, Dyn evidence, or compiled byte may be
+copied into a final-cohort path.
 
-The declaration-aware compiler remains the required 71442 shape. Do not hand-run `q2tool`,
-glob maps, or use `maps/compile.sh`. Every producer parent and leaf must be
+The declaration-aware compiler remains the required final-cohort shape.
+Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer
+parent and leaf must be
 preflighted as fresh and present/absent exactly as required before the sole
 invocation:
 
@@ -725,15 +802,22 @@ membership error leaves no compiled publication; its staging, logs, and report
 are terminal failure evidence and cannot be resumed, retried, copied into a
 new cohort, or used as a passing subset.
 
-The following pinned-runtime atomic materialization shape applies only to fresh
-71442 and must not be pointed at any retired path. Materialization discovers
+Immediately after compilation and before materialization, run the compiled-CM
+preflight defined above against all 28 BSPs with the pinned CM authority. Its
+canonical report must bind declaration, BSP, oracle, and implementation
+digests and pass 28/28. Failure retires the final cohort before any hook or
+Atlas work. This preflight is separate from the source/static campaign.
+
+The following pinned-runtime atomic materialization shape applies only to a
+fresh final declaration and must not be pointed at any retired or qualification
+path. Materialization discovers
 the first grounded compiled Pmove landing without constraining it to the
 generator hint; independent analysis later requires the sealed exact landing
 and ordered trace to replay identically:
 
 ```sh
 MATERIALIZER_PY=/home/raymond/miniconda3/bin/python
-B1_AUTHORITIES=/home/raymond/q2-multires-isolated/B1-authorities-909b1e46
+B1_AUTHORITIES=/path/to/fresh/design-plan-bound-b1-authorities
 "$MATERIALIZER_PY" -B tools/materialize_generated_cohort.py \
   --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \
   --compiled-dir "$FUTURE_ROOT/compiled" \
@@ -749,8 +833,8 @@ B1_AUTHORITIES=/home/raymond/q2-multires-isolated/B1-authorities-909b1e46
   --timeout-seconds 900
 ```
 
-The WSL bundle is independent B1 authority, not a cohort artifact
-or generated stage. Its immutable path is
+The previous WSL bundle was independent B1 authority for its historical
+cohorts, not a cohort artifact or generated stage. Its immutable path is
 `/home/raymond/q2-multires-isolated/B1-authorities-909b1e46`; its canonical
 `CONTENT-MANIFEST.json` SHA-256 is
 `8d163d87a6919fc5d7f3761b17aa1aeaae7e71a5c505b80392a315802e11a92f`.
@@ -759,9 +843,10 @@ The directory has exactly these seven filenames and no symlinks or extras:
 `hook-parity-pullspeed-1700.json`, `q2-cm-oracle`, `q2-fall-oracle`,
 `q2-hook-oracle`, and `q2-pmove-oracle`. Those exact immutable B1 bytes were
 independently supplied to the terminal 71439 attempt, but they must not be
-copied under a cohort root or treated as population evidence. The B1 bundle
-itself is not retired; its independence does not authorize any reuse or retry
-of cohort 71439.
+copied under a cohort root or treated as population evidence. Its seal predates
+this methodology amendment and is historical only. Future qualification and
+final-cohort execution require a fresh design/plan-bound B1 seal, even if that
+new seal verifies byte-identical oracle binaries.
 
 Materialization consumes the compiled rows in declaration order and fails
 closed unless every map seals exactly six unique V4 measured geometries with

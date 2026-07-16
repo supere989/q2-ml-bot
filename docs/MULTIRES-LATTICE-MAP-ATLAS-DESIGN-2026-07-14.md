@@ -1,6 +1,7 @@
 # Multi-Resolution Lattice and Map Atlas Specification
 
-Status: Externally reviewed and accepted specification v1  
+Status: Externally reviewed and accepted specification v1; B2 methodology
+amended 2026-07-16
 Date: 2026-07-14  
 Target branch: `feature/multires-map-atlas-v1` from `feature/rust-lattice`  
 Owners: q2-ml-bot, q2-lithium-3zb2, and q2-ml-client maintainers
@@ -365,6 +366,14 @@ Required analysis includes:
 PVS is never treated as line of sight. Dynamic movers produce stateful,
 confidence-tagged edges rather than unconditional static corridors.
 
+Oracle authority is sealed against the exact normative design and plan
+digests. Changing either document invalidates every earlier B1 seal and B2
+admission artifact for future gates, even when the underlying binaries are
+byte-identical. The binaries may be inputs to a new verification, but only a
+fresh B1 gate/seal bound to the amended documents can authorize qualification
+or a later final cohort. The prior `B1-authorities-909b1e46` seal is historical
+evidence only.
+
 ## 9. Hazards and recovery
 
 ### 9.1 Hazard sources
@@ -527,13 +536,37 @@ For every generated map:
 1. Generate `.map` source and current sidecars.
 2. Run existing source-level geometry, lighting, spawn, and safety validation.
 3. Compile BSP on the WSL map farm.
-4. Run the authored-map analyzer on the compiled BSP.
-5. Produce the static atlas, traversal graph, visibility summary, and design
+4. Run a cheap compiled-CM invariant preflight on the BSP with the pinned
+   collision authority. It must challenge engine-linked spawn origins, stance,
+   support, the 96-unit spawn column, separation, escape, basic hazard
+   containment, and compiled lightdata before expensive downstream work.
+5. Materialize compiled hook evidence and prepare immutable generator claims.
+6. Run the authored-map analyzer on the compiled BSP.
+7. Produce the static atlas, traversal graph, visibility summary, and design
    signature.
-6. Compare compiled-world results with generator claims.
-7. Reject or repair disconnected spawns, unsafe stance transitions, uncontained
+8. Compare compiled-world results with generator claims.
+9. Reject disconnected spawns, unsafe stance transitions, uncontained
    hazards, dark regions, invalid hooks, or excessive prior divergence.
-8. Attest the accepted atlas and analysis artifacts in the map bundle.
+10. Attest the accepted atlas and analysis artifacts in the map bundle.
+
+The compiled-CM preflight consumes the real BSP, not a copied `.map` file or a
+source-validator result. Source validation remains necessary but cannot fill a
+compiled fact.
+
+Two execution classes are mandatory:
+
+- **Toolchain qualification** is disposable, retryable, and always
+  non-admissible. It runs real q2tool and pinned oracles through the complete
+  lifecycle on golden boundary fixtures and a representative 28-map batch.
+- **Final cohort execution** begins only after qualification is green. Its
+  declaration, seeds, stage roots, and reports are immutable and no-retry.
+  Qualification bytes and passing subsets cannot be reused as final evidence.
+
+Artifact-state vocabulary is normative. `built` means staging bytes exist;
+`published` means an exact stage was atomically exposed but remains
+non-admissible; `validated` means the stage passed its named independent
+checks; `admitted` means every applicable final-cohort and B2 gate passed.
+Publication alone never authorizes a downstream runtime or promotion.
 
 Current bundle v2 consumers remain unchanged during offline prototyping. A new
 bundle version is required before the atlas becomes a mandatory runtime
@@ -545,6 +578,13 @@ Acceptance gates are split:
   analysis, hazard classification, deterministic Atlas, and declared confidence.
 - **Generator promotion** applies existing v6 source/light/headroom/spawn/
   lethal-guard contracts plus Atlas-versus-generator claim consistency.
+
+A qualification campaign is green only when every golden and infrastructure
+preflight passes and at least 20 of 28 disposable maps complete the entire
+lifecycle through promotion validation. The final declared B2 cohort is
+all-or-nothing: all 28 maps must pass every source, compiled-CM, Atlas, and
+promotion criterion. Neither rule permits a passing subset to become admission
+evidence.
 
 Stock/community maps do not fail because they lack `_ml_*` tags, 98% tagged
 floor-light coverage, or generator-specific headroom conventions when their
@@ -796,6 +836,10 @@ Required tests include:
   state under the manifest physics cvars
 - lava, slime, hurt, void, crush, current, and safe-drop fixtures
 - 56--95-unit unsafe sandwich and 96-unit safe-headroom fixtures
+- real q2tool-to-BSP-to-CM spawn-column fixtures that apply the engine's `+9`
+  spawn-origin link lift and prove room-ceiling boundaries of 104 units fail,
+  105 units fail, and 106 units pass the compiled 96-unit column criterion;
+  mock q2tool or shared generator/validator constants cannot satisfy this test
 - PVS-positive but MASK_SHOT-blocked occlusion, plus closed/open areaportal
 - mover, teleporter, and hook-edge fixtures
 - hook-oracle golden trajectories match isolated q2ded attach/pull/landing
@@ -839,6 +883,11 @@ escape paths match generator claims, Atlas hazard coverage contains generator
 danger volumes, lethal exterior remains guarded, and every published hook edge
 has a current legal anchor and landing. These gates do not impose v6 authored
 lighting/tag requirements on stock maps.
+
+Section 17 admission establishes offline map/Atlas integrity only. It is not
+evidence of policy learning, target engagement, locomotion quality, reward
+correctness, trainer cutover, or public readiness; those require the later
+protocol, training, season, and shadow gates.
 
 ### 17.2 Required telemetry
 

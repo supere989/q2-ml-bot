@@ -1,8 +1,9 @@
 # Multi-Resolution Lattice and Map Atlas Execution Plan
 
-Status: Ready for main-thread execution; no construction or deployment batch
-has been started by this side conversation  
+Status: Active; B2 toolchain qualification is required before another final
+generated cohort is declared
 Date: 2026-07-14  
+Methodology amendment: 2026-07-16
 Normative specification:
 `docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md`
 
@@ -41,6 +42,15 @@ promotion requires Batches 8 and 9.
 - Agents do not deploy, stop training, mutate services, or copy artifacts to
   another host. Only the root integration batch may do that after its gate.
 - No batch starts until the previous gate report is written and green.
+- B2 toolchain qualification is disposable, retryable, and non-admissible. It
+  must pass before an immutable final generated cohort is declared.
+- Once declared, a final cohort remains immutable and no-retry; qualification
+  artifacts, maps, or passing subsets can never satisfy final-cohort evidence.
+- This methodology amendment changes the normative design/plan digests. Every
+  prior B1 seal and B2 admission artifact is historical for future gates; a
+  fresh B1 seal bound to these exact documents is required before B2
+  qualification. Reusing unchanged oracle binaries does not reuse their old
+  seal or gate authority.
 - Each batch produces commits, tests, artifact hashes, and a concise handoff.
 - Existing user changes and unrelated dirty files are preserved.
 - Secrets, complete client commands, and credential files never appear in logs,
@@ -216,6 +226,8 @@ Extend the current Rust Lattice without changing Atlas:
 
 Compare generated source/meta claims against compiled Atlas:
 
+- implement the cheap BSP/CM invariant preflight independently of the
+  generator and source/static validator
 - spawn origin, column, separation, and escape
 - lava/hurt coverage
 - lethal exterior and guard containment
@@ -224,15 +236,70 @@ Compare generated source/meta claims against compiled Atlas:
 - generator route claims versus Atlas cost/connectivity
 - stock analysis quality separated from generated v6 promotion rules
 
+### B2 toolchain qualification
+
+Before declaring an immutable final cohort, run a disposable qualification
+lane against the exact pinned generator, q2tool, CM/Pmove/hook authorities, and
+validators. Qualification is retryable because none of its output is
+admissible evidence. It must include:
+
+1. a fresh B1 authority seal and gate bound to the amended design and plan;
+   the prior `B1-authorities-909b1e46` seal is historical only
+2. real q2tool-to-BSP-to-CM golden fixtures for engine-linked spawns, including
+   the `+9` spawn-origin lift and room-ceiling boundaries where 104 and 105
+   units fail the compiled 96-unit column criterion and 106 units passes
+3. one disposable 28-map representative campaign through source validation,
+   real compilation, the compiled-CM preflight, materialization/claims, full
+   Atlas construction, and promotion validation
+4. exact stage-membership, deterministic rebuild, timeout, and resource checks
+5. a qualification report that is explicitly `non_admissible: true`
+
+Qualification is green only when every golden and infrastructure preflight
+passes and at least 20 of the 28 disposable maps complete the entire lifecycle
+through promotion validation. That 20-map threshold is a generator/toolchain
+signal, not final admission; it does not permit selection of a passing subset
+or excuse a systemic stage failure.
+
+### B2 final-cohort lifecycle
+
+Only after qualification is green may root commit a fresh declaration and
+invoke the immutable final lane. Its order is normative:
+
+1. source generation and source/static validation
+2. real q2tool compilation
+3. cheap compiled-CM invariant preflight over every declared BSP, covering at
+   least spawn identity, engine-linked stance, support, 96-unit column,
+   separation, escape, basic hazard containment, and lightdata presence
+4. hook materialization and claim preparation
+5. full Atlas construction and deterministic cold rebuild
+6. compiled promotion/claim validation
+7. Dyn, performance, and assembled B2-gate evidence
+
+The compiled-CM preflight must consume the BSP and pinned collision authority;
+validating a copied `.map` source is not compiled-world validation.
+
+Artifact states are distinct: **built** means staging bytes exist;
+**published** means an exact stage was atomically made available but remains
+non-admissible; **validated** means that stage passed its named independent
+checks; **admitted** means every applicable final-cohort and B2 gate passed.
+Reports and operators must not use these terms interchangeably.
+
 ### Gate B2
 
+- fresh B1 seal/gate binds the exact amended design and plan digests
 - `q2dm1` through `q2dm8` produce cold-rebuild-stable Atlas hashes
 - pinned stock spawn counts and item-class multisets match
-- at least 20 generated maps preserve the existing static-validation pass rate
+- B2 toolchain qualification is green and explicitly non-admissible
+- all 28 maps in the immutable final declaration pass source/static,
+  compiled-CM preflight, full Atlas, and compiled-promotion validation
 - no generated claim can override oracle failure
 - representative Atlas stays within 1200 L0 chunks, 16 MiB L0, and 32 MiB total
 - resident four-client feature assembly p99 is below 0.5 ms
 - four Dyn snapshots remain below 8 MiB combined and payload hard limits pass
+
+Gate B2 proves offline artifact, oracle, determinism, and performance
+integrity. It does not prove policy learning, targeting, locomotion, combat
+quality, trainer cutover, or public readiness; those require B4 through B9.
 
 ## 8. B3 — Recovery, guideposts, priors, and bundle preparation
 
