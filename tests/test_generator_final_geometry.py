@@ -16,12 +16,18 @@ from maps.generator import (
     MIN_SPAWN_SEPARATION,
     MapGenerator,
     Room,
+    SPAWN_COMPILED_COLUMN_HEIGHT,
+    SPAWN_COLUMN_SWEEP,
+    SPAWN_LINK_LIFT,
     SolidBox,
     generate_map,
 )
 from maps.routes import source_endpoint_components
 from tools.source_route_contract import load_source_route_contract
-from tools.validate_maps import deathmatch_spawn_origins
+from tools.validate_maps import (
+    _player_column_is_clear as static_player_column_is_clear,
+    deathmatch_spawn_origins,
+)
 
 
 @pytest.mark.parametrize(
@@ -91,12 +97,15 @@ def test_spawn_arena_floor_normalization_preserves_height_and_nonoverlap() -> No
 
     assert overlapping.floor_z == anchor.floor_z
     assert overlapping.ceil_z - overlapping.floor_z == authored_height
-    assert overlapping.ceil_z >= anchor.floor_z + MIN_SAFE_HEADROOM + 8
+    assert (
+        overlapping.ceil_z
+        >= anchor.floor_z + SPAWN_COMPILED_COLUMN_HEIGHT + 8
+    )
     assert (nonoverlapping.floor_z, nonoverlapping.ceil_z) == (96, 256)
     assert len(generator._spawn_protected_domains) == 4
     assert all(
         domain.z0 == anchor.floor_z + 1
-        and domain.z1 == anchor.floor_z + MIN_SAFE_HEADROOM
+        and domain.z1 == anchor.floor_z + SPAWN_COMPILED_COLUMN_HEIGHT
         for domain in generator._spawn_protected_domains
     )
     assert len(generator._spawn_protected_witnesses) == DM_SPAWN_COUNT
@@ -107,6 +116,68 @@ def test_spawn_arena_floor_normalization_preserves_height_and_nonoverlap() -> No
         for right in generator._spawn_protected_witnesses[index + 1:]
     ) >= MIN_SPAWN_SEPARATION
     generator._assert_spawn_protected_capacity()
+
+
+@pytest.mark.parametrize(
+    ("overhead_height", "expected_clear"),
+    ((104, False), (105, False), (106, True)),
+)
+def test_source_spawn_column_uses_conservative_106_unit_boundary(
+    overhead_height: int, expected_clear: bool,
+) -> None:
+    """Exercise the source policy mirror, not compiled-world authority."""
+    assert SPAWN_LINK_LIFT == 9
+    assert SPAWN_COLUMN_SWEEP == MIN_SAFE_HEADROOM - 56 == 40
+    assert SPAWN_COMPILED_COLUMN_HEIGHT == 106
+
+    blocker = SolidBox(-64, -64, overhead_height, 64, 64, 128)
+    generator = MapGenerator(seed=1, style="open")
+    generator.spawn_blockers = [blocker]
+    parsed_blocker = [
+        (blocker.x0, blocker.y0, blocker.z0,
+         blocker.x1, blocker.y1, blocker.z1)
+    ]
+
+    assert generator._player_column_is_clear(0, 0, 0) is expected_clear
+    assert static_player_column_is_clear(
+        0, 0, 0, parsed_blocker
+    ) is expected_clear
+
+
+@pytest.mark.parametrize(
+    ("style", "seed", "formerly_blocked_origins"),
+    (
+        ("towers", 71442103, {(1120, 608, 120)}),
+        (
+            "arena_vertical", 71442500,
+            {(2464, 2464, 216), (1120, 2464, 216)},
+        ),
+        ("arena_vertical", 71442502, {(2464, 1760, 120)}),
+    ),
+)
+def test_retired_71442_compiled_column_failures_are_source_clear(
+    style: str,
+    seed: int,
+    formerly_blocked_origins: set[tuple[int, int, int]],
+) -> None:
+    """Retired members are regression fixtures only, never publication rows."""
+    generator = MapGenerator(seed=seed, style=style)
+    generator.generate(5)
+
+    assert formerly_blocked_origins <= set(generator.spawn_points)
+    for x, y, z in generator.spawn_points:
+        floor_z = z - 24
+        assert generator._player_column_is_clear(x, y, floor_z)
+        overlapping_overheads = [
+            blocker.z0
+            for blocker in generator.spawn_blockers
+            if blocker.x1 > x - 16 and blocker.x0 < x + 16
+            and blocker.y1 > y - 16 and blocker.y0 < y + 16
+            and blocker.z0 >= floor_z + 1
+        ]
+        assert not overlapping_overheads or min(overlapping_overheads) >= (
+            floor_z + SPAWN_COMPILED_COLUMN_HEIGHT
+        )
 
 
 def test_spawn_arena_floor_normalization_is_noop_without_an_arena() -> None:

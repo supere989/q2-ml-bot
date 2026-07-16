@@ -43,6 +43,7 @@ from maps.generator import (  # noqa: E402
     MIN_SANDWICH_OVERLAP,
     PLAYER_DIAMETER,
     PLAYER_H,
+    SPAWN_COMPILED_COLUMN_HEIGHT,
     SPAWN_ESCAPE_DISTANCE,
     SPAWN_ESCAPE_STEP,
     SPAWN_LIGHT_EYE_OFFSET,
@@ -338,7 +339,10 @@ def _player_column_is_clear(
     px0, px1 = x - PLAYER_XY_HALF, x + PLAYER_XY_HALF
     py0, py1 = y - PLAYER_XY_HALF, y + PLAYER_XY_HALF
     bottom = floor_z + FLOOR_EPSILON
-    top = floor_z + MIN_SAFE_HEADROOM
+    # Match the compiled CM probe: authored spawn +9 link lift, then a 40u
+    # sweep of the standing hull.  A source brush may begin at the first
+    # integer boundary above that final hull top.
+    top = floor_z + SPAWN_COMPILED_COLUMN_HEIGHT
     return not any(
         x1 > px0 and x0 < px1 and
         y1 > py0 and y0 < py1 and

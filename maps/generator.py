@@ -42,6 +42,15 @@ PMOVE_FIXED_QUANTUM = 0.125  # pmove_state_t origin is stored in eighth-units
 # gaps therefore need 40u of motion margin above the standing hull.
 MIN_SAFE_HEADROOM = 96
 MIN_SANDWICH_OVERLAP = PLAYER_DIAMETER + 16
+SPAWN_LINK_LIFT = 9       # engine link raises authored DM origins before CM probes
+SPAWN_COLUMN_SWEEP = MIN_SAFE_HEADROOM - PLAYER_H
+# Atlas proves 96u total standing clearance by sweeping the linked 56u hull
+# upward 40u.  Integer source brushes must begin strictly above the final hull
+# top, so the reserved floor-to-overhead interval is 24+9+32+40+1 = 106u.
+SPAWN_COMPILED_COLUMN_HEIGHT = (
+    -PLAYER_MINS_Z + SPAWN_LINK_LIFT + PLAYER_MAXS_Z
+    + SPAWN_COLUMN_SWEEP + 1
+)
 SPAWN_ESCAPE_DISTANCE = 96
 SPAWN_ESCAPE_STEP = 16
 JUMP_H      = 50           # max jump height (units)
@@ -63,7 +72,7 @@ LIGHT_REGION_SIZE = 512    # maximum XY extent of one base-floor light region
 LIGHT_SAMPLE_SPACING = 128 # fixed coverage probes within each region
 MIN_FLOOR_LIGHT_COVERAGE = 0.98
 FLOOR_LIGHT_RADIUS = 448   # guaranteed horizontal reach used by validation
-SPAWN_LIGHT_EYE_OFFSET = 31  # authored origin +9 link offset +22 view height
+SPAWN_LIGHT_EYE_OFFSET = SPAWN_LINK_LIFT + 22
 SPAWN_COLUMN_LIGHT_OFFSET = 48  # 17u above the admitted spawn eye
 OVERHEAD_LIGHT_VALUE = 900 # qrad point-light intensity
 UNDER_PLATFORM_LIGHT_VALUE = 700
@@ -900,7 +909,10 @@ class MapGenerator:
             ),
         )
         self._spawn_protected_anchor = anchor
-        safe_ceiling = anchor.floor_z + MIN_SAFE_HEADROOM + 8
+        # spawn_blockers conservatively model ceiling/light assemblies from
+        # ceil_z-8, so raise the authored ceiling until that lower bound is at
+        # the first integer-safe compiled-column boundary.
+        safe_ceiling = anchor.floor_z + SPAWN_COMPILED_COLUMN_HEIGHT + 8
         for room in self.rooms:
             if room is anchor or not self._room_footprints_overlap(anchor, room):
                 continue
@@ -911,7 +923,7 @@ class MapGenerator:
             ceiling_bottom = room.ceil_z - 8
             ceiling_top = room.ceil_z + WALL_T
             standing_bottom = anchor.floor_z + 1
-            standing_top = anchor.floor_z + MIN_SAFE_HEADROOM
+            standing_top = anchor.floor_z + SPAWN_COMPILED_COLUMN_HEIGHT
             if ceiling_top > standing_bottom and ceiling_bottom < standing_top:
                 room.ceil_z = max(room.ceil_z, safe_ceiling)
 
@@ -924,7 +936,7 @@ class MapGenerator:
         outer_inset = SPAWN_EDGE_MARGIN - spawn_half
         inner_inset = SPAWN_EDGE_MARGIN + spawn_half
         z0 = anchor.floor_z + 1
-        z1 = anchor.floor_z + MIN_SAFE_HEADROOM
+        z1 = anchor.floor_z + SPAWN_COMPILED_COLUMN_HEIGHT
         x0, x1 = anchor.wx + outer_inset, anchor.wx + anchor.w - outer_inset
         y0, y1 = anchor.wy + outer_inset, anchor.wy + anchor.d - outer_inset
         inner_x0 = anchor.wx + inner_inset
@@ -1994,11 +2006,11 @@ class MapGenerator:
         )
 
     def _player_column_is_clear(self, x: float, y: float, floor_z: int) -> bool:
-        """Check the full 96u safe-headroom column for a standing hull."""
+        """Check the source interval required by the compiled 96u probe."""
         px0, px1 = x - PLAYER_XY_HALF, x + PLAYER_XY_HALF
         py0, py1 = y - PLAYER_XY_HALF, y + PLAYER_XY_HALF
         column_bottom = floor_z + 1
-        column_top = floor_z + MIN_SAFE_HEADROOM
+        column_top = floor_z + SPAWN_COMPILED_COLUMN_HEIGHT
         for box in self.spawn_blockers:
             if box.x1 <= px0 or box.x0 >= px1:
                 continue
