@@ -632,9 +632,25 @@ current alias and byte-identical immutable named declaration
 `B2-GENERATED-COHORT-71441-DECLARATION.json`, both SHA-256
 `5929532e0edae77b48073abccf4a4f3afdbacfb6905d1eadfb7f18d1dc5ba151`.
 Its 28 rows use fresh seed blocks 71441000..71441003 through
-71441600..71441603, four per concrete style in declaration order. No 71441
-producer, artifact, report, Dyn, test, gate, deployment, or training path has
-run; declaration publication is not producer progress.
+71441600..71441603, four per concrete style in declaration order. Its sole
+source freeze passed all 28 members from clean commit `89a2726` and tree
+`82e5581`: both 140-file populations matched, all route and spawn bindings
+passed, and all layouts were unique. The source report SHA-256 is
+`c241b81b458eb525334a720e9059902dabef30347195ba1200d63b530133f3e3`.
+
+The sole WSL compile invocation then failed during preflight before q2tool or
+map ordinal 0 because the selected nested `log_root` parent did not exist. The
+canonical failure report SHA-256 is
+`292e0e483c66596bfba58972bdf0e58ed36d938b3412c8868a3b2c10ba510aa3`.
+No compiled staging/publication, log leaf, materialization, analysis, Dyn, gate,
+deployment, or training action occurred. Exact evidence is archived in
+`B2-GENERATED-COHORT-71441-FAILURE.json`.
+
+Cohort 71441 and all source, WSL, report, and producer-snapshot bytes associated
+with it are permanently retired. None may be retried, repaired, resumed,
+reused, copied forward, salvaged, substituted, or admitted. The alias and
+assembler remain bound to retired 71441 so every producer and gate entry point
+fails closed. No replacement cohort is authorized.
 
 The interpreter boundary is now a pre-declaration authority, not a check to
 discover after compilation. The exact clean immediate-predecessor
@@ -665,15 +681,14 @@ check.
 
 ## Offline workflow
 
-The alias, assembler, and B2 gate schema are bound to authorized cohort
-`b2g26_final_71441`; the current `COHORT_ID` is therefore
-`b2g26_final_71441`. Every output leaf must be fresh and absent. Commands must
-never name retired cohorts 71426 through 71440, and no retired population,
-report, Dyn evidence, or compiled byte may be copied into the 71441 path.
+The alias, assembler, and B2 gate schema remain bound to retired cohort
+`b2g26_final_71441`; there is no authorized current `COHORT_ID`. Commands must
+never name retired cohorts 71426 through 71441, and no retired population,
+report, Dyn evidence, or compiled byte may be copied into a future path.
 
-The declaration-aware compiler remains the required 71441 shape. Do not hand-run `q2tool`,
-glob maps, or use `maps/compile.sh`. Every leaf must be absent before the sole
-attempt:
+The declaration-aware compiler remains the required shape for a separately
+authorized future cohort. Do not hand-run `q2tool`, glob maps, or use
+`maps/compile.sh`. The following terminal 71441 transcript is non-executable:
 
 ```sh
 python tools/compile_generated_cohort.py \
@@ -700,7 +715,7 @@ membership error leaves no compiled publication; its staging, logs, and report
 are terminal failure evidence and cannot be resumed, retried, copied into a
 new cohort, or used as a passing subset.
 
-The following pinned-runtime atomic materialization shape applies only to fresh
+The following pinned-runtime atomic materialization shape was never reached by
 71441 and must not be pointed at any retired path. Materialization discovers
 the first grounded compiled Pmove landing without constraining it to the
 generator hint; independent analysis later requires the sealed exact landing

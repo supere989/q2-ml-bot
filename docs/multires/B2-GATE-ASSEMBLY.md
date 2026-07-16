@@ -63,8 +63,24 @@ Fresh replacement cohort `b2g26_final_71441` is explicitly authorized. Its
 canonical named declaration and current alias are byte-identical with SHA-256
 `5929532e0edae77b48073abccf4a4f3afdbacfb6905d1eadfb7f18d1dc5ba151`.
 They declare 28 fresh rows in ordinal order, four per concrete style, using
-seed blocks 71441000..71441003 through 71441600..71441603. No 71441 producer,
-artifact, report, Dyn, test, gate, deployment, or training path exists yet.
+seed blocks 71441000..71441003 through 71441600..71441603. The sole source
+freeze passed 28/28 from clean commit `89a2726` and tree `82e5581`; its report
+SHA-256 is
+`c241b81b458eb525334a720e9059902dabef30347195ba1200d63b530133f3e3`.
+
+The sole WSL compiler invocation then failed in preflight before q2tool or map
+ordinal 0 because the nested log-root parent was absent. Its canonical failure
+report SHA-256 is
+`292e0e483c66596bfba58972bdf0e58ed36d938b3412c8868a3b2c10ba510aa3`.
+No compiled staging/publication, log leaf, materialization, analysis, Dyn, gate,
+deployment, or training action occurred. Exact evidence is archived in
+`B2-GENERATED-COHORT-71441-FAILURE.json`.
+
+Cohort 71441 is permanently retired. Its source, WSL, report, and
+producer-snapshot bytes cannot be retried, repaired, resumed, reused, copied,
+salvaged, substituted, or admitted. The alias and assembler remain bound to
+retired 71441 so every entry point fails closed. No replacement cohort is
+authorized.
 
 The exact clean immediate-predecessor implementation snapshot at commit
 `8d89df4a787e261f8a4fb935908191f8df7634b2` and tree
@@ -90,26 +106,26 @@ zstandard. These repeated checks must finish before source generation or WSL
 cohort bootstrap; a local newer-Python parse is not sufficient because Python 3.14
 accepted the PEP-701 construct that terminated 71439 on Python 3.10.
 
-The assembler's declaration check admits only the exact fresh 71441 rows. It
-rejects the immutable named 71440 declaration as retired before reading
-campaign evidence. Existing clean-repository, source-freeze, Atlas, test,
-manifest, and Dyn requirements remain the frozen gate contract. All evidence
-through 71440 is historical only.
+The assembler's declaration check remains shaped for the exact 71441 rows but
+rejects both the alias and immutable named declaration as retired before
+reading campaign evidence. Existing clean-repository, source-freeze, Atlas,
+test, manifest, and Dyn requirements remain the frozen gate contract. All
+evidence through 71441 is historical only.
 
 ## Frozen producer-report contract
 
-No 71441 producer report exists yet. The authorized, authority-bound 71441
-cohort must supply every item below from fresh roots. This authorization does
-not permit a 71440 retry or reuse of any retired byte.
+No producer report is currently authorized. The list below records what a
+separately declared, authority-bound future cohort must supply; it does not
+authorize a 71441 retry or reuse of any retired byte.
 
-- `tools/run_generator_cohort.py generate` is the only authorized producer for
-  the exact 71441 source freeze from two distinct fresh directories.
-- `tools/compile_generated_cohort.py` is the only authorized 71441 compiled
-  stage producer. Its canonical report
+- `tools/run_generator_cohort.py generate` remains the required producer for a
+  future exact source freeze from two distinct fresh directories.
+- `tools/compile_generated_cohort.py` remains the required compiled-stage
+  producer. Its canonical report
   retains per-map terminal logs and exit status, and publishes only the exact
   168-file declaration with atomic no-replace semantics.
-- `tools/materialize_generated_cohort.py` is the only authorized 71441
-  cohort-level V4 stage producer. Its canonical report
+- `tools/materialize_generated_cohort.py` remains the required cohort-level V4
+  stage producer. Its canonical report
   publishes only the exact 196-file declaration with atomic no-replace
   semantics. Its B1 authorities are explicit immutable inputs, never files
   discovered beside a cohort.
@@ -147,17 +163,16 @@ not permit a 71440 retry or reuse of any retired byte.
   must be outside the repository so its creation does not invalidate the clean
   Git binding.
 
-## Retired cohort 71440 producer transcript
+## Retired cohort 71441 producer transcript
 
-Cohort 71440 is retired and no replacement is authorized. The following
-commands preserve the producer contract and the shape of its successful but
-now implementation-ineligible stages; they are non-executable and must not be
-rerun against any 71440 source, staging, log, report, WSL, producer-snapshot,
-or release-build path.
+Cohort 71441 is retired and no replacement is authorized. The following
+commands preserve the producer contract and the shape of its terminal attempt;
+they are non-executable and must not be rerun against any 71441 source,
+staging, log, report, WSL, producer-snapshot, or release-build path.
 
 ```sh
 python tools/compile_generated_cohort.py \
-  --declaration docs/multires/B2-GENERATED-COHORT-71440-DECLARATION.json \
+  --declaration docs/multires/B2-GENERATED-COHORT-71441-DECLARATION.json \
   --source-root "$FUTURE_ROOT/source" \
   --staging-root "$FUTURE_ROOT/compiled-staging" \
   --publish-root "$FUTURE_ROOT/compiled" \
@@ -183,7 +198,7 @@ Only an all-green population is published with
 MATERIALIZER_PY=/home/raymond/miniconda3/bin/python
 B1_AUTHORITIES=/home/raymond/q2-multires-isolated/B1-authorities-909b1e46
 "$MATERIALIZER_PY" -B tools/materialize_generated_cohort.py \
-  --declaration docs/multires/B2-GENERATED-COHORT-71440-DECLARATION.json \
+  --declaration docs/multires/B2-GENERATED-COHORT-71441-DECLARATION.json \
   --compiled-dir "$FUTURE_ROOT/compiled" \
   --stage-dir "$FUTURE_ROOT/materialized-staging" \
   --materialized-dir "$FUTURE_ROOT/materialized" \
@@ -220,9 +235,9 @@ The B1 bundle remains reusable authority; it does not authorize reuse of any
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. The alias admits fresh 71441 identity, but this command
-still fails closed and creates no output until all newly produced 71441
-evidence is complete and green.
+clean-tree authority. The alias names retired 71441, so this command fails at
+declaration admission and creates no output. It is retained only as the frozen
+gate interface.
 
 ```sh
 python tools/assemble_b2_gate.py \
