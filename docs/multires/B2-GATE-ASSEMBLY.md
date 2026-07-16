@@ -78,9 +78,15 @@ deployment, or training action occurred. Exact evidence is archived in
 
 Cohort 71441 is permanently retired. Its source, WSL, report, and
 producer-snapshot bytes cannot be retried, repaired, resumed, reused, copied,
-salvaged, substituted, or admitted. The alias and assembler remain bound to
-retired 71441 so every entry point fails closed. No replacement cohort is
-authorized.
+salvaged, substituted, or admitted. Its immutable named declaration remains
+rejected by the retirement registry.
+
+Fresh replacement cohort `b2g26_final_71442` is explicitly authorized. Its
+canonical named declaration and current alias are byte-identical with SHA-256
+`fe4b86bbb0ab331dca4f7fd1418106c69ba4d4ea34b36774cb7e9259d27502bc`.
+They declare 28 fresh rows in ordinal order, four per concrete style, using
+seed blocks 71442000..71442003 through 71442600..71442603. No 71442 producer,
+artifact, report, Dyn, test, gate, deployment, or training action exists yet.
 
 The exact clean immediate-predecessor implementation snapshot at commit
 `8d89df4a787e261f8a4fb935908191f8df7634b2` and tree
@@ -106,26 +112,26 @@ zstandard. These repeated checks must finish before source generation or WSL
 cohort bootstrap; a local newer-Python parse is not sufficient because Python 3.14
 accepted the PEP-701 construct that terminated 71439 on Python 3.10.
 
-The assembler's declaration check remains shaped for the exact 71441 rows but
-rejects both the alias and immutable named declaration as retired before
-reading campaign evidence. Existing clean-repository, source-freeze, Atlas,
-test, manifest, and Dyn requirements remain the frozen gate contract. All
-evidence through 71441 is historical only.
+The assembler's declaration check admits only the exact fresh 71442 rows. It
+rejects the immutable named 71441 declaration as retired before reading
+campaign evidence. Existing clean-repository, source-freeze, Atlas, test,
+manifest, and Dyn requirements remain the frozen gate contract. All evidence
+through 71441 is historical only.
 
 ## Frozen producer-report contract
 
-No producer report is currently authorized. The list below records what a
-separately declared, authority-bound future cohort must supply; it does not
-authorize a 71441 retry or reuse of any retired byte.
+No 71442 producer report exists yet. The authorized, authority-bound 71442
+cohort must supply every item below from fresh roots. This authorization does
+not permit a 71441 retry or reuse of any retired byte.
 
-- `tools/run_generator_cohort.py generate` remains the required producer for a
-  future exact source freeze from two distinct fresh directories.
-- `tools/compile_generated_cohort.py` remains the required compiled-stage
-  producer. Its canonical report
+- `tools/run_generator_cohort.py generate` is the only authorized producer for
+  the exact 71442 source freeze from two distinct fresh directories.
+- `tools/compile_generated_cohort.py` is the only authorized 71442
+  compiled-stage producer. Its canonical report
   retains per-map terminal logs and exit status, and publishes only the exact
   168-file declaration with atomic no-replace semantics.
-- `tools/materialize_generated_cohort.py` remains the required cohort-level V4
-  stage producer. Its canonical report
+- `tools/materialize_generated_cohort.py` is the only authorized 71442
+  cohort-level V4 stage producer. Its canonical report
   publishes only the exact 196-file declaration with atomic no-replace
   semantics. Its B1 authorities are explicit immutable inputs, never files
   discovered beside a cohort.
@@ -235,9 +241,9 @@ The B1 bundle remains reusable authority; it does not authorize reuse of any
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. The alias names retired 71441, so this command fails at
-declaration admission and creates no output. It is retained only as the frozen
-gate interface.
+clean-tree authority. The alias admits fresh 71442 identity, but this command
+still fails closed and creates no output until all newly produced 71442
+evidence is complete and green.
 
 ```sh
 python tools/assemble_b2_gate.py \

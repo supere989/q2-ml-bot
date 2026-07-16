@@ -26,7 +26,7 @@ from tools.assemble_b2_gate import (
     _exact_directory_files,
     _decode_dyn_snapshot,
     _dyn_source_authority,
-    _expected_71441_rows,
+    _expected_71442_rows,
     _validate_declaration,
     _validate_dyn_evidence,
     _validate_materialized,
@@ -522,7 +522,7 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
     paths.claims_dir.mkdir()
     paths.analysis_dir.mkdir()
     paths.dyn_evidence_report.parent.mkdir()
-    map_id = _expected_71441_rows()[0]["map"]
+    map_id = _expected_71442_rows()[0]["map"]
 
     bsp = b"IBSP fixture"
     (paths.claims_dir / f"{map_id}.bsp").write_bytes(bsp)
@@ -663,22 +663,22 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
         },
     }
     paths.dyn_evidence_report.write_bytes(canonical_bytes(report))
-    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71441_rows()}
+    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71442_rows()}
     return paths, declaration, report
 
 
-def test_71441_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
-    rows = _expected_71441_rows()
+def test_71442_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
+    rows = _expected_71442_rows()
     assert len(rows) == 28
     assert rows[0] == {
         "ordinal": 0,
-        "map": "b2g26_open_71441000",
-        "seed": 71441000,
+        "map": "b2g26_open_71442000",
+        "seed": 71442000,
         "style": "open",
         "grid": 5,
         "observed_heat": None,
     }
-    assert rows[-1]["map"] == "b2g26_arena_lanes_71441603"
+    assert rows[-1]["map"] == "b2g26_arena_lanes_71442603"
     options = _parser().format_help()
     assert "--declaration" in options
     assert "--source-dir" in options
@@ -708,10 +708,6 @@ def test_71441_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
             ROOT / "docs/multires/B2-GENERATED-COHORT-71441-DECLARATION.json",
             "71441",
         ),
-        (
-            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
-            "71441",
-        ),
     ],
 )
 def test_gate_refuses_retired_declaration_before_evidence(
@@ -721,11 +717,14 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_gate_refuses_current_retired_71441_alias() -> None:
-    with pytest.raises(B2GateError, match="71441.*permanently retired"):
-        _validate_declaration(
-            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-        )
+def test_gate_admits_current_71442_declaration() -> None:
+    declaration, digest = _validate_declaration(
+        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+    )
+
+    assert declaration["cohort_id"] == EXPECTED_COHORT
+    assert declaration["maps"] == _expected_71442_rows()
+    assert len(digest) == 64
 
 
 def test_exact_directory_membership_rejects_extra_and_symlink(tmp_path: Path) -> None:

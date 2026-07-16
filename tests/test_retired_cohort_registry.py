@@ -219,9 +219,9 @@ def test_named_71439_remains_retired() -> None:
         )
 
 
-@pytest.mark.parametrize("declaration_path", [CURRENT_ALIAS, NAMED_71441])
+@pytest.mark.parametrize("declaration_path", [NAMED_71441])
 def test_alias_and_named_71441_are_retired(declaration_path: Path) -> None:
-    current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
+    current, current_sha256 = cohort.load_declaration(declaration_path)
 
     assert current["cohort_id"] == "b2g26_final_71441"
     with pytest.raises(
@@ -230,6 +230,15 @@ def test_alias_and_named_71441_are_retired(declaration_path: Path) -> None:
         registry.require_unretired_declaration(
             declaration_path, current, current_sha256
         )
+
+
+def test_current_alias_71442_is_admitted() -> None:
+    current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
+
+    assert current["cohort_id"] == "b2g26_final_71442"
+    assert registry.require_unretired_declaration(
+        CURRENT_ALIAS, current, current_sha256
+    ) is None
 
 
 @pytest.mark.parametrize(
