@@ -21,10 +21,70 @@ from tools.run_generator_cohort import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DECLARATION = (
-    ROOT
-    / "tests/fixtures/multires/B2-GENERATED-COHORT-FRESH-DECLARATION.json"
-)
+
+
+def _synthetic_declaration_document() -> dict[str, object]:
+    styles = (
+        "open",
+        "towers",
+        "canyon",
+        "pits",
+        "arena_open",
+        "arena_vertical",
+        "arena_lanes",
+    )
+    maps = []
+    for style_index, style in enumerate(styles):
+        for member in range(4):
+            ordinal = style_index * 4 + member
+            maps.append({
+                "ordinal": ordinal,
+                "map": f"b2g26_test_fresh_{ordinal:02d}",
+                "seed": 99_000_000 + ordinal,
+                "style": style,
+                "grid": 5,
+                "observed_heat": None,
+            })
+    return {
+        "schema": "q2-b2-generated-cohort-declaration-v1",
+        "cohort_id": "b2g26_test_fresh_99000",
+        "mode": "final",
+        "selection": {
+            "policy": "all-or-nothing",
+            "required_map_count": 28,
+            "required_maps_per_style": 4,
+            "required_concrete_styles": list(styles),
+            "timing": "declared-before-generation",
+            "salvage_allowed": False,
+            "replacement_allowed": False,
+        },
+        "generator": {
+            "version": "v6",
+            "grid": 5,
+            "gym": False,
+            "observed_heat": None,
+        },
+        "source_suffixes": [
+            ".map",
+            ".json",
+            ".meta.json",
+            ".lattice.json",
+            ".routes.json",
+        ],
+        "implementation_binding": {
+            "bind_repository_commit": True,
+            "bind_repository_tree": True,
+            "require_clean_git": True,
+            "bind_atlas_analyzer_closure": True,
+        },
+        "maps": maps,
+    }
+
+
+def _declaration_path(claims_directory: Path) -> Path:
+    return claims_directory.parent / "synthetic-unretired-declaration.json"
+
+
 @lru_cache(maxsize=1)
 def binding() -> dict[str, object]:
     return {
@@ -47,7 +107,11 @@ def binding() -> dict[str, object]:
 
 
 def write_claims_stage(directory: Path) -> dict:
-    declaration, _digest = load_declaration(DECLARATION)
+    declaration_path = _declaration_path(directory)
+    declaration_path.write_bytes(
+        canonical_bytes(_synthetic_declaration_document())
+    )
+    declaration, _digest = load_declaration(declaration_path)
     directory.mkdir()
     for row in declaration["maps"]:
         for suffix in STAGE_SUFFIXES["claims"]:
@@ -302,7 +366,7 @@ def test_builds_declared_order_and_atomically_publishes_exact_224_files(
         return write_map_build(declared, claims_dir, output_dir)
 
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -355,7 +419,7 @@ def test_one_builder_failure_runs_full_declaration_and_publishes_no_subset(
         return write_map_build(declared, claims_dir, output_dir)
 
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -395,7 +459,7 @@ def test_unexpected_builder_file_rejects_whole_campaign(tmp_path: Path) -> None:
         )
 
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -423,7 +487,7 @@ def test_second_run_refuses_overwrite_before_builder(tmp_path: Path) -> None:
         return write_map_build(declared, claims_dir, output_dir)
 
     first = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -436,7 +500,7 @@ def test_second_run_refuses_overwrite_before_builder(tmp_path: Path) -> None:
 
     with pytest.raises(campaign.GeneratedAtlasCampaignError, match="already exists"):
         campaign.build_atlas_campaign(
-            DECLARATION,
+            _declaration_path(claims),
             claims,
             analysis,
             tmp_path / "second-diagnostics",
@@ -453,7 +517,7 @@ def test_refuses_nested_report_and_symlink_stage_roots(tmp_path: Path) -> None:
     analysis = tmp_path / "analysis"
     with pytest.raises(campaign.GeneratedAtlasCampaignError, match="outside"):
         campaign.build_atlas_campaign(
-            DECLARATION,
+            _declaration_path(claims),
             claims,
             analysis,
             tmp_path / "diagnostics",
@@ -463,7 +527,7 @@ def test_refuses_nested_report_and_symlink_stage_roots(tmp_path: Path) -> None:
         )
     with pytest.raises(campaign.GeneratedAtlasCampaignError, match="outside"):
         campaign.build_atlas_campaign(
-            DECLARATION,
+            _declaration_path(claims),
             claims,
             tmp_path / "report-root" / "analysis",
             tmp_path / "inverse-diagnostics",
@@ -476,7 +540,7 @@ def test_refuses_nested_report_and_symlink_stage_roots(tmp_path: Path) -> None:
     symlink.symlink_to(tmp_path / "absent-analysis")
     with pytest.raises(campaign.GeneratedAtlasCampaignError, match="symlink"):
         campaign.build_atlas_campaign(
-            DECLARATION,
+            _declaration_path(claims),
             claims,
             symlink,
             tmp_path / "different-diagnostics",
@@ -495,7 +559,7 @@ def test_exact_claims_membership_failure_calls_no_builder(tmp_path: Path) -> Non
     calls: list[str] = []
 
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -571,7 +635,7 @@ def test_claims_and_execution_are_immutable_committed_snapshots(
         return write_map_build(declared, claims_snapshot, output_dir)
 
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -600,7 +664,7 @@ def test_rejects_noncanonical_repo_root_before_reserving_outputs(
         match="repo_root must be",
     ):
         campaign.build_atlas_campaign(
-            DECLARATION,
+            _declaration_path(claims),
             claims,
             tmp_path / "analysis",
             tmp_path / "diagnostics",
@@ -683,7 +747,7 @@ def test_manifest_authority_tampering_rejects_complete_campaign(
         )
 
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -721,7 +785,7 @@ def test_noncanonical_analysis_manifest_is_rejected(tmp_path: Path) -> None:
         return result
 
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -772,7 +836,7 @@ def test_atlas_manifest_authority_is_independently_bound(tmp_path: Path) -> None
         )
 
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -801,7 +865,7 @@ def test_row_artifacts_are_derived_from_and_compared_to_incoming_membership(
     monkeypatch.setattr(campaign, "_exclusive_copy", corrupting_copy)
 
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -835,7 +899,7 @@ def test_nested_claims_entry_and_nested_builder_output_are_rejected(
     calls: list[str] = []
 
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -860,7 +924,7 @@ def test_nested_claims_entry_and_nested_builder_output_are_rejected(
         return result
 
     second = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(second_claims),
         second_claims,
         second_root / "analysis",
         second_root / "diagnostics",
@@ -889,7 +953,7 @@ def test_publication_race_preserves_attacker_destination_and_fails_report(
         return result
 
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -926,7 +990,7 @@ def test_passing_report_is_durable_before_analysis_rename(
 
     monkeypatch.setattr(campaign, "_rename_noreplace", attested_rename)
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -955,7 +1019,7 @@ def test_failed_post_publish_verification_quarantines_owned_root(
 
     monkeypatch.setattr(campaign, "_open_exact_flat_root", fail_final)
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,
@@ -994,7 +1058,7 @@ def test_report_path_symlink_swap_prevents_any_publication(
         match="report path was replaced",
     ):
         campaign.build_atlas_campaign(
-            DECLARATION,
+            _declaration_path(claims),
             claims,
             analysis,
             diagnostics,
@@ -1021,7 +1085,7 @@ def test_diagnostics_root_symlink_swap_fails_closed_with_report(
         return result
 
     report = campaign.build_atlas_campaign(
-        DECLARATION,
+        _declaration_path(claims),
         claims,
         analysis,
         diagnostics,

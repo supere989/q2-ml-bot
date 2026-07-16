@@ -667,7 +667,7 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
     return paths, declaration, report
 
 
-def test_71442_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
+def test_retired_71442_historical_identity_and_cli_contract_are_exact() -> None:
     rows = _expected_71442_rows()
     assert len(rows) == 28
     assert rows[0] == {
@@ -708,6 +708,10 @@ def test_71442_identity_is_exact_and_cli_has_no_discovery_flags() -> None:
             ROOT / "docs/multires/B2-GENERATED-COHORT-71441-DECLARATION.json",
             "71441",
         ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71442-DECLARATION.json",
+            "71442",
+        ),
     ],
 )
 def test_gate_refuses_retired_declaration_before_evidence(
@@ -717,14 +721,14 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_gate_admits_current_71442_declaration() -> None:
-    declaration, digest = _validate_declaration(
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
-
-    assert declaration["cohort_id"] == EXPECTED_COHORT
-    assert declaration["maps"] == _expected_71442_rows()
-    assert len(digest) == 64
+def test_gate_refuses_retired_current_alias_until_new_qualification() -> None:
+    with pytest.raises(
+        B2GateError,
+        match=r"71442.*permanently retired",
+    ):
+        _validate_declaration(
+            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+        )
 
 
 def test_exact_directory_membership_rejects_extra_and_symlink(tmp_path: Path) -> None:
