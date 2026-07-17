@@ -14,7 +14,7 @@ import sys
 from typing import Any, Callable, Mapping, Sequence
 
 
-PLAN_SCHEMA = "q2-b2-qualification-driver-plan-v1"
+PLAN_SCHEMA = "q2-b2-qualification-driver-plan-v2"
 STATE_SCHEMA = "q2-b2-qualification-driver-state-v1"
 STAGE_SCHEMA = "q2-b2-qualification-stage-v1"
 INFRASTRUCTURE_SCHEMA = "q2-b2-qualification-infrastructure-v1"
@@ -88,6 +88,13 @@ def _tool(repo: Path, name: str) -> Path:
     return repo / "tools" / name
 
 
+def _same_file_bytes(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    return (
+        left.get("bytes") == right.get("bytes")
+        and left.get("sha256") == right.get("sha256")
+    )
+
+
 def _step(stage: str, command: Sequence[str], report: Path) -> dict[str, Any]:
     return {"stage": stage, "command": list(command), "report": str(report)}
 
@@ -132,6 +139,37 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "zstandard_init": _file_record(args.zstandard_init),
         "zstandard_backend": _file_record(args.zstandard_backend),
     }
+    pinned_inputs = {
+        name: _file_record(path)
+        for name, path in {
+            "design": args.design,
+            "execution_plan": args.plan,
+            "b1_gate": args.b1_gate,
+            "boundary_proof": args.boundary_proof_report,
+            "syntax_report": args.syntax_report,
+            "q2tool": args.q2tool,
+            "base_pak": args.basedir / "pak0.pak",
+            "cm_oracle": args.cm_oracle,
+            "pmove_oracle": args.pmove_oracle,
+            "hook_oracle": args.hook_oracle,
+            "fall_oracle": args.fall_oracle,
+            "hook_attestation": args.hook_attestation,
+            "packer": args.packer,
+            "verifier": args.verifier,
+            "atlas_cm_oracle": args.client_root / "release/q2-cm-oracle",
+            "atlas_pmove_oracle": args.client_root / "release/q2-pmove-oracle",
+            "atlas_hook_oracle": args.lithium_root / "tools/q2-hook-oracle",
+        }.items()
+    }
+    for supplied, atlas in (
+        ("cm_oracle", "atlas_cm_oracle"),
+        ("pmove_oracle", "atlas_pmove_oracle"),
+        ("hook_oracle", "atlas_hook_oracle"),
+    ):
+        if not _same_file_bytes(pinned_inputs[supplied], pinned_inputs[atlas]):
+            raise QualificationDriverError(
+                f"canonical Atlas {supplied} bytes differ from supplied authority"
+            )
 
     commands: list[dict[str, Any]] = []
     command = [str(python), str(_tool(repo, "run_b2_qualification_source.py"))]
@@ -290,6 +328,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "boundary_mode": "preexisting-wsl-compile-and-proof",
         "toolchain_authority": toolchain_authority,
         "runtime_inputs": runtime_inputs,
+        "pinned_inputs": pinned_inputs,
         "outputs": sorted(str(path) for path in {
             declaration, source, source_cold, compile_staging, compiled,
             compile_logs, cm_evidence, materialize_staging, materialized,
@@ -346,6 +385,32 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
             or dict(record) != _file_record(Path(record["path"]))
         ):
             raise QualificationDriverError(f"pinned runtime input drifted: {name}")
+    pinned = plan.get("pinned_inputs")
+    expected_pinned = {
+        "design", "execution_plan", "b1_gate", "boundary_proof",
+        "syntax_report", "q2tool", "base_pak", "cm_oracle",
+        "pmove_oracle", "hook_oracle", "fall_oracle", "hook_attestation",
+        "packer", "verifier", "atlas_cm_oracle", "atlas_pmove_oracle",
+        "atlas_hook_oracle",
+    }
+    if not isinstance(pinned, Mapping) or set(pinned) != expected_pinned:
+        raise QualificationDriverError("pinned qualification inputs are incomplete")
+    for name, record in pinned.items():
+        if (
+            not isinstance(record, Mapping)
+            or not isinstance(record.get("path"), str)
+            or dict(record) != _file_record(Path(record["path"]))
+        ):
+            raise QualificationDriverError(f"pinned qualification input drifted: {name}")
+    for supplied, atlas in (
+        ("cm_oracle", "atlas_cm_oracle"),
+        ("pmove_oracle", "atlas_pmove_oracle"),
+        ("hook_oracle", "atlas_hook_oracle"),
+    ):
+        if not _same_file_bytes(pinned[supplied], pinned[atlas]):
+            raise QualificationDriverError(
+                f"canonical Atlas {supplied} bytes differ from supplied authority"
+            )
     reports = [Path(step["report"]) for step in plan["commands"]]
     if len(set(reports)) != len(reports) or any(
         path != workspace / "reports" / path.name for path in reports

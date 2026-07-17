@@ -163,6 +163,17 @@ Every golden and infrastructure preflight must pass, and at least 20 maps must
 complete the full lifecycle through promotion validation. Qualification bytes
 or passing subsets can never satisfy the final gate.
 
+The disposable campaign is orchestrated by
+`tools/run_b2_qualification.py`. Driver-plan schema v2 hash-binds every
+external file before source generation, including both the explicitly supplied
+B1 oracle paths and the canonical Atlas placements beneath
+`CLIENT_ROOT/release` and `LITHIUM_ROOT/tools`. The paired CM, Pmove, and hook
+files must be byte-identical. A missing canonical build artifact, a symlink, or
+input drift therefore fails the dry run instead of producing a late 28-map
+Atlas rejection. The base `pak0.pak`, toolchain, syntax report, normative
+documents, boundary proof, runtime modules, packer, and verifier are covered by
+the same pre-generation binding.
+
 After qualification is green, a separately committed fresh declaration may
 authorize one immutable/no-retry final producer attempt. Its required order is
 source/source-static, real compilation, compiled-CM preflight,

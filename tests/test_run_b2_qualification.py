@@ -69,6 +69,26 @@ def _args(tmp_path: Path) -> argparse.Namespace:
         "dry_run": False,
         "resume": False,
     }
+    for name in (
+        "design.md", "plan.md", "b1.json", "syntax.json", "q2tool",
+        "cm", "pmove", "hook", "fall", "hook-attestation.json",
+        "packer", "verifier",
+    ):
+        path = tmp_path / name
+        path.write_bytes(f"fixture:{name}\n".encode("ascii"))
+    (tmp_path / "baseq2").mkdir()
+    (tmp_path / "baseq2/pak0.pak").write_bytes(b"fixture:pak0\n")
+    (tmp_path / "client/release").mkdir(parents=True)
+    (tmp_path / "client/release/q2-cm-oracle").write_bytes(
+        (tmp_path / "cm").read_bytes()
+    )
+    (tmp_path / "client/release/q2-pmove-oracle").write_bytes(
+        (tmp_path / "pmove").read_bytes()
+    )
+    (tmp_path / "lithium/tools").mkdir(parents=True)
+    (tmp_path / "lithium/tools/q2-hook-oracle").write_bytes(
+        (tmp_path / "hook").read_bytes()
+    )
     return argparse.Namespace(**values)
 
 
@@ -195,6 +215,26 @@ def test_command_plan_is_sequential_and_dry_to_build(tmp_path: Path) -> None:
         "non_admissible": True, "final_cohort_authorized": False,
         "deploy_allowed": False, "training_allowed": False,
     }
+    assert plan["schema"] == "q2-b2-qualification-driver-plan-v2"
+    assert len(plan["pinned_inputs"]) == 17
+
+
+def test_missing_canonical_atlas_authority_fails_before_generation(
+    tmp_path: Path,
+) -> None:
+    args = _args(tmp_path)
+    (args.client_root / "release/q2-cm-oracle").unlink()
+    with pytest.raises(QualificationDriverError, match="absent or a symlink"):
+        build_plan(args)
+    assert not args.workspace.exists()
+
+
+def test_canonical_atlas_authority_must_match_supplied_bytes(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    (args.lithium_root / "tools/q2-hook-oracle").write_bytes(b"wrong hook\n")
+    with pytest.raises(QualificationDriverError, match="canonical Atlas hook_oracle"):
+        build_plan(args)
+    assert not args.workspace.exists()
 
 
 def test_every_generated_argv_parses_with_its_actual_stage_parser(
@@ -284,6 +324,15 @@ def test_resume_rejects_pinned_runtime_byte_drift(tmp_path: Path) -> None:
     run_plan(plan, resume=False, runner=FakeTools(plan))
     args.zstandard_backend.write_bytes(b"drifted backend\n")
     with pytest.raises(QualificationDriverError, match="runtime input drifted"):
+        run_plan(plan, resume=True, runner=FakeTools(plan))
+
+
+def test_resume_rejects_pinned_qualification_input_drift(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    plan = build_plan(args)
+    run_plan(plan, resume=False, runner=FakeTools(plan))
+    args.packer.write_bytes(b"drifted packer\n")
+    with pytest.raises(QualificationDriverError, match="qualification input drifted"):
         run_plan(plan, resume=True, runner=FakeTools(plan))
 
 
