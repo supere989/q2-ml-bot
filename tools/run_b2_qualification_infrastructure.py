@@ -50,9 +50,11 @@ from tools.run_generator_cohort import STAGE_SUFFIXES  # noqa: E402
 
 PINNED_PYTHON_VERSION = [3, 11, 4]
 PINNED_PYTHON_SHA256 = "b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4"
+SYNTAX_PYTHON_VERSION = [3, 10, 12]
+SYNTAX_PYTHON_SHA256 = "7d51cd6b48b521277f5caa4610a82126e315fa2be4df069823a8b1eeb5bd4a86"
 CHECK_IDS = (
     "deterministic-cold-rebuild", "exact-stage-membership", "exclusive-create",
-    "pinned-runtime-syntax", "resource-bounds", "timeout-fail-closed",
+    "python310-syntax-floor", "resource-bounds", "timeout-fail-closed",
 )
 
 
@@ -83,7 +85,7 @@ def validate_infrastructure_evidence(
             "schema", "qualification_id", "id", "stage_report_sha256s",
             "evidence", "passed",
         }, f"infrastructure {check_id} evidence keys differ")
-        require(evidence["schema"] == "q2-b2-qualification-infrastructure-evidence-v1"
+        require(evidence["schema"] == "q2-b2-qualification-infrastructure-evidence-v2"
                 and evidence["qualification_id"] == report.get("qualification_id")
                 and evidence["id"] == check_id
                 and evidence["stage_report_sha256s"] == report.get("stage_report_sha256s")
@@ -110,7 +112,7 @@ def validate_infrastructure_evidence(
         "deterministic-cold-rebuild": cold,
         "exact-stage-membership": membership,
         "exclusive-create": exclusive,
-        "pinned-runtime-syntax": syntax,
+        "python310-syntax-floor": syntax,
         "resource-bounds": resources,
         "timeout-fail-closed": timeout,
     }
@@ -301,20 +303,22 @@ def _cold_and_resource_evidence(
 def _syntax_evidence(path: Path, runtime: Mapping[str, Any]) -> dict[str, Any]:
     report, raw = load_canonical(path)
     require(report.get("schema") == "q2-python-syntax-floor-v1" and report.get("passed") is True,
-            "pinned runtime syntax report is not green")
+            "Python 3.10 syntax-floor report is not green")
     require(report.get("failures") == [] and isinstance(report.get("file_count"), int)
             and report["file_count"] > 0, "syntax report is incomplete")
     interpreter = report.get("interpreter")
     require(isinstance(interpreter, Mapping), "syntax interpreter record is malformed")
     require(interpreter.get("implementation") == "cpython"
-            and interpreter.get("version") == PINNED_PYTHON_VERSION
-            and interpreter.get("sha256") == PINNED_PYTHON_SHA256,
-            "syntax report was not produced by the pinned CPython 3.11.4 runtime")
-    require(interpreter.get("sha256") == runtime.get("sha256")
-            and interpreter.get("version") == runtime.get("version"),
-            "syntax report runtime differs from infrastructure producer runtime")
+            and interpreter.get("version") == SYNTAX_PYTHON_VERSION
+            and interpreter.get("sha256") == SYNTAX_PYTHON_SHA256,
+            "syntax report was not produced by the WSL CPython 3.10.12 authority")
+    require(runtime.get("implementation") == "cpython"
+            and runtime.get("version") == PINNED_PYTHON_VERSION
+            and runtime.get("sha256") == PINNED_PYTHON_SHA256,
+            "infrastructure producer is not the pinned CPython 3.11.4 runtime")
     return {"report": {"bytes": len(raw), "sha256": sha256_bytes(raw)},
-            "interpreter": dict(interpreter), "file_count": report["file_count"],
+            "syntax_interpreter": dict(interpreter),
+            "execution_runtime": dict(runtime), "file_count": report["file_count"],
             "files_sha256": report.get("files_sha256")}
 
 
@@ -392,14 +396,14 @@ def produce_infrastructure_report(
             "deterministic-cold-rebuild": cold,
             "exact-stage-membership": membership,
             "exclusive-create": exclusive,
-            "pinned-runtime-syntax": syntax,
+            "python310-syntax-floor": syntax,
             "resource-bounds": resources,
             "timeout-fail-closed": timeout,
         }
         checks: list[dict[str, Any]] = []
         for check_id in CHECK_IDS:
             evidence = {
-                "schema": "q2-b2-qualification-infrastructure-evidence-v1",
+                "schema": "q2-b2-qualification-infrastructure-evidence-v2",
                 "qualification_id": declaration["qualification_id"],
                 "id": check_id, "stage_report_sha256s": report_hashes,
                 "evidence": bodies[check_id], "passed": True,

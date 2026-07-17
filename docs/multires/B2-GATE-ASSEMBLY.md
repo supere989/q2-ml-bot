@@ -145,6 +145,12 @@ The system Python 3.10 interpreter is syntax authority only because it lacks
 zstandard. These repeated checks must finish before source generation or WSL
 cohort bootstrap; a local newer-Python parse is not sufficient because Python 3.14
 accepted the PEP-701 construct that terminated 71439 on Python 3.10.
+Infrastructure evidence records these as two distinct authorities: the
+`python310-syntax-floor` check binds `/usr/bin/python3.10` (CPython 3.10.12,
+SHA-256 `7d51cd6b48b521277f5caa4610a82126e315fa2be4df069823a8b1eeb5bd4a86`),
+while the infrastructure producer and materializer remain bound to the
+separate CPython 3.11.4 executable and zstandard module digests above. The
+syntax report must never be required to identify the execution runtime.
 
 The assembler must reject declarations for retired cohorts 71426 through
 71442 before reading campaign evidence. A future final declaration is eligible

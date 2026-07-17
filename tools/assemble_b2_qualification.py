@@ -60,7 +60,7 @@ from tools.retired_cohort_registry import (  # noqa: E402
 QUALIFICATION_SCHEMA = "q2-b2-toolchain-qualification-v1"
 DECLARATION_SCHEMA = "q2-b2-qualification-declaration-v1"
 STAGE_SCHEMA = "q2-b2-qualification-stage-v1"
-INFRASTRUCTURE_SCHEMA = "q2-b2-qualification-infrastructure-v1"
+INFRASTRUCTURE_SCHEMA = "q2-b2-qualification-infrastructure-v2"
 EXPECTED_MAP_COUNT = 28
 REQUIRED_END_TO_END_PASSES = 20
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -89,7 +89,7 @@ REQUIRED_INFRASTRUCTURE_CHECKS = {
     "deterministic-cold-rebuild",
     "exact-stage-membership",
     "exclusive-create",
-    "pinned-runtime-syntax",
+    "python310-syntax-floor",
     "resource-bounds",
     "timeout-fail-closed",
 }

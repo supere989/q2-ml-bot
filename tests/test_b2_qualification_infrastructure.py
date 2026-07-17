@@ -12,7 +12,7 @@ from tools.assemble_b2_qualification import STAGES, _validate_infrastructure
 from tools.b2_qualification_stage_support import QualificationStageError
 from tools.run_b2_qualification_infrastructure import (
     PINNED_PYTHON_SHA256, _timeout_probe as real_timeout_probe,
-    _membership_evidence, produce_infrastructure_report,
+    _membership_evidence, _syntax_evidence, produce_infrastructure_report,
 )
 from tools.run_generator_cohort import STAGE_SUFFIXES, canonical_bytes
 
@@ -104,9 +104,10 @@ def _inputs(tmp_path: Path, *, sparse: bool = False) -> dict[str, object]:
     syntax = write_json(tmp_path / "syntax.json", {
         "enumeration": "git-tracked", "failures": [], "file_count": 17,
         "files_sha256": sha(b"files"),
-        "interpreter": {"executable": "/home/raymond/miniconda3/bin/python3.11",
-                        "implementation": "cpython", "sha256": PINNED_PYTHON_SHA256,
-                        "version": [3, 11, 4]},
+        "interpreter": {"executable": "/usr/bin/python3.10",
+                        "implementation": "cpython",
+                        "sha256": "7d51cd6b48b521277f5caa4610a82126e315fa2be4df069823a8b1eeb5bd4a86",
+                        "version": [3, 10, 12]},
         "passed": True, "schema": "q2-python-syntax-floor-v1",
     })
     return {
@@ -178,9 +179,30 @@ def test_infrastructure_rejects_ambient_or_forged_syntax_runtime(tmp_path: Path)
     syntax = __import__("json").loads(paths["syntax"].read_bytes())
     syntax["interpreter"]["version"] = [3, 14, 0]
     paths["syntax"].write_bytes(canonical_bytes(syntax))
-    with pytest.raises(QualificationStageError, match="pinned CPython 3.11.4"):
+    with pytest.raises(QualificationStageError, match="WSL CPython 3.10.12"):
         _run(paths)
     assert not paths["evidence"].exists()
+
+
+def test_syntax_floor_and_execution_runtime_are_distinct_authorities(tmp_path: Path):
+    paths = _inputs(tmp_path)
+    evidence = _syntax_evidence(paths["syntax"], {
+        "sha256": PINNED_PYTHON_SHA256, "version": [3, 11, 4],
+        "implementation": "cpython", "executable": "/fixture/python3.11",
+        "bytes": 1,
+    })
+    assert evidence["syntax_interpreter"]["version"] == [3, 10, 12]
+    assert evidence["execution_runtime"]["version"] == [3, 11, 4]
+
+
+def test_syntax_evidence_rejects_wrong_execution_runtime(tmp_path: Path):
+    paths = _inputs(tmp_path)
+    with pytest.raises(QualificationStageError, match="pinned CPython 3.11.4"):
+        _syntax_evidence(paths["syntax"], {
+            "sha256": "00" * 32, "version": [3, 11, 4],
+            "implementation": "cpython", "executable": "/fixture/python",
+            "bytes": 1,
+        })
 
 
 def test_infrastructure_rejects_forged_stage_hash_chain(tmp_path: Path):

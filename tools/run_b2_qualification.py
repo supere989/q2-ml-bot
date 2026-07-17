@@ -17,7 +17,7 @@ from typing import Any, Callable, Mapping, Sequence
 PLAN_SCHEMA = "q2-b2-qualification-driver-plan-v2"
 STATE_SCHEMA = "q2-b2-qualification-driver-state-v1"
 STAGE_SCHEMA = "q2-b2-qualification-stage-v1"
-INFRASTRUCTURE_SCHEMA = "q2-b2-qualification-infrastructure-v1"
+INFRASTRUCTURE_SCHEMA = "q2-b2-qualification-infrastructure-v2"
 QUALIFICATION_SCHEMA = "q2-b2-toolchain-qualification-v1"
 QUALIFICATION_ID = re.compile(r"^b2q26_[a-z0-9][a-z0-9_-]*$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
