@@ -392,7 +392,7 @@ def test_historical_b1_pin_rejects_current_gate_before_producer(
 
     with pytest.raises(
         cohort.MaterializeCohortError,
-        match="current B1 gate exact bytes differ.*909b1e46.*eb99e08e",
+        match="current B1 gate exact bytes differ.*909b1e46.*58295d22",
     ):
         cohort._expected_authority_sha256(attestation)
 
