@@ -854,6 +854,7 @@ def assemble_qualification(
     args: argparse.Namespace,
     *,
     replay_implementation: Mapping[str, Any] | None = None,
+    replay_raw_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     repo_root = args.repo_root.resolve()
     _require(repo_root == ROOT.resolve(), "repo root must be the repository containing this tool")
@@ -930,6 +931,30 @@ def assemble_qualification(
             retained_stage_evidence,
             args, repo_root,
         )
+    raw_evidence = {
+        "normative_documents": {
+            "design": _raw_evidence_path(args.design),
+            "plan": _raw_evidence_path(args.plan),
+        },
+        "b1_gate": _raw_evidence_path(args.b1_gate),
+        "compiled_boundary_report": _raw_evidence_path(
+            args.boundary_proof_report
+        ),
+        "declaration": _raw_evidence_path(args.declaration),
+        "stage_reports": {
+            stage: _raw_evidence_path(paths[stage]) for stage in STAGES
+        },
+        "infrastructure_report": _raw_evidence_path(
+            args.infrastructure_report
+        ),
+        "stage_evidence": retained_stage_evidence,
+    }
+    if replay_raw_evidence is not None:
+        _require(
+            replay_implementation is not None,
+            "raw-evidence replay requires a reported implementation",
+        )
+        raw_evidence = dict(replay_raw_evidence)
     return {
         "schema": QUALIFICATION_SCHEMA,
         "status": "green",
@@ -961,24 +986,7 @@ def assemble_qualification(
             "qualification_artifact_reuse_as_final_evidence": False,
             "passing_subset_admissible": False,
         },
-        "raw_evidence": {
-            "normative_documents": {
-                "design": _raw_evidence_path(args.design),
-                "plan": _raw_evidence_path(args.plan),
-            },
-            "b1_gate": _raw_evidence_path(args.b1_gate),
-            "compiled_boundary_report": _raw_evidence_path(
-                args.boundary_proof_report
-            ),
-            "declaration": _raw_evidence_path(args.declaration),
-            "stage_reports": {
-                stage: _raw_evidence_path(paths[stage]) for stage in STAGES
-            },
-            "infrastructure_report": _raw_evidence_path(
-                args.infrastructure_report
-            ),
-            "stage_evidence": retained_stage_evidence,
-        },
+        "raw_evidence": raw_evidence,
         "failures": [],
     }
 
@@ -1191,11 +1199,17 @@ def replay_qualification(
 
     normative = _mapping(raw["normative_documents"], "raw normative evidence")
     stages = _mapping(raw["stage_reports"], "raw stage evidence")
+    raw_b1_gate = reopen(raw["b1_gate"], "B1 gate")
+    current_b1_gate = repo_root.resolve() / "docs/multires/B1-GATE.json"
+    _require(
+        _file_record(current_b1_gate) == _file_record(raw_b1_gate),
+        "current B1 trust-root bytes differ from retained qualification evidence",
+    )
     arguments = argparse.Namespace(
         design=reopen(normative["design"], "design"),
         plan=reopen(normative["plan"], "plan"),
         repo_root=repo_root.resolve(),
-        b1_gate=reopen(raw["b1_gate"], "B1 gate"),
+        b1_gate=current_b1_gate,
         boundary_proof_report=reopen(
             raw["compiled_boundary_report"], "compiled boundary report"
         ),
@@ -1225,6 +1239,7 @@ def replay_qualification(
             if use_reported_implementation
             else None
         ),
+        replay_raw_evidence=(raw if use_reported_implementation else None),
     )
     _require(
         canonical_bytes(recomputed) == canonical_bytes(report),
