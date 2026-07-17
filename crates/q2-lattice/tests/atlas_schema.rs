@@ -231,9 +231,9 @@ fn oracle_admissions(bsp: &BspIdentity, pmove: bool, hook: bool) -> OracleAdmiss
         b1_runtime_authority_seal: B1RuntimeAuthoritySeal {
             schema: "q2-b1-runtime-authority-seal-v1".to_owned(),
             normative_documents: B1NormativeDocuments {
-                design_sha256: "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5"
+                design_sha256: "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
                     .to_owned(),
-                plan_sha256: "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b"
+                plan_sha256: "371577feb8c40f542c90eec4b4aa91ef84c4a8e2019bf1614e59c46aedfec410"
                     .to_owned(),
             },
             hook_parity_attestation_sha256:
@@ -742,6 +742,29 @@ fn every_b1_seal_field_and_fall_gate_field_is_authoritative() {
 }
 
 #[test]
+fn amended_normative_authority_passes_and_superseded_hashes_fail_closed() {
+    let bsp = bsp_identity();
+    let current = oracle_admissions(&bsp, true, true);
+    current.admit(&bsp).unwrap();
+
+    let mut old_design = current.clone();
+    old_design
+        .b1_runtime_authority_seal
+        .normative_documents
+        .design_sha256 =
+        "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5".to_owned();
+    assert!(old_design.admit(&bsp).is_err());
+
+    let mut old_plan = current;
+    old_plan
+        .b1_runtime_authority_seal
+        .normative_documents
+        .plan_sha256 =
+        "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b".to_owned();
+    assert!(old_plan.admit(&bsp).is_err());
+}
+
+#[test]
 fn hook_requires_companion_pmove_and_canonical_q2ded_parity() {
     let bsp = bsp_identity();
     let valid = oracle_admissions(&bsp, true, true);
@@ -1019,7 +1042,7 @@ fn manifest_is_canonical_bound_and_strict() {
     let bytes = source.canonical_json(&limits).unwrap();
     assert_eq!(
         sha256_hex(&bytes),
-        "3a9010682bf171849af5d98358042e9bf1555e24c208a54b88d53a11f8af793b"
+        "cfc926130a3c14de223bccfd0175a57b0c9ceedc5b217b264caf43bcb3b74a60"
     );
     let restored = AtlasManifest::from_canonical_json(&bytes, &limits).unwrap();
     assert_eq!(restored.channels[0].level, 0);

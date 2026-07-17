@@ -16,8 +16,8 @@ pub const HOOK_PARITY_SCHEMA: &str = "q2-hook-parity-v1";
 pub const HOOK_PARITY_CASES_V1: u32 = 8;
 pub const B1_RUNTIME_AUTHORITY_SEAL_SCHEMA: &str = "q2-b1-runtime-authority-seal-v1";
 
-const B1_DESIGN_SHA256: &str = "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5";
-const B1_PLAN_SHA256: &str = "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b";
+const B1_DESIGN_SHA256: &str = "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6";
+const B1_PLAN_SHA256: &str = "371577feb8c40f542c90eec4b4aa91ef84c4a8e2019bf1614e59c46aedfec410";
 const B1_HOOK_ATTESTATION_SHA256: &str =
     "2e473d8face6b89f5b32798ddc5264bb8cc406e8dc29fd837e85bbd11b53d5ab";
 const B1_FIXTURE_BSP_SHA256: &str =

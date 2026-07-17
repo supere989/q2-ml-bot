@@ -8,6 +8,7 @@ use serde::Serialize;
 
 const ATLAS_MEDIA_TYPE: &str = "application/vnd.q2.atlas-v1";
 const SUMMARY_SCHEMA: &str = "q2-atlas-verification-v1";
+const DESIGN_SHA256: &str = "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6";
 
 #[derive(Debug, Serialize)]
 struct VerificationSummary {
@@ -66,6 +67,12 @@ fn verify(manifest_bytes: &[u8], atlas_bytes: &[u8]) -> Result<Vec<u8>, String> 
     let limits = AtlasLimits::default();
     let manifest = AtlasManifest::from_canonical_json(manifest_bytes, &limits)
         .map_err(|error| error.to_string())?;
+    if manifest.specification_sha256 != DESIGN_SHA256 {
+        return Err(format!(
+            "manifest specification {} != authoritative design {DESIGN_SHA256}",
+            manifest.specification_sha256
+        ));
+    }
     let artifact_name = atlas_artifact_name(&manifest)?;
     let artifact = manifest
         .decode_and_verify_atlas_artifact(&artifact_name, atlas_bytes, &limits)
@@ -283,7 +290,7 @@ mod tests {
             schema_version: ATLAS_SCHEMA_VERSION,
             byte_order: "little".to_owned(),
             atlas_magic: String::from_utf8_lossy(ATLAS_MAGIC).into_owned(),
-            specification_sha256: digest(0x17),
+            specification_sha256: DESIGN_SHA256.to_owned(),
             bsp: bsp.clone(),
             analyzer: ToolIdentity {
                 name: "fixture-analyzer".to_owned(),
@@ -295,10 +302,10 @@ mod tests {
                     schema: "q2-b1-runtime-authority-seal-v1".to_owned(),
                     normative_documents: B1NormativeDocuments {
                         design_sha256:
-                            "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5"
+                            "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
                                 .to_owned(),
                         plan_sha256:
-                            "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b"
+                            "371577feb8c40f542c90eec4b4aa91ef84c4a8e2019bf1614e59c46aedfec410"
                                 .to_owned(),
                     },
                     hook_parity_attestation_sha256:
@@ -456,5 +463,37 @@ mod tests {
         manifest.grid.model0_mins = [-1, 0, 0];
         let wrong_origin = manifest.canonical_json(&limits).unwrap();
         assert!(verify(&wrong_origin, &raw).unwrap_err().contains("origin"));
+    }
+
+    #[test]
+    fn verifier_fixture_rejects_superseded_normative_authority() {
+        let limits = AtlasLimits::default();
+        let (mut manifest, raw) = fixture();
+        manifest.specification_sha256 =
+            "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5".to_owned();
+        let manifest_bytes = manifest.canonical_json(&limits).unwrap();
+        assert!(
+            verify(&manifest_bytes, &raw)
+                .unwrap_err()
+                .contains("authoritative design")
+        );
+
+        let (mut manifest, _) = fixture();
+        manifest
+            .oracles
+            .b1_runtime_authority_seal
+            .normative_documents
+            .design_sha256 =
+            "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5".to_owned();
+        assert!(manifest.canonical_json(&limits).is_err());
+
+        let (mut manifest, _) = fixture();
+        manifest
+            .oracles
+            .b1_runtime_authority_seal
+            .normative_documents
+            .plan_sha256 =
+            "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b".to_owned();
+        assert!(manifest.canonical_json(&limits).is_err());
     }
 }

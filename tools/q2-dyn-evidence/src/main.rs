@@ -20,7 +20,7 @@ use serde::Serialize;
 
 const REPORT_SCHEMA: &str = "q2-b2-dyn-evidence-v1";
 const ATLAS_MEDIA_TYPE: &str = "application/vnd.q2.atlas-v1";
-const DESIGN_SHA256: &str = "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5";
+const DESIGN_SHA256: &str = "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6";
 const CLIENT_COUNT: u32 = 4;
 const MIN_SAMPLES: usize = 2_000;
 const DEFAULT_SAMPLES: usize = 4_000;
@@ -488,6 +488,15 @@ fn parse_digest(value: &str, label: &str) -> AppResult<[u8; 32]> {
             .map_err(|error| format!("invalid {label}: {error}"))?;
     }
     Ok(output)
+}
+
+fn validate_specification_sha256(actual: &str) -> AppResult<()> {
+    if actual != DESIGN_SHA256 {
+        return Err(format!(
+            "manifest specification {actual} != authoritative design {DESIGN_SHA256}"
+        ));
+    }
+    Ok(())
 }
 
 fn read_bounded(path: &Path, maximum: usize, label: &str) -> AppResult<Vec<u8>> {
@@ -1115,12 +1124,7 @@ fn execute(arguments: Arguments) -> AppResult<(PathBuf, bool)> {
     )?;
     let manifest = AtlasManifest::from_canonical_json(&manifest_bytes, &atlas_limits)
         .map_err(|error| error.to_string())?;
-    if manifest.specification_sha256 != DESIGN_SHA256 {
-        return Err(format!(
-            "manifest specification {} != authoritative design {DESIGN_SHA256}",
-            manifest.specification_sha256
-        ));
-    }
+    validate_specification_sha256(&manifest.specification_sha256)?;
     if manifest.bsp.canonical_map_id != arguments.expected_map_id {
         return Err(format!(
             "manifest map {} != expected {}",
@@ -1413,6 +1417,16 @@ mod tests {
         assert_eq!(parse_digest(&text, "test").unwrap(), [0xa5; 32]);
         assert!(parse_digest(&"A5".repeat(32), "test").is_err());
         assert!(parse_digest("00", "test").is_err());
+    }
+
+    #[test]
+    fn amended_design_passes_and_superseded_design_fails_closed() {
+        validate_specification_sha256(DESIGN_SHA256).unwrap();
+        let error = validate_specification_sha256(
+            "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5",
+        )
+        .unwrap_err();
+        assert!(error.contains("authoritative design"));
     }
 
     #[test]
