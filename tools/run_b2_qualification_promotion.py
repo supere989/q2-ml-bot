@@ -87,6 +87,60 @@ def _validate_atlas_artifacts(
                         f"Atlas artifact bytes differ for {row['map']}{suffix}")
 
 
+def validate_promotion_evidence(
+    declaration: Mapping[str, Any], report: Mapping[str, Any],
+    claims_root: Path, analysis_root: Path, evidence_root: Path,
+) -> None:
+    """Replay every promotion row against its retained validator report."""
+
+    exact_flat_files(claims_root, {
+        f"{row['map']}{suffix}" for row in declaration["maps"]
+        for suffix in STAGE_SUFFIXES["claims"]
+    }, "qualification claims")
+    exact_flat_files(evidence_root, {
+        f"{row['ordinal']:03d}-{row['map']}.json" for row in declaration["maps"]
+    }, "promotion evidence")
+    for row in report["maps"]:
+        path = evidence_root / f"{row['ordinal']:03d}-{row['map']}.json"
+        evidence, raw = load_canonical(path)
+        require(sha256_bytes(raw) == row["evidence_sha256"],
+                f"promotion evidence hash differs for {row['map']}")
+        require(set(evidence) == {
+            "schema", "ordinal", "map", "atlas_evidence_sha256", "runtime",
+            "eligible", "validation", "criteria", "failures", "passed",
+        }, f"promotion evidence keys differ for {row['map']}")
+        require(evidence["schema"] == "q2-b2-qualification-promotion-map-evidence-v1"
+                and evidence["ordinal"] == row["ordinal"]
+                and evidence["map"] == row["map"],
+                f"promotion evidence identity differs for {row['map']}")
+        require(evidence["criteria"] == row["criteria"]
+                and evidence["failures"] == row["failures"]
+                and evidence["passed"] is row["passed"],
+                f"promotion evidence disposition differs for {row['map']}")
+        validation = evidence["validation"]
+        if row["passed"]:
+            require(isinstance(validation, Mapping),
+                    f"passing promotion evidence lacks validator report for {row['map']}")
+            try:
+                validate_promotion_report(validation)
+            except ClaimValidationError as error:
+                raise QualificationStageError(
+                    f"promotion validator report rejected for {row['map']}: {error}"
+                ) from error
+            identities = validation["identities"]
+            require(validation["passed"] is True
+                    and identities["analysis_sha256"] == file_record(
+                        analysis_root / f"{row['map']}.analysis.manifest.json"
+                    )["sha256"]
+                    and identities["bsp_sha256"] == file_record(
+                        claims_root / f"{row['map']}.bsp"
+                    )["sha256"],
+                    f"promotion validator identities differ for {row['map']}")
+        else:
+            require(validation is None or isinstance(validation, Mapping),
+                    f"failed promotion validation has malformed evidence for {row['map']}")
+
+
 def run_qualification_promotion(
     *, declaration_path: Path, atlas_report_path: Path, claims_root: Path,
     analysis_root: Path, atlas_evidence_root: Path, b1_gate_path: Path,

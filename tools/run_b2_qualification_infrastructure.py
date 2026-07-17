@@ -56,6 +56,69 @@ CHECK_IDS = (
 )
 
 
+def validate_infrastructure_evidence(
+    report: Mapping[str, Any], evidence_root: Path, *,
+    declaration: Mapping[str, Any] | None = None,
+    stage_reports: Mapping[str, Mapping[str, Any]] | None = None,
+    roots: Mapping[str, Path] | None = None,
+    syntax_report: Path | None = None,
+    runtime_provider: Callable[[], Mapping[str, Any]] = pinned_runtime_record,
+) -> None:
+    """Replay retained check bytes and, when supplied, every live predicate."""
+
+    exact_flat_files(evidence_root, {f"{check_id}.json" for check_id in CHECK_IDS},
+                     "infrastructure evidence")
+    checks = report.get("checks")
+    require(isinstance(checks, list) and len(checks) == len(CHECK_IDS),
+            "infrastructure check membership differs")
+    by_id = {str(check.get("id")): check for check in checks if isinstance(check, Mapping)}
+    require(set(by_id) == set(CHECK_IDS), "infrastructure check IDs differ")
+    bodies: dict[str, Any] = {}
+    for check_id in CHECK_IDS:
+        evidence, raw = load_canonical(evidence_root / f"{check_id}.json")
+        check = by_id[check_id]
+        require(sha256_bytes(raw) == check.get("evidence_sha256"),
+                f"infrastructure {check_id} evidence hash differs")
+        require(set(evidence) == {
+            "schema", "qualification_id", "id", "stage_report_sha256s",
+            "evidence", "passed",
+        }, f"infrastructure {check_id} evidence keys differ")
+        require(evidence["schema"] == "q2-b2-qualification-infrastructure-evidence-v1"
+                and evidence["qualification_id"] == report.get("qualification_id")
+                and evidence["id"] == check_id
+                and evidence["stage_report_sha256s"] == report.get("stage_report_sha256s")
+                and evidence["passed"] is True,
+                f"infrastructure {check_id} evidence binding differs")
+        bodies[check_id] = evidence["evidence"]
+    supplied = (declaration, stage_reports, roots, syntax_report)
+    require(all(value is None for value in supplied) or all(value is not None for value in supplied),
+            "complete infrastructure replay inputs are required")
+    if declaration is None or stage_reports is None or roots is None or syntax_report is None:
+        return
+    membership = _membership_evidence(declaration, stage_reports, roots)
+    cold, resources = _cold_and_resource_evidence(
+        stage_reports, roots["atlas-build"]
+    )
+    syntax = _syntax_evidence(syntax_report, dict(runtime_provider()))
+    probe_root = Path(tempfile.mkdtemp(prefix=".b2q-exclusive-replay-"))
+    try:
+        exclusive = _exclusive_probe(probe_root)
+    finally:
+        shutil.rmtree(probe_root, ignore_errors=True)
+    timeout = _timeout_probe()
+    recomputed = {
+        "deterministic-cold-rebuild": cold,
+        "exact-stage-membership": membership,
+        "exclusive-create": exclusive,
+        "pinned-runtime-syntax": syntax,
+        "resource-bounds": resources,
+        "timeout-fail-closed": timeout,
+    }
+    for check_id in CHECK_IDS:
+        require(canonical_bytes(bodies[check_id]) == canonical_bytes(recomputed[check_id]),
+                f"infrastructure {check_id} evidence differs from live replay")
+
+
 def _timeout_probe() -> dict[str, Any]:
     command = [sys.executable, "-I", "-c", "import time; time.sleep(60)"]
     process = subprocess.Popen(

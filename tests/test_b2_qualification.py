@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import tools.assemble_b2_qualification as gate
+import tools.assemble_b2_gate as final_gate
 from tools.run_generator_cohort import CONCRETE_STYLES, canonical_bytes
 
 
@@ -310,6 +311,37 @@ def test_assembles_20_of_28_non_admissible_qualification(
     assert gate.validate_qualification(report) == report
 
 
+def test_hand_authored_summary_forgery_validates_but_replay_and_final_gate_reject(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _inputs(tmp_path, monkeypatch)
+    for name in (
+        "source_root", "compiled_root", "materialized_root", "claims_root",
+        "analysis_root", "atlas_evidence_root",
+        "promotion_evidence_root", "infrastructure_evidence_root",
+        "syntax_report",
+    ):
+        path = tmp_path / name
+        path.mkdir()
+        setattr(args, name, path)
+    monkeypatch.setattr(gate, "_validate_retained_stage_evidence", lambda *unused: None)
+    legitimate = gate.assemble_qualification(args)
+    forged = json.loads(canonical_bytes(legitimate))
+    forged["end_to_end"]["passed_maps"][0] = "hand_authored_forgery"
+    # This documents the old summary-only weakness: its internal shape is green.
+    assert gate.validate_qualification(forged) == forged
+    with pytest.raises(gate.B2QualificationError, match="canonical summary differs"):
+        gate.replay_qualification(forged, repo_root=gate.ROOT)
+
+    forged_path = tmp_path / "forged-qualification.json"
+    forged_path.write_bytes(canonical_bytes(forged))
+    paths = SimpleNamespace(
+        qualification_report=forged_path, repo_root=gate.ROOT,
+    )
+    with pytest.raises(final_gate.B2GateError, match="qualification rejected"):
+        final_gate._validate_qualification_report(paths, {}, {})
+
+
 def test_rejects_final_mode_declaration_and_retired_seed(tmp_path: Path) -> None:
     implementation = _implementation()
     declaration = _declaration(implementation)
@@ -504,9 +536,12 @@ def test_main_exclusive_creates_canonical_output_outside_repo(
     for name in (
         "design", "plan", "b1-gate", "boundary-proof-report", "declaration",
         "source-report", "compile-report", "compiled-cm-preflight-report",
-        "materialization-report", "claims-report", "atlas-build-report",
-        "generated-promotion-report", "infrastructure-report",
-    ):
+            "materialization-report", "claims-report", "atlas-build-report",
+            "generated-promotion-report", "infrastructure-report",
+            "claims-root", "analysis-root", "atlas-evidence-root",
+            "promotion-evidence-root", "infrastructure-evidence-root",
+            "source-root", "compiled-root", "materialized-root", "syntax-report",
+        ):
         argv.extend((f"--{name}", str(tmp_path / f"{name}.json")))
     argv.extend(("--repo-root", str(gate.ROOT), "--output", str(output)))
     assert gate.main(argv) == 0

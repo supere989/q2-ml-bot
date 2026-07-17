@@ -42,6 +42,10 @@ from harness.hook_claims_v4 import (  # noqa: E402
     validate_runtime_sidecar,
 )
 from harness.ibsp38 import BspValidationError, parse_ibsp38  # noqa: E402
+from harness.atlas_b1_authority import (  # noqa: E402
+    B1AuthorityError,
+    load_b1_authority_gate,
+)
 from tools.generator_claim_validator import (  # noqa: E402
     ClaimValidationError,
     _hurt_bounds,
@@ -52,7 +56,7 @@ from tools.generator_claim_validator import (  # noqa: E402
 from tools.assemble_b2_qualification import (  # noqa: E402
     B2QualificationError,
     QUALIFICATION_SCHEMA,
-    validate_qualification,
+    replay_qualification,
 )
 from tools.run_generator_claim_campaign import (  # noqa: E402
     CAMPAIGN_SCHEMA,
@@ -370,6 +374,15 @@ def _validate_implementation(
 def _validate_b1_and_oracles(
     paths: B2GatePaths, normative: Mapping[str, Any]
 ) -> tuple[dict[str, Any], dict[str, str]]:
+    expected_gate = paths.repo_root / "docs/multires/B1-GATE.json"
+    _require(
+        paths.b1_gate.resolve() == expected_gate.resolve(),
+        "supplied B1 gate is not the repository trust root",
+    )
+    try:
+        authority = load_b1_authority_gate(paths.repo_root)
+    except B1AuthorityError as exc:
+        raise B2GateError(f"canonical B1 authority rejected: {exc}") from exc
     gate = _mapping(_load_json(paths.b1_gate, canonical=False), "B1 gate")
     _require(gate.get("schema") == "q2-multires-batch-gate-v1", "B1 schema differs")
     _require(gate.get("batch") == "B1", "B1 batch identity differs")
@@ -403,6 +416,13 @@ def _validate_b1_and_oracles(
     _require(fall.get("executable_sha256") == binaries["fall"], "fall oracle differs from B1")
     _require(parity.get("sha256") == binaries["hook_attestation"], "hook attestation differs from B1")
     _require(parity.get("passed") is True, "B1 hook parity is not passed")
+    _require(
+        authority.cm_executable_sha256 == binaries["cm"]
+        and authority.pmove_executable_sha256 == binaries["pmove"]
+        and authority.fall_executable_sha256 == binaries["fall"]
+        and authority.hook_attestation_sha256 == binaries["hook_attestation"],
+        "canonical B1 loader authority differs from supplied oracle bytes",
+    )
     for name in ("oracle_tool_identity", "oracle_source_closure_sha256"):
         _digest(transformed.get(name), f"B1 collision {name}")
     binaries["cm_tool_identity"] = transformed["oracle_tool_identity"]
@@ -445,8 +465,8 @@ def _validate_qualification_report(
     implementation: Mapping[str, Any],
 ) -> dict[str, Any]:
     try:
-        report = validate_qualification(
-            _load_json(paths.qualification_report)
+        report = replay_qualification(
+            _load_json(paths.qualification_report), repo_root=paths.repo_root,
         )
     except B2QualificationError as exc:
         raise B2GateError(f"B2 toolchain qualification rejected: {exc}") from exc

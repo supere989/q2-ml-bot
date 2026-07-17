@@ -616,6 +616,69 @@ def _normative_documents(design: Path, plan: Path) -> dict[str, Any]:
     }
 
 
+def _raw_evidence_path(path: Path) -> dict[str, Any]:
+    absolute = path.absolute()
+    return {"path": str(absolute), "record": _file_record(absolute)}
+
+
+def _stage_evidence_paths(args: argparse.Namespace) -> dict[str, str] | None:
+    names = (
+        "source_root", "compiled_root", "materialized_root", "claims_root",
+        "analysis_root", "atlas_evidence_root",
+        "promotion_evidence_root", "infrastructure_evidence_root",
+        "syntax_report",
+    )
+    values = [getattr(args, name, None) for name in names]
+    if all(value is None for value in values):
+        return None
+    _require(all(isinstance(value, Path) for value in values),
+             "all qualification stage evidence roots are required")
+    result = {name: str(value.absolute()) for name, value in zip(names, values)}
+    for name, value in result.items():
+        _require_qualification_path(Path(value), name)
+    return result
+
+
+def _validate_retained_stage_evidence(
+    declaration: Mapping[str, Any], stage_documents: Mapping[str, Mapping[str, Any]],
+    infrastructure_document: Mapping[str, Any], roots: Mapping[str, str],
+) -> None:
+    try:
+        from tools.run_b2_qualification_promotion import (
+            _validate_atlas_artifacts,
+            validate_promotion_evidence,
+        )
+        from tools.run_b2_qualification_infrastructure import (
+            validate_infrastructure_evidence,
+        )
+        _validate_atlas_artifacts(
+            declaration, stage_documents["atlas-build"],
+            Path(roots["analysis_root"]), Path(roots["atlas_evidence_root"]),
+        )
+        validate_promotion_evidence(
+            declaration, stage_documents["generated-promotion"],
+            Path(roots["claims_root"]), Path(roots["analysis_root"]),
+            Path(roots["promotion_evidence_root"]),
+        )
+        validate_infrastructure_evidence(
+            infrastructure_document, Path(roots["infrastructure_evidence_root"]),
+            declaration=declaration, stage_reports=stage_documents,
+            roots={
+                "source": Path(roots["source_root"]),
+                "compile": Path(roots["compiled_root"]),
+                "materialization": Path(roots["materialized_root"]),
+                "claims": Path(roots["claims_root"]),
+                "atlas-build": Path(roots["analysis_root"]),
+                "generated-promotion": Path(roots["promotion_evidence_root"]),
+            },
+            syntax_report=Path(roots["syntax_report"]),
+        )
+    except (ValueError, RuntimeError, OSError, KeyError, TypeError) as error:
+        raise B2QualificationError(
+            f"retained qualification stage evidence rejected: {error}"
+        ) from error
+
+
 def assemble_qualification(args: argparse.Namespace) -> dict[str, Any]:
     repo_root = args.repo_root.resolve()
     _require(repo_root == ROOT.resolve(), "repo root must be the repository containing this tool")
@@ -642,6 +705,7 @@ def assemble_qualification(args: argparse.Namespace) -> dict[str, Any]:
         "generated-promotion": args.generated_promotion_report,
     }
     stage_summaries: dict[str, Any] = {}
+    stage_documents: dict[str, Mapping[str, Any]] = {}
     stage_sha256s: dict[str, str] = {}
     stage_passes: dict[str, set[str]] = {}
     previous: str | None = None
@@ -651,6 +715,7 @@ def assemble_qualification(args: argparse.Namespace) -> dict[str, Any]:
             implementation, previous, retired,
         )
         stage_summaries[stage] = summary
+        stage_documents[stage] = _load_json(paths[stage])[0]
         stage_sha256s[stage] = digest
         stage_passes[stage] = passed
         previous = digest
@@ -672,6 +737,13 @@ def assemble_qualification(args: argparse.Namespace) -> dict[str, Any]:
         args.infrastructure_report, declaration, declaration_sha256,
         implementation, stage_sha256s, retired,
     )
+    infrastructure_document = _load_json(args.infrastructure_report)[0]
+    retained_stage_evidence = _stage_evidence_paths(args)
+    if retained_stage_evidence is not None:
+        _validate_retained_stage_evidence(
+            declaration, stage_documents, infrastructure_document,
+            retained_stage_evidence,
+        )
     return {
         "schema": QUALIFICATION_SCHEMA,
         "status": "green",
@@ -702,6 +774,24 @@ def assemble_qualification(args: argparse.Namespace) -> dict[str, Any]:
             "qualification_artifact_reuse_as_final_evidence": False,
             "passing_subset_admissible": False,
         },
+        "raw_evidence": {
+            "normative_documents": {
+                "design": _raw_evidence_path(args.design),
+                "plan": _raw_evidence_path(args.plan),
+            },
+            "b1_gate": _raw_evidence_path(args.b1_gate),
+            "compiled_boundary_report": _raw_evidence_path(
+                args.boundary_proof_report
+            ),
+            "declaration": _raw_evidence_path(args.declaration),
+            "stage_reports": {
+                stage: _raw_evidence_path(paths[stage]) for stage in STAGES
+            },
+            "infrastructure_report": _raw_evidence_path(
+                args.infrastructure_report
+            ),
+            "stage_evidence": retained_stage_evidence,
+        },
         "failures": [],
     }
 
@@ -715,7 +805,7 @@ def validate_qualification(value: object) -> dict[str, Any]:
             "retryable", "final_cohort_authorized", "normative_documents",
             "implementation", "b1_authority", "compiled_boundary",
             "declaration", "stages", "infrastructure", "end_to_end",
-            "authorization", "failures",
+            "authorization", "raw_evidence", "failures",
         },
         "B2 qualification",
     )
@@ -811,8 +901,115 @@ def validate_qualification(value: object) -> dict[str, Any]:
         },
         "B2 qualification authorization differs",
     )
+    raw_evidence = _mapping(report["raw_evidence"], "B2 qualification raw evidence")
+    _exact_keys(
+        raw_evidence,
+        {
+            "normative_documents", "b1_gate", "compiled_boundary_report",
+            "declaration", "stage_reports", "infrastructure_report",
+            "stage_evidence",
+        },
+        "B2 qualification raw evidence",
+    )
+    raw_normative = _mapping(
+        raw_evidence["normative_documents"],
+        "B2 qualification raw normative evidence",
+    )
+    _exact_keys(raw_normative, {"design", "plan"}, "raw normative evidence")
+    raw_stages = _mapping(raw_evidence["stage_reports"], "raw stage reports")
+    _require(set(raw_stages) == set(STAGES), "raw qualification stage reports differ")
+    for label, item in (
+        *((f"normative {name}", value) for name, value in raw_normative.items()),
+        ("B1 gate", raw_evidence["b1_gate"]),
+        ("compiled boundary", raw_evidence["compiled_boundary_report"]),
+        ("declaration", raw_evidence["declaration"]),
+        *((f"stage {name}", value) for name, value in raw_stages.items()),
+        ("infrastructure", raw_evidence["infrastructure_report"]),
+    ):
+        entry = _mapping(item, f"raw {label} evidence")
+        _exact_keys(entry, {"path", "record"}, f"raw {label} evidence")
+        path = entry["path"]
+        _require(
+            isinstance(path, str) and Path(path).is_absolute(),
+            f"raw {label} evidence path is not absolute",
+        )
+        record = _mapping(entry["record"], f"raw {label} evidence record")
+        _exact_keys(record, {"bytes", "sha256"}, f"raw {label} evidence record")
+        _integer(record["bytes"], f"raw {label} evidence bytes", 1)
+        _digest(record["sha256"], f"raw {label} evidence digest")
+    stage_evidence = raw_evidence["stage_evidence"]
+    if stage_evidence is not None:
+        roots = _mapping(stage_evidence, "raw retained stage evidence")
+        _exact_keys(roots, {
+            "source_root", "compiled_root", "materialized_root", "claims_root",
+            "analysis_root", "atlas_evidence_root",
+            "promotion_evidence_root", "infrastructure_evidence_root",
+            "syntax_report",
+        }, "raw retained stage evidence")
+        for name, value in roots.items():
+            _require(isinstance(value, str) and Path(value).is_absolute(),
+                     f"retained {name} path is not absolute")
     _require(report.get("failures") == [], "B2 qualification retains failures")
     return dict(report)
+
+
+def replay_qualification(value: object, *, repo_root: Path = ROOT) -> dict[str, Any]:
+    """Reopen every retained raw input and reproduce the exact summary bytes."""
+
+    report = validate_qualification(value)
+    raw = _mapping(report["raw_evidence"], "B2 qualification raw evidence")
+    stage_evidence = _mapping(
+        raw.get("stage_evidence"), "retained qualification stage evidence"
+    )
+
+    retained: list[tuple[Path, Mapping[str, Any]]] = []
+
+    def reopen(item: object, label: str) -> Path:
+        entry = _mapping(item, f"raw {label}")
+        path = Path(str(entry["path"]))
+        _require(path.is_absolute(), f"raw {label} path is not absolute")
+        expected = _mapping(entry["record"], f"raw {label} record")
+        _require(_file_record(path) == dict(expected), f"raw {label} bytes changed")
+        retained.append((path, expected))
+        return path
+
+    normative = _mapping(raw["normative_documents"], "raw normative evidence")
+    stages = _mapping(raw["stage_reports"], "raw stage evidence")
+    arguments = argparse.Namespace(
+        design=reopen(normative["design"], "design"),
+        plan=reopen(normative["plan"], "plan"),
+        repo_root=repo_root.resolve(),
+        b1_gate=reopen(raw["b1_gate"], "B1 gate"),
+        boundary_proof_report=reopen(
+            raw["compiled_boundary_report"], "compiled boundary report"
+        ),
+        declaration=reopen(raw["declaration"], "declaration"),
+        source_report=reopen(stages["source"], "source report"),
+        compile_report=reopen(stages["compile"], "compile report"),
+        compiled_cm_preflight_report=reopen(
+            stages["compiled-cm-preflight"], "compiled-CM report"
+        ),
+        materialization_report=reopen(
+            stages["materialization"], "materialization report"
+        ),
+        claims_report=reopen(stages["claims"], "claims report"),
+        atlas_build_report=reopen(stages["atlas-build"], "Atlas report"),
+        generated_promotion_report=reopen(
+            stages["generated-promotion"], "promotion report"
+        ),
+        infrastructure_report=reopen(
+            raw["infrastructure_report"], "infrastructure report"
+        ),
+        **{name: Path(str(value)) for name, value in stage_evidence.items()},
+    )
+    recomputed = assemble_qualification(arguments)
+    _require(
+        canonical_bytes(recomputed) == canonical_bytes(report),
+        "qualification canonical summary differs from raw-evidence replay",
+    )
+    for path, expected in retained:
+        _require(_file_record(path) == dict(expected), f"raw evidence changed during replay: {path}")
+    return recomputed
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -831,6 +1028,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--atlas-build-report", type=Path, required=True)
     parser.add_argument("--generated-promotion-report", type=Path, required=True)
     parser.add_argument("--infrastructure-report", type=Path, required=True)
+    parser.add_argument("--claims-root", type=Path, required=True)
+    parser.add_argument("--source-root", type=Path, required=True)
+    parser.add_argument("--compiled-root", type=Path, required=True)
+    parser.add_argument("--materialized-root", type=Path, required=True)
+    parser.add_argument("--analysis-root", type=Path, required=True)
+    parser.add_argument("--atlas-evidence-root", type=Path, required=True)
+    parser.add_argument("--promotion-evidence-root", type=Path, required=True)
+    parser.add_argument("--infrastructure-evidence-root", type=Path, required=True)
+    parser.add_argument("--syntax-report", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
