@@ -27,6 +27,9 @@ from tools.run_b2_qualification_postcompile import (
     stage_evidence_sha256,
 )
 from tools.run_generator_cohort import canonical_bytes
+from tools.b2_qualification_toolchain import (
+    ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
+)
 
 
 IMPLEMENTATION = {
@@ -70,6 +73,7 @@ def _declaration() -> dict:
             "required_maps_per_style": 4,
         },
         "implementation": IMPLEMENTATION,
+        "toolchain_authority_sha256": ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
         "maps": maps,
     }
 
@@ -98,6 +102,7 @@ def _prior_report(declaration: dict, stage: str, failed: set[str] | None = None)
         "final_cohort_authorized": False,
         "declaration_sha256": _sha(canonical_bytes(declaration)),
         "implementation": IMPLEMENTATION,
+        "toolchain_authority_sha256": ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
         "input_report_sha256": "ab" * 32,
         "infrastructure_checks": (
             {

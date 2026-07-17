@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tools.assemble_b2_qualification import STAGE_SCHEMA
+from tools.b2_qualification_toolchain import (
+    ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
+)
 from tools.run_generator_cohort import CONCRETE_STYLES, canonical_bytes
 
 
@@ -49,7 +52,9 @@ def declaration() -> dict[str, Any]:
         "selection": {"required_map_count": 28,
                       "required_concrete_styles": list(CONCRETE_STYLES),
                       "required_maps_per_style": 4},
-        "implementation": IMPLEMENTATION, "maps": maps,
+        "implementation": IMPLEMENTATION,
+        "toolchain_authority_sha256": ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
+        "maps": maps,
     }
 
 
@@ -78,6 +83,7 @@ def stage_report(
         "retryable": True, "final_cohort_authorized": False,
         "declaration_sha256": declaration_sha,
         "implementation": IMPLEMENTATION,
+        "toolchain_authority_sha256": ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
         "input_report_sha256": input_sha,
         "infrastructure_checks": {"fixture": True},
         "map_count": 28, "pass_count": pass_count, "maps": rows, "failures": [],

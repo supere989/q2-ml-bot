@@ -169,17 +169,41 @@ def _membership_evidence(
     declaration: Mapping[str, Any], stage_reports: Mapping[str, Mapping[str, Any]],
     roots: Mapping[str, Path],
 ) -> dict[str, Any]:
-    suffixes = {
-        "source": STAGE_SUFFIXES["source"],
-        "compile": STAGE_SUFFIXES["compiled"],
-        "materialization": STAGE_SUFFIXES["materialized"],
-        "claims": STAGE_SUFFIXES["claims"],
-    }
     records: dict[str, Any] = {}
-    for stage, values in suffixes.items():
-        expected = {
-            f"{row['map']}{suffix}" for row in declaration["maps"] for suffix in values
+    all_maps = {str(row["map"]) for row in declaration["maps"]}
+    stage_passed = {
+        stage: {
+            str(row["map"])
+            for row in stage_reports[stage]["maps"]
+            if row["passed"] is True
         }
+        for stage in ("compile", "materialization", "claims")
+    }
+    expected_by_stage = {
+        "source": {
+            f"{map_id}{suffix}"
+            for map_id in all_maps for suffix in STAGE_SUFFIXES["source"]
+        },
+        # Sparse compilation retains every immutable source artifact and
+        # publishes a BSP only for compile-passing members.
+        "compile": {
+            f"{map_id}{suffix}"
+            for map_id in all_maps for suffix in STAGE_SUFFIXES["source"]
+        } | {
+            f"{map_id}.bsp" for map_id in stage_passed["compile"]
+        },
+        "materialization": {
+            f"{map_id}{suffix}"
+            for map_id in stage_passed["materialization"]
+            for suffix in STAGE_SUFFIXES["materialized"]
+        },
+        "claims": {
+            f"{map_id}{suffix}"
+            for map_id in stage_passed["claims"]
+            for suffix in STAGE_SUFFIXES["claims"]
+        },
+    }
+    for stage, expected in expected_by_stage.items():
         exact_flat_files(roots[stage], expected, f"{stage} root")
         records[stage] = {
             name: file_record(roots[stage] / name) for name in sorted(expected)
@@ -387,6 +411,9 @@ def produce_infrastructure_report(
             "final_cohort_authorized": False,
             "declaration_sha256": declaration_sha256,
             "implementation": implementation,
+            "toolchain_authority_sha256": declaration[
+                "toolchain_authority_sha256"
+            ],
             "stage_report_sha256s": report_hashes,
             "checks": checks, "pass_count": len(checks), "failures": [],
         }

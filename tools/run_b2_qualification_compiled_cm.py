@@ -42,10 +42,9 @@ from tools.assemble_b2_qualification import (  # noqa: E402
     _validate_stage_report,
 )
 from tools.run_b2_qualification_compile import (  # noqa: E402
-    COMPILED_SUFFIXES,
     QualificationCompileError,
-    _flat_records,
     _load_json,
+    _sparse_compiled_records,
 )
 from tools.run_compiled_cm_preflight import (  # noqa: E402
     ESCAPE_DISTANCE_UNITS,
@@ -79,6 +78,7 @@ EXPECTED_COMPILE_CRITERIA = {
     "ibsp38-lightdata",
     "compiled-stage-published",
 }
+COMPILE_SKIP_FAILURE = "compile stage did not publish a BSP for compiled-CM preflight"
 
 
 class QualificationCompiledCmError(RuntimeError):
@@ -153,7 +153,7 @@ def _compile_report(
     declaration_sha256: str,
     implementation: Mapping[str, Any],
     retired: Mapping[str, set[Any]],
-) -> tuple[dict[str, Any], bytes, str]:
+) -> tuple[dict[str, Any], bytes, str, set[str]]:
     try:
         report, raw = _load_json(path)
     except QualificationCompileError as error:
@@ -179,24 +179,21 @@ def _compile_report(
         raise QualificationCompiledCmError(
             f"qualification compile report rejected: {error}"
         ) from error
-    _require(
-        summary["map_count"] == summary["pass_count"] == EXPECTED_MAP_COUNT
-        and len(passed) == EXPECTED_MAP_COUNT,
-        "qualification compiled-CM preflight requires the published 28/28 compile stage",
-    )
+    _require(summary["map_count"] == EXPECTED_MAP_COUNT,
+             "qualification compile report map count differs")
     for declared, row in zip(declaration["maps"], report["maps"]):
         criteria = row.get("criteria")
         _require(
             isinstance(criteria, Mapping)
             and set(criteria) == EXPECTED_COMPILE_CRITERIA
-            and all(value is True for value in criteria.values())
+            and all(isinstance(value, bool) for value in criteria.values())
             and row.get("ordinal") == declared["ordinal"]
             and row.get("map") == declared["map"]
-            and row.get("passed") is True
-            and row.get("failures") == [],
+            and row.get("passed")
+            is (str(declared["map"]) in passed),
             f"qualification compile map evidence differs for {declared['map']}",
         )
-    return report, raw, digest
+    return report, raw, digest, passed
 
 
 def _spawn_invariants(value: object) -> bool:
@@ -319,9 +316,10 @@ def _run_maps(
     jobs: int,
     timeout_seconds: float,
     map_validator: Callable[..., dict[str, Any]],
-) -> list[dict[str, Any]]:
+    eligible_maps: set[str],
+) -> dict[str, dict[str, Any]]:
     limits = AnalyzerLimits(oracle_batch_timeout_seconds=timeout_seconds)
-    by_ordinal: dict[int, dict[str, Any]] = {}
+    by_map: dict[str, dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {
             executor.submit(
@@ -333,27 +331,53 @@ def _run_maps(
                 file_sha256(cm_oracle),
                 gate.oracle_tool_identity,
                 gate.oracle_source_closure_sha256,
-            ): int(row["ordinal"])
+            ): row
             for row in declaration["maps"]
+            if str(row["map"]) in eligible_maps
         }
         for future in as_completed(futures):
-            ordinal = futures[future]
-            declared = declaration["maps"][ordinal]
+            declared = futures[future]
+            map_id = str(declared["map"])
             try:
                 value = future.result()
                 if not isinstance(value, Mapping):
                     raise TypeError("map validator result is not an object")
-                by_ordinal[ordinal] = dict(value)
+                by_map[map_id] = dict(value)
             except Exception as error:  # defensive executor boundary
-                by_ordinal[ordinal] = {
-                    "ordinal": ordinal,
-                    "map": declared["map"],
+                by_map[map_id] = {
+                    "ordinal": declared["ordinal"],
+                    "map": map_id,
                     "failures": [
                         f"executor {type(error).__name__}: {error}"
                     ],
                     "passed": False,
                 }
-    return [by_ordinal[index] for index in range(EXPECTED_MAP_COUNT)]
+    _require(
+        set(by_map) == eligible_maps,
+        "compiled-CM executor result membership differs from compile pass set",
+    )
+    return by_map
+
+
+def _compile_skipped_result(declared: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the one replayable result permitted for a compile-failed map."""
+
+    return {
+        "ordinal": declared["ordinal"],
+        "map": declared["map"],
+        "bsp": None,
+        "compiled_lightdata": None,
+        "source_spawn_origins_milliunits": None,
+        "compiled_spawn_origins_milliunits": None,
+        "spawn_origin_sets_match": False,
+        "minimum_spawn_xy_separation_milliunits": None,
+        "oracle": None,
+        "spawn_count": 0,
+        "spawns": [],
+        "basic_hazard_containment": None,
+        "failures": [COMPILE_SKIP_FAILURE],
+        "passed": False,
+    }
 
 
 def run_qualification_compiled_cm(
@@ -421,12 +445,12 @@ def run_qualification_compiled_cm(
         declaration, declaration_sha256 = _validate_declaration(
             paths["declaration"], initial_implementation, retired
         )
-        compile_report, compile_raw, compile_sha256 = _compile_report(
+        compile_report, compile_raw, compile_sha256, compile_passed = _compile_report(
             paths["compile_report"], declaration, declaration_sha256,
             initial_implementation, retired,
         )
-        compiled_records = _flat_records(
-            declaration, paths["compiled_root"], COMPILED_SUFFIXES
+        compiled_records = _sparse_compiled_records(
+            declaration, paths["compiled_root"], compile_passed
         )
         gate = gate_loader(repo_root)
         preflight_implementation = preflight_implementation_provider(repo_root)
@@ -444,7 +468,7 @@ def run_qualification_compiled_cm(
     gate_record = _file_record(gate_path)
     results = _run_maps(
         declaration, paths["compiled_root"], paths["cm_oracle"], gate,
-        jobs, timeout_seconds, map_validator,
+        jobs, timeout_seconds, map_validator, compile_passed,
     )
 
     try:
@@ -452,8 +476,8 @@ def run_qualification_compiled_cm(
             paths["declaration"].read_bytes()
             == canonical_bytes(declaration)
             and paths["compile_report"].read_bytes() == compile_raw
-            and _flat_records(
-                declaration, paths["compiled_root"], COMPILED_SUFFIXES
+            and _sparse_compiled_records(
+                declaration, paths["compiled_root"], compile_passed
             ) == compiled_records
             and _file_record(paths["cm_oracle"], executable=True) == cm_record
             and _file_record(gate_path) == gate_record
@@ -481,10 +505,15 @@ def run_qualification_compiled_cm(
         "cm_tool_identity": gate.oracle_tool_identity,
         "cm_source_closure_sha256": gate.oracle_source_closure_sha256,
     }
-    for declared, compile_row, result in zip(
-        declaration["maps"], compile_report["maps"], results
+    for declared, compile_row in zip(
+        declaration["maps"], compile_report["maps"]
     ):
         map_id = str(declared["map"])
+        result = (
+            results[map_id]
+            if map_id in compile_passed
+            else _compile_skipped_result(declared)
+        )
         criteria = _map_criteria(
             declared, compile_row, compiled_records[map_id], result,
             cm_record, gate,
@@ -609,12 +638,12 @@ def validate_published_qualification_compiled_cm(
         declaration, declaration_sha256 = _validate_declaration(
             paths["declaration"], implementation, retired
         )
-        compile_report, compile_raw, compile_sha256 = _compile_report(
+        compile_report, compile_raw, compile_sha256, compile_passed = _compile_report(
             paths["compile_report"], declaration, declaration_sha256,
             implementation, retired,
         )
-        compiled_records = _flat_records(
-            declaration, paths["compiled_root"], COMPILED_SUFFIXES
+        compiled_records = _sparse_compiled_records(
+            declaration, paths["compiled_root"], compile_passed
         )
         report, report_raw = _load_json(paths["report"])
         _validate_stage_report(
@@ -697,6 +726,11 @@ def validate_published_qualification_compiled_cm(
             isinstance(result, Mapping),
             f"compiled-CM real result is not an object for {map_id}",
         )
+        if map_id not in compile_passed:
+            _require(
+                result == _compile_skipped_result(declared),
+                f"compile-skipped compiled-CM result differs for {map_id}",
+            )
         criteria = _map_criteria(
             declared, compile_row, compiled_records[map_id], result,
             cm_record, gate,
@@ -758,8 +792,8 @@ def validate_published_qualification_compiled_cm(
                 name: (paths["evidence_root"] / name).read_bytes()
                 for name in expected_names
             } == evidence_raw
-            and _flat_records(
-                declaration, paths["compiled_root"], COMPILED_SUFFIXES
+            and _sparse_compiled_records(
+                declaration, paths["compiled_root"], compile_passed
             ) == compiled_records
             and _file_record(paths["cm_oracle"], executable=True) == cm_record
             and _file_record(gate_path) == gate_record

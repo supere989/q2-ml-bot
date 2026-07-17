@@ -19,6 +19,9 @@ from tools.assemble_b2_qualification import (
     EXPECTED_MAP_COUNT,
     STAGE_SCHEMA,
 )
+from tools.b2_qualification_toolchain import (
+    ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
+)
 from tools.run_generator_cohort import CONCRETE_STYLES, canonical_bytes, repository_binding
 
 
@@ -33,7 +36,8 @@ IMPLEMENTATION_KEYS = {
 REPORT_KEYS = {
     "schema", "qualification_id", "mode", "stage", "non_admissible",
     "retryable", "final_cohort_authorized", "declaration_sha256",
-    "implementation", "input_report_sha256", "infrastructure_checks",
+    "implementation", "toolchain_authority_sha256", "input_report_sha256",
+    "infrastructure_checks",
     "map_count", "pass_count", "maps", "failures",
 }
 ROW_KEYS = {
@@ -166,7 +170,8 @@ def validate_declaration(
     declaration, raw = load_canonical(path)
     exact_keys(declaration, {
         "schema", "qualification_id", "mode", "non_admissible", "retryable",
-        "final_cohort_authorized", "generator", "selection", "implementation", "maps",
+        "final_cohort_authorized", "generator", "selection", "implementation",
+        "toolchain_authority_sha256", "maps",
     }, "declaration")
     require(declaration["schema"] == DECLARATION_SCHEMA, "declaration schema differs")
     require(declaration["mode"] == "qualification", "final declaration rejected")
@@ -176,6 +181,11 @@ def validate_declaration(
             "declaration authorizes a final cohort")
     require(declaration["implementation"] == implementation,
             "declaration implementation differs from current clean repository")
+    require(
+        declaration["toolchain_authority_sha256"]
+        == ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
+        "declaration toolchain authority differs",
+    )
     qualification_id = declaration["qualification_id"]
     require(isinstance(qualification_id, str) and qualification_id.startswith("b2q26_")
             and TOKEN.fullmatch(qualification_id) and "final" not in qualification_id,
@@ -239,6 +249,11 @@ def validate_stage_report(
             f"{expected_stage} declaration binding differs")
     require(report["implementation"] == implementation,
             f"{expected_stage} implementation binding differs")
+    require(
+        report["toolchain_authority_sha256"]
+        == declaration["toolchain_authority_sha256"],
+        f"{expected_stage} toolchain authority binding differs",
+    )
     if expected_input_sha256 is not ...:
         require(report["input_report_sha256"] == expected_input_sha256,
                 f"{expected_stage} input report hash differs")
@@ -362,6 +377,9 @@ def stage_report(
         "final_cohort_authorized": False,
         "declaration_sha256": declaration_sha256,
         "implementation": dict(implementation),
+        "toolchain_authority_sha256": declaration[
+            "toolchain_authority_sha256"
+        ],
         "input_report_sha256": input_sha256,
         "infrastructure_checks": dict(checks),
         "map_count": len(rows),

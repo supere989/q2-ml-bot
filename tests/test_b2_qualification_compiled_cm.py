@@ -16,7 +16,7 @@ from tools.assemble_b2_qualification import (
     STAGE_SCHEMA,
     _validate_stage_report,
 )
-from tools.run_b2_qualification_compile import COMPILED_SUFFIXES
+from tools.run_b2_qualification_compile import COMPILED_SUFFIXES, SOURCE_SUFFIXES
 from tools.run_b2_qualification_compiled_cm import (
     QualificationCompiledCmError,
     run_qualification_compiled_cm,
@@ -326,6 +326,54 @@ def test_emits_all_real_map_results_and_preserves_retryable_failures(
     )
     assert summary["pass_count"] == len(passed) == 26
     assert digest == _sha256(paths["report"].read_bytes())
+
+
+def test_sparse_compile_runs_cm_only_for_published_bsps_and_replays_all_rows(
+    tmp_path: Path,
+) -> None:
+    paths = _fixture(tmp_path)
+    compile_failed = {3, 19}
+    compile_report = json.loads(paths["compile_path"].read_text())
+    for ordinal in compile_failed:
+        row = compile_report["maps"][ordinal]
+        row["criteria"]["q2tool-exit-zero"] = False
+        row["criteria"]["ibsp38-lightdata"] = False
+        row["criteria"]["compiled-stage-published"] = False
+        row["failures"] = ["synthetic q2tool rejection"]
+        row["passed"] = False
+        map_id = paths["declaration"]["maps"][ordinal]["map"]
+        (paths["compiled"] / f"{map_id}.bsp").unlink()
+    compile_report["pass_count"] = 26
+    paths["compile_path"].write_bytes(canonical_bytes(compile_report))
+
+    called: set[int] = set()
+    real_validator = _validator()
+
+    def eligible_validator(*args, **kwargs):
+        ordinal = int(args[0]["ordinal"])
+        assert ordinal not in compile_failed
+        called.add(ordinal)
+        return real_validator(*args, **kwargs)
+
+    report = _run(paths, validator=eligible_validator)
+    assert called == set(range(28)) - compile_failed
+    assert report["pass_count"] == 26
+    assert [row["ordinal"] for row in report["maps"] if not row["passed"]] == [3, 19]
+    for ordinal in compile_failed:
+        map_id = paths["declaration"]["maps"][ordinal]["map"]
+        evidence_path = paths["evidence"] / f"{ordinal:03d}-{map_id}.evidence.json"
+        evidence = json.loads(evidence_path.read_text())
+        assert set(evidence["compiled_files"]) == set(SOURCE_SUFFIXES)
+        assert evidence["real_preflight_result"]["bsp"] is None
+        assert evidence["criteria"] == {
+            "compile-stage-bound": False,
+            "real-bsp-cm": False,
+            "compiled-invariants": False,
+        }
+
+    replayed, _, _, passed = _replay(paths)
+    assert replayed == report
+    assert len(passed) == 26
 
 
 def test_forged_pass_cannot_bypass_independent_compiled_invariants(

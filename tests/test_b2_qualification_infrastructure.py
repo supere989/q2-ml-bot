@@ -16,15 +16,24 @@ from tools.run_b2_qualification_infrastructure import (
 from tools.run_generator_cohort import STAGE_SUFFIXES, canonical_bytes
 
 
-def _inputs(tmp_path: Path) -> dict[str, object]:
+def _inputs(tmp_path: Path, *, sparse: bool = False) -> dict[str, object]:
     declared = declaration()
     declaration_path = write_json(tmp_path / "declaration.json", declared)
     declaration_sha = sha(declaration_path.read_bytes())
     report_paths = {}
     report_hashes = {}
     previous = None
+    sparse_counts = {
+        "source": 28, "compile": 26, "compiled-cm-preflight": 25,
+        "materialization": 24, "claims": 23, "atlas-build": 20,
+        "generated-promotion": 20,
+    }
     for stage in STAGES:
-        count = 20 if stage in ("atlas-build", "generated-promotion") else 28
+        count = (
+            sparse_counts[stage]
+            if sparse else
+            (20 if stage in ("atlas-build", "generated-promotion") else 28)
+        )
         criteria = None
         if stage == "source":
             criteria = {"source-static": True, "deterministic-cold-rebuild": True,
@@ -46,8 +55,18 @@ def _inputs(tmp_path: Path) -> dict[str, object]:
     ):
         root = tmp_path / f"{stage}-root"
         root.mkdir()
-        for row in declared["maps"]:
-            for suffix in STAGE_SUFFIXES[suffix_key]:
+        for ordinal, row in enumerate(declared["maps"]):
+            suffixes = STAGE_SUFFIXES[suffix_key]
+            if sparse and stage == "compile":
+                suffixes = (
+                    STAGE_SUFFIXES["compiled"]
+                    if ordinal < sparse_counts["compile"] else
+                    STAGE_SUFFIXES["source"]
+                )
+            elif sparse and stage in ("materialization", "claims"):
+                if ordinal >= sparse_counts[stage]:
+                    continue
+            for suffix in suffixes:
                 (root / f"{row['map']}{suffix}").write_bytes(
                     f"{stage}:{row['map']}:{suffix}\n".encode()
                 )
@@ -131,6 +150,17 @@ def test_infrastructure_retains_six_actual_evidence_documents(tmp_path: Path):
     assert sorted(path.stem for path in paths["evidence"].iterdir()) == sorted(
         check["id"] for check in report["checks"]
     )
+
+
+def test_infrastructure_accepts_exact_sparse_stage_membership(tmp_path: Path):
+    paths = _inputs(tmp_path, sparse=True)
+    report = _run(paths)
+    assert report["pass_count"] == 6
+    exact = next(
+        check for check in report["checks"]
+        if check["id"] == "exact-stage-membership"
+    )
+    assert exact["passed"] is True
     for check in report["checks"]:
         raw = (paths["evidence"] / f"{check['id']}.json").read_bytes()
         assert sha(raw) == check["evidence_sha256"]

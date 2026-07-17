@@ -180,7 +180,8 @@ def _validate_prior_stage(
     expected_keys = {
         "schema", "qualification_id", "mode", "stage", "non_admissible",
         "retryable", "final_cohort_authorized", "declaration_sha256",
-        "implementation", "input_report_sha256", "infrastructure_checks",
+        "implementation", "toolchain_authority_sha256",
+        "input_report_sha256", "infrastructure_checks",
         "map_count", "pass_count", "maps", "failures",
     }
     if set(report) != expected_keys:
@@ -195,6 +196,8 @@ def _validate_prior_stage(
         or report["final_cohort_authorized"] is not False
         or report["declaration_sha256"] != declaration_sha256
         or report["implementation"] != implementation
+        or report["toolchain_authority_sha256"]
+        != declaration["toolchain_authority_sha256"]
         or report["failures"] != []
         or not isinstance(report["infrastructure_checks"], Mapping)
         or not report["infrastructure_checks"]
@@ -561,6 +564,9 @@ def _stage_report(
         "final_cohort_authorized": False,
         "declaration_sha256": declaration_sha256,
         "implementation": dict(implementation),
+        "toolchain_authority_sha256": declaration[
+            "toolchain_authority_sha256"
+        ],
         "input_report_sha256": input_report_sha256,
         "infrastructure_checks": dict(infrastructure),
         "map_count": 28,
