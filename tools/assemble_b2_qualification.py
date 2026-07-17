@@ -814,6 +814,12 @@ def _validate_retained_stage_evidence(
             hook_attestation=Path(roots["hook_attestation"]),
             python_runtime=Path(roots["python_runtime"]), repo_root=repo_root,
             implementation_provider=implementation_provider,
+            compiled_cm_validator=(
+                lambda **kwargs: validate_published_qualification_compiled_cm(
+                    **kwargs,
+                    implementation_provider=implementation_provider,
+                )
+            ),
         )
         expected_passes = {
             stage: {
