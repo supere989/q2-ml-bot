@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import runpy
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -26,10 +28,14 @@ def _sha(path: Path) -> str:
 
 
 def _args(tmp_path: Path) -> argparse.Namespace:
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    repo = Path(__file__).resolve().parents[1]
     boundary = tmp_path / "boundary-proof.json"
     boundary.write_bytes(_canonical({"schema": "fixture-boundary-v1"}))
+    pinned_python = tmp_path / "pinned-python"
+    zstandard_init = tmp_path / "zstandard-init.py"
+    zstandard_backend = tmp_path / "zstandard-backend.so"
+    for path in (pinned_python, zstandard_init, zstandard_backend):
+        path.write_bytes(f"fixture:{path.name}\n".encode("ascii"))
     values = {
         "workspace": tmp_path / "qualification-workspace",
         "qualification_id": "b2q26_driver_fixture",
@@ -47,7 +53,9 @@ def _args(tmp_path: Path) -> argparse.Namespace:
         "hook_oracle": tmp_path / "hook",
         "fall_oracle": tmp_path / "fall",
         "hook_attestation": tmp_path / "hook-attestation.json",
-        "pinned_python": tmp_path / "pinned-python",
+        "pinned_python": pinned_python,
+        "zstandard_init": zstandard_init,
+        "zstandard_backend": zstandard_backend,
         "client_root": tmp_path / "client",
         "lithium_root": tmp_path / "lithium",
         "packer": tmp_path / "packer",
@@ -83,14 +91,34 @@ class FakeTools:
             prior = None if index == 0 else _sha(Path(
                 self.plan["commands"][index - 1]["report"]
             ))
+            passed_names = {
+                f"b2q26_driver_map_{ordinal:02d}"
+                for ordinal in range(28 if stage == "source" else 20)
+            }
+            rows = []
+            for ordinal in range(28):
+                name = f"b2q26_driver_map_{ordinal:02d}"
+                passed = name in passed_names
+                rows.append({
+                    "ordinal": ordinal, "map": name,
+                    "criteria": {"fixture-stage": passed},
+                    "evidence_sha256": hashlib.sha256(
+                        f"{stage}:{name}".encode("ascii")
+                    ).hexdigest(),
+                    "failures": [] if passed else ["fixture semantic rejection"],
+                    "passed": passed,
+                })
             report = {
                 "schema": STAGE_SCHEMA,
                 "qualification_id": self.plan["qualification_id"],
                 "mode": "qualification", "stage": stage,
                 "non_admissible": True, "retryable": True,
                 "final_cohort_authorized": False,
+                "toolchain_authority_sha256": self.plan[
+                    "toolchain_authority"
+                ]["sha256"],
                 "input_report_sha256": prior, "map_count": 28,
-                "pass_count": 20, "maps": [], "failures": [],
+                "pass_count": len(passed_names), "maps": rows, "failures": [],
             }
         elif stage == "infrastructure":
             report = {
@@ -98,6 +126,9 @@ class FakeTools:
                 "qualification_id": self.plan["qualification_id"],
                 "mode": "qualification", "non_admissible": True,
                 "retryable": True, "final_cohort_authorized": False,
+                "toolchain_authority_sha256": self.plan[
+                    "toolchain_authority"
+                ]["sha256"],
                 "stage_report_sha256s": {
                     name: _sha(Path(self.plan["commands"][index]["report"]))
                     for index, name in enumerate(STAGES)
@@ -110,6 +141,16 @@ class FakeTools:
                 "qualification_id": self.plan["qualification_id"],
                 "non_admissible": True, "retryable": True,
                 "final_cohort_authorized": False,
+                "toolchain_authority": {
+                    key: self.plan["toolchain_authority"][key]
+                    for key in ("bytes", "sha256")
+                },
+                "end_to_end": {
+                    "pass_count": 20,
+                    "passed_maps": [
+                        f"b2q26_driver_map_{ordinal:02d}" for ordinal in range(20)
+                    ],
+                },
                 "authorization": {
                     "final_declaration_allowed_by_this_report": False,
                     "qualification_artifact_reuse_as_final_evidence": False,
@@ -121,6 +162,30 @@ class FakeTools:
         return SimpleNamespace(returncode=0)
 
 
+class _ParserCaptured(Exception):
+    pass
+
+
+def _actual_parser(path: Path, monkeypatch: pytest.MonkeyPatch) -> argparse.ArgumentParser:
+    captured: dict[str, argparse.ArgumentParser] = {}
+
+    def intercept(parser, args=None, namespace=None):
+        del args, namespace
+        captured["parser"] = parser
+        raise _ParserCaptured
+
+    old_argv = sys.argv
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(argparse.ArgumentParser, "parse_args", intercept)
+            sys.argv = [str(path)]
+            with pytest.raises(_ParserCaptured):
+                runpy.run_path(str(path), run_name="__main__")
+    finally:
+        sys.argv = old_argv
+    return captured["parser"]
+
+
 def test_command_plan_is_sequential_and_dry_to_build(tmp_path: Path) -> None:
     args = _args(tmp_path)
     plan = build_plan(args)
@@ -130,6 +195,17 @@ def test_command_plan_is_sequential_and_dry_to_build(tmp_path: Path) -> None:
         "non_admissible": True, "final_cohort_authorized": False,
         "deploy_allowed": False, "training_allowed": False,
     }
+
+
+def test_every_generated_argv_parses_with_its_actual_stage_parser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(_args(tmp_path))
+    for step in plan["commands"]:
+        command = step["command"]
+        parser = _actual_parser(Path(command[1]), monkeypatch)
+        parsed = parser.parse_args(command[2:])
+        assert parsed is not None, step["stage"]
 
 
 def test_fake_tools_prove_order_and_exact_raw_hash_chaining(tmp_path: Path) -> None:
@@ -178,6 +254,18 @@ def test_clean_resume_skips_every_completed_tool(tmp_path: Path) -> None:
     second = run_plan(plan, resume=True, runner=fake)
     assert second == first
     assert fake.calls == []
+    promotion = json.loads(Path(plan["commands"][6]["report"]).read_text())
+    assert promotion["pass_count"] == 20
+    assert [row["ordinal"] for row in promotion["maps"] if row["passed"]] == list(range(20))
+
+
+def test_resume_rejects_pinned_runtime_byte_drift(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    plan = build_plan(args)
+    run_plan(plan, resume=False, runner=FakeTools(plan))
+    args.zstandard_backend.write_bytes(b"drifted backend\n")
+    with pytest.raises(QualificationDriverError, match="runtime input drifted"):
+        run_plan(plan, resume=True, runner=FakeTools(plan))
 
 
 def test_existing_workspace_requires_resume_and_plan_has_no_admission_action(

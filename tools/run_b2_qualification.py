@@ -21,6 +21,10 @@ INFRASTRUCTURE_SCHEMA = "q2-b2-qualification-infrastructure-v1"
 QUALIFICATION_SCHEMA = "q2-b2-toolchain-qualification-v1"
 QUALIFICATION_ID = re.compile(r"^b2q26_[a-z0-9][a-z0-9_-]*$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+TOOLCHAIN_MANIFEST = Path("docs/multires/B2-QUALIFICATION-TOOLCHAIN-AUTHORITY.json")
+TOOLCHAIN_MANIFEST_SHA256 = (
+    "44961966343c9d1979def8afdf302202d82a98f8489ba252564e7f26a8170645"
+)
 STAGES = (
     "source", "compile", "compiled-cm-preflight", "materialization",
     "claims", "atlas-build", "generated-promotion",
@@ -49,6 +53,16 @@ def _file_sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _file_record(path: Path) -> dict[str, Any]:
+    absolute = _absolute(path)
+    if absolute.is_symlink() or not absolute.is_file():
+        raise QualificationDriverError(f"pinned input is absent or a symlink: {absolute}")
+    return {
+        "path": str(absolute), "bytes": absolute.stat().st_size,
+        "sha256": _file_sha256(absolute),
+    }
 
 
 def _absolute(path: Path) -> Path:
@@ -109,6 +123,14 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "generated-promotion": reports / "generated-promotion.json",
         "infrastructure": reports / "infrastructure.json",
         "assemble": reports / "qualification.json",
+    }
+    toolchain_authority = _file_record(repo / TOOLCHAIN_MANIFEST)
+    if toolchain_authority["sha256"] != TOOLCHAIN_MANIFEST_SHA256:
+        raise QualificationDriverError("fixed toolchain authority digest differs")
+    runtime_inputs = {
+        "python": _file_record(args.pinned_python),
+        "zstandard_init": _file_record(args.zstandard_init),
+        "zstandard_backend": _file_record(args.zstandard_backend),
     }
 
     commands: list[dict[str, Any]] = []
@@ -236,6 +258,23 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         ("--atlas-build-report", report_paths["atlas-build"]),
         ("--generated-promotion-report", report_paths["generated-promotion"]),
         ("--infrastructure-report", report_paths["infrastructure"]),
+        ("--claims-root", claims), ("--source-root", source),
+        ("--source-cold-root", source_cold),
+        ("--compiled-root", compiled), ("--materialized-root", materialized),
+        ("--compile-evidence-root", compile_logs),
+        ("--q2tool", _absolute(args.q2tool)), ("--basedir", _absolute(args.basedir)),
+        ("--compiled-cm-evidence-root", cm_evidence),
+        ("--cm-oracle", _absolute(args.cm_oracle)),
+        ("--pmove-oracle", _absolute(args.pmove_oracle)),
+        ("--hook-oracle", _absolute(args.hook_oracle)),
+        ("--fall-oracle", _absolute(args.fall_oracle)),
+        ("--hook-attestation", _absolute(args.hook_attestation)),
+        ("--python-runtime", _absolute(args.pinned_python)),
+        ("--materialization-log-root", materialize_logs),
+        ("--analysis-root", analysis), ("--atlas-evidence-root", atlas_evidence),
+        ("--promotion-evidence-root", promotion_evidence),
+        ("--infrastructure-evidence-root", infrastructure_evidence),
+        ("--syntax-report", _absolute(args.syntax_report)),
         ("--output", report_paths["assemble"]),
     ):
         _arg(command, name, value)
@@ -249,6 +288,8 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "declaration": str(declaration),
         "boundary_proof_report": str(_absolute(args.boundary_proof_report)),
         "boundary_mode": "preexisting-wsl-compile-and-proof",
+        "toolchain_authority": toolchain_authority,
+        "runtime_inputs": runtime_inputs,
         "outputs": sorted(str(path) for path in {
             declaration, source, source_cold, compile_staging, compiled,
             compile_logs, cm_evidence, materialize_staging, materialized,
@@ -286,6 +327,25 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
         "deploy_allowed": False, "training_allowed": False,
     }:
         raise QualificationDriverError("qualification authorization differs")
+    toolchain = plan.get("toolchain_authority")
+    if (
+        not isinstance(toolchain, Mapping)
+        or dict(toolchain) != _file_record(repo / TOOLCHAIN_MANIFEST)
+        or toolchain.get("sha256") != TOOLCHAIN_MANIFEST_SHA256
+    ):
+        raise QualificationDriverError("fixed toolchain authority binding differs")
+    runtime = plan.get("runtime_inputs")
+    if not isinstance(runtime, Mapping) or set(runtime) != {
+        "python", "zstandard_init", "zstandard_backend",
+    }:
+        raise QualificationDriverError("pinned runtime inputs are incomplete")
+    for name, record in runtime.items():
+        if (
+            not isinstance(record, Mapping)
+            or not isinstance(record.get("path"), str)
+            or dict(record) != _file_record(Path(record["path"]))
+        ):
+            raise QualificationDriverError(f"pinned runtime input drifted: {name}")
     reports = [Path(step["report"]) for step in plan["commands"]]
     if len(set(reports)) != len(reports) or any(
         path != workspace / "reports" / path.name for path in reports
@@ -314,12 +374,14 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
 
 def _validate_stage_report(
     path: Path, stage: str, qualification_id: str, expected_input: str | None,
-) -> str:
+    toolchain_sha256: str, prior_passed: set[str] | None,
+) -> tuple[str, set[str]]:
     report, raw = _load_canonical(path)
     required = {
         "schema", "qualification_id", "mode", "stage", "non_admissible",
         "retryable", "final_cohort_authorized", "input_report_sha256",
         "map_count", "pass_count", "maps", "failures",
+        "toolchain_authority_sha256",
     }
     if (
         not required.issubset(report)
@@ -331,13 +393,49 @@ def _validate_stage_report(
         or report["retryable"] is not True
         or report["final_cohort_authorized"] is not False
         or report["input_report_sha256"] != expected_input
+        or report["toolchain_authority_sha256"] != toolchain_sha256
         or report["failures"] != []
     ):
         raise QualificationDriverError(f"{stage} report identity/hash chain differs")
-    return _sha256(raw)
+    rows = report["maps"]
+    if not isinstance(rows, list) or len(rows) != report["map_count"] or len(rows) != 28:
+        raise QualificationDriverError(f"{stage} map population differs")
+    passed: set[str] = set()
+    names: set[str] = set()
+    for ordinal, row in enumerate(rows):
+        if not isinstance(row, Mapping) or set(row) != {
+            "ordinal", "map", "criteria", "evidence_sha256", "failures", "passed",
+        }:
+            raise QualificationDriverError(f"{stage} map row differs")
+        criteria = row["criteria"]
+        failures = row["failures"]
+        recomputed = (
+            isinstance(criteria, Mapping) and bool(criteria)
+            and all(value is True for value in criteria.values())
+            and isinstance(failures, list) and not failures
+        )
+        name = row["map"]
+        if (
+            row["ordinal"] != ordinal or not isinstance(name, str) or name in names
+            or not isinstance(row["evidence_sha256"], str)
+            or HEX64.fullmatch(row["evidence_sha256"]) is None
+            or row["passed"] is not recomputed
+        ):
+            raise QualificationDriverError(f"{stage} map disposition differs")
+        names.add(name)
+        if recomputed:
+            passed.add(name)
+    if report["pass_count"] != len(passed):
+        raise QualificationDriverError(f"{stage} sparse pass count differs")
+    if prior_passed is not None and not passed.issubset(prior_passed):
+        raise QualificationDriverError(f"{stage} upgrades a prior failed map")
+    return _sha256(raw), passed
 
 
-def _validate_infrastructure(path: Path, qualification_id: str, hashes: Mapping[str, str]) -> str:
+def _validate_infrastructure(
+    path: Path, qualification_id: str, hashes: Mapping[str, str],
+    toolchain_sha256: str,
+) -> str:
     report, raw = _load_canonical(path)
     if (
         report.get("schema") != INFRASTRUCTURE_SCHEMA
@@ -347,13 +445,17 @@ def _validate_infrastructure(path: Path, qualification_id: str, hashes: Mapping[
         or report.get("retryable") is not True
         or report.get("final_cohort_authorized") is not False
         or report.get("stage_report_sha256s") != dict(hashes)
+        or report.get("toolchain_authority_sha256") != toolchain_sha256
         or report.get("failures") != []
     ):
         raise QualificationDriverError("infrastructure report/hash bindings differ")
     return _sha256(raw)
 
 
-def _validate_assembly(path: Path, qualification_id: str) -> str:
+def _validate_assembly(
+    path: Path, qualification_id: str, toolchain: Mapping[str, Any],
+    final_passed: set[str],
+) -> str:
     report, raw = _load_canonical(path)
     if (
         report.get("schema") != QUALIFICATION_SCHEMA
@@ -362,6 +464,9 @@ def _validate_assembly(path: Path, qualification_id: str) -> str:
         or report.get("non_admissible") is not True
         or report.get("retryable") is not True
         or report.get("final_cohort_authorized") is not False
+        or report.get("toolchain_authority") != {
+            "bytes": toolchain["bytes"], "sha256": toolchain["sha256"],
+        }
         or report.get("authorization") != {
             "final_declaration_allowed_by_this_report": False,
             "qualification_artifact_reuse_as_final_evidence": False,
@@ -370,6 +475,14 @@ def _validate_assembly(path: Path, qualification_id: str) -> str:
         or report.get("failures") != []
     ):
         raise QualificationDriverError("assembled qualification is not green/non-admissible")
+    end_to_end = report.get("end_to_end")
+    if (
+        not isinstance(end_to_end, Mapping)
+        or end_to_end.get("pass_count") != len(final_passed)
+        or set(end_to_end.get("passed_maps", [])) != final_passed
+        or len(final_passed) < 20
+    ):
+        raise QualificationDriverError("assembled sparse end-to-end population differs")
     return _sha256(raw)
 
 
@@ -436,23 +549,28 @@ def run_plan(
         raise QualificationDriverError("resume completion order differs")
     stage_hashes: dict[str, str] = {}
     previous: str | None = None
+    previous_passed: set[str] | None = None
+    toolchain = plan["toolchain_authority"]
     for index, step in enumerate(plan["commands"]):
         stage = str(step["stage"])
         report_path = Path(str(step["report"]))
         if stage in STAGES:
             validator = lambda: _validate_stage_report(
-                report_path, stage, str(plan["qualification_id"]), previous
+                report_path, stage, str(plan["qualification_id"]), previous,
+                str(toolchain["sha256"]), previous_passed,
             )
         elif stage == "infrastructure":
-            validator = lambda: _validate_infrastructure(
-                report_path, str(plan["qualification_id"]), stage_hashes
-            )
+            validator = lambda: (_validate_infrastructure(
+                report_path, str(plan["qualification_id"]), stage_hashes,
+                str(toolchain["sha256"]),
+            ), None)
         else:
-            validator = lambda: _validate_assembly(
-                report_path, str(plan["qualification_id"])
-            )
+            validator = lambda: (_validate_assembly(
+                report_path, str(plan["qualification_id"]), toolchain,
+                previous_passed or set(),
+            ), None)
         if index < len(completed):
-            digest = validator()
+            digest, passed = validator()
             if completed[index] != {"stage": stage, "report_sha256": digest}:
                 raise QualificationDriverError(f"resume hash validation failed at {stage}")
         else:
@@ -465,12 +583,13 @@ def run_plan(
                 raise QualificationDriverError(
                     f"qualification stopped at {stage}: exit {completed_process.returncode}"
                 )
-            digest = validator()
+            digest, passed = validator()
             completed.append({"stage": stage, "report_sha256": digest})
             _write_state(state_path, state)
         if stage in STAGES:
             stage_hashes[stage] = digest
             previous = digest
+            previous_passed = passed
     return state
 
 
@@ -493,6 +612,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--fall-oracle", type=Path, required=True)
     parser.add_argument("--hook-attestation", type=Path, required=True)
     parser.add_argument("--pinned-python", type=Path, required=True)
+    parser.add_argument("--zstandard-init", type=Path, required=True)
+    parser.add_argument("--zstandard-backend", type=Path, required=True)
     parser.add_argument("--client-root", type=Path, required=True)
     parser.add_argument("--lithium-root", type=Path, required=True)
     parser.add_argument("--packer", type=Path, required=True)
