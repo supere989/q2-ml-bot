@@ -624,3 +624,20 @@ def test_lava_candidate_rejects_existing_static_structure() -> None:
     generator._emit_lava_pools()
 
     assert generator.lava_pools == []
+
+
+def test_lava_candidate_without_reward_rolls_back_optional_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = MapGenerator(seed=92, style="pits")
+    spawn_room = Room(0, 0, 0, 0, 1536, 1536, 0, 384, "arena")
+    hazard_room = Room(4, 0, 2048, 0, 1024, 1024, 0, 384, "room")
+    generator.rooms = [spawn_room, hazard_room]
+    generator.lava_prob = 1.0
+    monkeypatch.setattr(generator, "_floor_item_spot", lambda *_args, **_kwargs: None)
+
+    generator._emit_lava_pools()
+
+    assert generator.spawn_blockers == []
+    assert generator.lava_pools == []
+    assert generator._placed_loot == []

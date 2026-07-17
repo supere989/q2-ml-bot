@@ -1908,12 +1908,36 @@ class MapGenerator:
                 )
                 if not self._structure_is_clear(candidate):
                     continue
-                placement = (size, px, py, candidate)
+                # Lava and its rim reward form one optional transaction.  The
+                # candidate must participate in the final-geometry standing
+                # check, but no brush or hazard may be committed until both
+                # sides are admissible.  A failed reward search rolls back
+                # only the just-appended blocker and tries another candidate.
+                self._admit_spawn_blocker(candidate, required=True)
+                left = px - 48
+                right = px + size + 48
+                primary, secondary = (
+                    (left, right) if rng.random() < 0.5 else (right, left)
+                )
+                mega_origin = None
+                for preferred_x in (primary, secondary):
+                    mega_origin = self._floor_item_spot(
+                        room, preferred_x, py + size // 2, 192
+                    )
+                    if mega_origin is not None:
+                        break
+                if mega_origin is None:
+                    removed = self.spawn_blockers.pop()
+                    if removed is not candidate:
+                        raise RuntimeError(
+                            "lava placement transaction lost blocker ownership"
+                        )
+                    continue
+                placement = (size, px, py, candidate, mega_origin)
                 break
             if placement is None:
                 continue
-            size, px, py, box = placement
-            self._admit_spawn_blocker(box, required=True)
+            size, px, py, _box, mega_origin = placement
             # Pool sits on the floor with a low rim so it reads as terrain
             w.add_brush(px - 16, py - 16, fz, px + size + 16, py + size + 16, fz + 12,
                         tf=self.pal['trim'], tc=self.pal['trim'], tw=self.pal['trim'])
@@ -1930,23 +1954,6 @@ class MapGenerator:
                 px + size, py + size, fz + 12 + LAVA_DEPTH,
             ))
             # Mega health on the rim: worth the burn risk
-            left = px - 48
-            right = px + size + 48
-            primary, secondary = (
-                (left, right) if rng.random() < 0.5 else (right, left)
-            )
-            # Uniqueness alone is insufficient: a nominal rim point can be
-            # inside a lane wall or lack a full standing column.  Route both
-            # preferences through the final-geometry floor validator.
-            mega_origin = None
-            for preferred_x in (primary, secondary):
-                mega_origin = self._floor_item_spot(
-                    room, preferred_x, py + size // 2, 192
-                )
-                if mega_origin is not None:
-                    break
-            if mega_origin is None:
-                raise RuntimeError("could not place a unique lava-rim reward")
             self._reserve_item_origin(mega_origin, "lava-rim mega health")
             mx, my, mz = mega_origin
             w.add_entity("item_health_mega",
