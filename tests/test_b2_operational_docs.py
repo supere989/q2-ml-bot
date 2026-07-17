@@ -118,6 +118,12 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "ffa5b9ccfee0340f1bad533a23fedd103a08d14d125149d1516a2326fb8a091b",
         "71445000..71445003",
         "71445600..71445603",
+        "B2-GENERATED-COHORT-71445-FAILURE.json",
+        "Cohort 71445 is permanently retired",
+        "d134ddd35bb6e93f1fffa71d2b6176d402ba70c2d4242b2f55b6be40efd651af",
+        "cf87d90e7f7d40a9baae7e5bf54c27491f26d4a28531830f4a5cc79e4add1db7",
+        "2167bfdef17cf247e329e5761dc7e44d3c22d34f5a3181faea5b8c2f737ee8a3",
+        "could not place a unique lava-rim reward",
         "b709b038772e349583de4eea549ec16d6180ac820ea9ff1a4e382a0ec14ccf01",
         "0986e0c70e04c7d1a70427c0218e079b885f2bbe269b3280a81a4245c2c7c098",
         "2a93eb8782c488768eb1c81bade03872eced3e64ad65de16eec948d614986e33",
@@ -148,7 +154,8 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert "b2g26_final_71444" in text
     assert "Cohort 71444 is permanently retired" in text
     assert "b2g26_final_71445" in text
-    assert "Authorized 71445 final attempt" in text
+    assert "Retired 71445 final attempt" in text
+    assert "Cohort 71445 is permanently retired" in text
     assert "Exactly one immutable/no-retry final producer attempt" in text
     assert "future-only" not in text
     assert '--basedir "$FUTURE_ROOT/assets"' not in text

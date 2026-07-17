@@ -215,7 +215,7 @@ rejects it before evidence. The final-wrapper authority fix, its exact no-write
 preflight, the fresh B1 reseal, and a new disposable qualification are now
 committed and green; they authorize only the distinct 71445 declaration below.
 
-## Authorized 71445 final attempt
+## Retired 71445 final attempt
 
 Fresh B1 gate SHA-256
 `58295d227ddd3694a0ddae5af46e2bbc98cc60dbe6b6751b4e42df01c06b1cd6`
@@ -243,6 +243,29 @@ Any source or later-stage failure permanently retires 71445; there is no
 resume, repair, repeated invocation, replacement member, passing subset,
 salvage, or reuse under that declaration. Qualification artifacts and every
 retired 71426..71444 byte remain forbidden inputs.
+
+That terminal condition occurred during the sole primary source generation.
+The first 12 declarations were emitted as complete five-file forensic members;
+ordinal 12, `b2g26_pits_71445300`, then raised
+`could not place a unique lava-rim reward`. The cold population remained
+empty, the source-freeze report was never published, and no compile or later
+stage ran. Optional lava-pool
+placement admitted and emitted its in-memory geometry before proving that the
+paired mega-health reward had a final-geometry floor origin, so an exhausted
+reward search could not transactionally decline the optional pool or try a new
+candidate. Qualification's different seeds did not cover this rejection path.
+`B2-GENERATED-COHORT-71445-FAILURE.json` is the exact terminal authority,
+canonical SHA-256
+`d134ddd35bb6e93f1fffa71d2b6176d402ba70c2d4242b2f55b6be40efd651af`.
+It binds primary/cold membership reports
+`cf87d90e7f7d40a9baae7e5bf54c27491f26d4a28531830f4a5cc79e4add1db7` /
+`2167bfdef17cf247e329e5761dc7e44d3c22d34f5a3181faea5b8c2f737ee8a3`.
+
+Cohort 71445 is permanently retired. None of its source, report, WSL, or
+producer-snapshot bytes may be retried, resumed, reused, copied forward,
+salvaged, substituted, or admitted. A successor requires the transactional
+lava/reward fix, deterministic rejection-path coverage, and a fresh green
+non-admissible qualification before a new immutable declaration.
 
 The declaration-bearing 71445 producer commit must be a strict successor of
 qualified commit `3b17223ab32e20152aead1eb32a79e239d6f4d8a`. Gate replay
@@ -323,9 +346,9 @@ separate CPython 3.11.4 executable and zstandard module digests above. The
 syntax report must never be required to identify the execution runtime.
 
 The assembler must reject declarations for retired cohorts 71426 through
-71444 before reading campaign evidence. The only eligible final successor is
-the immutable 71445 declaration bound to the fresh B1 reseal and green
-non-admissible qualification above.
+71445 before reading campaign evidence. There is no eligible final successor
+while the transactional lava/reward fix and a fresh non-admissible
+qualification are pending.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -349,7 +372,7 @@ and qualified implementation commit/tree
 consumed by 71444 and it remains non-admissible historical evidence rather
 than final population input or successor authority.
 
-The active 71445 prerequisite is the independent green 28/28 qualification
+The retired 71445 prerequisite was the independent green 28/28 qualification
 `b2q26_3b17223_71625100`, report SHA-256
 `351baccaabf405e0ef240c1def18e4ede796ff417e73230524e9f0f9b0c0491b`,
 bound to fresh B1 gate SHA-256
@@ -357,8 +380,8 @@ bound to fresh B1 gate SHA-256
 and qualified implementation commit/tree
 `3b17223ab32e20152aead1eb32a79e239d6f4d8a` /
 `fa2b106d19dbb115e6acd4c344b3820b3013464a`. It is non-admissible proof of
-the fixed toolchain only; its population remains forbidden from the final
-71445 lane.
+the fixed toolchain only; its authorization was consumed by the terminal
+71445 source attempt and cannot authorize a successor.
 
 The disposable campaign is orchestrated by
 `tools/run_b2_qualification.py`. Driver-plan schema v2 hash-binds every
@@ -509,9 +532,9 @@ reuse of any retired cohort byte.
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. The current alias names fresh cohort 71445. The command
-shape below becomes executable only after its one-shot final evidence exists
-and must use the exact B1/qualification bindings above.
+clean-tree authority. The current alias names retired cohort 71445 and cannot
+execute this template. The command shape below becomes executable only after a
+fresh successor updates the cohort and exact qualification bindings.
 
 ```sh
 python tools/assemble_b2_gate.py \

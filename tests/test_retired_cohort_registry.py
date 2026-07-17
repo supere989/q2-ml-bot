@@ -47,6 +47,9 @@ FAILURE_71443 = (
 FAILURE_71444 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71444-FAILURE.json"
 )
+FAILURE_71445 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71445-FAILURE.json"
+)
 RETIRED_DECLARATIONS = (
     NAMED_71438,
     NAMED_71439,
@@ -55,6 +58,7 @@ RETIRED_DECLARATIONS = (
     NAMED_71442,
     NAMED_71443,
     NAMED_71444,
+    NAMED_71445,
 )
 
 
@@ -260,7 +264,7 @@ def test_alias_and_named_71441_are_retired(declaration_path: Path) -> None:
         )
 
 
-def test_current_alias_71445_is_fresh_and_matches_named_declaration() -> None:
+def test_current_alias_71445_is_retired_until_replaced() -> None:
     current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
 
     assert current["cohort_id"] == "b2g26_final_71445"
@@ -268,12 +272,42 @@ def test_current_alias_71445_is_fresh_and_matches_named_declaration() -> None:
     assert current_sha256 == (
         "ffa5b9ccfee0340f1bad533a23fedd103a08d14d125149d1516a2326fb8a091b"
     )
-    assert (
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71445.*permanently retired"
+    ):
         registry.require_unretired_declaration(
             CURRENT_ALIAS, current, current_sha256
         )
-        is None
+
+
+def test_71445_terminal_failure_authority_is_canonical_and_exact() -> None:
+    payload = FAILURE_71445.read_bytes()
+    authority = json.loads(payload)
+
+    assert payload == cohort.canonical_bytes(authority)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "d134ddd35bb6e93f1fffa71d2b6176d402ba70c2d4242b2f55b6be40efd651af"
     )
+    assert authority["schema"] == registry.FAILURE_SCHEMA
+    assert authority["status"] == "permanently-failed-first-source-freeze"
+    assert authority["cohort_id"] == "b2g26_final_71445"
+    assert authority["failure"]["phase"] == (
+        "primary-generation-lava-reward-placement"
+    )
+    assert authority["evidence"]["failed_member"] == {
+        "files": {},
+        "map": "b2g26_pits_71445300",
+        "missing_suffixes": [
+            ".map", ".json", ".meta.json", ".lattice.json", ".routes.json"
+        ],
+        "ordinal": 12,
+        "seed": 71445300,
+        "style": "pits",
+    }
+    assert authority["evidence"]["primary_population"]["actual_file_count"] == 60
+    assert authority["evidence"]["cold_population"]["actual_file_count"] == 0
+    assert authority["admission"]["source_stage_published"] is False
+    assert authority["admission"]["retry_under_same_declaration_allowed"] is False
 
 
 def test_71443_terminal_failure_authority_is_canonical_and_exact() -> None:
@@ -509,6 +543,11 @@ def test_contradictory_failure_registry_fails_closed(
             NAMED_71444,
             "b2g26_final_71444",
             "da27e96b3fe8c3719a7ff1593e37b4ac768f53a36f38c877566af495a6b551bf",
+        ),
+        (
+            NAMED_71445,
+            "b2g26_final_71445",
+            "ffa5b9ccfee0340f1bad533a23fedd103a08d14d125149d1516a2326fb8a091b",
         ),
     ],
 )
