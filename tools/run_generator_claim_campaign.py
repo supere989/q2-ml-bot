@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Prepare and validate one exact, declaration-bound generator cohort.
 
-The source/materialization and Atlas analysis roots are deliberately separate:
-both contain a ``<map>.routes.json`` with different authority.  Directory
-globs, count-only admission, adjacent analysis lookup, replacement maps, and
-passing-subset publication are not supported.
+The source/materialization and Atlas analysis roots are deliberately separate.
+Generator ``<map>.routes.json`` is only a source claim; admitted Atlas guide
+authority is the distinct versioned ``<map>.objectives.json`` artifact.
+Directory globs, count-only admission, adjacent analysis lookup, replacement
+maps, and passing-subset publication are not supported.
 """
 
 from __future__ import annotations

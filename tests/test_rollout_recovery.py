@@ -11,6 +11,7 @@ from harness.rollout_protocol import (
     CoordinatorRecoveryConfig,
     CoordinatorRequestError,
     CoordinatorServer,
+    PPO_ACTION_CARDINALITIES,
     PPO_BEHAVIOR_METRIC_KEYS,
     PPO_EPISODE_SUMMARY_COLUMNS,
     PPO_TELEMETRY_SCHEMA,
@@ -18,6 +19,7 @@ from harness.rollout_protocol import (
     RolloutBatch,
     RolloutCoordinator,
 )
+from harness.protocol import ML_PROTOCOL_GENERATION, OBS_DIM
 
 
 RUNTIME_DIGEST = "d" * 64
@@ -38,7 +40,7 @@ def _lattice_payload(env_steps, n_envs=2):
 
 def _leased_batch(policy, lease, lattice_payload):
     assignment = lease.assignment
-    steps, envs, obs_dim = assignment.steps, assignment.n_envs, 219
+    steps, envs, obs_dim = assignment.steps, assignment.n_envs, OBS_DIM
     metadata = {
         **assignment.batch_contract(),
         "worker_id": lease.worker_id,
@@ -50,6 +52,9 @@ def _leased_batch(policy, lease, lattice_payload):
         "deterministic_actions": False,
         "runtime_manifest_sha256": policy.runtime_manifest_sha256,
         "telemetry_schema": PPO_TELEMETRY_SCHEMA,
+        "protocol_generation": ML_PROTOCOL_GENERATION,
+        "observation_dim": OBS_DIM,
+        "action_cardinalities": dict(PPO_ACTION_CARDINALITIES),
     }
     zeros = np.zeros
     return RolloutBatch(metadata, {

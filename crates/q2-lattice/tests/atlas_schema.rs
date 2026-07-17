@@ -2,21 +2,27 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use q2_lattice_rs::atlas::{
-    ATLAS_CELL_SIZES, ATLAS_MAGIC, ATLAS_SCHEMA_VERSION, ArtifactManifest, AtlasAggregateCell,
-    AtlasArtifact, AtlasCounts, AtlasLevel, AtlasLimits, AtlasManifest, AtlasOrigin,
-    B1AuthorityExecutables, B1AuthorityIdentities, B1AuthorityIdentity, B1NormativeDocuments,
-    B1RuntimeAuthoritySeal, BspIdentity, COLLISION_ORACLE_NAME, COLLISION_ORACLE_SCHEMA,
-    COST_INFINITY, ChannelManifest, CollisionOracleAdmission, CollisionParameters,
-    CollisionSourceClosure, ConservativeChild, CorridorWitness, EdgeInput, EdgeType,
-    FALL_ORACLE_NAME, FALL_ORACLE_SCHEMA, FallOracleAdmission, FallParameters, FallSourceClosure,
-    GridIndex, GridManifest, HOOK_ORACLE_NAME, HOOK_ORACLE_SCHEMA, HOOK_PARITY_CASES_V1,
-    HOOK_PARITY_NAME, HOOK_PARITY_SCHEMA, HookOracleAdmission, HookParameters,
+    ADVISORY_SPATIAL_WIDTH, ATLAS_CELL_SIZES, ATLAS_MAGIC, ATLAS_SCHEMA_VERSION, ArtifactManifest,
+    AtlasAggregateCell, AtlasArtifact, AtlasCounts, AtlasLevel, AtlasLimits, AtlasManifest,
+    AtlasOrigin, AtlasRuntime, AtlasRuntimeSlot, B1AuthorityExecutables, B1AuthorityIdentities,
+    B1AuthorityIdentity, B1NormativeDocuments, B1RuntimeAuthoritySeal, BspIdentity,
+    COLLISION_ORACLE_NAME, COLLISION_ORACLE_SCHEMA, COST_INFINITY, ChannelManifest,
+    CollisionOracleAdmission, CollisionParameters, CollisionSourceClosure, ConservativeChild,
+    CorridorWitness, EdgeInput, EdgeType, FALL_ORACLE_NAME, FALL_ORACLE_SCHEMA,
+    FallOracleAdmission, FallParameters, FallSourceClosure, GUIDE_FEATURE_WIDTH, GridIndex,
+    GridManifest, HAZARD_CLEARANCE_UNREACHABLE_HAZARD, HAZARD_CLEARANCE_UNREACHABLE_SAFE,
+    HOOK_ORACLE_NAME, HOOK_ORACLE_SCHEMA, HOOK_PARITY_CASES_V1, HOOK_PARITY_NAME,
+    HOOK_PARITY_SCHEMA, HazardComponentField, HookOracleAdmission, HookParameters,
     HookParityAttestation, HookSourceClosure, HullManifest, L0Address, L0BitPlane, L0Chunk,
     L0ScalarPlane, L1Graph, L1Node, MASK_PLAYERSOLID_V1, MASK_SHOT_V1, ManifestBudgets, NodeFlags,
-    ORACLE_SEMANTIC_VERSION, OracleAdmissions, OracleBspBinding, OracleToolIdentity,
-    PMOVE_ORACLE_NAME, PMOVE_ORACLE_SCHEMA, PmoveOracleAdmission, PmoveParameters,
-    PmoveSourceClosure, SparseL0, Stance, ToolIdentity, aggregate_conservative,
-    decode_zstd_envelope, encode_zstd_envelope, sha256_hex,
+    OBJECTIVE_MEDIA_TYPE, ORACLE_SEMANTIC_VERSION, ObjectiveBelief, ObjectiveClass,
+    OracleAdmissions, OracleBspBinding, OracleToolIdentity, PMOVE_ORACLE_NAME, PMOVE_ORACLE_SCHEMA,
+    PmoveOracleAdmission, PmoveParameters, PmoveSourceClosure, PolicyHazardBits,
+    RECOVERY_EVIDENCE_FIELD_NAMES, RECOVERY_FEATURE_WIDTH, RECOVERY_REPAIR_NODE_LIMIT,
+    RecoveryOverlay, RecoveryQuery, SparseL0, Stance, ToolIdentity, advisory_spatial_feature_names,
+    aggregate_conservative, decode_zstd_envelope, encode_zstd_envelope, install_static_costs,
+    install_static_hazard_clearances, recovery_features, sha256_hex, solve_static_costs,
+    solve_static_hazard_clearances, validate_static_costs, validate_static_hazard_clearances,
 };
 
 fn node(index: GridIndex) -> L1Node {
@@ -1198,6 +1204,743 @@ fn collision_oracle_is_mandatory_and_manifest_artifact_verification_rechecks_edg
             )
             .is_err()
     );
+}
+
+fn b3_recovery_graph() -> (AtlasOrigin, L1Graph, GridIndex, GridIndex, GridIndex) {
+    let limits = AtlasLimits::default();
+    let bsp = bsp_identity();
+    let admission = oracle_admissions(&bsp, true, true).admit(&bsp).unwrap();
+    let hazard = GridIndex::new(0, 0, 0);
+    let east = GridIndex::new(1, 0, 0);
+    let north = GridIndex::new(0, 1, 0);
+    let mut hazard_node = node(hazard);
+    hazard_node.flags &= !NodeFlags::SAFE_TO_STAND;
+    hazard_node.hazard_types = PolicyHazardBits::LAVA | PolicyHazardBits::HURT;
+    hazard_node.hazard_severity = 192;
+    let mut east_edge = edge(hazard, east, EdgeType::Walk);
+    east_edge.cost = 512;
+    let mut north_edge = edge(hazard, north, EdgeType::StrafeWalk);
+    north_edge.cost = 256;
+    let mut graph = L1Graph::build(
+        vec![node(north), hazard_node, node(east)],
+        vec![east_edge, north_edge],
+        &admission,
+        &limits,
+    )
+    .unwrap();
+    install_static_costs(&mut graph).unwrap();
+    install_static_hazard_clearances(&mut graph).unwrap();
+    (AtlasOrigin([0, 0, 0]), graph, hazard, east, north)
+}
+
+#[test]
+fn b3_static_costs_are_exact_and_every_finite_unsafe_node_descends() {
+    let (_origin, mut graph, hazard, _east, _north) = b3_recovery_graph();
+    let costs = solve_static_costs(&graph).unwrap();
+    assert_eq!(costs[graph.node_ordinal(hazard).unwrap()], 256);
+    validate_static_costs(&graph).unwrap();
+
+    let mut tampered = costs;
+    tampered[graph.node_ordinal(hazard).unwrap()] += 1;
+    graph.set_costs_to_safety(&tampered).unwrap();
+    assert!(validate_static_costs(&graph).is_err());
+}
+
+#[test]
+fn b3_signed_hazard_clearance_is_monotonic_deterministic_and_explicit() {
+    let limits = AtlasLimits::default();
+    let bsp = bsp_identity();
+    let admission = oracle_admissions(&bsp, true, true).admit(&bsp).unwrap();
+    let indices = (-2..=2)
+        .map(|x| GridIndex::new(x, 0, 0))
+        .collect::<Vec<_>>();
+    let build = |reverse: bool| {
+        let mut nodes = indices
+            .iter()
+            .map(|index| {
+                let mut result = node(*index);
+                if index.x < 0 {
+                    result.flags &= !NodeFlags::SAFE_TO_STAND;
+                    result.hazard_types = PolicyHazardBits::LAVA;
+                    result.hazard_severity = 255;
+                    result.region_id = 11;
+                } else {
+                    result.region_id = 22;
+                }
+                result
+            })
+            .collect::<Vec<_>>();
+        let mut edges = Vec::new();
+        for pair in indices.windows(2) {
+            let mut forward = edge(pair[0], pair[1], EdgeType::Walk);
+            forward.cost = 4096;
+            let mut backward = edge(pair[1], pair[0], EdgeType::Walk);
+            backward.cost = 4096;
+            edges.push(forward);
+            edges.push(backward);
+        }
+        if reverse {
+            nodes.reverse();
+            edges.reverse();
+        }
+        let mut graph = L1Graph::build(nodes, edges, &admission, &limits).unwrap();
+        install_static_costs(&mut graph).unwrap();
+        install_static_hazard_clearances(&mut graph).unwrap();
+        graph
+    };
+    let forward = build(false);
+    let reverse = build(true);
+    let clearances = indices
+        .iter()
+        .map(|index| forward.nodes()[forward.node_ordinal(*index).unwrap()].hazard_clearance)
+        .collect::<Vec<_>>();
+    assert_eq!(clearances, vec![-6144, -2048, 2048, 6144, 10240]);
+    assert_eq!(
+        clearances,
+        indices
+            .iter()
+            .map(|index| {
+                reverse.nodes()[reverse.node_ordinal(*index).unwrap()].hazard_clearance
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        forward
+            .nodes()
+            .iter()
+            .map(|item| item.region_id)
+            .collect::<Vec<_>>(),
+        vec![11, 11, 22, 22, 22]
+    );
+    validate_static_hazard_clearances(&forward).unwrap();
+    assert_eq!(
+        solve_static_hazard_clearances(&forward).unwrap(),
+        clearances
+    );
+
+    let raw_forward = AtlasArtifact {
+        origin: AtlasOrigin([0, 0, 0]),
+        l0: SparseL0::new(),
+        l1: forward,
+        l2: vec![],
+        l3: vec![],
+    }
+    .encode_uncompressed(&limits)
+    .unwrap();
+    let raw_reverse = AtlasArtifact {
+        origin: AtlasOrigin([0, 0, 0]),
+        l0: SparseL0::new(),
+        l1: reverse,
+        l2: vec![],
+        l3: vec![],
+    }
+    .encode_uncompressed(&limits)
+    .unwrap();
+    assert_eq!(sha256_hex(&raw_forward), sha256_hex(&raw_reverse));
+
+    let safe_clearance = clearances[2] as f32 / 256.0;
+    assert!((0..30).all(|_| safe_clearance >= 0.5));
+
+    let mut isolated_hazard = node(GridIndex::new(0, 0, 0));
+    isolated_hazard.flags &= !NodeFlags::SAFE_TO_STAND;
+    isolated_hazard.hazard_types = PolicyHazardBits::SLIME;
+    let isolated = L1Graph::build(
+        vec![isolated_hazard, node(GridIndex::new(2, 0, 0))],
+        vec![],
+        &admission,
+        &limits,
+    )
+    .unwrap();
+    assert_eq!(
+        solve_static_hazard_clearances(&isolated).unwrap(),
+        vec![
+            HAZARD_CLEARANCE_UNREACHABLE_HAZARD,
+            HAZARD_CLEARANCE_UNREACHABLE_SAFE
+        ]
+    );
+}
+
+#[test]
+fn b3_recovery_packs_primary_alternate_hazards_and_dynamic_repair() {
+    assert!(RECOVERY_EVIDENCE_FIELD_NAMES.contains(&"atlas_region_id"));
+    assert!(RECOVERY_EVIDENCE_FIELD_NAMES.contains(&"hazard_component_id"));
+    assert!(!RECOVERY_EVIDENCE_FIELD_NAMES.contains(&"hazard_region_id"));
+    assert!(!RECOVERY_EVIDENCE_FIELD_NAMES.contains(&"server_damage_source_id"));
+    let (origin, graph, hazard, east, north) = b3_recovery_graph();
+    let position = origin.center(hazard, AtlasLevel::L1);
+    let empty = RecoveryOverlay::default();
+    let static_block = recovery_features(
+        origin,
+        &graph,
+        RecoveryQuery {
+            world_position: position,
+            yaw_degrees: 0.0,
+            overlay: &empty,
+            time_to_impact_seconds: Some(2.0),
+        },
+    )
+    .unwrap();
+    assert_eq!(static_block.values.len(), RECOVERY_FEATURE_WIDTH);
+    assert_eq!(static_block.values[0], 1.0);
+    assert_eq!(static_block.values[2], 1.0);
+    assert_eq!(static_block.values[1], 0.0);
+    assert_eq!(&static_block.values[9..12], &[0.0, -1.0, 0.0]);
+    assert_eq!(&static_block.values[12..15], &[1.0, 0.0, 0.0]);
+    assert!((static_block.values[15] - 0.4).abs() < 1e-6);
+    assert_eq!(static_block.evidence.l1_index, hazard);
+    assert_eq!(static_block.evidence.cost_to_safety_q8, 256);
+    assert_eq!(static_block.evidence.signed_safe_clearance_q8, -(8 * 256));
+    assert_eq!(
+        static_block.evidence.hazard_types,
+        PolicyHazardBits::LAVA | PolicyHazardBits::HURT
+    );
+    assert_eq!(static_block.evidence.atlas_region_id, 7);
+    assert_eq!(static_block.evidence.hazard_component_id, 1);
+
+    let mut overlay = RecoveryOverlay::default();
+    overlay.blocked_nodes.insert(north);
+    let repaired = recovery_features(
+        origin,
+        &graph,
+        RecoveryQuery {
+            world_position: position,
+            yaw_degrees: 0.0,
+            overlay: &overlay,
+            time_to_impact_seconds: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(&repaired.values[9..12], &[1.0, 0.0, 0.0]);
+    assert_eq!(&repaired.values[12..15], &[0.0, 0.0, 0.0]);
+    assert_eq!(repaired.repaired_nodes, 3);
+    assert_eq!(repaired.evidence.cost_to_safety_q8, 512);
+    assert_eq!(
+        graph.nodes()[graph.node_ordinal(east).unwrap()].cost_to_safety,
+        0
+    );
+}
+
+#[test]
+fn b3_hazard_components_cover_predamage_lava_void_and_safe_recovery_basins() {
+    let limits = AtlasLimits::default();
+    let bsp = bsp_identity();
+    let admission = oracle_admissions(&bsp, true, true).admit(&bsp).unwrap();
+    let indices = (-4..=4)
+        .map(|x| GridIndex::new(x, 0, 0))
+        .collect::<Vec<_>>();
+    let build = |reverse: bool| {
+        let mut nodes = indices.iter().map(|index| node(*index)).collect::<Vec<_>>();
+        let lava = nodes.iter_mut().find(|item| item.index.x == -3).unwrap();
+        lava.flags &= !NodeFlags::SAFE_TO_STAND;
+        lava.hazard_types = PolicyHazardBits::LAVA;
+        lava.hazard_severity = 255;
+        let void_edge = nodes.iter_mut().find(|item| item.index.x == 3).unwrap();
+        void_edge.flags &= !NodeFlags::SAFE_TO_STAND;
+        void_edge.hazard_types = PolicyHazardBits::VOID_OR_LETHAL_DROP;
+        void_edge.hazard_severity = 255;
+        let mut edges = Vec::new();
+        for pair in indices.windows(2) {
+            let mut forward = edge(pair[0], pair[1], EdgeType::Walk);
+            forward.cost = 4096;
+            let mut backward = edge(pair[1], pair[0], EdgeType::Walk);
+            backward.cost = 4096;
+            edges.extend([forward, backward]);
+        }
+        if reverse {
+            nodes.reverse();
+            edges.reverse();
+        }
+        let mut graph = L1Graph::build(nodes, edges, &admission, &limits).unwrap();
+        install_static_costs(&mut graph).unwrap();
+        install_static_hazard_clearances(&mut graph).unwrap();
+        graph
+    };
+    let graph = build(false);
+    let rebuilt = build(true);
+    let components = HazardComponentField::build(&graph).unwrap();
+    let rebuilt_components = HazardComponentField::build(&rebuilt).unwrap();
+    assert_eq!(components.component_count(), 2);
+    assert_eq!(components, rebuilt_components);
+    let encode = |l1: L1Graph| {
+        AtlasArtifact {
+            origin: AtlasOrigin([0, 0, 0]),
+            l0: SparseL0::new(),
+            l1,
+            l2: vec![],
+            l3: vec![],
+        }
+        .encode_uncompressed(&limits)
+        .unwrap()
+    };
+    // The component field is derived from digest-bound canonical graph data;
+    // reversing analyzer insertion order changes neither Atlas nor component
+    // identity.
+    assert_eq!(
+        sha256_hex(&encode(graph.clone())),
+        sha256_hex(&encode(rebuilt.clone()))
+    );
+
+    let id_at = |index: GridIndex| {
+        components
+            .id_at_ordinal(graph.node_ordinal(index).unwrap())
+            .unwrap()
+    };
+    // Static Atlas bits identify lava entry and exact void/lethal-drop
+    // proximity before any server damage-source event exists.
+    assert_eq!(id_at(GridIndex::new(-3, 0, 0)), 1);
+    assert_eq!(id_at(GridIndex::new(3, 0, 0)), 2);
+    // Safe recovery nodes remain associated with the entry component's fixed
+    // basin; the distinct void component never aliases traversal region IDs.
+    assert_eq!(id_at(GridIndex::new(-2, 0, 0)), 1);
+    assert_eq!(id_at(GridIndex::new(-1, 0, 0)), 1);
+    assert_eq!(id_at(GridIndex::new(2, 0, 0)), 2);
+
+    let origin = AtlasOrigin([0, 0, 0]);
+    let overlay = RecoveryOverlay::default();
+    for x in [-3, -2, -1] {
+        let block = recovery_features(
+            origin,
+            &graph,
+            RecoveryQuery {
+                world_position: origin.center(GridIndex::new(x, 0, 0), AtlasLevel::L1),
+                yaw_degrees: 0.0,
+                overlay: &overlay,
+                time_to_impact_seconds: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(block.evidence.hazard_component_id, 1);
+        assert_eq!(block.evidence.hazard_component_epoch(17), 17);
+        let mut no_component = block.evidence;
+        no_component.hazard_component_id = 0;
+        assert_eq!(no_component.hazard_component_epoch(17), 0);
+        if x >= -2 {
+            assert_eq!(block.evidence.cost_to_safety_q8, 0);
+            assert!(block.evidence.signed_safe_clearance_q8 > 0);
+        }
+    }
+}
+
+#[test]
+fn b3_public_recovery_excludes_hook_and_enables_only_identified_movers() {
+    let limits = AtlasLimits::default();
+    let bsp = bsp_identity();
+    let admission = oracle_admissions(&bsp, true, true).admit(&bsp).unwrap();
+    let hazard = GridIndex::new(0, 0, 0);
+    let hook_target = GridIndex::new(1, 0, 0);
+    let mover_target = GridIndex::new(0, 1, 0);
+    let mut hazard_node = node(hazard);
+    hazard_node.flags &= !NodeFlags::SAFE_TO_STAND;
+    let hook = edge(hazard, hook_target, EdgeType::Hook);
+    let mut mover = edge(hazard, mover_target, EdgeType::Mover);
+    mover.blocker = 7;
+    let mut graph = L1Graph::build(
+        vec![hazard_node, node(hook_target), node(mover_target)],
+        vec![hook, mover],
+        &admission,
+        &limits,
+    )
+    .unwrap();
+    install_static_costs(&mut graph).unwrap();
+    install_static_hazard_clearances(&mut graph).unwrap();
+    assert_eq!(
+        graph.nodes()[graph.node_ordinal(hazard).unwrap()].cost_to_safety,
+        COST_INFINITY
+    );
+    let origin = AtlasOrigin([0, 0, 0]);
+    let position = origin.center(hazard, AtlasLevel::L1);
+    let empty = RecoveryOverlay::default();
+    let without_mover = recovery_features(
+        origin,
+        &graph,
+        RecoveryQuery {
+            world_position: position,
+            yaw_degrees: 0.0,
+            overlay: &empty,
+            time_to_impact_seconds: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(&without_mover.values[9..15], &[0.0; 6]);
+
+    let mut enabled = RecoveryOverlay::default();
+    enabled.enabled_mover_blockers.insert(7);
+    let with_mover = recovery_features(
+        origin,
+        &graph,
+        RecoveryQuery {
+            world_position: position,
+            yaw_degrees: 0.0,
+            overlay: &enabled,
+            time_to_impact_seconds: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(&with_mover.values[9..12], &[0.0, -1.0, 0.0]);
+    assert_eq!(&with_mover.values[12..15], &[0.0; 3]);
+}
+
+#[test]
+fn b3_local_repair_refuses_more_than_4096_sparse_nodes() {
+    let limits = AtlasLimits::default();
+    let bsp = bsp_identity();
+    let admission = oracle_admissions(&bsp, true, false).admit(&bsp).unwrap();
+    let mut nodes = Vec::new();
+    'outer: for z in 0..20 {
+        for y in 0..20 {
+            for x in 0..20 {
+                nodes.push(node(GridIndex::new(x, y, z)));
+                if nodes.len() == RECOVERY_REPAIR_NODE_LIMIT + 1 {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    let current = GridIndex::new(8, 8, 8);
+    assert!(nodes.iter().any(|item| item.index == current));
+    let mut graph = L1Graph::build(nodes, vec![], &admission, &limits).unwrap();
+    install_static_costs(&mut graph).unwrap();
+    install_static_hazard_clearances(&mut graph).unwrap();
+    let origin = AtlasOrigin([0, 0, 0]);
+    let mut overlay = RecoveryOverlay::default();
+    overlay.dynamic_penalty_q8.insert(current, 1);
+    let error = recovery_features(
+        origin,
+        &graph,
+        RecoveryQuery {
+            world_position: origin.center(current, AtlasLevel::L1),
+            yaw_degrees: 0.0,
+            overlay: &overlay,
+            time_to_impact_seconds: None,
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("exceeds 4096 L1 nodes"));
+}
+
+#[test]
+fn b3_guide_slots_are_deterministic_one_hot_and_exactly_60_floats() {
+    assert_eq!(ObjectiveClass::Weapon.name(), "weapon");
+    assert_eq!(
+        ObjectiveClass::from_classname("weapon_rocketlauncher"),
+        Some(ObjectiveClass::Weapon)
+    );
+    assert_eq!(
+        ObjectiveClass::from_classname("item_power_shield"),
+        Some(ObjectiveClass::Armor)
+    );
+    assert_eq!(ObjectiveClass::from_classname("light"), None);
+
+    let names = advisory_spatial_feature_names();
+    assert_eq!(names.len(), ADVISORY_SPATIAL_WIDTH);
+    assert_eq!(
+        ADVISORY_SPATIAL_WIDTH,
+        RECOVERY_FEATURE_WIDTH + GUIDE_FEATURE_WIDTH
+    );
+    assert_eq!(ADVISORY_SPATIAL_WIDTH, 76);
+    let unique: std::collections::BTreeSet<_> = names.iter().copied().collect();
+    assert_eq!(unique.len(), names.len());
+}
+
+fn objective_payload(
+    bsp_sha256: &str,
+    atlas_sha256: &str,
+    origin: AtlasOrigin,
+    objectives: serde_json::Value,
+) -> Vec<u8> {
+    let value = serde_json::json!({
+        "atlas_sha256": atlas_sha256,
+        "bsp_sha256": bsp_sha256,
+        "canonical_map_id": "fixture",
+        "objectives": objectives,
+        "origin": origin.0,
+        "schema": "q2-atlas-objectives-v1",
+    });
+    let mut payload = serde_json::to_vec(&value).unwrap();
+    payload.push(b'\n');
+    payload
+}
+
+fn attach_objective_identity(manifest: &mut AtlasManifest, payload: &[u8], objective_count: u64) {
+    manifest.artifacts.insert(
+        "fixture.objectives.json".to_owned(),
+        ArtifactManifest::from_uncompressed(
+            OBJECTIVE_MEDIA_TYPE,
+            payload,
+            payload.len() as u64,
+            BTreeMap::from([("objectives".to_owned(), objective_count)]),
+        ),
+    );
+}
+
+fn fixture_objective_records(origin: AtlasOrigin) -> serde_json::Value {
+    let target = GridIndex::new(0, 0, -2);
+    let world = origin.center(target, AtlasLevel::L1);
+    serde_json::json!([{
+        "class": "weapon",
+        "classname": "weapon_rocketlauncher",
+        "confidence": 65535,
+        "l1_index": target.xyz(),
+        "objective_id": 7,
+        "risk": 0,
+        "world_milliunits": world.map(|value| (value * 1000.0).round() as i64),
+    }])
+}
+
+#[test]
+fn b3_runtime_admits_raw_or_enveloped_atlas_and_rejects_identity_mismatch() {
+    let limits = AtlasLimits::default();
+    let bsp_bytes = b"runtime-bsp-fixture";
+    let mut admitted_artifact = artifact(false);
+    install_static_costs(&mut admitted_artifact.l1).unwrap();
+    install_static_hazard_clearances(&mut admitted_artifact.l1).unwrap();
+    admitted_artifact.l2[0].cost_to_safety = 0;
+    let raw = admitted_artifact.encode_uncompressed(&limits).unwrap();
+    let envelope = encode_zstd_envelope(&raw, &limits).unwrap();
+    let mut runtime_manifest = manifest(&raw, envelope.len() as u64);
+    runtime_manifest.bsp.sha256 = sha256_hex(bsp_bytes);
+    runtime_manifest.bsp.size_bytes = bsp_bytes.len() as u64;
+    runtime_manifest.oracles = oracle_admissions(&runtime_manifest.bsp, true, true);
+    let objectives = objective_payload(
+        &runtime_manifest.bsp.sha256,
+        &sha256_hex(&raw),
+        admitted_artifact.origin,
+        serde_json::json!([]),
+    );
+    let missing_objective_manifest = runtime_manifest.canonical_json(&limits).unwrap();
+    assert!(
+        AtlasRuntime::from_bytes(
+            &missing_objective_manifest,
+            "fixture.atlas.bin.zst",
+            &envelope,
+            "fixture.objectives.json",
+            &objectives,
+            bsp_bytes,
+            "fixture",
+            41,
+            &limits,
+        )
+        .is_err()
+    );
+    attach_objective_identity(&mut runtime_manifest, &objectives, 0);
+    let manifest_bytes = runtime_manifest.canonical_json(&limits).unwrap();
+
+    let runtime = AtlasRuntime::from_bytes(
+        &manifest_bytes,
+        "fixture.atlas.bin.zst",
+        &envelope,
+        "fixture.objectives.json",
+        &objectives,
+        bsp_bytes,
+        "fixture",
+        41,
+        &limits,
+    )
+    .unwrap();
+    assert_eq!(runtime.map_epoch(), 41);
+    assert_eq!(runtime.atlas_sha256(), sha256_hex(&raw));
+    assert_eq!(runtime.shared_instance_count(), 1);
+    let clone = runtime.clone();
+    assert_eq!(runtime.shared_instance_count(), 2);
+    drop(clone);
+    assert!(runtime.guide(40, [0.0; 3], 0.0, &[]).is_err());
+    let current = runtime.artifact().l1.nodes()[0].index;
+    let empty = runtime
+        .guide(
+            41,
+            runtime.artifact().origin.center(current, AtlasLevel::L1),
+            0.0,
+            &[],
+        )
+        .unwrap();
+    assert_eq!(empty.values, [0.0; GUIDE_FEATURE_WIDTH]);
+
+    let mut wrong_envelope_size = envelope.clone();
+    wrong_envelope_size.push(0);
+    assert!(
+        AtlasRuntime::from_bytes(
+            &manifest_bytes,
+            "fixture.atlas.bin.zst",
+            &wrong_envelope_size,
+            "fixture.objectives.json",
+            &objectives,
+            bsp_bytes,
+            "fixture",
+            41,
+            &limits,
+        )
+        .is_err()
+    );
+
+    assert!(
+        AtlasRuntime::from_bytes(
+            &manifest_bytes,
+            "fixture.atlas.bin.zst",
+            &raw,
+            "fixture.objectives.json",
+            &objectives,
+            bsp_bytes,
+            "wrong-map",
+            41,
+            &limits,
+        )
+        .is_err()
+    );
+    assert!(
+        AtlasRuntime::from_bytes(
+            &manifest_bytes,
+            "fixture.atlas.bin.zst",
+            &raw,
+            "fixture.objectives.json",
+            &objectives,
+            b"wrong-bsp",
+            "fixture",
+            41,
+            &limits,
+        )
+        .is_err()
+    );
+}
+
+fn b3_runtime_fixture(map_epoch: u64) -> AtlasRuntime {
+    b3_runtime_fixture_with_extra_limit(map_epoch, None)
+}
+
+fn b3_runtime_fixture_with_extra_limit(map_epoch: u64, extra_limit: Option<&str>) -> AtlasRuntime {
+    let limits = AtlasLimits::default();
+    let bsp_bytes = b"runtime-bsp-fixture";
+    let mut admitted_artifact = artifact(false);
+    install_static_costs(&mut admitted_artifact.l1).unwrap();
+    install_static_hazard_clearances(&mut admitted_artifact.l1).unwrap();
+    admitted_artifact.l2[0].cost_to_safety = 0;
+    let raw = admitted_artifact.encode_uncompressed(&limits).unwrap();
+    let envelope = encode_zstd_envelope(&raw, &limits).unwrap();
+    let mut runtime_manifest = manifest(&raw, envelope.len() as u64);
+    runtime_manifest.bsp.sha256 = sha256_hex(bsp_bytes);
+    runtime_manifest.bsp.size_bytes = bsp_bytes.len() as u64;
+    runtime_manifest.oracles = oracle_admissions(&runtime_manifest.bsp, true, true);
+    let objectives = objective_payload(
+        &runtime_manifest.bsp.sha256,
+        &sha256_hex(&raw),
+        admitted_artifact.origin,
+        fixture_objective_records(admitted_artifact.origin),
+    );
+    attach_objective_identity(&mut runtime_manifest, &objectives, 1);
+    if let Some(extra_limit) = extra_limit {
+        runtime_manifest.limitations.push(extra_limit.to_owned());
+    }
+    let manifest_bytes = runtime_manifest.canonical_json(&limits).unwrap();
+    AtlasRuntime::from_bytes(
+        &manifest_bytes,
+        "fixture.atlas.bin.zst",
+        &envelope,
+        "fixture.objectives.json",
+        &objectives,
+        bsp_bytes,
+        "fixture",
+        map_epoch,
+        &limits,
+    )
+    .unwrap()
+}
+
+#[test]
+fn b3_runtime_slot_is_epoch_atomic_and_query_components_are_counted() {
+    let slot = AtlasRuntimeSlot::new();
+    assert!(slot.snapshot(41).is_err());
+
+    slot.activate(b3_runtime_fixture(41)).unwrap();
+    let retained = slot.snapshot(41).unwrap();
+    // Re-admitting the same immutable identity in one epoch is idempotent.
+    slot.activate(b3_runtime_fixture(41)).unwrap();
+    assert!(
+        slot.activate(b3_runtime_fixture_with_extra_limit(
+            41,
+            Some("different manifest identity")
+        ))
+        .is_err()
+    );
+
+    let current = retained.artifact().l1.nodes()[0].index;
+    let origin = retained.artifact().origin;
+    let overlay = RecoveryOverlay::default();
+    let timed = retained
+        .advisory_spatial_features_timed(
+            41,
+            RecoveryQuery {
+                world_position: origin.center(current, AtlasLevel::L1),
+                yaw_degrees: 0.0,
+                overlay: &overlay,
+                time_to_impact_seconds: None,
+            },
+            &[],
+        )
+        .unwrap();
+    assert_eq!(timed.values.len(), ADVISORY_SPATIAL_WIDTH);
+    assert!(timed.timing.total_ns >= timed.timing.atlas_lookup_ns);
+    assert!(timed.timing.total_ns >= timed.timing.recovery_ns);
+    assert!(timed.timing.total_ns >= timed.timing.guide_ns);
+    let counters = retained.query_counters();
+    assert_eq!(counters.accepted_queries, 1);
+    assert_eq!(counters.atlas_lookup_ns, timed.timing.atlas_lookup_ns);
+    assert_eq!(counters.recovery_ns, timed.timing.recovery_ns);
+    assert_eq!(counters.guide_ns, timed.timing.guide_ns);
+    assert_eq!(counters.total_ns, timed.timing.total_ns);
+    let guide = retained
+        .guide(
+            41,
+            origin.center(current, AtlasLevel::L1),
+            0.0,
+            &[ObjectiveBelief {
+                objective_id: 7,
+                availability_belief: 0.75,
+            }],
+        )
+        .unwrap();
+    assert!(guide.values[..3].iter().any(|value| *value != 0.0));
+    assert!((guide.values[6] - 0.75).abs() < 1e-5);
+    assert_eq!(guide.values[7 + ObjectiveClass::Weapon as usize], 1.0);
+
+    let epoch_41_evidence = retained
+        .recovery(
+            41,
+            RecoveryQuery {
+                world_position: origin.center(current, AtlasLevel::L1),
+                yaw_degrees: 0.0,
+                overlay: &overlay,
+                time_to_impact_seconds: None,
+            },
+        )
+        .unwrap()
+        .evidence;
+
+    slot.activate(b3_runtime_fixture(42)).unwrap();
+    let epoch_42 = slot.snapshot(42).unwrap();
+    assert_eq!(epoch_42.map_epoch(), 42);
+    let epoch_42_evidence = epoch_42
+        .recovery(
+            42,
+            RecoveryQuery {
+                world_position: origin.center(current, AtlasLevel::L1),
+                yaw_degrees: 0.0,
+                overlay: &overlay,
+                time_to_impact_seconds: None,
+            },
+        )
+        .unwrap()
+        .evidence;
+    assert_eq!(
+        epoch_41_evidence.hazard_component_id,
+        epoch_42_evidence.hazard_component_id
+    );
+    assert_eq!(retained.atlas_sha256(), epoch_42.atlas_sha256());
+    assert!(slot.snapshot(41).is_err());
+    // A reader holding the prior snapshot remains isolated from activation.
+    assert_eq!(retained.map_epoch(), 41);
+    assert!(slot.activate(b3_runtime_fixture(40)).is_err());
+    assert!(slot.clear(41).is_err());
+    slot.clear(42).unwrap();
+    assert!(slot.snapshot(42).is_err());
 }
 
 #[test]

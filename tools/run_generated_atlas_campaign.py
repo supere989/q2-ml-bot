@@ -718,7 +718,7 @@ def _load_analysis_binding(
         ".navigation.bin.zst",
         ".visibility.bin.zst",
         ".design-signature.json",
-        ".routes.json",
+        ".objectives.json",
     }
     expected_semantic = {
         ".analysis.manifest.json",

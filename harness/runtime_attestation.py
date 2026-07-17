@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 
-MANIFEST_SCHEMA = "q2-runtime-attestation-v1"
+MANIFEST_SCHEMA = "q2-runtime-attestation-v2"
 SIGNATURE_ALGORITHM = "hmac-sha256"
 
 _MAP_SUFFIXES = (
@@ -45,6 +45,7 @@ _MAP_SUFFIXES = (
 _NON_SEMANTIC_Q2_KEYS = {
     "Q2_BIND_IP",
     "Q2_CKPT_DIR",
+    "Q2_EXT_OBS",  # retired; cannot select protocol generation 2 layout
     "Q2_HEAT_DIR",
     "Q2_ML_PORT_BASE",
     "Q2_RESUME_DIR",
@@ -160,29 +161,50 @@ def resolve_rust_extension(
 
 
 def describe_observation(environment: Mapping[str, str]) -> dict[str, Any]:
-    # Import constants only.  OBS_DIM itself is import-time environment
-    # dependent, so total_dim is recomputed from the supplied environment.
+    """Describe the only admissible multires protocol generation."""
     from harness import protocol
-
-    ext_enabled = _truthy(environment.get("Q2_EXT_OBS", "0"))
-    total = (
-        int(protocol.OBS_BASE_DIM)
-        + int(protocol.OBS_SESSION_MEMORY_DIM)
-        + (int(protocol.OBS_EXT_DIM) if ext_enabled else 0)
+    from harness.causal_protocol import (
+        CAUSAL_TELEMETRY_SIZE,
+        ML_CAUSAL_MAGIC,
+        ML_CAUSAL_VERSION,
     )
+    from harness.client_protocol import ML_CLIENT_WIRE_VERSION
+    from harness.teacher_protocol import ML_TEACHER_VERSION
+
+    del environment  # no environment switch may select an observation width
     return {
-        "base_dim": int(protocol.OBS_BASE_DIM),
-        "session_memory_dim": int(protocol.OBS_SESSION_MEMORY_DIM),
-        "extension_dim": int(protocol.OBS_EXT_DIM),
-        "extension_enabled": ext_enabled,
-        "total_dim": total,
+        "protocol_generation": int(protocol.ML_PROTOCOL_GENERATION),
+        "factual_dim": int(protocol.OBS_FACTUAL_DIM),
+        "dyn_dim": int(protocol.OBS_DYN_DIM),
+        "recovery_dim": int(protocol.OBS_RECOVERY_DIM),
+        "objective_count": int(protocol.OBS_OBJECTIVE_COUNT),
+        "objective_dim": int(protocol.OBS_OBJECTIVE_DIM),
+        "objective_total_dim": int(protocol.OBS_OBJECTIVES_DIM),
+        "total_dim": int(protocol.OBS_DIM),
+        "ordered_feature_names": list(protocol.POLICY_FEATURE_NAMES),
+        "feature_schema_sha256": protocol.POLICY_FEATURE_SCHEMA_SHA256,
+        "spatial_feature_schema_sha256": protocol.SPATIAL_FEATURE_SCHEMA_SHA256,
         "observation_packet_bytes": int(protocol.OBS_SIZE),
         "action_packet_bytes": int(protocol.ACT_SIZE),
         "observation_magic": int(protocol.ML_OBS_MAGIC),
         "action_magic": int(protocol.ML_ACT_MAGIC),
+        "client_wire_version": int(ML_CLIENT_WIRE_VERSION),
+        "teacher_version": int(ML_TEACHER_VERSION),
+        "rollout_telemetry_schema": "ppo-telemetry-multires-v1",
+        "logical_action_dim": 8,
+        "action_cardinalities": {
+            "vertical_intent": 3,
+            "fire": 2,
+            "hook": 4,
+            "weapon": 10,
+        },
+        "teacher_privileged_packing": "physically-separate-qm3c-v2",
+        "causal_magic": int(ML_CAUSAL_MAGIC),
+        "causal_version": int(ML_CAUSAL_VERSION),
+        "causal_packet_bytes": int(CAUSAL_TELEMETRY_SIZE),
         "max_entities": int(protocol.ML_MAX_ENTITIES),
-        "entity_semantics": "target-solution-v2",
-        "session_memory_semantics": "thermal-overlay-v1",
+        "entity_semantics": "target-solution-v3",
+        "dyn_semantics": "named-multires-dyn-v1",
         "ray_count": int(protocol.ML_RAY_COUNT),
         "hook_zone_count": int(protocol.ML_HOOK_ZONES),
     }
@@ -238,10 +260,10 @@ def load_policy_descriptor(
     observation_dim: int,
     checkpoint: Optional[Path] = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Instantiate the policy (or load a checkpoint) and return semantics/diagnostics."""
+    """Instantiate the fresh policy and return its state-schema descriptor."""
     try:
-        import torch
-        from models.policy import ACTION_DIM, HIDDEN_DIM, OBS_DIM, Q2BotPolicy
+        from harness.multires_contract import ACTION_DIM, OBS_DIM
+        from models.multires_policy import HIDDEN_DIM, MultiresQ2BotPolicy
     except ImportError as error:
         raise AttestationError(
             "PyTorch/model imports are required unless policy_descriptor is supplied"
@@ -250,27 +272,21 @@ def load_policy_descriptor(
     if int(OBS_DIM) != int(observation_dim):
         raise AttestationError(
             "model/manifest observation dimension mismatch: "
-            f"{OBS_DIM} != {observation_dim}; set Q2_EXT_OBS before importing the policy"
+            f"{OBS_DIM} != {observation_dim}; legacy observation widths are retired"
         )
-    policy = Q2BotPolicy()
+    policy = MultiresQ2BotPolicy()
     diagnostics: dict[str, Any] = {}
     if checkpoint is not None:
-        checkpoint = checkpoint.expanduser().resolve()
-        if not checkpoint.is_file():
-            raise AttestationError(f"policy checkpoint is missing: {checkpoint}")
-        loaded = torch.load(checkpoint, map_location="cpu")
-        if isinstance(loaded, Mapping) and "state_dict" in loaded:
-            loaded = loaded["state_dict"]
-        if not isinstance(loaded, Mapping):
-            raise AttestationError("policy checkpoint does not contain a state mapping")
-        policy.load_state_dict(loaded)
-        diagnostics["checkpoint_path"] = str(checkpoint)
-        diagnostics["checkpoint_sha256"] = sha256_file(checkpoint)
+        raise AttestationError(
+            "raw checkpoint loading is retired; supply an attested multires "
+            "policy descriptor produced by harness.multires_lineage"
+        )
     descriptor = describe_policy_state(
         policy.state_dict(),
         observation_dim=observation_dim,
         action_dim=int(ACTION_DIM),
         hidden_dim=int(HIDDEN_DIM),
+        architecture="models.multires_policy.MultiresQ2BotPolicy",
     )
     return descriptor, diagnostics
 
@@ -421,11 +437,18 @@ def build_runtime_manifest(
     q2_root = q2_root.expanduser().resolve()
     source_root = source_root.expanduser().resolve()
     env = dict(os.environ if environment is None else environment)
+    expected_observation = describe_observation(env)
     observation = dict(
-        observation_descriptor
-        if observation_descriptor is not None
-        else describe_observation(env)
+        expected_observation
+        if observation_descriptor is None
+        else observation_descriptor
     )
+    if observation != expected_observation:
+        differences = _diff_values(observation, expected_observation, "observation")
+        raise AttestationError(
+            "observation descriptor is not the frozen multires generation: "
+            + json.dumps(differences, sort_keys=True, separators=(",", ":"))
+        )
     policy_diagnostics: dict[str, Any] = {}
     if policy_descriptor is None:
         policy, policy_diagnostics = load_policy_descriptor(

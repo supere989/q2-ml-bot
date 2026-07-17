@@ -25,6 +25,7 @@ from tools.generator_claim_validator import (
     _canonical_semantic_analysis_manifest,
     _expected_analyzer_sha256,
     _route_contract,
+    _validate_objective_artifact,
     build_generator_claims,
     canonical_bytes,
     file_sha256,
@@ -423,8 +424,7 @@ def _write_authority_artifacts(
         "counts": {"deathmatch_spawns": len(analysis["compiled_world"]["spawns"])},
         "item_class_multiset": {},
     }))
-    routes_path = directory / f"{map_id}.routes.json"
-    routes_path.write_bytes(canonical_bytes({"schema": "q2-atlas-routes-v1"}))
+    objectives_path = directory / f"{map_id}.objectives.json"
 
     analysis["canonical_map_id"] = map_id
     analysis["grid"] = {"origin": [0, 0, 0]}
@@ -432,6 +432,14 @@ def _write_authority_artifacts(
         **counts, "l0_bit_cells": 1, "l0_scalar_cells": 0,
     }
     atlas_sha = file_sha256(atlas_path)
+    objectives_path.write_bytes(canonical_bytes({
+        "atlas_sha256": atlas_sha,
+        "bsp_sha256": analysis["identity"]["bsp_sha256"],
+        "canonical_map_id": map_id,
+        "objectives": [],
+        "origin": [0, 0, 0],
+        "schema": "q2-atlas-objectives-v1",
+    }))
     verification = {
         "schema": "q2-atlas-verification-v1", "passed": True,
         "canonical_map_id": map_id,
@@ -455,6 +463,22 @@ def _write_authority_artifacts(
             "max_build_rss_bytes": 512 * 1024 * 1024,
         },
         "build_peak_rss_bytes": 16 * 1024 * 1024,
+        "artifacts": {
+            atlas_path.name: {
+                "media_type": "application/vnd.q2.atlas-v1",
+                "sha256_uncompressed": atlas_sha,
+                "uncompressed_size": atlas_path.stat().st_size,
+                "compressed_size": atlas_zst_path.stat().st_size,
+                "counts": counts,
+            },
+            objectives_path.name: {
+                "media_type": "application/vnd.q2.atlas-objectives-v1",
+                "sha256_uncompressed": file_sha256(objectives_path),
+                "uncompressed_size": objectives_path.stat().st_size,
+                "compressed_size": objectives_path.stat().st_size,
+                "counts": {"objectives": 0},
+            },
+        },
     }
     atlas_manifest_path.write_bytes(canonical_bytes(atlas_manifest))
     manifest_sha = file_sha256(atlas_manifest_path)
@@ -479,7 +503,12 @@ def _write_authority_artifacts(
         "navigation": {"transport_sha256": file_sha256(navigation_path)},
         "visibility": {"transport_sha256": file_sha256(visibility_path)},
         "design_signature": {"sha256": file_sha256(design_path)},
-        "routes": {"sha256": file_sha256(routes_path)},
+        "objectives": {
+            "sha256": file_sha256(objectives_path),
+            "uncompressed_bytes": objectives_path.stat().st_size,
+            "count": 0,
+            "schema": "q2-atlas-objectives-v1",
+        },
         "atlas_manifest": {
             "path": atlas_manifest_path.name, "sha256": manifest_sha,
             "uncompressed_bytes": atlas_manifest_path.stat().st_size,
@@ -490,7 +519,7 @@ def _write_authority_artifacts(
         ".atlas.bin": atlas_path, ".atlas.bin.zst": atlas_zst_path,
         ".navigation.bin.zst": navigation_path,
         ".visibility.bin.zst": visibility_path,
-        ".design-signature.json": design_path, ".routes.json": routes_path,
+        ".design-signature.json": design_path, ".objectives.json": objectives_path,
     }
     exact = {suffix: file_sha256(path) for suffix, path in exact_paths.items()}
     analysis["performance"] = {
@@ -658,6 +687,48 @@ def test_complete_compiled_world_proof_passes(generated):
     assert report["passed"] is True
     assert all(criterion["passed"] for criterion in report["criteria"].values())
     assert report["mode"] == "generated_v6_promotion"
+
+
+def test_objective_artifact_semantics_bind_identity_order_and_class(tmp_path: Path):
+    path = tmp_path / "fixture.objectives.json"
+    atlas_sha = "22" * 32
+    bsp_sha = "33" * 32
+    document = {
+        "atlas_sha256": atlas_sha,
+        "bsp_sha256": bsp_sha,
+        "canonical_map_id": "fixture",
+        "objectives": [{
+            "class": "weapon",
+            "classname": "weapon_rocketlauncher",
+            "confidence": 65535,
+            "l1_index": [1, -2, 3],
+            "objective_id": 7,
+            "risk": 0,
+            "world_milliunits": [16000, -32000, 48000],
+        }],
+        "origin": [0, -256, 0],
+        "schema": "q2-atlas-objectives-v1",
+    }
+    path.write_bytes(canonical_bytes(document))
+    _, count = _validate_objective_artifact(
+        path,
+        map_id="fixture",
+        bsp_sha256=bsp_sha,
+        atlas_sha256=atlas_sha,
+        origin=[0, -256, 0],
+    )
+    assert count == 1
+
+    document["objectives"][0]["class"] = "health"
+    path.write_bytes(canonical_bytes(document))
+    with pytest.raises(ClaimValidationError, match="classname/class mapping"):
+        _validate_objective_artifact(
+            path,
+            map_id="fixture",
+            bsp_sha256=bsp_sha,
+            atlas_sha256=atlas_sha,
+            origin=[0, -256, 0],
+        )
 
 
 def test_generated_promotion_allows_accounted_fail_closed_drop_reasons(generated):

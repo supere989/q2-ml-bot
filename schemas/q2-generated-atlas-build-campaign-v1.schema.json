@@ -187,7 +187,7 @@
           ".navigation.bin.zst",
           ".visibility.bin.zst",
           ".design-signature.json",
-          ".routes.json"
+          ".objectives.json"
         ]
       },
       "additionalProperties": {"$ref": "#/$defs/file_identity"}
@@ -203,7 +203,7 @@
         ".navigation.bin.zst",
         ".visibility.bin.zst",
         ".design-signature.json",
-        ".routes.json"
+        ".objectives.json"
       ],
       "properties": {
         ".analysis.manifest.json": {"$ref": "#/$defs/file_identity"},
@@ -213,7 +213,7 @@
         ".navigation.bin.zst": {"$ref": "#/$defs/file_identity"},
         ".visibility.bin.zst": {"$ref": "#/$defs/file_identity"},
         ".design-signature.json": {"$ref": "#/$defs/file_identity"},
-        ".routes.json": {"$ref": "#/$defs/file_identity"}
+        ".objectives.json": {"$ref": "#/$defs/file_identity"}
       }
     },
     "analysis_manifest_binding": {

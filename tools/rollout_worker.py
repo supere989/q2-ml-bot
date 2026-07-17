@@ -23,11 +23,13 @@ from harness.rollout_protocol import (
     CoordinatorRequestError,
     CoordinatorTransportError,
     PPO_BEHAVIOR_METRIC_KEYS,
+    PPO_ACTION_CARDINALITIES,
     PPO_EPISODE_SUMMARY_COLUMNS,
     PPO_TELEMETRY_SCHEMA,
     RolloutBatch,
     deterministic_synthetic_batch,
 )
+from harness.protocol import ML_PROTOCOL_GENERATION, OBS_DIM
 from harness.distributed_runtime import (
     BackoffPolicy,
     ReconnectBackoff,
@@ -476,6 +478,9 @@ def collect_q2_batch(
         "device": str(device),
         "deterministic_actions": bool(args.deterministic_actions),
         "telemetry_schema": PPO_TELEMETRY_SCHEMA,
+        "protocol_generation": ML_PROTOCOL_GENERATION,
+        "observation_dim": OBS_DIM,
+        "action_cardinalities": dict(PPO_ACTION_CARDINALITIES),
         "runtime_manifest_sha256": runtime["runtime_manifest_sha256"],
         "lattice_mode": (
             "versioned_snapshot" if lease is not None else

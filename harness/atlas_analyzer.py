@@ -74,6 +74,9 @@ from .atlas_teleporter_edges import (
 
 
 SCHEMA = "q2-atlas-analysis-v1"
+OBJECTIVE_SCHEMA = "q2-atlas-objectives-v1"
+OBJECTIVE_MEDIA_TYPE = "application/vnd.q2.atlas-objectives-v1"
+OBJECTIVE_TARGET_MAX_DISTANCE = 160.0
 BUILD_PLAN_SCHEMA = "q2-atlas-build-plan-v2"
 EVIDENCE_CM_TRACE_V1 = 1
 EVIDENCE_PMOVE_V1 = 2
@@ -539,6 +542,8 @@ class NavNode:
     supported: bool
     contents: int
     floor_normal: tuple[float, float, float]
+    atlas_hazard_types: int = 0
+    atlas_hazard_severity: int = 0
     region_id: int = 0
     floor_surface_flags: int = 0
     floor_surface_name: str = ""
@@ -560,7 +565,7 @@ class NavNode:
             flags |= 1 << 4
         if self.crouched_clear and passable:
             flags |= 1 << 5
-        hazard = 0
+        hazard = self.atlas_hazard_types
         if self.contents & CONTENTS_LAVA:
             hazard |= 1 << 0
         if self.contents & CONTENTS_SLIME:
@@ -571,8 +576,9 @@ class NavNode:
             "floor_normal_class": 1 if self.floor_normal[2] >= 0.7 else 0,
             "clearance_height": 56 if self.standing_clear else 28 if self.crouched_clear else 0,
             "hazard_types": hazard,
-            "hazard_severity": 255 if hazard else 0,
-            "hazard_clearance": -1 if hazard else 0,
+            "hazard_severity": max(
+                self.atlas_hazard_severity, 255 if hazard else 0,
+            ),
             "cost_to_safety": 0 if safe else 0xFFFFFFFF,
             "region_id": self.region_id,
             "confidence": 65535,
@@ -816,10 +822,117 @@ def _authored_item_destinations(
     destinations = []
     for entity in metadata.entities:
         classname = entity.classname.casefold()
-        if not classname.startswith(("item_", "weapon_", "ammo_")):
+        if classname == "info_player_deathmatch":
+            continue
+        objective_class = _objective_class(classname)
+        if objective_class is None:
+            if classname.startswith(("item_", "weapon_", "ammo_", "key_", "rune_")):
+                raise AtlasAnalysisError(
+                    f"entity {entity.index} has unsupported objective class {classname}"
+                )
             continue
         destinations.append(_origin(entity))
     return destinations
+
+
+def _objective_class(classname: str) -> str | None:
+    if classname.startswith("weapon_"):
+        return "weapon"
+    if classname.startswith("ammo_") or classname in {"item_pack", "item_bandolier"}:
+        return "ammunition"
+    if classname.startswith("item_health") or classname in {
+        "item_adrenaline", "item_ancient_head",
+    }:
+        return "health"
+    if classname.startswith("item_armor_") or classname in {
+        "item_power_shield", "item_power_screen",
+    }:
+        return "armor"
+    if classname in {
+        "item_quad", "item_invulnerability", "item_silencer",
+        "item_breather", "item_enviro",
+    }:
+        return "powerup"
+    if classname.startswith(("rune_", "item_rune_")):
+        return "rune"
+    if classname.startswith(("item_flag_", "item_tech")):
+        return "control"
+    if classname == "info_player_deathmatch":
+        return "spawn_egress"
+    return None
+
+
+def _objective_artifact(
+    metadata: BspMetadata,
+    nodes: Mapping[tuple[int, int, int], NavNode],
+    spawn_indices: Mapping[int, tuple[int, int, int]],
+    origin: tuple[int, int, int],
+    canonical_map_id: str,
+    atlas_sha256: str,
+) -> dict[str, Any]:
+    records = []
+    for entity in metadata.entities:
+        classname = entity.classname.casefold()
+        objective_class = _objective_class(classname)
+        if objective_class is None:
+            if classname.startswith(("item_", "weapon_", "ammo_", "key_", "rune_")):
+                raise AtlasAnalysisError(
+                    f"entity {entity.index} has unsupported objective class {classname}"
+                )
+            continue
+        authored = _origin(entity)
+        world_point = (
+            (authored[0], authored[1], authored[2] + 9.0)
+            if classname == "info_player_deathmatch" else authored
+        )
+        target = spawn_indices.get(entity.index)
+        if classname == "info_player_deathmatch" and target is None:
+            # Only engine-linked, oracle-clear spawns are public egress facts.
+            continue
+        if target is None:
+            ranked = sorted(
+                nodes.values(),
+                key=lambda node: (
+                    sum((node.position[axis] - world_point[axis]) ** 2 for axis in range(3)),
+                    node.index[2], node.index[1], node.index[0],
+                ),
+            )
+            if not ranked:
+                raise AtlasAnalysisError(
+                    f"objective entity {entity.index} has no admitted L1 target"
+                )
+            target = ranked[0].index
+        node = nodes.get(target)
+        if node is None:
+            raise AtlasAnalysisError(
+                f"objective entity {entity.index} target is not in Atlas L1"
+            )
+        distance = math.sqrt(sum(
+            (node.position[axis] - world_point[axis]) ** 2 for axis in range(3)
+        ))
+        if distance > OBJECTIVE_TARGET_MAX_DISTANCE:
+            raise AtlasAnalysisError(
+                f"objective entity {entity.index} is {distance:.3f} units from admitted L1"
+            )
+        hazard = bool(node.contents & (CONTENTS_LAVA | CONTENTS_SLIME))
+        records.append({
+            "class": objective_class,
+            "classname": classname,
+            "confidence": 65535,
+            "l1_index": list(target),
+            "objective_id": entity.index,
+            "risk": 65535 if hazard else 0,
+            "world_milliunits": _milliunits(world_point, f"objective {entity.index}"),
+        })
+    records.sort(key=lambda record: record["objective_id"])
+    return {
+        "atlas_sha256": atlas_sha256,
+        "bsp_sha256": metadata.sha256,
+        "canonical_map_id": canonical_map_id,
+        "objectives": records,
+        "origin": list(origin),
+        "schema": OBJECTIVE_SCHEMA,
+    }
 
 
 def _snapped_origin(model_mins: Sequence[float]) -> tuple[int, int, int]:
@@ -1666,6 +1779,38 @@ def _apply_stock_drop_hazards(
     """Record exact lethal landings without inventing void/uncontained facts."""
 
     hazards["exact_lethal_candidates_omitted"] = int(summary["exact_lethal"])
+
+
+def _apply_static_drop_hazards(
+    nodes: Mapping[tuple[int, int, int], NavNode],
+    classifications: Sequence[Mapping[str, Any]],
+) -> int:
+    """Materialize only exact lethal-drop source proximity into Atlas L1."""
+
+    marked: set[tuple[int, int, int]] = set()
+    for record in classifications:
+        classification = record.get("classification")
+        if not (
+            isinstance(classification, Mapping)
+            and classification.get("classification") == "Exact"
+            and classification.get("lethal") is True
+        ):
+            continue
+        source = record.get("source_l1")
+        if (
+            not isinstance(source, list)
+            or len(source) != 3
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in source)
+        ):
+            raise AtlasAnalysisError("exact lethal-drop source L1 identity is invalid")
+        key = tuple(source)
+        node = nodes.get(key)
+        if node is None:
+            raise AtlasAnalysisError("exact lethal-drop source is not admitted Atlas L1")
+        node.atlas_hazard_types |= 1 << 3
+        node.atlas_hazard_severity = max(node.atlas_hazard_severity, 255)
+        marked.add(key)
+    return len(marked)
 
 
 def _add_exact_platform_navigation(
@@ -2600,6 +2745,9 @@ def _build_navigation(
                 raise AtlasAnalysisError(
                     "Pmove trajectory outcome accounting differs from requests"
                 )
+
+    # Unknown/no-landing trajectories remain omitted and never invent void.
+    _apply_static_drop_hazards(nodes, drop_classifications)
 
     _assign_directed_regions(nodes, edges)
     mutual = _mutually_reachable_spawn_pairs(edges, spawn_indices)
@@ -4046,6 +4194,7 @@ def _atlas_channels() -> list[dict[str, Any]]:
             ("confidence", "u16"),
             ("contents_flags", "u32-bitset"),
             ("cost_to_safety", "u32-q8"),
+            ("hazard_clearance", "i32-q8"),
             ("hazard_severity", "u8"),
             ("hazard_types", "u16-bitset"),
             ("stance_passability", "u8-bitset"),
@@ -4071,6 +4220,8 @@ def _write_canonical_atlas_manifest(
     atlas_name: str,
     atlas_raw: Path,
     atlas_zst: Path,
+    objective_path: Path,
+    objective_count: int,
     pack_result: Mapping[str, Any],
     limitations: Sequence[str],
 ) -> dict[str, Any]:
@@ -4136,6 +4287,13 @@ def _write_canonical_atlas_manifest(
                 "uncompressed_size": atlas_raw.stat().st_size,
                 "compressed_size": atlas_zst.stat().st_size,
                 "counts": dict(sorted(counts.items())),
+            },
+            objective_path.name: {
+                "media_type": OBJECTIVE_MEDIA_TYPE,
+                "sha256_uncompressed": sha256_file(objective_path),
+                "uncompressed_size": objective_path.stat().st_size,
+                "compressed_size": objective_path.stat().st_size,
+                "counts": {"objectives": objective_count},
             },
         },
         "counts": counts,
@@ -4305,7 +4463,7 @@ def _full_cold_rebuild(
         raise AtlasAnalysisError(f"independent cold analyzer worker missing: {worker}")
     artifact_suffixes = (
         ".atlas.bin", ".atlas.bin.zst", ".navigation.bin.zst",
-        ".visibility.bin.zst", ".design-signature.json", ".routes.json",
+        ".visibility.bin.zst", ".design-signature.json", ".objectives.json",
         ".atlas.manifest.json",
     )
     with tempfile.TemporaryDirectory(prefix="q2-atlas-full-cold-") as temporary:
@@ -5543,13 +5701,13 @@ def analyze_map(
     design_path = base.with_suffix(".design-signature.json")
     design_bytes = canonical_json(design) + b"\n"
     design_path.write_bytes(design_bytes)
-    routes = {
-        "schema": "q2-atlas-routes-v1", "bsp_sha256": metadata.sha256,
-        "route_claims": compiled_non_hook["route_claims"], "objective_routes": [],
-    }
-    routes_path = base.with_suffix(".routes.json")
-    routes_bytes = canonical_json(routes) + b"\n"
-    routes_path.write_bytes(routes_bytes)
+    objective_document = _objective_artifact(
+        metadata, nodes, spawn_indices, origin, canonical_map_id,
+        pack_result["uncompressed_sha256"],
+    )
+    objective_path = base.with_suffix(".objectives.json")
+    objective_bytes = canonical_json(objective_document) + b"\n"
+    objective_path.write_bytes(objective_bytes)
     artifacts = {
         "atlas": {
             **pack_result,
@@ -5560,7 +5718,12 @@ def analyze_map(
         "design_signature": {
             "sha256": sha256_bytes(design_bytes), "uncompressed_bytes": len(design_bytes),
         },
-        "routes": {"sha256": sha256_bytes(routes_bytes), "uncompressed_bytes": len(routes_bytes)},
+        "objectives": {
+            "sha256": sha256_bytes(objective_bytes),
+            "uncompressed_bytes": len(objective_bytes),
+            "count": len(objective_document["objectives"]),
+            "schema": OBJECTIVE_SCHEMA,
+        },
     }
     analyzer_sha256 = atlas_analyzer_authority_sha256(
         Path(__file__).resolve().parents[1]
@@ -5590,6 +5753,8 @@ def analyze_map(
         atlas_name=atlas_raw.name,
         atlas_raw=atlas_raw,
         atlas_zst=atlas_zst,
+        objective_path=objective_path,
+        objective_count=len(objective_document["objectives"]),
         pack_result=pack_result,
         limitations=limitations,
     )

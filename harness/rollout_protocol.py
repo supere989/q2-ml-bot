@@ -24,6 +24,8 @@ from typing import Dict, Iterable, Optional, Sequence
 
 import numpy as np
 
+from harness.protocol import ML_PROTOCOL_GENERATION, OBS_DIM
+
 from harness.distributed_runtime import (
     AssignmentLease,
     AssignmentLeaseBook,
@@ -36,9 +38,9 @@ from harness.distributed_runtime import (
     validate_batch_lease,
 )
 
-PROTOCOL_VERSION = 1
-POLICY_MAGIC = b"Q2PL0001"
-BATCH_MAGIC = b"Q2RB0001"
+PROTOCOL_VERSION = 2
+POLICY_MAGIC = b"Q2PL0002"
+BATCH_MAGIC = b"Q2RB0002"
 MAX_POLICY_BYTES = 128 * 1024 * 1024
 MAX_BATCH_BYTES = 512 * 1024 * 1024
 ALLOWED_DTYPES = {
@@ -53,7 +55,13 @@ def _valid_sha256(value: str) -> bool:
 # Telemetry carried beside every real PPO rollout.  The order is part of the
 # PPO telemetry schema so workers and learners cannot silently disagree about
 # vector positions.
-PPO_TELEMETRY_SCHEMA = "ppo-telemetry-v8"
+PPO_TELEMETRY_SCHEMA = "ppo-telemetry-multires-v1"
+PPO_ACTION_CARDINALITIES = {
+    "vertical_intent": 3,
+    "fire": 2,
+    "hook": 4,
+    "weapon": 10,
+}
 PPO_EPISODE_SUMMARY_COLUMNS = (
     "reward",
     "base_reward",
@@ -373,6 +381,10 @@ class RolloutBatch:
         if obs.ndim != 3 or obs.shape[0] < 1 or obs.shape[1] < 1:
             raise ValueError("obs must have shape (steps, envs, obs_dim)")
         steps, envs, obs_dim = obs.shape
+        if obs_dim != OBS_DIM:
+            raise ValueError(
+                f"PPO obs width must be the frozen multires width {OBS_DIM}"
+            )
         expected = {
             "actions": (steps, envs, 8),
             "rewards": (steps, envs),
@@ -441,6 +453,14 @@ class RolloutBatch:
             )
         if self.metadata.get("telemetry_schema") != PPO_TELEMETRY_SCHEMA:
             raise ValueError("invalid PPO telemetry_schema")
+        if int(self.metadata.get("protocol_generation", -1)) != int(
+            ML_PROTOCOL_GENERATION
+        ):
+            raise ValueError("invalid PPO protocol_generation")
+        if int(self.metadata.get("observation_dim", -1)) != OBS_DIM:
+            raise ValueError("invalid PPO observation_dim")
+        if self.metadata.get("action_cardinalities") != PPO_ACTION_CARDINALITIES:
+            raise ValueError("invalid PPO action_cardinalities")
         if not isinstance(self.metadata.get("map_name"), str) or not self.metadata[
             "map_name"
         ]:

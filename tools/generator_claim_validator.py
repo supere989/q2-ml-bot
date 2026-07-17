@@ -68,12 +68,19 @@ MAX_BUILD_RSS_BYTES = 512 * 1024 * 1024
 MAX_FULL_COLD_MILLISECONDS = 300_000
 FULL_COLD_EXACT_SUFFIXES = (
     ".atlas.bin", ".atlas.bin.zst", ".navigation.bin.zst",
-    ".visibility.bin.zst", ".design-signature.json", ".routes.json",
+    ".visibility.bin.zst", ".design-signature.json", ".objectives.json",
 )
 FULL_COLD_SEMANTIC_SUFFIXES = (
     ".atlas.manifest.json", ".analysis.manifest.json",
 )
 FULL_COLD_SUFFIXES = FULL_COLD_EXACT_SUFFIXES + FULL_COLD_SEMANTIC_SUFFIXES
+OBJECTIVE_SCHEMA = "q2-atlas-objectives-v1"
+OBJECTIVE_MEDIA_TYPE = "application/vnd.q2.atlas-objectives-v1"
+OBJECTIVE_LIMIT = 8_192
+OBJECTIVE_CLASSES = frozenset({
+    "weapon", "ammunition", "health", "armor", "powerup", "rune",
+    "control", "spawn_egress",
+})
 STOCK_PROVENANCE = ROOT / "docs/multires/stock-q2dm1-q2dm8.provenance.json"
 STOCK_INVENTORY = ROOT / "tests/fixtures/corpus/stock-q2dm1-q2dm8.json"
 CLAIM_ID_RE = re.compile(r"^[a-z0-9:_-]{1,127}$")
@@ -828,6 +835,140 @@ def _atlas_header(path: Path) -> tuple[int, tuple[int, int, int, int, int]]:
     return int(lengths[0]), tuple(int(value) for value in counts)
 
 
+def _objective_class_for_classname(classname: str) -> str | None:
+    """Mirror the frozen analyzer/runtime classname authority exactly."""
+
+    if classname.startswith("weapon_"):
+        return "weapon"
+    if classname.startswith("ammo_") or classname in {"item_pack", "item_bandolier"}:
+        return "ammunition"
+    if classname.startswith("item_health") or classname in {
+        "item_adrenaline", "item_ancient_head",
+    }:
+        return "health"
+    if classname.startswith("item_armor_") or classname in {
+        "item_power_shield", "item_power_screen",
+    }:
+        return "armor"
+    if classname in {
+        "item_quad", "item_invulnerability", "item_silencer",
+        "item_breather", "item_enviro",
+    }:
+        return "powerup"
+    if classname.startswith(("rune_", "item_rune_")):
+        return "rune"
+    if classname.startswith(("item_flag_", "item_tech")):
+        return "control"
+    if classname == "info_player_deathmatch":
+        return "spawn_egress"
+    return None
+
+
+def _bounded_integer(
+    value: object, label: str, *, minimum: int, maximum: int,
+) -> int:
+    admitted = _integer(value, label, minimum=minimum)
+    if admitted > maximum:
+        raise ClaimValidationError(f"{label} must be at most {maximum}")
+    return admitted
+
+
+def _validate_objective_artifact(
+    path: Path,
+    *,
+    map_id: str,
+    bsp_sha256: object,
+    atlas_sha256: object,
+    origin: object,
+) -> tuple[Mapping[str, Any], int]:
+    document = _mapping(load_json(path), "objective artifact")
+    if path.read_bytes() != canonical_bytes(document):
+        raise ClaimValidationError(
+            "objective artifact is not canonical sorted JSON plus LF"
+        )
+    _exact_keys(document, {
+        "atlas_sha256", "bsp_sha256", "canonical_map_id", "objectives",
+        "origin", "schema",
+    }, "objective artifact")
+    if (
+        document.get("schema") != OBJECTIVE_SCHEMA
+        or document.get("canonical_map_id") != map_id
+        or document.get("bsp_sha256") != bsp_sha256
+        or document.get("atlas_sha256") != atlas_sha256
+        or document.get("origin") != origin
+    ):
+        raise ClaimValidationError(
+            "objective artifact identity differs from admitted Atlas/map"
+        )
+    records = _list(document.get("objectives"), "objective records")
+    if len(records) > OBJECTIVE_LIMIT:
+        raise ClaimValidationError(
+            f"objective artifact count exceeds {OBJECTIVE_LIMIT}"
+        )
+    previous_id = -1
+    for ordinal, raw_record in enumerate(records):
+        record = _mapping(raw_record, f"objective record {ordinal}")
+        _exact_keys(record, {
+            "class", "classname", "confidence", "l1_index", "objective_id",
+            "risk", "world_milliunits",
+        }, f"objective record {ordinal}")
+        objective_id = _bounded_integer(
+            record.get("objective_id"), f"objective {ordinal} ID",
+            minimum=0, maximum=0xFFFF_FFFF,
+        )
+        if objective_id <= previous_id:
+            raise ClaimValidationError(
+                "objectives are not strictly ordered by stable ID"
+            )
+        previous_id = objective_id
+        objective_class = record.get("class")
+        classname = record.get("classname")
+        if objective_class not in OBJECTIVE_CLASSES:
+            raise ClaimValidationError(
+                f"objective {objective_id} class is not admitted"
+            )
+        if (
+            not isinstance(classname, str)
+            or re.fullmatch(r"[a-z0-9_]{1,128}", classname) is None
+            or _objective_class_for_classname(classname) != objective_class
+        ):
+            raise ClaimValidationError(
+                f"objective {objective_id} classname/class mapping is invalid"
+            )
+        for axis, value in enumerate(_list(
+            record.get("l1_index"), f"objective {objective_id} L1 index"
+        )):
+            _bounded_integer(
+                value, f"objective {objective_id} L1 axis {axis}",
+                minimum=-(2 ** 31), maximum=2 ** 31 - 1,
+            )
+        if len(record["l1_index"]) != 3:
+            raise ClaimValidationError(
+                f"objective {objective_id} L1 index must contain three integers"
+            )
+        for axis, value in enumerate(_list(
+            record.get("world_milliunits"),
+            f"objective {objective_id} world milliunits",
+        )):
+            _bounded_integer(
+                value, f"objective {objective_id} world axis {axis}",
+                minimum=-(2 ** 63), maximum=2 ** 63 - 1,
+            )
+        if len(record["world_milliunits"]) != 3:
+            raise ClaimValidationError(
+                f"objective {objective_id} world point must contain three integers"
+            )
+        _bounded_integer(
+            record.get("risk"), f"objective {objective_id} risk",
+            minimum=0, maximum=0xFFFF,
+        )
+        _bounded_integer(
+            record.get("confidence"), f"objective {objective_id} confidence",
+            minimum=0, maximum=0xFFFF,
+        )
+    return document, len(records)
+
+
 def _full_cold_authority(
     analysis: Mapping[str, Any], analysis_path: Path,
 ) -> tuple[dict[str, Any], Mapping[str, Any]]:
@@ -985,6 +1126,16 @@ def _full_cold_authority(
         if analysis_counts[0] > MAX_L0_CHUNKS:
             failures.append("analysis exceeds 1200 L0 chunks")
 
+        objective_path = Path(f"{base}.objectives.json")
+        grid = _mapping(analysis.get("grid"), "analysis grid")
+        _, objective_count = _validate_objective_artifact(
+            objective_path,
+            map_id=map_id,
+            bsp_sha256=identity.get("bsp_sha256"),
+            atlas_sha256=identity.get("atlas_sha256"),
+            origin=grid.get("origin"),
+        )
+
         atlas = _mapping(artifacts.get("atlas"), "analysis Atlas artifact")
         if atlas_path.is_file() and atlas.get("uncompressed_sha256") != file_sha256(atlas_path):
             failures.append("analysis Atlas digest differs from artifact")
@@ -1005,11 +1156,23 @@ def _full_cold_authority(
             ("navigation", ".navigation.bin.zst", "transport_sha256"),
             ("visibility", ".visibility.bin.zst", "transport_sha256"),
             ("design_signature", ".design-signature.json", "sha256"),
-            ("routes", ".routes.json", "sha256"),
+            ("objectives", ".objectives.json", "sha256"),
         ):
             artifact = _mapping(artifacts.get(name), f"analysis {name} artifact")
             if artifact.get(digest_name) != exact.get(suffix):
                 failures.append(f"analysis {name} digest differs from full-cold proof")
+        objective_metadata = _mapping(
+            artifacts.get("objectives"), "analysis objectives artifact"
+        )
+        _exact_keys(objective_metadata, {
+            "count", "schema", "sha256", "uncompressed_bytes",
+        }, "analysis objectives artifact")
+        if (
+            objective_metadata.get("schema") != OBJECTIVE_SCHEMA
+            or objective_metadata.get("count") != objective_count
+            or objective_metadata.get("uncompressed_bytes") != objective_path.stat().st_size
+        ):
+            failures.append("analysis objective metadata differs from artifact")
         resident = _integer(
             atlas.get("resident_bytes_estimate"), "Atlas resident estimate", minimum=0
         )
@@ -1052,6 +1215,37 @@ def _full_cold_authority(
             "analyzer_sha256"
         ):
             failures.append("Atlas manifest analyzer identity differs")
+        manifest_artifacts = _mapping(
+            manifest.get("artifacts"), "Atlas manifest artifacts"
+        )
+        objective_identity = _mapping(
+            manifest_artifacts.get(objective_path.name),
+            "Atlas manifest objective identity",
+        )
+        _exact_keys(objective_identity, {
+            "compressed_size", "counts", "media_type", "sha256_uncompressed",
+            "uncompressed_size",
+        }, "Atlas manifest objective identity")
+        if (
+            objective_identity.get("media_type") != OBJECTIVE_MEDIA_TYPE
+            or objective_identity.get("sha256_uncompressed") != file_sha256(objective_path)
+            or objective_identity.get("uncompressed_size") != objective_path.stat().st_size
+            or objective_identity.get("compressed_size") != objective_path.stat().st_size
+            or _mapping(
+                objective_identity.get("counts"),
+                "Atlas manifest objective counts",
+            ) != {"objectives": objective_count}
+        ):
+            failures.append("Atlas manifest objective identity differs from artifact")
+        objective_media_names = [
+            name for name, raw_identity in manifest_artifacts.items()
+            if isinstance(raw_identity, Mapping)
+            and raw_identity.get("media_type") == OBJECTIVE_MEDIA_TYPE
+        ]
+        if objective_media_names != [objective_path.name]:
+            failures.append(
+                "Atlas manifest must attest exactly one authoritative objective artifact"
+            )
 
         atlas_manifest_artifact = _mapping(
             artifacts.get("atlas_manifest"), "analysis Atlas-manifest artifact"

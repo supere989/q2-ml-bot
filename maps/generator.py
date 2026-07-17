@@ -1421,6 +1421,12 @@ class MapGenerator:
             self.spawn_blockers.append(box)
         return True
 
+    def _rollback_spawn_blocker(self, box: SolidBox) -> None:
+        """Rollback only the most recent un-emitted blocker transaction."""
+        if not self.spawn_blockers or self.spawn_blockers[-1] is not box:
+            raise RuntimeError("spawn blocker rollback lost transaction ownership")
+        self.spawn_blockers.pop()
+
     def _structure_is_clear(self, box: SolidBox) -> bool:
         if not self._admit_spawn_blocker(box, register=False):
             return False
@@ -1760,7 +1766,7 @@ class MapGenerator:
                     room, tx + TOWER_BASE // 2, ty + TOWER_BASE // 2,
                     TOWER_BASE + 128,
                 )
-                self.spawn_blockers.pop()
+                self._rollback_spawn_blocker(box)
                 if quad_site is not None:
                     chosen = (
                         room, tx, ty, fz, top, box, surface, quad_site
@@ -1927,11 +1933,7 @@ class MapGenerator:
                     if mega_origin is not None:
                         break
                 if mega_origin is None:
-                    removed = self.spawn_blockers.pop()
-                    if removed is not candidate:
-                        raise RuntimeError(
-                            "lava placement transaction lost blocker ownership"
-                        )
+                    self._rollback_spawn_blocker(candidate)
                     continue
                 placement = (size, px, py, candidate, mega_origin)
                 break

@@ -327,6 +327,107 @@ impl L1Graph {
         Some(&self.edges[start..end])
     }
 
+    /// Resolve one canonical grid key without allocating a runtime index.
+    ///
+    /// L1 nodes are already stored in strict `(iz,iy,ix)` order, so binary
+    /// search keeps resident Atlas memory inside the frozen budget.
+    pub fn node_ordinal(&self, index: GridIndex) -> Option<usize> {
+        self.nodes
+            .binary_search_by_key(&index, |node| node.index)
+            .ok()
+    }
+
+    /// Enumerate sparse L1 ordinals whose L2 parents fall within a fixed
+    /// Chebyshev radius. The implementation performs bounded canonical row
+    /// searches rather than a full hot-path node scan.
+    pub fn ordinals_in_l2_radius(
+        &self,
+        center: GridIndex,
+        radius: i32,
+        limit: usize,
+    ) -> AtlasResult<Vec<usize>> {
+        if radius < 0 || limit == 0 {
+            return Err(AtlasError::InvalidFormat(
+                "L2 neighborhood radius/limit is invalid".to_owned(),
+            ));
+        }
+        let l1_bound = |coordinate: i32, upper: bool| -> AtlasResult<i32> {
+            let parent = i64::from(coordinate)
+                .checked_add(if upper {
+                    i64::from(radius) + 1
+                } else {
+                    -i64::from(radius)
+                })
+                .ok_or_else(|| AtlasError::Coordinate("L2 neighborhood overflow".to_owned()))?;
+            let scaled = parent
+                .checked_mul(4)
+                .and_then(|value| {
+                    if upper {
+                        value.checked_sub(1)
+                    } else {
+                        Some(value)
+                    }
+                })
+                .ok_or_else(|| AtlasError::Coordinate("L1 neighborhood overflow".to_owned()))?;
+            i32::try_from(scaled)
+                .map_err(|_| AtlasError::Coordinate("L1 neighborhood exceeds i32".to_owned()))
+        };
+        let x_min = l1_bound(center.x, false)?;
+        let x_max = l1_bound(center.x, true)?;
+        let y_min = l1_bound(center.y, false)?;
+        let y_max = l1_bound(center.y, true)?;
+        let z_min = l1_bound(center.z, false)?;
+        let z_max = l1_bound(center.z, true)?;
+        let mut ordinals = Vec::new();
+        for z in z_min..=z_max {
+            for y in y_min..=y_max {
+                let lower = GridIndex::new(x_min, y, z);
+                let upper = GridIndex::new(x_max, y, z);
+                let start = self.nodes.partition_point(|node| node.index < lower);
+                let end = self.nodes.partition_point(|node| node.index <= upper);
+                if ordinals.len().saturating_add(end.saturating_sub(start)) > limit {
+                    return Err(AtlasError::LimitExceeded(format!(
+                        "local recovery neighborhood exceeds {limit} L1 nodes"
+                    )));
+                }
+                ordinals.extend(start..end);
+            }
+        }
+        Ok(ordinals)
+    }
+
+    /// Install one complete, independently computed scalar recovery field.
+    /// Partial updates are forbidden because L2/L3 aggregation and runtime
+    /// descent validation must observe one coherent field.
+    pub fn set_costs_to_safety(&mut self, costs: &[u32]) -> AtlasResult<()> {
+        if costs.len() != self.nodes.len() {
+            return Err(AtlasError::InvalidFormat(format!(
+                "cost-to-safety field has {} entries for {} L1 nodes",
+                costs.len(),
+                self.nodes.len()
+            )));
+        }
+        for (node, cost) in self.nodes.iter_mut().zip(costs) {
+            node.cost_to_safety = *cost;
+        }
+        Ok(())
+    }
+
+    /// Install one complete deterministic signed hazard-clearance field.
+    pub fn set_hazard_clearances(&mut self, clearances: &[i32]) -> AtlasResult<()> {
+        if clearances.len() != self.nodes.len() {
+            return Err(AtlasError::InvalidFormat(format!(
+                "hazard-clearance field has {} entries for {} L1 nodes",
+                clearances.len(),
+                self.nodes.len()
+            )));
+        }
+        for (node, clearance) in self.nodes.iter_mut().zip(clearances) {
+            node.hazard_clearance = *clearance;
+        }
+        Ok(())
+    }
+
     pub fn validate(&self, admission: &EdgeAdmission, limits: &AtlasLimits) -> AtlasResult<()> {
         self.validate_structure(limits)?;
         for edge in &self.edges {

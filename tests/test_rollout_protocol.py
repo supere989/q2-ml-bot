@@ -4,6 +4,7 @@ import pytest
 from harness.rollout_protocol import (
     CoordinatorClient,
     CoordinatorServer,
+    PPO_ACTION_CARDINALITIES,
     PPO_BEHAVIOR_METRIC_KEYS,
     PPO_EPISODE_SUMMARY_COLUMNS,
     PPO_TELEMETRY_SCHEMA,
@@ -13,6 +14,7 @@ from harness.rollout_protocol import (
     deterministic_synthetic_batch,
     merge_ppo_batches,
 )
+from harness.protocol import ML_PROTOCOL_GENERATION, OBS_DIM
 
 
 def _policy(version=1, payload=b"policy-one", runtime_digest=""):
@@ -144,7 +146,7 @@ def test_ppo_schema_rejects_incomplete_batches_and_accepts_exact_shapes():
     incomplete = deterministic_synthetic_batch(policy, "worker-a", 1, 1, 2, 0)
     assert coordinator.submit(incomplete.encode()).status == "invalid_schema"
 
-    steps, envs, obs_dim = 4, 2, 219
+    steps, envs, obs_dim = 4, 2, OBS_DIM
     metadata = dict(
         incomplete.metadata,
         producer="q2",
@@ -154,6 +156,9 @@ def test_ppo_schema_rejects_incomplete_batches_and_accepts_exact_shapes():
         deterministic_actions=False,
         runtime_manifest_sha256=runtime_digest,
         telemetry_schema=PPO_TELEMETRY_SCHEMA,
+        protocol_generation=ML_PROTOCOL_GENERATION,
+        observation_dim=OBS_DIM,
+        action_cardinalities=dict(PPO_ACTION_CARDINALITIES),
     )
     zeros = np.zeros
     batch = RolloutBatch(metadata, {

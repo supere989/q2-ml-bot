@@ -1,20 +1,31 @@
 import hashlib
+from importlib.machinery import ModuleSpec
 import io
 import json
+import os
 import sys
 import types
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 try:
     import onnxruntime  # noqa: F401
 except ModuleNotFoundError:
-    sys.modules["onnxruntime"] = types.ModuleType("onnxruntime")
+    onnxruntime = types.ModuleType("onnxruntime")
+    onnxruntime.__spec__ = ModuleSpec("onnxruntime", loader=None)
+    sys.modules["onnxruntime"] = onnxruntime
 
 from tools.map_farm_client import FarmMapGenerator, ShuffledStockRotation
 from tools.map_farm_worker import MapFarm
-from tools.map_bundle import installed_manifest_name
+from tools.map_bundle import (
+    analysis_artifact_names,
+    build_manifest,
+    declared_artifact_names,
+    installed_manifest_name,
+)
 
 
 class _Response:
@@ -33,7 +44,17 @@ class _Response:
         return self.payload
 
 
-def _bundle(name="mllive_12345678", corrupt=False, style=None, missing=None):
+def _bundle(
+    name="mllive_12345678",
+    corrupt=False,
+    style=None,
+    missing=None,
+    *,
+    bundle_version=2,
+    analysis=False,
+    corrupt_analysis=False,
+    missing_analysis=None,
+):
     payloads = {
         f"{name}.bsp": b"compiled-bsp",
         f"{name}.json": b'{"spawn": []}',
@@ -43,7 +64,7 @@ def _bundle(name="mllive_12345678", corrupt=False, style=None, missing=None):
     if missing is not None:
         payloads.pop(f"{name}.{missing}.json")
     manifest = {
-        "bundle_version": 2,
+        "bundle_version": bundle_version,
         "name": name,
         "files": {
             key: hashlib.sha256(value).hexdigest()
@@ -61,6 +82,37 @@ def _bundle(name="mllive_12345678", corrupt=False, style=None, missing=None):
         manifest["generator"] = {"style": style}
     if corrupt:
         manifest["files"][f"{name}.bsp"] = "0" * 64
+    if analysis or bundle_version == 3:
+        analysis_payloads = {
+            f"{name}.analysis.manifest.json": b'{"status":"passed"}\n',
+            f"{name}.atlas.manifest.json": b'{"schema_version":1}\n',
+            f"{name}.atlas.bin.zst": b"Q2AZST01fixture-atlas",
+            f"{name}.navigation.bin.zst": b"fixture-navigation",
+            f"{name}.visibility.bin.zst": b"fixture-visibility",
+            f"{name}.design-signature.json": b'{"coordinate_free":true}\n',
+            f"{name}.objectives.json": b'{"schema":"q2-atlas-objectives-v1"}\n',
+        }
+        payloads.update(analysis_payloads)
+        manifest["analysis_files"] = {
+            key: hashlib.sha256(value).hexdigest()
+            for key, value in analysis_payloads.items()
+        }
+        manifest["analysis_file_sizes"] = {
+            key: len(value) for key, value in analysis_payloads.items()
+        }
+        manifest["analysis_sidecars"] = {
+            "analysis_manifest": f"{name}.analysis.manifest.json",
+            "atlas_manifest": f"{name}.atlas.manifest.json",
+            "atlas_transport": f"{name}.atlas.bin.zst",
+            "navigation": f"{name}.navigation.bin.zst",
+            "visibility": f"{name}.visibility.bin.zst",
+            "design_signature": f"{name}.design-signature.json",
+            "objectives": f"{name}.objectives.json",
+        }
+        if corrupt_analysis:
+            manifest["analysis_files"][f"{name}.atlas.bin.zst"] = "0" * 64
+        if missing_analysis is not None:
+            payloads.pop(f"{name}.{missing_analysis}")
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as bundle:
         for filename, payload in payloads.items():
@@ -106,6 +158,130 @@ def test_farm_bundle_is_verified_and_installed_atomically(tmp_path, monkeypatch)
     )
     assert installed_manifest["sidecars"]["item_timing"].endswith(".routes.json")
     assert not list(install.glob("*.tmp"))
+
+
+def test_v2_install_accepts_optional_analysis_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q2_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: _Response(_bundle(analysis=True)),
+    )
+    generator = FarmMapGenerator("http://map-farm.test:32510")
+
+    generator._fetch()
+
+    assert generator._result == "mllive_12345678"
+    install = tmp_path / "runtime" / "baseq2" / "maps"
+    for filename in analysis_artifact_names("mllive_12345678"):
+        assert (install / filename).is_file()
+
+
+def test_bundle_v3_is_isolated_by_default_and_explicitly_admitted(tmp_path, monkeypatch):
+    encoded = _bundle(bundle_version=3)
+    monkeypatch.setenv("Q2_ROOT", str(tmp_path / "default-runtime"))
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda *_args, **_kwargs: _Response(encoded),
+    )
+    default_generator = FarmMapGenerator("http://map-farm.test:32510")
+    default_generator._fetch()
+    assert default_generator._result is None
+    assert "bundle v3 is disabled" in default_generator._error
+    assert not (tmp_path / "default-runtime" / "baseq2" / "maps").exists()
+
+    monkeypatch.setenv("Q2_ROOT", str(tmp_path / "isolated-runtime"))
+    isolated_generator = FarmMapGenerator(
+        "http://map-farm.test:32510", allow_bundle_v3=True,
+    )
+    isolated_generator._fetch()
+    assert isolated_generator._result == "mllive_12345678"
+    install = tmp_path / "isolated-runtime" / "baseq2" / "maps"
+    with zipfile.ZipFile(io.BytesIO(encoded)) as bundle:
+        manifest = json.loads(bundle.read("manifest.json"))
+    for filename in declared_artifact_names(manifest):
+        assert (install / filename).is_file()
+    # Generator timing routes and Atlas objectives are distinct authorities;
+    # v3 installation must preserve both byte identities without collision.
+    assert (install / "mllive_12345678.routes.json").read_bytes() == (
+        b'{"version": 1, "nodes": [], "routes": []}'
+    )
+    assert (install / "mllive_12345678.objectives.json").read_bytes() == (
+        b'{"schema":"q2-atlas-objectives-v1"}\n'
+    )
+    assert manifest["sidecars"]["item_timing"].endswith(".routes.json")
+    assert manifest["analysis_sidecars"]["objectives"].endswith(
+        ".objectives.json"
+    )
+
+
+def test_bundle_v3_rejects_missing_or_mismatched_analysis(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q2_ROOT", str(tmp_path / "runtime"))
+    generator = FarmMapGenerator(
+        "http://map-farm.test:32510", allow_bundle_v3=True,
+    )
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: _Response(
+            _bundle(bundle_version=3, missing_analysis="visibility.bin.zst")
+        ),
+    )
+    generator._fetch()
+    assert generator._result is None
+    assert "archive member set is invalid" in generator._error
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: _Response(
+            _bundle(bundle_version=3, corrupt_analysis=True)
+        ),
+    )
+    generator._fetch()
+    assert generator._result is None
+    assert "checksum mismatch" in generator._error
+    assert not (tmp_path / "runtime" / "baseq2" / "maps").exists()
+
+
+def test_bundle_v3_mid_publication_failure_restores_prior_generation(
+    tmp_path, monkeypatch,
+):
+    encoded = _bundle(bundle_version=3)
+    with zipfile.ZipFile(io.BytesIO(encoded)) as bundle:
+        manifest = json.loads(bundle.read("manifest.json"))
+    install = tmp_path / "runtime" / "baseq2" / "maps"
+    install.mkdir(parents=True)
+    expected_prior = {
+        filename: f"prior:{filename}".encode()
+        for filename in declared_artifact_names(manifest)
+    }
+    expected_prior[installed_manifest_name(manifest["name"])] = b"prior-manifest"
+    for filename, payload in expected_prior.items():
+        (install / filename).write_bytes(payload)
+
+    real_replace = os.replace
+    failed = False
+
+    def fail_during_analysis_publication(source, destination):
+        nonlocal failed
+        if not failed and Path(destination).name.endswith("navigation.bin.zst"):
+            failed = True
+            raise OSError("injected publication failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("tools.map_bundle.os.replace", fail_during_analysis_publication)
+    monkeypatch.setenv("Q2_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda *_args, **_kwargs: _Response(encoded),
+    )
+    generator = FarmMapGenerator(
+        "http://map-farm.test:32510", allow_bundle_v3=True,
+    )
+    generator._fetch()
+
+    assert generator._result is None
+    assert "injected publication failure" in generator._error
+    for filename, payload in expected_prior.items():
+        assert (install / filename).read_bytes() == payload
+    assert not list(install.glob(".*.tmp"))
+    assert not list(install.glob(".*.bak"))
 
 
 def test_farm_bundle_rejects_checksum_mismatch(tmp_path, monkeypatch):
@@ -167,6 +343,31 @@ def test_v2_bundle_keeps_v1_digest_shape_for_worker_first_rollout():
             assert hashlib.sha256(bundle.read(filename)).hexdigest() == (
                 manifest["files"][filename]
             )
+
+
+def test_manifest_builder_requires_complete_analysis_only_for_v3():
+    name = "mllive_12345678"
+    core = {
+        f"{name}.bsp": b"bsp",
+        f"{name}.json": b"hook",
+        f"{name}.lattice.json": b"lattice",
+        f"{name}.routes.json": b"routes",
+    }
+    analysis = {
+        filename: f"analysis:{filename}".encode()
+        for filename in analysis_artifact_names(name)
+    }
+
+    plain_v2 = build_manifest(name, {}, core)
+    optional_v2 = build_manifest(name, {}, core, analysis_payloads=analysis)
+    complete_v3 = build_manifest(
+        name, {}, core, analysis_payloads=analysis, bundle_version=3,
+    )
+    assert "analysis_files" not in plain_v2
+    assert set(optional_v2["analysis_files"]) == set(analysis)
+    assert set(declared_artifact_names(complete_v3)) == set(core) | set(analysis)
+    with pytest.raises(ValueError, match="complete Atlas analysis artifact set"):
+        build_manifest(name, {}, core, bundle_version=3)
 
 
 def test_worker_claim_is_atomic_and_wakes_replenishment(tmp_path):

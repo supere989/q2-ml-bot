@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 from functools import lru_cache
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import tarfile
+import tempfile
 from typing import Callable
 
 import pytest
@@ -87,23 +90,36 @@ def _declaration_path(claims_directory: Path) -> Path:
 
 @lru_cache(maxsize=1)
 def binding() -> dict[str, object]:
-    return {
-        "repository_commit": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-        ).strip(),
-        "repository_tree": subprocess.check_output(
-            ["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT, text=True
-        ).strip(),
-        "git_clean": True,
-        "atlas_analyzer_authority_sha256": (
-            campaign.atlas_analyzer_authority_sha256(ROOT)
-        ),
-        "atlas_analyzer_authority_file_count": len(
-            campaign.atlas_analyzer_authority_inputs(ROOT)
-        ),
-        "generator_sha256": file_sha256(ROOT / "maps/generator.py"),
-        "routes_sha256": file_sha256(ROOT / "maps/routes.py"),
-    }
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT, text=True
+    ).strip()
+    # Production deliberately rejects a dirty working closure while executing
+    # the committed snapshot.  These unit tests inject their builder, so their
+    # synthetic clean binding must likewise describe the exact HEAD archive,
+    # not unrelated concurrent edits in the shared development worktree.
+    archive = subprocess.check_output(
+        ["git", "archive", "--format=tar", commit], cwd=ROOT
+    )
+    with tempfile.TemporaryDirectory(prefix="q2-campaign-test-head-") as raw:
+        snapshot = Path(raw)
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as stream:
+            stream.extractall(snapshot)
+        return {
+            "repository_commit": commit,
+            "repository_tree": tree,
+            "git_clean": True,
+            "atlas_analyzer_authority_sha256": (
+                campaign.atlas_analyzer_authority_sha256(snapshot)
+            ),
+            "atlas_analyzer_authority_file_count": len(
+                campaign.atlas_analyzer_authority_inputs(snapshot)
+            ),
+            "generator_sha256": file_sha256(snapshot / "maps/generator.py"),
+            "routes_sha256": file_sha256(snapshot / "maps/routes.py"),
+        }
 
 
 def write_claims_stage(directory: Path) -> dict:
@@ -174,7 +190,7 @@ def write_map_build(
         ".navigation.bin.zst",
         ".visibility.bin.zst",
         ".design-signature.json",
-        ".routes.json",
+        ".objectives.json",
     }
     artifact_hashes = {
         suffix: file_sha256(output_dir / f"{name}{suffix}")
@@ -718,7 +734,7 @@ def test_rejects_noncanonical_repo_root_before_reserving_outputs(
         (
             lambda value: value["performance"]["full_cold_rebuild"][
                 "artifact_sha256"
-            ].__setitem__(".routes.json", "3" * 64),
+            ].__setitem__(".objectives.json", "3" * 64),
             False,
             "full-cold proof digest differs",
         ),
@@ -859,7 +875,7 @@ def test_row_artifacts_are_derived_from_and_compared_to_incoming_membership(
 
     def corrupting_copy(source: Path, destination: Path) -> None:
         original_copy(source, destination)
-        if destination.name == f"{first}.routes.json":
+        if destination.name == f"{first}.objectives.json":
             destination.write_bytes(destination.read_bytes() + b"post-copy drift\n")
 
     monkeypatch.setattr(campaign, "_exclusive_copy", corrupting_copy)
@@ -882,9 +898,9 @@ def test_row_artifacts_are_derived_from_and_compared_to_incoming_membership(
         "per-map artifacts differ from incoming membership"
     )
     corrupted_route = (
-        f"analysis:{first}:.routes.json\n".encode() + b"post-copy drift\n"
+        f"analysis:{first}:.objectives.json\n".encode() + b"post-copy drift\n"
     )
-    assert report["maps"][0]["artifacts"][".routes.json"] == {
+    assert report["maps"][0]["artifacts"][".objectives.json"] == {
         "bytes": len(corrupted_route),
         "sha256": hashlib.sha256(corrupted_route).hexdigest(),
     }

@@ -98,15 +98,26 @@ def discover_map_pool(
 
 
 def _decode_action(raw: np.ndarray) -> Action:
+    from .protocol import VerticalIntent
+
+    values = np.asarray(raw, dtype=np.float64)
+    if values.shape != (8,) or not np.isfinite(values).all():
+        raise ValueError("policy action must be one finite eight-value vector")
+    categorical = tuple(int(values[index]) for index in range(4, 8))
+    if any(float(value) != values[index] for index, value in zip(range(4, 8), categorical)):
+        raise ValueError("policy categorical actions must be exact integers")
+    vertical, fire, hook, weapon = categorical
+    if vertical not in (0, 1, 2) or fire not in (0, 1) or not 0 <= hook <= 3 or not 0 <= weapon <= 9:
+        raise ValueError("policy categorical action is outside the frozen cardinality")
     return Action(
-        move_forward = float(np.clip(raw[0], -1, 1)),
-        move_right   = float(np.clip(raw[1], -1, 1)),
-        look_yaw     = float(np.clip(raw[2], -45, 45)),
-        look_pitch   = float(np.clip(raw[3], -30, 30)),
-        jump         = bool(raw[4] > 0.5),
-        fire         = bool(raw[5] > 0.5),
-        hook         = int(np.clip(raw[6], 0, 3)),
-        weapon       = int(np.clip(raw[7], 0, 9)),
+        move_forward = float(np.clip(values[0], -1, 1)),
+        move_right   = float(np.clip(values[1], -1, 1)),
+        look_yaw     = float(np.clip(values[2], -45, 45)),
+        look_pitch   = float(np.clip(values[3], -30, 30)),
+        vertical_intent = VerticalIntent(vertical),
+        fire         = bool(fire),
+        hook         = hook,
+        weapon       = weapon,
     )
 
 

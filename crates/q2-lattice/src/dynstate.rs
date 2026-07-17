@@ -17,13 +17,22 @@ pub const DYN_MAGIC: &[u8; 8] = b"Q2LAT002";
 pub const RETIRED_DYN_MAGIC: &[u8; 8] = b"Q2LAT001";
 pub const DYN_SCHEMA_VERSION: u16 = 2;
 pub const DYN_FEATURE_WIDTH: usize = 24;
+pub const DYN_FEATURE_SCHEMA_SHA256: &str =
+    "97d0c42da952717613a26fb8453c0b65ba8002e4db26eab48d85ffe81b020a22";
 pub const DYN_CELL_ENCODED_BYTES: usize = 40;
 pub const DYN_L2_CELL_SIZE: u32 = 64;
 pub const DYN_L3_CELL_SIZE: u32 = 256;
 pub const THERMAL_MAX_AGE_TICKS: u64 = 5;
+pub const DYN_EVENT_SCHEMA: &str = "q2-dyn-named-event-v1";
+pub const DYN_EVENT_NAMES: [&str; 5] =
+    ["engagement", "threat", "opportunity", "self_fire", "death"];
+pub const DYN_DECAY_INTERVAL_STEPS: u64 = 1024;
+pub const DYN_RUNTIME_CHECKPOINT_MAGIC: &[u8; 8] = b"Q2DRT001";
+pub const DYN_RUNTIME_CHECKPOINT_VERSION: u16 = 1;
 
 const BYTE_ORDER_LITTLE: u16 = 0x454c;
 const SNAPSHOT_HEADER_BYTES: usize = 208;
+const RUNTIME_CHECKPOINT_HEADER_BYTES: usize = 208;
 const COMPRESSION_ZSTD: u8 = 1;
 const ZSTD_LEVEL: i8 = 3;
 const COARSE_PARENT_BUDGET: usize = 4;
@@ -42,6 +51,10 @@ pub enum DynError {
     DigestMismatch,
     FenceMismatch(&'static str),
     StaleEnvironmentSteps { expected: u64, found: u64 },
+    StaleClientLifeEpoch { expected: u64, found: u64 },
+    StaleServerFrame { previous: u64, found: u64 },
+    DuplicateEventId(u64),
+    StaleEventId { previous: u64, found: u64 },
     Io(std::io::Error),
 }
 
@@ -64,6 +77,21 @@ impl Display for DynError {
             Self::StaleEnvironmentSteps { expected, found } => write!(
                 formatter,
                 "stale Dyn environment steps: expected {expected}, found {found}"
+            ),
+            Self::StaleClientLifeEpoch { expected, found } => write!(
+                formatter,
+                "stale Dyn client life epoch: expected {expected}, found {found}"
+            ),
+            Self::StaleServerFrame { previous, found } => write!(
+                formatter,
+                "stale Dyn server frame: previous {previous}, found {found}"
+            ),
+            Self::DuplicateEventId(event_id) => {
+                write!(formatter, "duplicate Dyn event id {event_id}")
+            }
+            Self::StaleEventId { previous, found } => write!(
+                formatter,
+                "stale Dyn event id: previous {previous}, found {found}"
             ),
             Self::Io(error) => write!(formatter, "Dyn I/O error: {error}"),
         }
@@ -90,6 +118,8 @@ pub struct DynLimits {
     pub batch_soft_compressed_bytes: usize,
     pub batch_hard_compressed_bytes: usize,
     pub batch_hard_resident_bytes: usize,
+    pub max_events_per_transaction: usize,
+    pub max_events_per_client_life: u64,
 }
 
 impl Default for DynLimits {
@@ -106,6 +136,8 @@ impl Default for DynLimits {
             batch_soft_compressed_bytes: 2 * 1024 * 1024,
             batch_hard_compressed_bytes: 8 * 1024 * 1024,
             batch_hard_resident_bytes: 8 * 1024 * 1024 - 1,
+            max_events_per_transaction: DYN_EVENT_NAMES.len(),
+            max_events_per_client_life: 10_000_000,
         }
     }
 }
@@ -385,6 +417,53 @@ impl DynState {
         }
         self.environment_steps = environment_steps;
         Ok(())
+    }
+
+    fn advance_environment_steps(
+        &mut self,
+        expected_fence: DynFence,
+        environment_steps: u64,
+        limits: &DynLimits,
+    ) -> DynResult<u64> {
+        self.fence.check(expected_fence)?;
+        if environment_steps < self.environment_steps {
+            return Err(DynError::StaleEnvironmentSteps {
+                expected: self.environment_steps,
+                found: environment_steps,
+            });
+        }
+        let previous_interval = self.environment_steps / DYN_DECAY_INTERVAL_STEPS;
+        let next_interval = environment_steps / DYN_DECAY_INTERVAL_STEPS;
+        let elapsed_intervals = next_interval - previous_interval;
+        if elapsed_intervals == 0 {
+            self.environment_steps = environment_steps;
+            return Ok(0);
+        }
+
+        // Power-of-two decay is deliberate: applying N intervals at once or
+        // through any transaction partition produces the same IEEE-754 bits.
+        // Evidence that is older than the f32 normal exponent range is exactly
+        // zero and its sparse cell is removed.
+        let scale = if elapsed_intervals >= 126 {
+            0.0
+        } else {
+            2.0_f32.powi(-(elapsed_intervals as i32))
+        };
+        self.l2.retain(|_, cell| {
+            let mut values = cell.channels.values();
+            for value in &mut values {
+                *value *= scale;
+            }
+            cell.channels = PersistentChannels::from_values(values);
+            cell.sample_mass *= scale;
+            cell.confidence *= scale;
+            cell.canonicalize_zero();
+            cell.channels.values().into_iter().any(|value| value != 0.0) || cell.sample_mass != 0.0
+        });
+        self.l3 = derive_l3(&self.l2)?;
+        self.environment_steps = environment_steps;
+        self.validate(limits)?;
+        Ok(elapsed_intervals)
     }
 
     pub fn upsert_l2(
@@ -934,6 +1013,682 @@ pub const DYN_FEATURE_NAMES: [&str; DYN_FEATURE_WIDTH] = [
 pub struct DynFeatureBlock {
     pub values: [f32; DYN_FEATURE_WIDTH],
     pub nearest_death_score: f32,
+}
+
+/// The only persistent live Dyn deposit vocabulary.
+///
+/// Each accepted event deposits one unit into exactly one named channel and
+/// one unit of sample mass at its authoritative world point. Callers cannot
+/// submit scores, confidence, packed cells, or precomputed Dyn24 values.
+/// Production mapping is intentionally public and factual: engagement is
+/// positive observed damage dealt at a current or at-most-five-tick remembered
+/// visible target point; threat is positive observed damage taken at the own
+/// point; opportunity is a newly actionable or new-L2 visible damageable
+/// target point; self-fire is an accepted public action-echo shot edge; and
+/// death is the public death reward/health terminal at the own point.
+/// Unchanged presence/held input never repeats a deposit. Private causal or
+/// reward-only telemetry is never a deposit source.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[repr(usize)]
+pub enum DynEventKind {
+    Engagement,
+    Threat,
+    Opportunity,
+    SelfFire,
+    Death,
+}
+
+impl DynEventKind {
+    pub fn name(self) -> &'static str {
+        DYN_EVENT_NAMES[self as usize]
+    }
+
+    pub fn code(self) -> u64 {
+        self as u64 + 1
+    }
+
+    pub fn parse(name: &str) -> DynResult<Self> {
+        match name {
+            "engagement" => Ok(Self::Engagement),
+            "threat" => Ok(Self::Threat),
+            "opportunity" => Ok(Self::Opportunity),
+            "self_fire" => Ok(Self::SelfFire),
+            "death" => Ok(Self::Death),
+            _ => Err(DynError::InvalidFormat(format!(
+                "unknown Dyn event kind {name:?}"
+            ))),
+        }
+    }
+
+    fn channel(self) -> PersistentChannel {
+        match self {
+            Self::Engagement => PersistentChannel::Engagement,
+            Self::Threat => PersistentChannel::Threat,
+            Self::Opportunity => PersistentChannel::Opportunity,
+            Self::SelfFire => PersistentChannel::SelfFire,
+            Self::Death => PersistentChannel::Deaths,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DynNamedEvent {
+    /// Exact `(server_frame << 3) | kind_code` identity, with kind codes 1..5.
+    pub event_id: u64,
+    pub kind: DynEventKind,
+    pub world_position: [f64; 3],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DynIngestBatch<'a> {
+    pub fence: DynFence,
+    pub client_id: u32,
+    pub client_life_epoch: u64,
+    pub server_frame: u64,
+    /// Compare-and-swap predecessor; prevents two producers from advancing
+    /// the same runtime from different environment-step lineages.
+    pub expected_environment_steps: u64,
+    pub environment_steps: u64,
+    pub events: &'a [DynNamedEvent],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DynIngestReport {
+    pub events_applied: usize,
+    pub cells_updated: usize,
+    pub decay_intervals: u64,
+    pub environment_steps: u64,
+    pub client_life_epoch: u64,
+    pub server_frame: u64,
+    pub last_event_id: u64,
+}
+
+/// Query accepted by the sole live Q2LAT002 feature adapter.
+///
+/// The adapter binds Atlas/map/origin and client identity at construction. A
+/// query must present the exact live life/frame/environment cursor established
+/// by the preceding transaction, so cached or pre-ingest calls fail closed.
+#[derive(Clone, Copy, Debug)]
+pub struct DynRuntimeQuery {
+    pub map_epoch: u64,
+    pub client_id: u32,
+    pub client_life_epoch: u64,
+    pub environment_steps: u64,
+    pub server_frame: u64,
+    pub world_position: [f64; 3],
+    pub yaw_degrees: f32,
+    pub thermal: Option<ThermalSignal>,
+    pub survivability: [f32; 3],
+    pub search_radius: f32,
+    pub score_scale: f32,
+}
+
+/// Fail-closed per-client live Q2LAT002 event lattice and Dyn24 adapter.
+#[derive(Clone, Debug)]
+pub struct DynRuntime {
+    state: DynState,
+    snapshot_sha256: String,
+    client_life_epoch: u64,
+    server_frame: u64,
+    last_event_id: u64,
+    life_event_count: u64,
+    accepted_event_count: u64,
+    limits: DynLimits,
+}
+
+impl DynRuntime {
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_snapshot(
+        snapshot: &[u8],
+        expected_fence: DynFence,
+        expected_client_id: u32,
+        expected_client_count: u32,
+        expected_environment_steps: u64,
+        limits: &DynLimits,
+    ) -> DynResult<Self> {
+        let state = decode_snapshot(snapshot, expected_fence, limits)?;
+        if state.client_id() != expected_client_id {
+            return Err(DynError::FenceMismatch("client_id"));
+        }
+        if state.client_count() != expected_client_count {
+            return Err(DynError::FenceMismatch("client_count"));
+        }
+        if state.environment_steps() != expected_environment_steps {
+            return Err(DynError::StaleEnvironmentSteps {
+                expected: expected_environment_steps,
+                found: state.environment_steps(),
+            });
+        }
+        if encode_snapshot(&state, limits)? != snapshot {
+            return Err(DynError::InvalidFormat(
+                "Q2LAT002 snapshot is not the canonical byte encoding".to_owned(),
+            ));
+        }
+        Ok(Self {
+            state,
+            snapshot_sha256: format!("{:x}", Sha256::digest(snapshot)),
+            client_life_epoch: 0,
+            server_frame: 0,
+            last_event_id: 0,
+            life_event_count: 0,
+            accepted_event_count: 0,
+            limits: limits.clone(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_checkpoint(
+        checkpoint: &[u8],
+        expected_checkpoint_sha256: [u8; 32],
+        expected_fence: DynFence,
+        expected_client_id: u32,
+        expected_client_count: u32,
+        expected_environment_steps: u64,
+        expected_client_life_epoch: u64,
+        expected_server_frame: u64,
+        limits: &DynLimits,
+    ) -> DynResult<Self> {
+        expected_fence.validate()?;
+        if <[u8; 32]>::from(Sha256::digest(checkpoint)) != expected_checkpoint_sha256 {
+            return Err(DynError::DigestMismatch);
+        }
+        let header = RuntimeCheckpointHeader::decode(checkpoint, limits)?;
+        header.fence.check(expected_fence)?;
+        if header.client_id != expected_client_id {
+            return Err(DynError::FenceMismatch("client_id"));
+        }
+        if header.client_count != expected_client_count {
+            return Err(DynError::FenceMismatch("client_count"));
+        }
+        if header.environment_steps != expected_environment_steps {
+            return Err(DynError::StaleEnvironmentSteps {
+                expected: expected_environment_steps,
+                found: header.environment_steps,
+            });
+        }
+        if header.client_life_epoch != expected_client_life_epoch {
+            return Err(DynError::StaleClientLifeEpoch {
+                expected: expected_client_life_epoch,
+                found: header.client_life_epoch,
+            });
+        }
+        if header.server_frame != expected_server_frame {
+            return Err(DynError::StaleServerFrame {
+                previous: expected_server_frame,
+                found: header.server_frame,
+            });
+        }
+        let snapshot = checkpoint
+            .get(RUNTIME_CHECKPOINT_HEADER_BYTES..)
+            .ok_or_else(|| DynError::InvalidFormat("truncated runtime checkpoint".to_owned()))?;
+        if snapshot.len() != header.snapshot_len
+            || <[u8; 32]>::from(Sha256::digest(snapshot)) != header.snapshot_sha256
+        {
+            return Err(DynError::DigestMismatch);
+        }
+        let state = decode_snapshot(snapshot, expected_fence, limits)?;
+        if encode_snapshot(&state, limits)? != snapshot {
+            return Err(DynError::InvalidFormat(
+                "checkpoint embeds a noncanonical Q2LAT002 snapshot".to_owned(),
+            ));
+        }
+        if state.client_id() != header.client_id
+            || state.client_count() != header.client_count
+            || state.environment_steps() != header.environment_steps
+        {
+            return Err(DynError::InvalidFormat(
+                "runtime checkpoint and embedded Q2LAT002 identity differ".to_owned(),
+            ));
+        }
+        validate_runtime_cursor(
+            header.client_life_epoch,
+            header.server_frame,
+            header.last_event_id,
+            header.life_event_count,
+            header.accepted_event_count,
+            limits,
+        )?;
+        Ok(Self {
+            state,
+            snapshot_sha256: header
+                .snapshot_sha256
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            client_life_epoch: header.client_life_epoch,
+            server_frame: header.server_frame,
+            last_event_id: header.last_event_id,
+            life_event_count: header.life_event_count,
+            accepted_event_count: header.accepted_event_count,
+            limits: limits.clone(),
+        })
+    }
+
+    pub fn state(&self) -> &DynState {
+        &self.state
+    }
+
+    pub fn snapshot_sha256(&self) -> &str {
+        &self.snapshot_sha256
+    }
+
+    pub fn client_life_epoch(&self) -> u64 {
+        self.client_life_epoch
+    }
+
+    pub fn server_frame(&self) -> u64 {
+        self.server_frame
+    }
+
+    pub fn last_event_id(&self) -> u64 {
+        self.last_event_id
+    }
+
+    pub fn accepted_event_count(&self) -> u64 {
+        self.accepted_event_count
+    }
+
+    pub fn snapshot_bytes(&self) -> DynResult<Vec<u8>> {
+        encode_snapshot(&self.state, &self.limits)
+    }
+
+    pub fn checkpoint_bytes(&self) -> DynResult<Vec<u8>> {
+        let snapshot = self.snapshot_bytes()?;
+        let snapshot_sha256: [u8; 32] = Sha256::digest(&snapshot).into();
+        let total = RUNTIME_CHECKPOINT_HEADER_BYTES
+            .checked_add(snapshot.len())
+            .ok_or_else(|| DynError::LimitExceeded("checkpoint size overflow".to_owned()))?;
+        let maximum = RUNTIME_CHECKPOINT_HEADER_BYTES
+            .checked_add(self.limits.max_compressed_snapshot_bytes)
+            .ok_or_else(|| DynError::LimitExceeded("checkpoint limit overflow".to_owned()))?;
+        if total > maximum {
+            return Err(DynError::LimitExceeded(format!(
+                "runtime checkpoint bytes {total} > {maximum}"
+            )));
+        }
+        let mut output = Vec::with_capacity(total);
+        output.extend_from_slice(DYN_RUNTIME_CHECKPOINT_MAGIC);
+        push_u16(&mut output, DYN_RUNTIME_CHECKPOINT_VERSION);
+        push_u16(&mut output, 0);
+        push_u32(&mut output, RUNTIME_CHECKPOINT_HEADER_BYTES as u32);
+        push_u64(&mut output, snapshot.len() as u64);
+        output.extend_from_slice(&snapshot_sha256);
+        output.extend_from_slice(&self.state.fence().atlas_sha256);
+        output.extend_from_slice(&self.state.fence().map_sha256);
+        for value in self.state.fence().origin.0 {
+            push_i64(&mut output, value);
+        }
+        push_u64(&mut output, self.state.fence().map_epoch);
+        push_u32(&mut output, self.state.client_id());
+        push_u32(&mut output, self.state.client_count());
+        push_u64(&mut output, self.state.environment_steps());
+        push_u64(&mut output, self.client_life_epoch);
+        push_u64(&mut output, self.server_frame);
+        push_u64(&mut output, self.last_event_id);
+        push_u64(&mut output, self.life_event_count);
+        push_u64(&mut output, self.accepted_event_count);
+        debug_assert_eq!(output.len(), RUNTIME_CHECKPOINT_HEADER_BYTES);
+        output.extend_from_slice(&snapshot);
+        Ok(output)
+    }
+
+    pub fn checkpoint_sha256(&self) -> DynResult<String> {
+        Ok(format!("{:x}", Sha256::digest(self.checkpoint_bytes()?)))
+    }
+
+    /// Low-level qualification/checkpoint primitive.
+    ///
+    /// Production frame assembly must use [`Self::commit_frame`]. Calling
+    /// `ingest_events` and [`Self::feature_block`] separately is not atomic.
+    pub fn ingest_events(&mut self, batch: DynIngestBatch<'_>) -> DynResult<DynIngestReport> {
+        self.state.fence().check(batch.fence)?;
+        if batch.client_id != self.state.client_id() {
+            return Err(DynError::FenceMismatch("client_id"));
+        }
+        if batch.client_life_epoch == 0 {
+            return Err(DynError::InvalidFormat(
+                "client life epoch must be nonzero".to_owned(),
+            ));
+        }
+        let advances_life = if self.client_life_epoch == 0 {
+            true
+        } else if batch.client_life_epoch < self.client_life_epoch {
+            return Err(DynError::StaleClientLifeEpoch {
+                expected: self.client_life_epoch,
+                found: batch.client_life_epoch,
+            });
+        } else if batch.client_life_epoch == self.client_life_epoch {
+            false
+        } else if self.client_life_epoch.checked_add(1) == Some(batch.client_life_epoch) {
+            true
+        } else {
+            return Err(DynError::InvalidFormat(
+                "client life epoch skipped an admitted life".to_owned(),
+            ));
+        };
+        if batch.server_frame == 0 || batch.server_frame <= self.server_frame {
+            return Err(DynError::StaleServerFrame {
+                previous: self.server_frame,
+                found: batch.server_frame,
+            });
+        }
+        if batch.expected_environment_steps != self.state.environment_steps() {
+            return Err(DynError::StaleEnvironmentSteps {
+                expected: self.state.environment_steps(),
+                found: batch.expected_environment_steps,
+            });
+        }
+        if batch.events.len() > self.limits.max_events_per_transaction {
+            return Err(DynError::LimitExceeded(format!(
+                "events per transaction {} > {}",
+                batch.events.len(),
+                self.limits.max_events_per_transaction
+            )));
+        }
+
+        let baseline_event_id = if advances_life { 0 } else { self.last_event_id };
+        let baseline_life_events = if advances_life {
+            0
+        } else {
+            self.life_event_count
+        };
+        let next_life_events = baseline_life_events
+            .checked_add(batch.events.len() as u64)
+            .ok_or_else(|| DynError::LimitExceeded("life event count overflow".to_owned()))?;
+        if next_life_events > self.limits.max_events_per_client_life {
+            return Err(DynError::LimitExceeded(format!(
+                "events per client life {next_life_events} > {}",
+                self.limits.max_events_per_client_life
+            )));
+        }
+        let next_accepted_events = self
+            .accepted_event_count
+            .checked_add(batch.events.len() as u64)
+            .ok_or_else(|| DynError::LimitExceeded("accepted event count overflow".to_owned()))?;
+
+        let mut ordered = batch.events.to_vec();
+        ordered.sort_by_key(|event| event.event_id);
+        let event_frame_prefix = batch
+            .server_frame
+            .checked_mul(8)
+            .ok_or_else(|| DynError::LimitExceeded("event ID frame prefix overflow".to_owned()))?;
+        let mut previous_event_id = None;
+        for event in &ordered {
+            if event.event_id == 0 {
+                return Err(DynError::InvalidFormat(
+                    "Dyn event id must be nonzero".to_owned(),
+                ));
+            }
+            if previous_event_id == Some(event.event_id) {
+                return Err(DynError::DuplicateEventId(event.event_id));
+            }
+            let expected_event_id = event_frame_prefix | event.kind.code();
+            if event.event_id != expected_event_id {
+                return Err(DynError::InvalidFormat(format!(
+                    "Dyn event id {} differs from frame/kind identity {expected_event_id}",
+                    event.event_id
+                )));
+            }
+            if event.event_id <= baseline_event_id {
+                return Err(DynError::StaleEventId {
+                    previous: baseline_event_id,
+                    found: event.event_id,
+                });
+            }
+            if event.world_position.iter().any(|value| !value.is_finite()) {
+                return Err(DynError::InvalidCell(
+                    "Dyn event world point must be finite".to_owned(),
+                ));
+            }
+            previous_event_id = Some(event.event_id);
+        }
+
+        let mut next = self.state.clone();
+        let decay_intervals =
+            next.advance_environment_steps(batch.fence, batch.environment_steps, &self.limits)?;
+        let mut deposits: BTreeMap<GridIndex, [u32; 5]> = BTreeMap::new();
+        for event in &ordered {
+            let index = batch
+                .fence
+                .origin
+                .index(event.world_position, AtlasLevel::L2)
+                .map_err(|error| DynError::Coordinate(error.to_string()))?;
+            let counts = deposits.entry(index).or_default();
+            counts[event.kind.channel() as usize] = counts[event.kind.channel() as usize]
+                .checked_add(1)
+                .ok_or_else(|| DynError::LimitExceeded("cell event count overflow".to_owned()))?;
+        }
+        for (index, counts) in &deposits {
+            let mut cell = next.l2.get(index).copied().unwrap_or_default();
+            let mut values = cell.channels.values();
+            let mut sample_delta = 0_u32;
+            for (value, count) in values.iter_mut().zip(*counts) {
+                *value += count as f32;
+                sample_delta = sample_delta.checked_add(count).ok_or_else(|| {
+                    DynError::LimitExceeded("cell sample count overflow".to_owned())
+                })?;
+            }
+            cell.channels = PersistentChannels::from_values(values);
+            cell.sample_mass += sample_delta as f32;
+            cell.confidence = 1.0;
+            cell.canonicalize_zero();
+            cell.validate()?;
+            next.l2.insert(*index, cell);
+        }
+        next.l3 = derive_l3(&next.l2)?;
+        next.validate(&self.limits)?;
+        let next_snapshot = encode_snapshot(&next, &self.limits)?;
+
+        self.state = next;
+        self.snapshot_sha256 = format!("{:x}", Sha256::digest(&next_snapshot));
+        self.client_life_epoch = batch.client_life_epoch;
+        self.server_frame = batch.server_frame;
+        self.last_event_id = previous_event_id.unwrap_or(baseline_event_id);
+        self.life_event_count = next_life_events;
+        self.accepted_event_count = next_accepted_events;
+        Ok(DynIngestReport {
+            events_applied: batch.events.len(),
+            cells_updated: deposits.len(),
+            decay_intervals,
+            environment_steps: self.state.environment_steps(),
+            client_life_epoch: self.client_life_epoch,
+            server_frame: self.server_frame,
+            last_event_id: self.last_event_id,
+        })
+    }
+
+    /// Atomically ingests one public-event transaction and assembles that
+    /// transaction's same-frame Dyn24 feature block.
+    ///
+    /// All work is staged on a clone. The live runtime is replaced only after
+    /// both the exact event ingest and exact feature query succeed, so a bad
+    /// query cannot consume event IDs or advance any runtime cursor.
+    pub fn commit_frame(
+        &mut self,
+        batch: DynIngestBatch<'_>,
+        query: DynRuntimeQuery,
+    ) -> DynResult<(DynIngestReport, DynFeatureBlock)> {
+        let mut candidate = self.clone();
+        let report = candidate.ingest_events(batch)?;
+        let features = candidate.feature_block(query)?;
+        *self = candidate;
+        Ok((report, features))
+    }
+
+    /// Low-level qualification/checkpoint primitive.
+    ///
+    /// Production frame assembly must use [`Self::commit_frame`] so the query
+    /// and its event transaction have one commit boundary.
+    pub fn feature_block(&self, query: DynRuntimeQuery) -> DynResult<DynFeatureBlock> {
+        if query.map_epoch != self.state.fence().map_epoch {
+            return Err(DynError::FenceMismatch("map_epoch"));
+        }
+        if query.client_id != self.state.client_id() {
+            return Err(DynError::FenceMismatch("client_id"));
+        }
+        if query.client_life_epoch != self.client_life_epoch || self.client_life_epoch == 0 {
+            return Err(DynError::StaleClientLifeEpoch {
+                expected: self.client_life_epoch,
+                found: query.client_life_epoch,
+            });
+        }
+        if query.environment_steps != self.state.environment_steps() {
+            return Err(DynError::StaleEnvironmentSteps {
+                expected: self.state.environment_steps(),
+                found: query.environment_steps,
+            });
+        }
+        if query.server_frame != self.server_frame {
+            return Err(DynError::StaleServerFrame {
+                previous: self.server_frame,
+                found: query.server_frame,
+            });
+        }
+        if let Some(thermal) = query.thermal
+            && (thermal.observed_tick > query.server_frame
+                || query.server_frame - thermal.observed_tick > THERMAL_MAX_AGE_TICKS)
+        {
+            return Err(DynError::InvalidFormat(
+                "thermal feature is future-dated or stale".to_owned(),
+            ));
+        }
+        self.state.feature_block(DynFeatureInput {
+            fence: self.state.fence(),
+            world_position: query.world_position,
+            yaw_degrees: query.yaw_degrees,
+            thermal: query.thermal,
+            survivability: query.survivability,
+            search_radius: query.search_radius,
+            score_scale: query.score_scale,
+        })
+    }
+}
+
+fn validate_runtime_cursor(
+    client_life_epoch: u64,
+    server_frame: u64,
+    last_event_id: u64,
+    life_event_count: u64,
+    accepted_event_count: u64,
+    limits: &DynLimits,
+) -> DynResult<()> {
+    if client_life_epoch == 0 {
+        if server_frame != 0
+            || last_event_id != 0
+            || life_event_count != 0
+            || accepted_event_count != 0
+        {
+            return Err(DynError::InvalidFormat(
+                "uninitialized runtime checkpoint has a nonzero cursor".to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+    if server_frame == 0 {
+        return Err(DynError::InvalidFormat(
+            "initialized runtime checkpoint has server frame zero".to_owned(),
+        ));
+    }
+    if life_event_count > limits.max_events_per_client_life {
+        return Err(DynError::LimitExceeded(format!(
+            "events per client life {life_event_count} > {}",
+            limits.max_events_per_client_life
+        )));
+    }
+    if accepted_event_count < life_event_count
+        || (life_event_count == 0 && last_event_id != 0)
+        || (life_event_count != 0 && last_event_id == 0)
+    {
+        return Err(DynError::InvalidFormat(
+            "runtime checkpoint event cursor is inconsistent".to_owned(),
+        ));
+    }
+    if last_event_id != 0 {
+        let event_frame = last_event_id >> 3;
+        let kind_code = last_event_id & 7;
+        if event_frame == 0 || event_frame > server_frame || !(1..=5).contains(&kind_code) {
+            return Err(DynError::InvalidFormat(
+                "runtime checkpoint last event identity is malformed".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RuntimeCheckpointHeader {
+    snapshot_len: usize,
+    snapshot_sha256: [u8; 32],
+    fence: DynFence,
+    client_id: u32,
+    client_count: u32,
+    environment_steps: u64,
+    client_life_epoch: u64,
+    server_frame: u64,
+    last_event_id: u64,
+    life_event_count: u64,
+    accepted_event_count: u64,
+}
+
+impl RuntimeCheckpointHeader {
+    fn decode(checkpoint: &[u8], limits: &DynLimits) -> DynResult<Self> {
+        let maximum = RUNTIME_CHECKPOINT_HEADER_BYTES
+            .checked_add(limits.max_compressed_snapshot_bytes)
+            .ok_or_else(|| DynError::LimitExceeded("checkpoint limit overflow".to_owned()))?;
+        if checkpoint.len() > maximum {
+            return Err(DynError::LimitExceeded(format!(
+                "runtime checkpoint bytes {} > {maximum}",
+                checkpoint.len()
+            )));
+        }
+        let mut reader = Reader::new(checkpoint);
+        if reader.take(8)? != DYN_RUNTIME_CHECKPOINT_MAGIC {
+            return Err(DynError::InvalidFormat(
+                "invalid Dyn runtime checkpoint magic".to_owned(),
+            ));
+        }
+        if reader.u16()? != DYN_RUNTIME_CHECKPOINT_VERSION {
+            return Err(DynError::InvalidFormat(
+                "unsupported Dyn runtime checkpoint version".to_owned(),
+            ));
+        }
+        if reader.u16()? != 0 || reader.u32()? as usize != RUNTIME_CHECKPOINT_HEADER_BYTES {
+            return Err(DynError::InvalidFormat(
+                "invalid Dyn runtime checkpoint header".to_owned(),
+            ));
+        }
+        let snapshot_len = reader.count(limits.max_compressed_snapshot_bytes, "snapshot bytes")?;
+        let snapshot_sha256 = reader.array_32()?;
+        let fence = DynFence {
+            atlas_sha256: reader.array_32()?,
+            map_sha256: reader.array_32()?,
+            origin: AtlasOrigin([reader.i64()?, reader.i64()?, reader.i64()?]),
+            map_epoch: reader.u64()?,
+        };
+        fence.validate()?;
+        let result = Self {
+            snapshot_len,
+            snapshot_sha256,
+            fence,
+            client_id: reader.u32()?,
+            client_count: reader.u32()?,
+            environment_steps: reader.u64()?,
+            client_life_epoch: reader.u64()?,
+            server_frame: reader.u64()?,
+            last_event_id: reader.u64()?,
+            life_event_count: reader.u64()?,
+            accepted_event_count: reader.u64()?,
+        };
+        validate_client_identity(result.client_id, result.client_count, limits)?;
+        if reader.position() != RUNTIME_CHECKPOINT_HEADER_BYTES
+            || checkpoint.len() != RUNTIME_CHECKPOINT_HEADER_BYTES + snapshot_len
+        {
+            return Err(DynError::InvalidFormat(
+                "runtime checkpoint length/header mismatch".to_owned(),
+            ));
+        }
+        Ok(result)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

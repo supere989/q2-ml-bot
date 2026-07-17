@@ -2,14 +2,15 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from harness.causal_protocol import CausalFlags, CausalTelemetry
 from harness.client_env import Q2NetworkClientEnv, TARGET_ACQUIRE_REWARD
 from harness.client_protocol import ClientTelemetry
-from harness.protocol import ML_FIRE_GATE_PROTECTED, ML_FIRE_GATE_TARGET
+from harness.protocol import ActionDebugIndex, ML_FIRE_GATE_PROTECTED, ML_FIRE_GATE_TARGET
 
 
 def _sample(frame: int, flags: int = 0, *, terminal: bool = False):
-    debug = np.zeros(12, dtype=np.float32)
-    debug[11] = flags
+    debug = np.zeros(len(ActionDebugIndex), dtype=np.float32)
+    debug[ActionDebugIndex.FLAGS] = flags
     obs = SimpleNamespace(
         action_debug=debug,
         self_state=np.array([0, 0, 0, 0, 0, 0, 100, 0, 0, 0], dtype=np.float32),
@@ -26,6 +27,25 @@ def _sample(frame: int, flags: int = 0, *, terminal: bool = False):
         reward_survival=0.0,
         rune_flags=np.zeros(5, dtype=np.float32),
         self_debug=np.zeros(4, dtype=np.uint32),
+        standing_blocked=0.0,
+    )
+    causal = CausalTelemetry(
+        tick=frame,
+        client_life_epoch=1,
+        target_id=0,
+        target_epoch=0,
+        environmental_source_id=0,
+        environmental_source_epoch=0,
+        environmental_mod=0,
+        environmental_damage=0,
+        crouch_edge_id=0,
+        crouch_edge_epoch=0,
+        echo_tick=0,
+        action_generation=0,
+        hook_zone_id=0,
+        hook_attempt_tick=0,
+        hook_action_generation=0,
+        flags=CausalFlags.FACTS_COMPLETE,
     )
     return ClientTelemetry(
         sequence=frame,
@@ -34,6 +54,7 @@ def _sample(frame: int, flags: int = 0, *, terminal: bool = False):
         client_id="target-reward",
         map_name="q2dm1",
         observation=obs,
+        causal=causal,
     )
 
 

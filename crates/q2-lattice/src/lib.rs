@@ -1,10 +1,10 @@
 //! Hot-path kernels for q2-ml-bot's per-environment Vector Lattice.
 //!
-//! The policy contract remains a 24-float observation tail. This crate starts
-//! with the measured remaining kernel: choose the strongest nearby signal for
-//! five channels in one pass over packed cells. Python remains authoritative
-//! for deposits, rewards, persistence, and orchestration until parity and
-//! end-to-end SPS gates justify moving more state here.
+//! The policy contract retains a named 24-float Dyn block. Q2LAT002 Rust state
+//! is authoritative for factual event deposits, deterministic decay, derived
+//! L3, persistence, and feature assembly. Python only supplies identity-fenced
+//! factual event tuples and query facts; it cannot inject packed cells or Dyn24
+//! values into the live runtime.
 
 use std::collections::BTreeMap;
 
@@ -363,10 +363,21 @@ impl LatticeIndex {
 #[cfg(feature = "python")]
 mod python {
     use super::{LatticeIndex, PACKED_CELL_WIDTH, PackedCell, SCORE_EVENT_WIDTH, nearest_signals};
+    use crate::atlas::AtlasOrigin;
+    use crate::atlas::{
+        AtlasLimits, AtlasRuntime, ObjectiveBelief, RECOVERY_EVIDENCE_SCHEMA, RecoveryOverlay,
+        RecoveryQuery, advisory_spatial_feature_names,
+    };
+    use crate::dynstate::{
+        DYN_EVENT_NAMES, DYN_EVENT_SCHEMA, DYN_FEATURE_NAMES, DYN_FEATURE_SCHEMA_SHA256,
+        DynEventKind, DynFence, DynIngestBatch, DynIngestReport, DynLimits, DynNamedEvent,
+        DynResult, DynRuntime, DynRuntimeQuery, ThermalSignal,
+    };
     use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
     use pyo3::exceptions::PyValueError;
     use pyo3::prelude::*;
-    use pyo3::types::PyBytes;
+    use pyo3::types::{PyBytes, PyDict};
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn packed_rows(cells: PyReadonlyArray2<'_, f32>) -> PyResult<Vec<PackedCell>> {
         let view = cells.as_array();
@@ -402,6 +413,724 @@ mod python {
     #[pyclass(name = "LatticeIndex", module = "q2_lattice_rs")]
     struct PyLatticeIndex {
         inner: LatticeIndex,
+    }
+
+    #[pyclass(name = "AtlasRuntime", module = "q2_lattice_rs")]
+    struct PyAtlasRuntime {
+        inner: AtlasRuntime,
+    }
+
+    #[pyclass(name = "DynRuntime", module = "q2_lattice_rs")]
+    struct PyDynRuntime {
+        inner: DynRuntime,
+    }
+
+    fn dyn_ingest_report<'py>(
+        py: Python<'py>,
+        report: DynIngestReport,
+        snapshot_sha256: &str,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let result = PyDict::new(py);
+        result.set_item("schema", DYN_EVENT_SCHEMA)?;
+        result.set_item("events_applied", report.events_applied)?;
+        result.set_item("cells_updated", report.cells_updated)?;
+        result.set_item("decay_intervals", report.decay_intervals)?;
+        result.set_item("environment_steps", report.environment_steps)?;
+        result.set_item("client_life_epoch", report.client_life_epoch)?;
+        result.set_item("server_frame", report.server_frame)?;
+        result.set_item("last_event_id", report.last_event_id)?;
+        result.set_item("snapshot_sha256", snapshot_sha256)?;
+        Ok(result)
+    }
+
+    #[pymethods]
+    impl PyDynRuntime {
+        #[new]
+        #[allow(clippy::too_many_arguments)]
+        fn new(
+            snapshot: &[u8],
+            atlas_sha256: &str,
+            map_sha256: &str,
+            origin: [i64; 3],
+            map_epoch: u64,
+            client_id: u32,
+            client_count: u32,
+            environment_steps: u64,
+        ) -> PyResult<Self> {
+            let fence = DynFence {
+                atlas_sha256: digest_from_hex(atlas_sha256, "Atlas SHA-256")?,
+                map_sha256: digest_from_hex(map_sha256, "map SHA-256")?,
+                origin: AtlasOrigin(origin),
+                map_epoch,
+            };
+            let inner = DynRuntime::from_snapshot(
+                snapshot,
+                fence,
+                client_id,
+                client_count,
+                environment_steps,
+                &DynLimits::default(),
+            )
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            Ok(Self { inner })
+        }
+
+        #[staticmethod]
+        #[allow(clippy::too_many_arguments)]
+        fn from_checkpoint(
+            checkpoint: &[u8],
+            checkpoint_sha256: &str,
+            atlas_sha256: &str,
+            map_sha256: &str,
+            origin: [i64; 3],
+            map_epoch: u64,
+            client_id: u32,
+            client_count: u32,
+            environment_steps: u64,
+            client_life_epoch: u64,
+            server_frame: u64,
+        ) -> PyResult<Self> {
+            let fence = DynFence {
+                atlas_sha256: digest_from_hex(atlas_sha256, "Atlas SHA-256")?,
+                map_sha256: digest_from_hex(map_sha256, "map SHA-256")?,
+                origin: AtlasOrigin(origin),
+                map_epoch,
+            };
+            let inner = DynRuntime::from_checkpoint(
+                checkpoint,
+                digest_from_hex(checkpoint_sha256, "checkpoint SHA-256")?,
+                fence,
+                client_id,
+                client_count,
+                environment_steps,
+                client_life_epoch,
+                server_frame,
+                &DynLimits::default(),
+            )
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            Ok(Self { inner })
+        }
+
+        #[getter]
+        fn snapshot_sha256(&self) -> &str {
+            self.inner.snapshot_sha256()
+        }
+
+        #[getter]
+        fn atlas_sha256(&self) -> String {
+            digest_hex(&self.inner.state().fence().atlas_sha256)
+        }
+
+        #[getter]
+        fn map_sha256(&self) -> String {
+            digest_hex(&self.inner.state().fence().map_sha256)
+        }
+
+        #[getter]
+        fn origin(&self) -> [i64; 3] {
+            self.inner.state().fence().origin.0
+        }
+
+        #[getter]
+        fn map_epoch(&self) -> u64 {
+            self.inner.state().fence().map_epoch
+        }
+
+        #[getter]
+        fn client_id(&self) -> u32 {
+            self.inner.state().client_id()
+        }
+
+        #[getter]
+        fn client_count(&self) -> u32 {
+            self.inner.state().client_count()
+        }
+
+        #[getter]
+        fn environment_steps(&self) -> u64 {
+            self.inner.state().environment_steps()
+        }
+
+        #[getter]
+        fn client_life_epoch(&self) -> u64 {
+            self.inner.client_life_epoch()
+        }
+
+        #[getter]
+        fn server_frame(&self) -> u64 {
+            self.inner.server_frame()
+        }
+
+        #[getter]
+        fn last_event_id(&self) -> u64 {
+            self.inner.last_event_id()
+        }
+
+        #[getter]
+        fn accepted_event_count(&self) -> u64 {
+            self.inner.accepted_event_count()
+        }
+
+        #[getter]
+        fn checkpoint_sha256(&self) -> PyResult<String> {
+            self.inner
+                .checkpoint_sha256()
+                .map_err(|error| PyValueError::new_err(error.to_string()))
+        }
+
+        fn snapshot_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+            let bytes = self
+                .inner
+                .snapshot_bytes()
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            Ok(PyBytes::new(py, &bytes))
+        }
+
+        fn checkpoint_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+            let bytes = self
+                .inner
+                .checkpoint_bytes()
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            Ok(PyBytes::new(py, &bytes))
+        }
+
+        /// Qualification/checkpoint primitive. Production frame assembly uses
+        /// `commit_frame`, because split ingest/query calls are not atomic.
+        #[allow(clippy::too_many_arguments)]
+        fn ingest_events<'py>(
+            &mut self,
+            py: Python<'py>,
+            atlas_sha256: &str,
+            map_sha256: &str,
+            origin: [i64; 3],
+            map_epoch: u64,
+            client_id: u32,
+            client_life_epoch: u64,
+            server_frame: u64,
+            expected_environment_steps: u64,
+            environment_steps: u64,
+            events: Vec<(u64, String, [f64; 3])>,
+        ) -> PyResult<Bound<'py, PyDict>> {
+            let fence = DynFence {
+                atlas_sha256: digest_from_hex(atlas_sha256, "Atlas SHA-256")?,
+                map_sha256: digest_from_hex(map_sha256, "map SHA-256")?,
+                origin: AtlasOrigin(origin),
+                map_epoch,
+            };
+            let events = events
+                .into_iter()
+                .map(|(event_id, kind, world_position)| {
+                    Ok(DynNamedEvent {
+                        event_id,
+                        kind: DynEventKind::parse(&kind)?,
+                        world_position,
+                    })
+                })
+                .collect::<DynResult<Vec<_>>>()
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            let report = self
+                .inner
+                .ingest_events(DynIngestBatch {
+                    fence,
+                    client_id,
+                    client_life_epoch,
+                    server_frame,
+                    expected_environment_steps,
+                    environment_steps,
+                    events: &events,
+                })
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            dyn_ingest_report(py, report, self.inner.snapshot_sha256())
+        }
+
+        #[pyo3(signature = (
+            atlas_sha256,
+            map_sha256,
+            origin,
+            map_epoch,
+            client_id,
+            client_life_epoch,
+            server_frame,
+            expected_environment_steps,
+            environment_steps,
+            events,
+            position,
+            yaw_degrees,
+            survivability,
+            thermal=None,
+            search_radius=2048.0,
+            score_scale=8.0
+        ))]
+        #[allow(clippy::too_many_arguments)]
+        fn commit_frame<'py>(
+            &mut self,
+            py: Python<'py>,
+            atlas_sha256: &str,
+            map_sha256: &str,
+            origin: [i64; 3],
+            map_epoch: u64,
+            client_id: u32,
+            client_life_epoch: u64,
+            server_frame: u64,
+            expected_environment_steps: u64,
+            environment_steps: u64,
+            events: Vec<(u64, String, [f64; 3])>,
+            position: [f64; 3],
+            yaw_degrees: f32,
+            survivability: [f32; 3],
+            thermal: Option<(u64, [f64; 3], f32, u64)>,
+            search_radius: f32,
+            score_scale: f32,
+        ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyArray1<f32>>, f32)> {
+            let fence = DynFence {
+                atlas_sha256: digest_from_hex(atlas_sha256, "Atlas SHA-256")?,
+                map_sha256: digest_from_hex(map_sha256, "map SHA-256")?,
+                origin: AtlasOrigin(origin),
+                map_epoch,
+            };
+            let events = events
+                .into_iter()
+                .map(|(event_id, kind, world_position)| {
+                    Ok(DynNamedEvent {
+                        event_id,
+                        kind: DynEventKind::parse(&kind)?,
+                        world_position,
+                    })
+                })
+                .collect::<DynResult<Vec<_>>>()
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            let thermal =
+                thermal.map(
+                    |(target_id, world_point, heat, observed_tick)| ThermalSignal {
+                        target_id,
+                        world_point,
+                        heat,
+                        observed_tick,
+                    },
+                );
+            let (report, block) = self
+                .inner
+                .commit_frame(
+                    DynIngestBatch {
+                        fence,
+                        client_id,
+                        client_life_epoch,
+                        server_frame,
+                        expected_environment_steps,
+                        environment_steps,
+                        events: &events,
+                    },
+                    DynRuntimeQuery {
+                        map_epoch,
+                        client_id,
+                        client_life_epoch,
+                        environment_steps,
+                        server_frame,
+                        world_position: position,
+                        yaw_degrees,
+                        thermal,
+                        survivability,
+                        search_radius,
+                        score_scale,
+                    },
+                )
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            let result = dyn_ingest_report(py, report, self.inner.snapshot_sha256())?;
+            let features = PyArray1::from_slice(py, &block.values);
+            Ok((result, features, block.nearest_death_score))
+        }
+
+        #[pyo3(signature = (
+            position,
+            yaw_degrees,
+            map_epoch,
+            client_id,
+            client_life_epoch,
+            environment_steps,
+            server_frame,
+            survivability,
+            thermal=None,
+            search_radius=2048.0,
+            score_scale=8.0
+        ))]
+        /// Qualification/checkpoint primitive. Production frame assembly uses
+        /// `commit_frame`, because split ingest/query calls are not atomic.
+        #[allow(clippy::too_many_arguments)]
+        fn feature_block<'py>(
+            &self,
+            py: Python<'py>,
+            position: [f64; 3],
+            yaw_degrees: f32,
+            map_epoch: u64,
+            client_id: u32,
+            client_life_epoch: u64,
+            environment_steps: u64,
+            server_frame: u64,
+            survivability: [f32; 3],
+            thermal: Option<(u64, [f64; 3], f32, u64)>,
+            search_radius: f32,
+            score_scale: f32,
+        ) -> PyResult<Bound<'py, PyArray1<f32>>> {
+            let thermal =
+                thermal.map(
+                    |(target_id, world_point, heat, observed_tick)| ThermalSignal {
+                        target_id,
+                        world_point,
+                        heat,
+                        observed_tick,
+                    },
+                );
+            let block = py
+                .detach(|| {
+                    self.inner.feature_block(DynRuntimeQuery {
+                        map_epoch,
+                        client_id,
+                        client_life_epoch,
+                        environment_steps,
+                        server_frame,
+                        world_position: position,
+                        yaw_degrees,
+                        thermal,
+                        survivability,
+                        search_radius,
+                        score_scale,
+                    })
+                })
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            Ok(PyArray1::from_slice(py, &block.values))
+        }
+    }
+
+    fn digest_from_hex(value: &str, label: &str) -> PyResult<[u8; 32]> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(PyValueError::new_err(format!(
+                "{label} must contain exactly 64 lowercase hexadecimal characters"
+            )));
+        }
+        let mut result = [0_u8; 32];
+        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+            result[index] = u8::from_str_radix(
+                std::str::from_utf8(pair).expect("validated ASCII hexadecimal"),
+                16,
+            )
+            .map_err(|_| PyValueError::new_err(format!("{label} is invalid")))?;
+        }
+        Ok(result)
+    }
+
+    fn digest_hex(value: &[u8; 32]) -> String {
+        value.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[pymethods]
+    impl PyAtlasRuntime {
+        #[new]
+        #[allow(clippy::too_many_arguments)]
+        fn new(
+            manifest: &[u8],
+            artifact_name: &str,
+            atlas: &[u8],
+            objective_artifact_name: &str,
+            objectives: &[u8],
+            bsp: &[u8],
+            expected_map_id: &str,
+            map_epoch: u64,
+        ) -> PyResult<Self> {
+            let inner = AtlasRuntime::from_bytes(
+                manifest,
+                artifact_name,
+                atlas,
+                objective_artifact_name,
+                objectives,
+                bsp,
+                expected_map_id,
+                map_epoch,
+                &AtlasLimits::default(),
+            )
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            Ok(Self { inner })
+        }
+
+        #[getter]
+        fn map_id(&self) -> &str {
+            &self.inner.manifest().bsp.canonical_map_id
+        }
+
+        #[getter]
+        fn map_epoch(&self) -> u64 {
+            self.inner.map_epoch()
+        }
+
+        #[getter]
+        fn atlas_sha256(&self) -> &str {
+            self.inner.atlas_sha256()
+        }
+
+        #[getter]
+        fn atlas_manifest_sha256(&self) -> &str {
+            self.inner.manifest_sha256()
+        }
+
+        #[getter]
+        fn objective_sha256(&self) -> &str {
+            self.inner.objective_sha256()
+        }
+
+        #[getter]
+        fn resident_bytes(&self) -> usize {
+            self.inner.resident_bytes_estimate()
+        }
+
+        fn query_counters(&self) -> (u64, u64, u64, u64, u64) {
+            let counters = self.inner.query_counters();
+            (
+                counters.accepted_queries,
+                counters.atlas_lookup_ns,
+                counters.recovery_ns,
+                counters.guide_ns,
+                counters.total_ns,
+            )
+        }
+
+        #[pyo3(signature = (
+            position,
+            yaw_degrees,
+            map_epoch,
+            blocked_nodes=Vec::new(),
+            dynamic_penalties=Vec::new(),
+            enabled_mover_blockers=Vec::new(),
+            time_to_impact_seconds=None
+        ))]
+        #[allow(clippy::too_many_arguments)]
+        fn recovery_features<'py>(
+            &self,
+            py: Python<'py>,
+            position: [f64; 3],
+            yaw_degrees: f32,
+            map_epoch: u64,
+            blocked_nodes: Vec<[i32; 3]>,
+            dynamic_penalties: Vec<([i32; 3], u32)>,
+            enabled_mover_blockers: Vec<u32>,
+            time_to_impact_seconds: Option<f32>,
+        ) -> PyResult<Bound<'py, PyArray1<f32>>> {
+            let overlay =
+                recovery_overlay(blocked_nodes, dynamic_penalties, enabled_mover_blockers);
+            let block = py
+                .detach(|| {
+                    self.inner.recovery(
+                        map_epoch,
+                        RecoveryQuery {
+                            world_position: position,
+                            yaw_degrees,
+                            overlay: &overlay,
+                            time_to_impact_seconds,
+                        },
+                    )
+                })
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            Ok(PyArray1::from_slice(py, &block.values))
+        }
+
+        #[pyo3(signature = (
+            position,
+            yaw_degrees,
+            map_epoch,
+            client_id,
+            client_epoch,
+            server_frame,
+            blocked_nodes=Vec::new(),
+            dynamic_penalties=Vec::new(),
+            enabled_mover_blockers=Vec::new(),
+            time_to_impact_seconds=None
+        ))]
+        #[allow(clippy::too_many_arguments)]
+        fn recovery_features_with_evidence<'py>(
+            &self,
+            py: Python<'py>,
+            position: [f64; 3],
+            yaw_degrees: f32,
+            map_epoch: u64,
+            client_id: u32,
+            client_epoch: u64,
+            server_frame: u64,
+            blocked_nodes: Vec<[i32; 3]>,
+            dynamic_penalties: Vec<([i32; 3], u32)>,
+            enabled_mover_blockers: Vec<u32>,
+            time_to_impact_seconds: Option<f32>,
+        ) -> PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyDict>)> {
+            if client_epoch == 0 {
+                return Err(PyValueError::new_err(
+                    "recovery evidence client_epoch must be nonzero",
+                ));
+            }
+            let overlay =
+                recovery_overlay(blocked_nodes, dynamic_penalties, enabled_mover_blockers);
+            let block = py
+                .detach(|| {
+                    self.inner.recovery(
+                        map_epoch,
+                        RecoveryQuery {
+                            world_position: position,
+                            yaw_degrees,
+                            overlay: &overlay,
+                            time_to_impact_seconds,
+                        },
+                    )
+                })
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            let evidence = PyDict::new(py);
+            evidence.set_item("schema", RECOVERY_EVIDENCE_SCHEMA)?;
+            evidence.set_item("atlas_sha256", self.inner.atlas_sha256())?;
+            evidence.set_item("map_epoch", self.inner.map_epoch())?;
+            evidence.set_item("client_id", client_id)?;
+            evidence.set_item("client_epoch", client_epoch)?;
+            evidence.set_item("server_frame", server_frame)?;
+            evidence.set_item(
+                "l1_index",
+                [
+                    block.evidence.l1_index.x,
+                    block.evidence.l1_index.y,
+                    block.evidence.l1_index.z,
+                ],
+            )?;
+            evidence.set_item("cost_to_safety_q8", block.evidence.cost_to_safety_q8)?;
+            evidence.set_item(
+                "signed_safe_clearance_q8",
+                block.evidence.signed_safe_clearance_q8,
+            )?;
+            evidence.set_item("hazard_types", block.evidence.hazard_types)?;
+            evidence.set_item("hazard_severity", block.evidence.hazard_severity)?;
+            evidence.set_item("atlas_region_id", block.evidence.atlas_region_id)?;
+            evidence.set_item("hazard_component_id", block.evidence.hazard_component_id)?;
+            evidence.set_item(
+                "hazard_component_epoch",
+                block
+                    .evidence
+                    .hazard_component_epoch(self.inner.map_epoch()),
+            )?;
+            evidence.set_item("confidence", block.evidence.confidence)?;
+            Ok((PyArray1::from_slice(py, &block.values), evidence))
+        }
+
+        fn guide_features<'py>(
+            &self,
+            py: Python<'py>,
+            position: [f64; 3],
+            yaw_degrees: f32,
+            map_epoch: u64,
+            beliefs: Vec<(u32, f32)>,
+        ) -> PyResult<Bound<'py, PyArray1<f32>>> {
+            let beliefs = objective_beliefs(beliefs);
+            let block = py
+                .detach(|| self.inner.guide(map_epoch, position, yaw_degrees, &beliefs))
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            Ok(PyArray1::from_slice(py, &block.values))
+        }
+
+        #[pyo3(signature = (
+            position,
+            yaw_degrees,
+            map_epoch,
+            beliefs,
+            blocked_nodes=Vec::new(),
+            dynamic_penalties=Vec::new(),
+            enabled_mover_blockers=Vec::new(),
+            time_to_impact_seconds=None
+        ))]
+        #[allow(clippy::too_many_arguments)]
+        fn advisory_spatial_features<'py>(
+            &self,
+            py: Python<'py>,
+            position: [f64; 3],
+            yaw_degrees: f32,
+            map_epoch: u64,
+            beliefs: Vec<(u32, f32)>,
+            blocked_nodes: Vec<[i32; 3]>,
+            dynamic_penalties: Vec<([i32; 3], u32)>,
+            enabled_mover_blockers: Vec<u32>,
+            time_to_impact_seconds: Option<f32>,
+        ) -> PyResult<Bound<'py, PyArray1<f32>>> {
+            let beliefs = objective_beliefs(beliefs);
+            let overlay =
+                recovery_overlay(blocked_nodes, dynamic_penalties, enabled_mover_blockers);
+            let values = py
+                .detach(|| {
+                    self.inner.advisory_spatial_features(
+                        map_epoch,
+                        RecoveryQuery {
+                            world_position: position,
+                            yaw_degrees,
+                            overlay: &overlay,
+                            time_to_impact_seconds,
+                        },
+                        &beliefs,
+                    )
+                })
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            Ok(PyArray1::from_slice(py, &values))
+        }
+    }
+
+    fn recovery_overlay(
+        blocked_nodes: Vec<[i32; 3]>,
+        dynamic_penalties: Vec<([i32; 3], u32)>,
+        enabled_mover_blockers: Vec<u32>,
+    ) -> RecoveryOverlay {
+        RecoveryOverlay {
+            blocked_nodes: blocked_nodes
+                .into_iter()
+                .map(|value| crate::atlas::GridIndex::new(value[0], value[1], value[2]))
+                .collect::<BTreeSet<_>>(),
+            dynamic_penalty_q8: dynamic_penalties
+                .into_iter()
+                .map(|(value, penalty)| {
+                    (
+                        crate::atlas::GridIndex::new(value[0], value[1], value[2]),
+                        penalty,
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+            enabled_mover_blockers: enabled_mover_blockers.into_iter().collect(),
+        }
+    }
+
+    fn objective_beliefs(values: Vec<(u32, f32)>) -> Vec<ObjectiveBelief> {
+        values
+            .into_iter()
+            .map(|(objective_id, availability_belief)| ObjectiveBelief {
+                objective_id,
+                availability_belief,
+            })
+            .collect()
+    }
+
+    #[pyfunction]
+    fn atlas_advisory_feature_names() -> Vec<&'static str> {
+        advisory_spatial_feature_names()
+    }
+
+    #[pyfunction]
+    fn dyn_feature_names() -> Vec<&'static str> {
+        DYN_FEATURE_NAMES.to_vec()
+    }
+
+    #[pyfunction]
+    fn dyn_feature_schema_sha256() -> &'static str {
+        DYN_FEATURE_SCHEMA_SHA256
+    }
+
+    #[pyfunction]
+    fn dyn_event_names() -> Vec<&'static str> {
+        DYN_EVENT_NAMES.to_vec()
+    }
+
+    #[pyfunction]
+    fn dyn_event_schema() -> &'static str {
+        DYN_EVENT_SCHEMA
     }
 
     #[pymethods]
@@ -524,7 +1253,14 @@ mod python {
     #[pymodule]
     fn q2_lattice_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.add_function(wrap_pyfunction!(nearest_signals_py, module)?)?;
+        module.add_function(wrap_pyfunction!(atlas_advisory_feature_names, module)?)?;
+        module.add_function(wrap_pyfunction!(dyn_feature_names, module)?)?;
+        module.add_function(wrap_pyfunction!(dyn_feature_schema_sha256, module)?)?;
+        module.add_function(wrap_pyfunction!(dyn_event_names, module)?)?;
+        module.add_function(wrap_pyfunction!(dyn_event_schema, module)?)?;
         module.add_class::<PyLatticeIndex>()?;
+        module.add_class::<PyAtlasRuntime>()?;
+        module.add_class::<PyDynRuntime>()?;
         Ok(())
     }
 }

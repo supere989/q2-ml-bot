@@ -13,11 +13,12 @@ sys.path.insert(0, str(__import__('pathlib').Path(__file__).parent.parent))
 from harness.protocol import (
     ACT_FMT,
     ACT_SIZE,
-    EXT_OBS,
-    OBS_BASE_DIM,
-    OBS_EXT_DIM,
+    OBS_DIM,
+    OBS_DYN_DIM,
+    OBS_FACTUAL_DIM,
     OBS_FMT,
-    OBS_SESSION_MEMORY_DIM,
+    OBS_OBJECTIVES_DIM,
+    OBS_RECOVERY_DIM,
     OBS_SIZE,
 )
 
@@ -25,9 +26,8 @@ print(f"OBS_SIZE (Python): {OBS_SIZE} bytes")
 print(f"ACT_SIZE (Python): {ACT_SIZE} bytes")
 
 # Verify obs vector dimension
-from models.policy import OBS_DIM
 import numpy as np
-from harness.protocol import Observation, ML_MAX_ENTITIES, ML_RAY_COUNT, ML_HOOK_ZONES
+from harness.protocol import ML_MAX_ENTITIES, ML_RAY_COUNT, ML_HOOK_ZONES
 
 base_size = (
     10                            # self_state
@@ -37,8 +37,8 @@ base_size = (
     + 5                           # audio
     + 2                           # normalised yaw/pitch
 )
-assert base_size == OBS_BASE_DIM, f"base OBS_DIM mismatch: {base_size} vs {OBS_BASE_DIM}"
-vec_size = base_size + OBS_SESSION_MEMORY_DIM + (OBS_EXT_DIM if EXT_OBS else 0)
+assert base_size == 185, f"engine sensor dimension mismatch: {base_size}"
+vec_size = OBS_FACTUAL_DIM + OBS_DYN_DIM + OBS_RECOVERY_DIM + OBS_OBJECTIVES_DIM
 assert vec_size == OBS_DIM, f"OBS_DIM mismatch: {vec_size} vs {OBS_DIM}"
 print(f"OBS_DIM vector: {OBS_DIM} floats ✓")
 
@@ -53,20 +53,24 @@ dummy_act = bytes(ACT_SIZE)
 vals_act = s.unpack(ACT_FMT, dummy_act)
 print(f"ACT unpack: {len(vals_act)} fields ✓")
 
-# Test policy instantiation
-import torch
-from models.policy import Q2BotPolicy
-pol = Q2BotPolicy()
-print(f"Policy params: {pol.param_count():,}")
-
-obs  = torch.zeros(1, 1, OBS_DIM)
-hx   = pol.init_hidden(1)
-act_params, val, hx2 = pol(obs, hx)
-print(f"Policy forward: value shape {val.shape} ✓")
-
-import numpy as np
-act_np, v, lp, _ = pol.act(np.zeros(OBS_DIM, dtype=np.float32), hx)
-print(f"Policy act log_prob: {lp:.4f} ✓")
-print(f"Policy act: action shape {act_np.shape} ✓")
+# Test policy instantiation when the ML environment is installed. The wire
+# parity checks above intentionally remain usable on game/client build hosts.
+try:
+    import torch
+    from models.multires_policy import MultiresQ2BotPolicy
+except ImportError:
+    print("Policy forward: skipped (PyTorch unavailable on this build host)")
+else:
+    pol = MultiresQ2BotPolicy()
+    print(f"Policy params: {sum(value.numel() for value in pol.parameters()):,}")
+    obs = torch.zeros(1, 1, OBS_DIM)
+    hx = pol.init_hidden(1)
+    _act_params, val, _hx2 = pol(obs, hx)
+    print(f"Policy forward: value shape {val.shape} ✓")
+    act_np, _v, lp, _ = pol.act_batch(
+        np.zeros((1, OBS_DIM), dtype=np.float32), [hx], deterministic=True
+    )
+    print(f"Policy act log_prob: {float(lp[0]):.4f} ✓")
+    print(f"Policy act: action shape {act_np.shape} ✓")
 
 print("\nAll checks passed.")

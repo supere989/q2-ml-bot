@@ -15,14 +15,16 @@ from pathlib import Path
 
 try:
     from tools.map_bundle import (
-        artifact_names,
+        MAP_BUNDLE_V3,
+        declared_artifact_names,
         install_bundle,
         validate_manifest,
         verify_payloads,
     )
 except ModuleNotFoundError:  # direct execution from tools/
     from map_bundle import (
-        artifact_names,
+        MAP_BUNDLE_V3,
+        declared_artifact_names,
         install_bundle,
         validate_manifest,
         verify_payloads,
@@ -34,9 +36,18 @@ ROOT = Path(__file__).resolve().parent.parent
 class FarmMapGenerator:
     """Download and atomically install checksum-attested farm maps."""
 
-    def __init__(self, base_url: str, prefix: str = "mllive"):
+    def __init__(
+        self,
+        base_url: str,
+        prefix: str = "mllive",
+        *,
+        allow_bundle_v3: bool = False,
+    ):
         self.url = f"{base_url.rstrip('/')}/next.zip"
         self.prefix = prefix
+        # Bundle v3 is an isolated staging capability until all runtime
+        # consumers cut over atomically. Public/default consumers stay v2-only.
+        self.allow_bundle_v3 = allow_bundle_v3
         self.q2_root = Path(os.environ.get("Q2_ROOT", str(ROOT.parent / "q2_lithium_merge")))
         self._thread = None
         self._result = None
@@ -63,14 +74,20 @@ class FarmMapGenerator:
                 manifest_payload = bundle.read("manifest.json")
                 manifest = json.loads(manifest_payload)
                 name = validate_manifest(manifest)
+                if (
+                    manifest["bundle_version"] == MAP_BUNDLE_V3
+                    and not self.allow_bundle_v3
+                ):
+                    raise ValueError("bundle v3 is disabled for this consumer")
                 if not self._valid_name(name):
                     raise ValueError(f"invalid farm map name {name!r}")
-                expected_members = {"manifest.json", *artifact_names(name)}
+                artifact_members = declared_artifact_names(manifest)
+                expected_members = {"manifest.json", *artifact_members}
                 if set(members) != expected_members:
                     raise ValueError("map bundle archive member set is invalid")
                 payloads = {
                     filename: bundle.read(filename)
-                    for filename in artifact_names(name)
+                    for filename in artifact_members
                 }
                 verify_payloads(manifest, payloads)
             install_dir = self.q2_root / "baseq2" / "maps"

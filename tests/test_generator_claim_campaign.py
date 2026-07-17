@@ -1833,9 +1833,9 @@ def test_validate_uses_separate_explicit_analysis_root_in_declared_order(
     ]
     assert all(call[2] == b1_gate for call in calls)
     assert all(call[0].parent != call[1].parent for call in calls)
-    assert (claims / f"{expected_names[0]}.routes.json").read_bytes() != (
-        analysis / f"{expected_names[0]}.routes.json"
-    ).read_bytes()
+    assert (claims / f"{expected_names[0]}.routes.json").is_file()
+    assert (analysis / f"{expected_names[0]}.objectives.json").is_file()
+    assert not (analysis / f"{expected_names[0]}.routes.json").exists()
 
 
 def test_validate_rejects_same_count_analysis_substitution_before_validator(

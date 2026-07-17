@@ -477,7 +477,7 @@ def test_spawn_blocker_append_is_centralized_in_admission_api() -> None:
                 pop_owners.append(node.name)
 
     assert append_owners == ["_admit_spawn_blocker"]
-    assert pop_owners == ["_place_objectives"]
+    assert pop_owners == ["_rollback_spawn_blocker"]
 
 
 @pytest.mark.parametrize("seed", (71437202, 71437203))

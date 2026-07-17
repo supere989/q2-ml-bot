@@ -7,6 +7,7 @@ import pytest
 from harness.runtime_attestation import (
     AttestationError,
     build_runtime_manifest,
+    describe_observation,
     semantic_digest,
     verify_runtime_manifest,
 )
@@ -28,11 +29,11 @@ def _fixture_tree(tmp_path: Path, label: str):
     _write(rust, b"same-rust")
     _write(source / "harness" / "runtime.py", b'KEY = "R_KILL"\n')
     _write(source / "models" / "policy.py", b"POLICY = 2\n")
-    _write(source / "train" / "ppo.py", b'EXT = "Q2_EXT_OBS"\n')
+    _write(source / "train" / "ppo.py", b'GEN = "Q2_PROTOCOL_GENERATION"\n')
     return root, source, rust
 
 
-def _policy(obs_dim=219):
+def _policy(obs_dim=298):
     state = {
         "encoder.weight": np.zeros((4, obs_dim), dtype=np.float32),
         "actor.weight": np.zeros((8, 4), dtype=np.float32),
@@ -47,20 +48,11 @@ def _policy(obs_dim=219):
 
 
 def _observation():
-    return {
-        "base_dim": 185,
-        "session_memory_dim": 24,
-        "extension_dim": 10,
-        "extension_enabled": True,
-        "total_dim": 219,
-        "observation_packet_bytes": 1,
-        "action_packet_bytes": 1,
-    }
+    return describe_observation({})
 
 
 def _build(root, source, rust, *, environment=None, revision="abc123", policy=None):
     env = {
-        "Q2_EXT_OBS": "1",
         "Q2_RUST_LATTICE": "1",
         "R_KILL": "2.0",
         "Q2_ROOT": str(root),  # operational paths are intentionally excluded
@@ -81,11 +73,22 @@ def _build(root, source, rust, *, environment=None, revision="abc123", policy=No
     )
 
 
+def test_retired_width_environment_cannot_select_an_observation_layout():
+    baseline = describe_observation({})
+    assert describe_observation({"Q2_EXT_OBS": "0"}) == baseline
+    assert describe_observation({"Q2_EXT_OBS": "1"}) == baseline
+    assert baseline["total_dim"] == 298
+
+
 def test_manifest_is_path_independent_and_covers_semantic_inputs(tmp_path):
     first = _fixture_tree(tmp_path, "host-a")
     second = _fixture_tree(tmp_path, "host-b")
-    left = _build(*first, environment={"Q2_SOURCE_REVISION": "host-a-value"})
-    right = _build(*second, environment={"Q2_SOURCE_REVISION": "host-b-value"})
+    left = _build(*first, environment={
+        "Q2_SOURCE_REVISION": "host-a-value", "Q2_EXT_OBS": "0",
+    })
+    right = _build(*second, environment={
+        "Q2_SOURCE_REVISION": "host-b-value", "Q2_EXT_OBS": "1",
+    })
 
     assert left["manifest_sha256"] == right["manifest_sha256"]
     assert left["diagnostics"]["q2_root"] != right["diagnostics"]["q2_root"]
@@ -98,12 +101,14 @@ def test_manifest_is_path_independent_and_covers_semantic_inputs(tmp_path):
     assert semantic["artifacts"]["game_module"]["sha256"]
     assert semantic["artifacts"]["rust_lattice"]["sha256"]
     assert len(semantic["maps"][0]["files"]) == 2
-    assert semantic["observation"]["total_dim"] == 219
+    assert semantic["observation"]["total_dim"] == 298
+    assert semantic["observation"]["action_cardinalities"]["vertical_intent"] == 3
     assert semantic["policy"]["state_schema_sha256"]
     assert semantic["environment"]["R_KILL"] == "2.0"
     assert "Q2_ROOT" not in semantic["environment"]
     assert "Q2_ROLLOUT_TOKEN" not in semantic["environment"]
     assert "Q2_SOURCE_REVISION" not in semantic["environment"]
+    assert "Q2_EXT_OBS" not in semantic["environment"]
     assert semantic["source"]["git_revision"] == "abc123"
 
 
@@ -116,7 +121,7 @@ def test_verification_reports_artifact_reward_policy_and_revision_drift(tmp_path
         *fixture,
         environment={"R_KILL": "3.0"},
         revision="def456",
-        policy=_policy(obs_dim=219) | {"architecture": "test.PolicyV3"},
+        policy=_policy(obs_dim=298) | {"architecture": "test.PolicyV3"},
     )
     result = verify_runtime_manifest(current, expected=expected)
     assert not result.valid
@@ -136,7 +141,7 @@ def test_digest_and_hmac_reject_tampering(tmp_path):
         rust_extension=fixture[2],
         source_revision="abc123",
         runtime_config={},
-        environment={"Q2_EXT_OBS": "1", "Q2_RUST_LATTICE": "1"},
+        environment={"Q2_RUST_LATTICE": "1"},
         observation_descriptor=_observation(),
         policy_descriptor=_policy(),
         hmac_key=b"shared-secret",
@@ -166,7 +171,7 @@ def test_digest_and_hmac_reject_tampering(tmp_path):
             rust_extension=fixture[2],
             source_revision="abc123",
             runtime_config={},
-            environment={"Q2_EXT_OBS": "1", "Q2_RUST_LATTICE": "1"},
+            environment={"Q2_RUST_LATTICE": "1"},
             observation_descriptor=_observation(),
             policy_descriptor=_policy(),
             hmac_key=b"",

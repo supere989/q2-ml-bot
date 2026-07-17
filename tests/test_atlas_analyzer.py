@@ -24,6 +24,7 @@ from harness.atlas_analyzer import (
     NavNode,
     OracleProcess,
     _MoverDependencyIndex,
+    _apply_static_drop_hazards,
     _apply_stock_drop_hazards,
     _add_exact_platform_navigation,
     _atlas_channels,
@@ -47,6 +48,7 @@ from harness.atlas_analyzer import (
     _movement_edge_stance,
     _movement_requests_for_source,
     _normalized_analysis_manifest,
+    _objective_artifact,
     _process_tree_rss_bytes,
     _run_measured_process,
     _surface_candidate_scope,
@@ -306,6 +308,60 @@ def test_authored_item_destinations_include_q2_point_item_classes() -> None:
     assert _authored_item_destinations(metadata) == [
         (1.0, 2.0, 3.0), (4.0, 5.0, 6.0), (7.0, 8.0, 9.0),
     ]
+
+
+def test_objective_artifact_is_versioned_atlas_bound_and_uses_admitted_l1() -> None:
+    entities = (
+        EntityMetadata(1, "info_player_deathmatch", (("origin", "0 0 0"),)),
+        EntityMetadata(2, "weapon_railgun", (("origin", "32 0 24"),)),
+    )
+    nodes = {
+        (0, 0, 0): NavNode(
+            (0, 0, 0), (0.0, 0.0, 9.0), True, True, True, 0, (0.0, 0.0, 1.0),
+        ),
+        (2, 0, 1): NavNode(
+            (2, 0, 1), (32.0, 0.0, 24.0), True, True, True, 0, (0.0, 0.0, 1.0),
+        ),
+    }
+    artifact = _objective_artifact(
+        SimpleNamespace(entities=entities, sha256="ab" * 32),
+        nodes,
+        {1: (0, 0, 0)},
+        (0, 0, 0),
+        "objective-fixture",
+        "cd" * 32,
+    )
+    assert artifact["schema"] == "q2-atlas-objectives-v1"
+    assert artifact["canonical_map_id"] == "objective-fixture"
+    assert artifact["atlas_sha256"] == "cd" * 32
+    assert artifact["objectives"] == [
+        {
+            "class": "spawn_egress",
+            "classname": "info_player_deathmatch",
+            "confidence": 65535,
+            "l1_index": [0, 0, 0],
+            "objective_id": 1,
+            "risk": 0,
+            "world_milliunits": [0, 0, 9000],
+        },
+        {
+            "class": "weapon",
+            "classname": "weapon_railgun",
+            "confidence": 65535,
+            "l1_index": [2, 0, 1],
+            "objective_id": 2,
+            "risk": 0,
+            "world_milliunits": [32000, 0, 24000],
+        },
+    ]
+
+
+def test_unknown_objective_class_fails_instead_of_disappearing() -> None:
+    metadata = SimpleNamespace(entities=(
+        EntityMetadata(1, "item_future_unknown", (("origin", "1 2 3"),)),
+    ))
+    with pytest.raises(AtlasAnalysisError, match="unsupported objective class"):
+        _authored_item_destinations(metadata)
 
 
 def _required_artifacts() -> tuple[Path, Path, Path, Path, Path]:
@@ -2099,3 +2155,31 @@ def test_unknown_and_lethal_solid_landings_do_not_invent_void_or_uncontained() -
     assert hazards["exact_lethal_candidates_omitted"] == 1
     assert hazards["uncontained_drop_edges"] == 0
     assert "void" not in hazards["types"]
+
+
+def test_exact_lethal_drop_marks_predamage_l1_but_unknown_never_invents_it() -> None:
+    node = NavNode(
+        (0, 0, 0), (8.0, 8.0, 24.0), True, True, True, 0,
+        (0.0, 0.0, 1.0),
+    )
+    nodes = {(0, 0, 0): node}
+    assert _apply_static_drop_hazards(nodes, [
+        {
+            "source_l1": [0, 0, 0],
+            "classification": {"classification": "Unknown", "reason": "no_landing"},
+        },
+        {
+            "source_l1": [0, 0, 0],
+            "classification": {"classification": "Exact", "lethal": True},
+        },
+    ]) == 1
+    plan = node.plan(True)
+    assert plan["hazard_types"] & (1 << 3)
+    assert plan["hazard_severity"] == 255
+    assert "hazard_clearance" not in plan
+
+    with pytest.raises(AtlasAnalysisError, match="not admitted Atlas L1"):
+        _apply_static_drop_hazards(nodes, [{
+            "source_l1": [9, 9, 9],
+            "classification": {"classification": "Exact", "lethal": True},
+        }])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -11,9 +12,21 @@ import subprocess
 import time
 import uuid
 
+import numpy as np
+
 from .client_protocol import ClientTelemetry, parse_client_telemetry
+from .multires_admission import (
+    PRIVATE_CAUSAL_INFO_KEY,
+    PRIVATE_SPATIAL_REWARD_INFO_KEY,
+    SPATIAL_ATTESTATION_INFO_KEY,
+    SpatialFeatureProvider,
+    SpatialFeatureProviderFactory,
+    SpatialProviderBinding,
+    validate_spatial_provider_frame,
+)
 from .protocol import (
     Action,
+    ActionDebugIndex,
     ML_FIRE_GATE_PROTECTED,
     ML_FIRE_GATE_TARGET,
     R_DAMAGE_DEALT,
@@ -24,7 +37,6 @@ from .protocol import (
     R_KILL,
     pack_action,
 )
-from .spatial import VoxelSpatialReward
 
 
 def _float_env(name: str, default: float) -> float:
@@ -105,7 +117,12 @@ class Q2NetworkClientEnv:
         game: str = "lithium",
         timeout: float = 8.0,
         spatial_seed: int | None = None,
+        multires_spatial_provider: SpatialFeatureProvider | None = None,
+        multires_spatial_provider_factory: SpatialFeatureProviderFactory | None = None,
+        expected_atlas_sha256: str | None = None,
+        expected_runtime_manifest_sha256: str | None = None,
         debug: bool = False,
+        deterministic_frame_barrier: bool = False,
         extra_args: tuple[str, ...] = (),
     ):
         self.server = server
@@ -137,8 +154,53 @@ class Q2NetworkClientEnv:
         self.timeout = timeout
         self.extra_args = tuple(extra_args)
         self.debug = bool(debug)
-        self._spatial = VoxelSpatialReward.from_env(seed=spatial_seed)
+        self.deterministic_frame_barrier = bool(deterministic_frame_barrier)
+        self._multires_spatial_provider = multires_spatial_provider
+        self._multires_spatial_provider_factory = multires_spatial_provider_factory
+        self._expected_atlas_sha256 = expected_atlas_sha256
+        self._expected_runtime_manifest_sha256 = expected_runtime_manifest_sha256
+        if (
+            multires_spatial_provider is not None
+            and multires_spatial_provider_factory is not None
+        ):
+            raise ValueError("select one multires provider or provider factory")
+        if (
+            multires_spatial_provider is not None
+            or multires_spatial_provider_factory is not None
+        ):
+            if not expected_runtime_manifest_sha256:
+                raise ValueError(
+                    "multires spatial provider requires runtime-manifest digest"
+                )
+            if multires_spatial_provider is not None and not expected_atlas_sha256:
+                raise ValueError("fixed multires provider requires Atlas digest")
+            if multires_spatial_provider is not None and not callable(
+                getattr(multires_spatial_provider, "sample", None)
+            ):
+                raise TypeError("multires spatial provider must implement sample()")
+            if multires_spatial_provider_factory is not None and not callable(
+                getattr(multires_spatial_provider_factory, "create", None)
+            ):
+                raise TypeError("multires provider factory must implement create()")
+            self._spatial = None
+        else:
+            # The retired VoxelSpatialReward is imported and constructed only
+            # for an explicitly non-multires environment.  Selecting the new
+            # path cannot reach its module, dense rewards, or 24-float memory.
+            from .spatial import VoxelSpatialReward
+
+            self._spatial = VoxelSpatialReward.from_env(seed=spatial_seed)
         self._spatial_map: str | None = None
+        self._multires_map_name: str | None = None
+        self._multires_map_epoch = 0
+        self._last_policy_vector: np.ndarray | None = None
+        self._boundary_projection_key: tuple[object, ...] | None = None
+        self._boundary_projection_vector: np.ndarray | None = None
+        self._boundary_projection_info: dict | None = None
+        # Closing a network client is terminal for that object. A restart must
+        # construct a fresh environment (and therefore a fresh provider
+        # binding); this prevents a closed fixed provider from being sampled.
+        self._closed = False
         self._socket: socket.socket | None = None
         self._process: subprocess.Popen | None = None
         self._client_address: tuple[str, int] | None = None
@@ -148,6 +210,10 @@ class Q2NetworkClientEnv:
         self._last_target_acquire_frame = -TARGET_ACQUIRE_COOLDOWN_FRAMES
 
     def start(self) -> ClientTelemetry:
+        if self._closed:
+            raise RuntimeError(
+                "network client is closed; construct a fresh environment to restart"
+            )
         if self._process is not None:
             raise RuntimeError("network client is already running")
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -169,6 +235,9 @@ class Q2NetworkClientEnv:
         # private as well; otherwise a legacy host install defeats isolation.
         env["HOME"] = str(client_home)
         env["XDG_DATA_HOME"] = str(client_data_home)
+        # The conduit credential is inherited privately by the child and is
+        # never placed in argv, a cvar, an archived config, or debug output.
+        env["Q2_ML_CLIENT_TELEMETRY_TOKEN"] = self.telemetry_token
         args = [
             str(self.client_binary),
             "-datadir", str(self.client_root),
@@ -179,8 +248,11 @@ class Q2NetworkClientEnv:
             "+set", "ml_headless", "1",
             "+set", "ml_harness_debug", "1" if self.debug else "0",
             "+set", "ml_client_id", self.client_id,
+            *(
+                ("+set", "ml_frame_barrier", "1")
+                if self.deterministic_frame_barrier else ()
+            ),
             "+set", "ml_telemetry_server", self.telemetry_server,
-            "+set", "ml_telemetry_token", self.telemetry_token,
             "+set", "ml_harness_addr", f"{self.harness_host}:{self.harness_port}",
             "+set", "s_enable", "0",
             "+set", "vid_renderer", "soft",
@@ -306,20 +378,178 @@ class Q2NetworkClientEnv:
             "client_slot": current.client_slot,
             "sequence": current.sequence,
             "server_frame": current.server_frame,
+            "map_epoch": current.map_epoch,
+            "applied_action_tick": current.applied_action_tick,
+            "barrier_version": current.barrier_version,
+            "barrier_capabilities": current.barrier_capabilities,
             "network_native": True,
             "map": current.map_name,
             "terminal_reason": int(obs.terminal_reason),
-            "action_debug_tick": int(obs.action_debug[0]),
-            "action_debug_accepted": int(obs.action_debug[1]),
-            "action_debug_timeout_count": int(obs.action_debug[2]),
-            "action_debug_weapon": int(obs.action_debug[3]),
-            "action_debug_movement": [float(value) for value in obs.action_debug[4:8]],
+            "action_debug_tick": int(obs.action_debug[ActionDebugIndex.TICK]),
+            "action_debug_accepted": int(obs.action_debug[ActionDebugIndex.ACCEPTED]),
+            "action_debug_timeout_count": int(
+                obs.action_debug[ActionDebugIndex.TIMEOUT_COUNT]
+            ),
+            "action_debug_weapon": int(obs.action_debug[ActionDebugIndex.WEAPON]),
+            "action_debug_movement": [
+                float(obs.action_debug[index])
+                for index in (
+                    ActionDebugIndex.MOVE_FORWARD,
+                    ActionDebugIndex.MOVE_RIGHT,
+                    ActionDebugIndex.LOOK_YAW,
+                    ActionDebugIndex.LOOK_PITCH,
+                )
+            ],
+            "action_debug_vertical_intent": int(
+                obs.action_debug[ActionDebugIndex.VERTICAL_INTENT]
+            ),
+            "action_debug_applied_upmove": int(
+                obs.action_debug[ActionDebugIndex.APPLIED_UPMOVE]
+            ),
+            "action_debug_actual_ducked": bool(
+                obs.action_debug[ActionDebugIndex.ACTUAL_DUCKED]
+            ),
+            "action_debug_water_vertical_mode": bool(
+                obs.action_debug[ActionDebugIndex.WATER_VERTICAL_MODE]
+            ),
+            "action_debug_fire": bool(obs.action_debug[ActionDebugIndex.FIRE]),
+            "action_debug_hook": int(obs.action_debug[ActionDebugIndex.HOOK]),
+            "action_debug_flags": int(obs.action_debug[ActionDebugIndex.FLAGS]),
+            "standing_blocked": bool(obs.standing_blocked),
+            "damage_dealt": float(obs.reward_damage_dealt),
         }
+
+    @staticmethod
+    def _telemetry_projection_key(
+        current: ClientTelemetry,
+    ) -> tuple[object, ...]:
+        """Identity of one immutable client telemetry datagram.
+
+        Sequence is the primary conduit fence.  The remaining fields make a
+        restart/map rollover unable to alias a cached boundary projection.
+        """
+        return (
+            current.client_id,
+            int(current.client_slot),
+            int(current.sequence),
+            current.map_name,
+            int(current.server_frame),
+            int(current.causal.client_life_epoch),
+            int(current.causal.tick),
+        )
+
+    def _cache_boundary_projection(
+        self,
+        current: ClientTelemetry,
+        vector: np.ndarray,
+        info: dict,
+    ) -> None:
+        # Boundary consumers may see only factual/attestation information.
+        # Private causal reward evidence belongs exclusively to the accepted
+        # transition that produced it and must not be replayed by polling.
+        boundary_info = self._base_info(current)
+        attestation = info.get(SPATIAL_ATTESTATION_INFO_KEY)
+        if attestation is not None:
+            boundary_info[SPATIAL_ATTESTATION_INFO_KEY] = copy.deepcopy(
+                attestation
+            )
+        self._boundary_projection_key = self._telemetry_projection_key(current)
+        self._boundary_projection_vector = np.asarray(
+            vector, dtype=np.float32
+        ).copy()
+        self._boundary_projection_info = boundary_info
+
+    def _cached_boundary_projection(
+        self, current: ClientTelemetry
+    ) -> tuple[np.ndarray, dict] | None:
+        if (
+            self._boundary_projection_key
+            != self._telemetry_projection_key(current)
+            or self._boundary_projection_vector is None
+            or self._boundary_projection_info is None
+        ):
+            return None
+        return (
+            self._boundary_projection_vector.copy(),
+            copy.deepcopy(self._boundary_projection_info),
+        )
+
+    def _multires_result(
+        self,
+        current: ClientTelemetry,
+        info: dict,
+        *,
+        episode_projection: bool,
+    ):
+        map_changed = bool(
+            self._multires_map_name is not None
+            and self._multires_map_name != current.map_name
+        )
+        next_epoch = self._multires_map_epoch + int(map_changed)
+        if self._multires_spatial_provider_factory is not None and (
+            self._multires_spatial_provider is None or map_changed
+        ):
+            # Construct and validate the replacement before closing the old
+            # provider or mutating epoch/name state. A failed rotation can be
+            # retried without leaving the environment half-rotated.
+            binding = self._multires_spatial_provider_factory.create(
+                current, map_epoch=next_epoch
+            )
+            if (
+                not isinstance(binding, SpatialProviderBinding)
+                or not callable(getattr(binding.provider, "sample", None))
+                or not callable(getattr(binding.provider, "close", None))
+            ):
+                raise RuntimeError("multires provider factory returned no binding")
+            old = self._multires_spatial_provider
+            if old is not None:
+                old.close()
+            self._multires_spatial_provider = binding.provider
+            self._expected_atlas_sha256 = binding.atlas_sha256
+            self._multires_map_name = current.map_name
+            self._multires_map_epoch = next_epoch
+        elif self._multires_map_name is None:
+            self._multires_map_name = current.map_name
+        provider = self._multires_spatial_provider
+        if provider is None:
+            raise RuntimeError("multires result requested without a spatial provider")
+        frame = provider.sample(
+            current, episode_projection=episode_projection
+        )
+        spatial = validate_spatial_provider_frame(
+            frame,
+            current,
+            expected_atlas_sha256=str(self._expected_atlas_sha256),
+            expected_runtime_manifest_sha256=str(
+                self._expected_runtime_manifest_sha256
+            ),
+            expected_map_epoch=self._multires_map_epoch,
+            require_private_reward_evidence=not episode_projection,
+        )
+        info[SPATIAL_ATTESTATION_INFO_KEY] = {
+            "schema": frame.schema,
+            "feature_schema_sha256": frame.feature_schema_sha256,
+            "atlas_sha256": frame.atlas_sha256,
+            "runtime_manifest_sha256": frame.runtime_manifest_sha256,
+            "map_epoch": frame.map_epoch,
+        }
+        if not episode_projection:
+            info[PRIVATE_CAUSAL_INFO_KEY] = current.causal
+            info[PRIVATE_SPATIAL_REWARD_INFO_KEY] = frame.private_reward_evidence
+        return current.observation.to_vector(spatial)
+
+    @property
+    def uses_multires_spatial(self) -> bool:
+        """Whether this client was configured for the sole production path."""
+        return bool(
+            self._multires_spatial_provider is not None
+            or self._multires_spatial_provider_factory is not None
+        )
 
     @staticmethod
     def _target_is_aligned(current: ClientTelemetry) -> bool:
         obs = current.observation
-        flags = int(obs.action_debug[11]) if len(obs.action_debug) >= 12 else 0
+        flags = int(obs.action_debug[ActionDebugIndex.FLAGS])
         alive = float(obs.self_state[6]) > 0.0
         return bool(
             alive
@@ -366,6 +596,27 @@ class Q2NetworkClientEnv:
         vector: bool = False,
     ):
         """Convert a packet returned by :meth:`start` into reset output."""
+        if self._closed:
+            raise RuntimeError("network client is closed")
+        if (
+            self._multires_spatial_provider is not None
+            or self._multires_spatial_provider_factory is not None
+        ):
+            if not vector:
+                raise RuntimeError("multires client environments require vector=True")
+            cached = self._cached_boundary_projection(current)
+            if cached is not None:
+                return cached
+            self._reset_target_alignment(current)
+            info = self._base_info(current)
+            vector_result = self._multires_result(
+                current, info, episode_projection=True
+            )
+            self._last_policy_vector = np.asarray(
+                vector_result, dtype=np.float32
+            ).copy()
+            self._cache_boundary_projection(current, vector_result, info)
+            return vector_result, info
         self._reset_target_alignment(current)
         info = self._base_info(current)
         if not vector:
@@ -382,7 +633,26 @@ class Q2NetworkClientEnv:
         vector: bool = False,
     ):
         """Convert an already echo-validated telemetry packet into a step result."""
+        if self._closed:
+            raise RuntimeError("network client is closed")
         obs = current.observation
+        if (
+            self._multires_spatial_provider is not None
+            or self._multires_spatial_provider_factory is not None
+        ):
+            if not vector:
+                raise RuntimeError("multires client environments require vector=True")
+            info = self._base_info(current)
+            obs_result = self._multires_result(
+                current, info, episode_projection=False
+            )
+            self._last_policy_vector = np.asarray(
+                obs_result, dtype=np.float32
+            ).copy()
+            self._cache_boundary_projection(current, obs_result, info)
+            # All reward is admitted later from the private causal conduit.
+            # Network batching must never mix the legacy dense scalar here.
+            return obs_result, 0.0, obs.is_terminal, False, info
         reward = authoritative_reward(obs)
         target_bonus, target_acquired, target_aligned = (
             self._target_acquisition_bonus(current)
@@ -426,8 +696,9 @@ class Q2NetworkClientEnv:
         """Reset only policy-side episode memory around the latest live frame."""
         if self._last is None:
             raise RuntimeError("call start() before resetting an episode")
-        observation, _info = self.initial_result(self._last, vector=True)
-        return observation
+        if self._last_policy_vector is None:
+            raise RuntimeError("latest policy vector is unavailable")
+        return self._last_policy_vector.copy()
 
     def step(self, action: Action):
         dispatch = self.dispatch_action(action)
@@ -446,23 +717,56 @@ class Q2NetworkClientEnv:
         return self.transition_result(current, vector=True)
 
     def close(self):
-        if self._process is not None:
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self._process.wait(timeout=3)
-            self._process = None
-        if self._socket is not None:
-            self._socket.close()
-            self._socket = None
+        if self._closed:
+            return
+        self._closed = True
+        # Detach first. Even if provider shutdown reports an error, no later
+        # call can observe or sample a stale closed provider reference.
+        provider = self._multires_spatial_provider
+        self._multires_spatial_provider = None
+        process = self._process
+        self._process = None
+        sock = self._socket
+        self._socket = None
         self._client_address = None
         self._last = None
         self._spatial_map = None
+        self._multires_map_name = None
+        self._multires_map_epoch = 0
+        self._last_policy_vector = None
+        self._boundary_projection_key = None
+        self._boundary_projection_vector = None
+        self._boundary_projection_info = None
         self._target_alignment_map = None
         self._target_was_aligned = False
         self._last_target_acquire_frame = -TARGET_ACQUIRE_COOLDOWN_FRAMES
+        try:
+            if process is not None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+        finally:
+            try:
+                if sock is not None:
+                    sock.close()
+            finally:
+                try:
+                    if provider is not None:
+                        close = getattr(provider, "close", None)
+                        if callable(close):
+                            close()
+                finally:
+                    if self._multires_spatial_provider_factory is not None:
+                        reset_session = getattr(
+                            self._multires_spatial_provider_factory,
+                            "reset_session",
+                            None,
+                        )
+                        if callable(reset_session):
+                            reset_session()
 
     def __enter__(self):
         self.start()

@@ -7,7 +7,7 @@ use q2_lattice_rs::atlas::{
     AtlasAggregateCell, AtlasArtifact, AtlasLimits, AtlasOrigin, BspIdentity, COST_INFINITY,
     ConservativeChild, CorridorWitness, EdgeInput, EdgeType, GridIndex, L0BitPlane, L0Chunk,
     L0ScalarPlane, L1Graph, L1Node, NodeFlags, OracleAdmissions, SparseL0, Stance,
-    aggregate_conservative, sha256_hex,
+    aggregate_conservative, install_static_costs, install_static_hazard_clearances, sha256_hex,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -41,7 +41,6 @@ struct NodePlan {
     clearance_height: u16,
     hazard_types: u16,
     hazard_severity: u8,
-    hazard_clearance: i32,
     cost_to_safety: u32,
     region_id: u32,
     confidence: u16,
@@ -178,9 +177,9 @@ struct AggregateSource {
 }
 
 impl AggregateSource {
-    fn from_node(node: &NodePlan) -> Self {
+    fn from_node(node: &L1Node) -> Self {
         Self {
-            index: index(node.index),
+            index: node.index,
             contents_flags: node.contents_flags,
             hazard_types: node.hazard_types,
             hazard_severity: node.hazard_severity,
@@ -516,7 +515,8 @@ fn run() -> Result<(), String> {
             clearance_height: item.clearance_height,
             hazard_types: item.hazard_types,
             hazard_severity: item.hazard_severity,
-            hazard_clearance: item.hazard_clearance,
+            // Build-plan input is not allowed to claim this derived field.
+            hazard_clearance: 0,
             cost_to_safety: item.cost_to_safety,
             region_id: item.region_id,
             confidence: item.confidence,
@@ -544,9 +544,15 @@ fn run() -> Result<(), String> {
             })
         })
         .collect::<Result<_, String>>()?;
-    let graph =
+    let mut graph =
         L1Graph::build(nodes, edges, &admission, &limits).map_err(|error| error.to_string())?;
-    let l1_sources: Vec<_> = plan.nodes.iter().map(AggregateSource::from_node).collect();
+    install_static_costs(&mut graph).map_err(|error| error.to_string())?;
+    install_static_hazard_clearances(&mut graph).map_err(|error| error.to_string())?;
+    let l1_sources: Vec<_> = graph
+        .nodes()
+        .iter()
+        .map(AggregateSource::from_node)
+        .collect();
     let l2 = aggregate_level(&l1_sources, &l1_adjacency)?;
     let l2_sources: Vec<_> = l2.iter().map(AggregateSource::from_aggregate).collect();
     let l3 = aggregate_level(&l2_sources, &l1_adjacency.coarsened())?;

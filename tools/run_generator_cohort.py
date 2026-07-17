@@ -66,8 +66,8 @@ STAGE_SUFFIXES = {
         ".hook-materialization.json",
         ".generator-claims.json",
     ),
-    # Atlas output belongs in a separate directory because its .routes.json
-    # artifact has the same name as the hash-bound generator route sidecar.
+    # Atlas output belongs in a separate directory and uses one distinct,
+    # versioned objective artifact. Generator routes remain source claims.
     "analysis": (
         ".analysis.manifest.json",
         ".atlas.bin",
@@ -76,7 +76,7 @@ STAGE_SUFFIXES = {
         ".navigation.bin.zst",
         ".visibility.bin.zst",
         ".design-signature.json",
-        ".routes.json",
+        ".objectives.json",
     ),
 }
 MAP_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
