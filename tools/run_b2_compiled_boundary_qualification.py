@@ -15,6 +15,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import struct
@@ -24,6 +25,19 @@ from typing import Any, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from harness.atlas_b1_authority import canonical_cm_physics_identity  # noqa: E402
+from tools.b2_qualification_toolchain import (  # noqa: E402
+    Q2TOOL_FLAGS,
+    ToolchainAuthority,
+    ToolchainAuthorityError,
+    inspect_baseq2_assets,
+    inspect_q2tool,
+    load_toolchain_authority,
+)
+
 DEFAULT_FIXTURE_DIR = ROOT / "tests/fixtures/compiled_boundary"
 COMPILE_SCHEMA = "q2-b2-compiled-boundary-compile-v1"
 PROOF_SCHEMA = "q2-b2-compiled-boundary-qualification-v1"
@@ -35,10 +49,6 @@ ENGINE_LINK_LIFT = 9
 LINKED_SPAWN = [0, 0, 33]
 COLUMN_REQUIREMENT = 96
 TRACE_STEP = 4
-Q2TOOL_FLAGS = (
-    "-bsp", "-vis", "-fast", "-rad", "-bounce", "0", "-threads", "1",
-    "-basedir",
-)
 CASES = (
     {"case_id": "spawn_ceiling_104", "ceiling_units": 104,
      "expected_clearance_units": 92, "expected_pass": False},
@@ -51,6 +61,14 @@ CASES = (
 
 class QualificationError(RuntimeError):
     """A qualification input, tool, response, or boundary failed closed."""
+
+
+_PLANE_RE = re.compile(
+    r"^\s*\(\s*(-?\d+)\s+(-?\d+)\s+(-?\d+)\s*\)\s*"
+    r"\(\s*(-?\d+)\s+(-?\d+)\s+(-?\d+)\s*\)\s*"
+    r"\(\s*(-?\d+)\s+(-?\d+)\s+(-?\d+)\s*\)\s+(\S+)"
+)
+_PROPERTY_RE = re.compile(r'^\s*"([^"]+)"\s+"([^"]*)"\s*$')
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -94,23 +112,160 @@ def qualification_only() -> dict[str, bool]:
     }
 
 
-def fixture_records(fixture_dir: Path) -> list[dict[str, Any]]:
-    records = []
-    for case in CASES:
-        source = fixture_dir / f"{case['case_id']}.map"
-        record = file_record(source)
-        text = source.read_text(encoding="ascii")
-        marker = f"Authored ceiling bottom: {case['ceiling_units']}."
-        derived = f"ceiling bottom {case['ceiling_units']},"
-        if marker not in text and derived not in text:
+def _parse_fixture_geometry(text: str, case_id: str) -> dict[str, Any]:
+    entities: list[dict[str, str]] = []
+    world_brushes: list[list[dict[str, Any]]] = []
+    entity: dict[str, str] | None = None
+    brush: list[dict[str, Any]] | None = None
+    depth = 0
+    for raw_line in text.splitlines():
+        line = raw_line.split("//", 1)[0].strip()
+        if not line:
+            continue
+        if line == "{":
+            depth += 1
+            if depth == 1:
+                entity = {}
+            elif depth == 2:
+                brush = []
+            else:
+                raise QualificationError(
+                    f"fixture has unsupported nested geometry: {case_id}"
+                )
+            continue
+        if line == "}":
+            if depth == 2:
+                if entity is None or entity.get("classname") != "worldspawn":
+                    raise QualificationError(
+                        f"non-world fixture brush is forbidden: {case_id}"
+                    )
+                if not brush:
+                    raise QualificationError(f"empty fixture brush: {case_id}")
+                world_brushes.append(brush)
+                brush = None
+            elif depth == 1:
+                if entity is None:
+                    raise QualificationError(f"fixture entity is malformed: {case_id}")
+                entities.append(entity)
+                entity = None
+            else:
+                raise QualificationError(f"fixture braces are unbalanced: {case_id}")
+            depth -= 1
+            continue
+        if depth == 1:
+            match = _PROPERTY_RE.fullmatch(line)
+            if match is None or entity is None or match.group(1) in entity:
+                raise QualificationError(
+                    f"fixture entity property is malformed: {case_id}"
+                )
+            entity[match.group(1)] = match.group(2)
+            continue
+        if depth == 2:
+            match = _PLANE_RE.match(line)
+            if match is None or brush is None:
+                raise QualificationError(f"fixture brush plane is malformed: {case_id}")
+            values = [int(value) for value in match.groups()[:9]]
+            points = [values[index:index + 3] for index in range(0, 9, 3)]
+            brush.append({"points": points, "texture": match.group(10)})
+            continue
+        raise QualificationError(f"fixture content is outside an entity: {case_id}")
+    if depth != 0 or entity is not None or brush is not None:
+        raise QualificationError(f"fixture braces are unbalanced: {case_id}")
+    worldspawns = [item for item in entities if item.get("classname") == "worldspawn"]
+    spawns = [
+        item for item in entities
+        if item.get("classname") == "info_player_deathmatch"
+    ]
+    if len(worldspawns) != 1 or len(spawns) != 1:
+        raise QualificationError(
+            f"fixture must contain one worldspawn and one deathmatch spawn: {case_id}"
+        )
+    try:
+        spawn_origin = [int(value) for value in spawns[0]["origin"].split()]
+    except (KeyError, ValueError) as error:
+        raise QualificationError(f"fixture spawn origin is malformed: {case_id}") from error
+    if len(spawn_origin) != 3:
+        raise QualificationError(f"fixture spawn origin is malformed: {case_id}")
+
+    def horizontal_faces(texture: str) -> list[dict[str, Any]]:
+        return [
+            plane for candidate in world_brushes for plane in candidate
+            if plane["texture"] == texture
+            and len({point[2] for point in plane["points"]}) == 1
+        ]
+
+    floor_faces = horizontal_faces("e1u1/floor3_3")
+    ceiling_faces = horizontal_faces("e1u1/ceil1_4")
+    if len(floor_faces) != 2 or len(ceiling_faces) != 2:
+        raise QualificationError(
+            f"fixture floor/ceiling planes are not independently identifiable: {case_id}"
+        )
+    floor_heights = sorted({face["points"][0][2] for face in floor_faces})
+    ceiling_heights = sorted({face["points"][0][2] for face in ceiling_faces})
+    if (
+        len(floor_heights) != 2 or floor_heights[1] - floor_heights[0] != 16
+        or len(ceiling_heights) != 2
+        or ceiling_heights[1] - ceiling_heights[0] != 16
+    ):
+        raise QualificationError(f"fixture slab thickness differs: {case_id}")
+    floor_top = floor_heights[1]
+    ceiling_bottom = ceiling_heights[0]
+    for label, faces in (("floor", floor_faces), ("ceiling", ceiling_faces)):
+        xs = {point[0] for face in faces for point in face["points"]}
+        ys = {point[1] for face in faces for point in face["points"]}
+        if min(xs) != -144 or max(xs) != 144 or min(ys) != -144 or max(ys) != 144:
             raise QualificationError(
-                f"fixture does not declare its boundary: {source}"
+                f"fixture {label} footprint differs: {case_id}"
             )
-        if text.count('"classname" "info_player_deathmatch"') != 1:
-            raise QualificationError(f"fixture must contain one deathmatch spawn: {source}")
-        if '"origin" "0 0 24"' not in text:
-            raise QualificationError(f"fixture spawn origin changed: {source}")
-        records.append({**case, "source": record})
+    return {
+        "ceiling_bottom_units": ceiling_bottom,
+        "floor_top_units": floor_top,
+        "spawn_origin_units": spawn_origin,
+        "world_brush_count": len(world_brushes),
+    }
+
+
+def fixture_records(
+    fixture_dir: Path, authority: ToolchainAuthority | None = None,
+) -> list[dict[str, Any]]:
+    try:
+        accepted = authority or load_toolchain_authority(ROOT)
+    except ToolchainAuthorityError as error:
+        raise QualificationError(
+            f"canonical toolchain authority rejected: {error}"
+        ) from error
+    expected_dir = (ROOT / "tests/fixtures/compiled_boundary").resolve()
+    if fixture_dir.resolve() != expected_dir:
+        raise QualificationError("boundary fixture directory is not canonical")
+    cases = {case["case_id"]: case for case in CASES}
+    records = []
+    for fixture in accepted.fixtures:
+        case_id = str(fixture["case_id"])
+        if case_id not in cases:
+            raise QualificationError("toolchain fixture membership differs")
+        case = cases[case_id]
+        source = ROOT / str(fixture["relative_path"])
+        record = file_record(source)
+        if record["sha256"] != fixture["sha256"]:
+            raise QualificationError(f"fixture bytes differ for {case_id}")
+        try:
+            geometry = _parse_fixture_geometry(
+                source.read_text(encoding="ascii"), case_id
+            )
+        except UnicodeError as error:
+            raise QualificationError(f"fixture is not ASCII: {case_id}") from error
+        expected_geometry = {
+            "ceiling_bottom_units": fixture["ceiling_bottom_units"],
+            "floor_top_units": fixture["floor_top_units"],
+            "spawn_origin_units": fixture["spawn_origin_units"],
+        }
+        if any(geometry[name] != value for name, value in expected_geometry.items()):
+            raise QualificationError(f"fixture authored geometry differs for {case_id}")
+        if case["ceiling_units"] != geometry["ceiling_bottom_units"]:
+            raise QualificationError(f"fixture boundary case differs for {case_id}")
+        records.append({**case, "geometry": geometry, "source": record})
+    if {row["case_id"] for row in records} != set(cases):
+        raise QualificationError("toolchain fixture membership differs")
     return records
 
 
@@ -148,20 +303,24 @@ def run_logged(command: Sequence[str], cwd: Path, stdout_path: Path,
 
 def compile_fixtures(*, q2tool: Path, basedir: Path, fixture_dir: Path,
                      work_root: Path, workers: int,
-                     timeout_seconds: float, expected_q2tool_sha256: str) -> dict[str, Any]:
+                     timeout_seconds: float,
+                     authority: ToolchainAuthority | None = None) -> dict[str, Any]:
     if work_root.exists() or work_root.is_symlink():
         raise QualificationError(f"work root must not exist: {work_root}")
     if not 1 <= workers <= len(CASES):
         raise QualificationError("compile workers must be between 1 and 3")
     if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 86400:
         raise QualificationError("compile timeout must be in (0, 86400]")
+    try:
+        accepted = authority or load_toolchain_authority(ROOT)
+        inspect_q2tool(q2tool, accepted)
+        assets = inspect_baseq2_assets(basedir, accepted)
+    except ToolchainAuthorityError as error:
+        raise QualificationError(f"canonical toolchain rejected: {error}") from error
     tool_before = file_record(q2tool)
-    if tool_before["sha256"] != expected_q2tool_sha256:
-        raise QualificationError("q2tool SHA-256 does not match the explicit pin")
     if not os.access(q2tool, os.X_OK):
         raise QualificationError(f"q2tool is not executable: {q2tool}")
-    pak0 = file_record(basedir / "baseq2/pak0.pak")
-    fixtures = fixture_records(fixture_dir)
+    fixtures = fixture_records(fixture_dir, accepted)
     compiled_dir = work_root / "compiled"
     log_dir = work_root / "logs"
     compiled_dir.mkdir(parents=True)
@@ -201,17 +360,26 @@ def compile_fixtures(*, q2tool: Path, basedir: Path, fixture_dir: Path,
     for fixture in fixtures:
         if file_record(Path(fixture["source"]["path"])) != fixture["source"]:
             raise QualificationError("fixture changed during qualification compilation")
+    if authority is None:
+        try:
+            if load_toolchain_authority(ROOT) != accepted:
+                raise QualificationError(
+                    "toolchain authority changed during qualification compilation"
+                )
+        except ToolchainAuthorityError as error:
+            raise QualificationError(
+                f"toolchain authority stability failed: {error}"
+            ) from error
     return {
         "schema": COMPILE_SCHEMA,
         "status": "compiled-non-admissible-qualification",
         "passed": True,
         "admission": qualification_only(),
         "parallel_compile_workers": workers,
+        "toolchain_authority": accepted.manifest_record(),
         "q2tool": tool_before,
-        "q2tool_sha256_pin": expected_q2tool_sha256,
-        "basedir": str(basedir.absolute()),
-        "pak0": pak0,
-        "fixed_q2tool_flags": list(Q2TOOL_FLAGS),
+        "basedir": assets,
+        "fixed_q2tool_flags": list(accepted.q2tool_flags),
         "fixtures": fixtures,
         "compiled": sorted(compiled, key=lambda row: row["case_id"]),
     }
@@ -271,18 +439,37 @@ def invoke_cm(cm_oracle: Path, bsp: Path, requests: list[dict[str, Any]],
 
 def prove_compilation(*, compile_report_path: Path, compiled_dir: Path,
                       cm_oracle: Path, fixture_dir: Path,
-                      timeout_seconds: float, expected_q2tool_sha256: str,
-                      expected_cm_oracle_sha256: str) -> dict[str, Any]:
+                      timeout_seconds: float,
+                      expected_cm_oracle_sha256: str,
+                      authority: ToolchainAuthority | None = None) -> dict[str, Any]:
+    try:
+        accepted = authority or load_toolchain_authority(ROOT)
+    except ToolchainAuthorityError as error:
+        raise QualificationError(
+            f"canonical toolchain authority rejected: {error}"
+        ) from error
     compile_report, compile_record = load_compile_report(compile_report_path)
-    if (compile_report.get("q2tool_sha256_pin") != expected_q2tool_sha256
-            or compile_report.get("q2tool", {}).get("sha256") != expected_q2tool_sha256):
-        raise QualificationError("compile evidence does not match the q2tool SHA-256 pin")
+    if compile_report.get("toolchain_authority") != accepted.manifest_record():
+        raise QualificationError("compile evidence toolchain authority differs")
+    if compile_report.get("q2tool", {}).get("sha256") != accepted.q2tool_sha256:
+        raise QualificationError("compile evidence q2tool bytes differ")
+    if compile_report.get("fixed_q2tool_flags") != list(accepted.q2tool_flags):
+        raise QualificationError("compile evidence q2tool flags differ")
+    basedir_record = compile_report.get("basedir")
+    if (
+        not isinstance(basedir_record, dict)
+        or basedir_record.get("pak0", {}).get("sha256")
+        != accepted.pak0_sha256
+        or basedir_record.get("required_member", {}).get("sha256")
+        != accepted.colormap_sha256
+    ):
+        raise QualificationError("compile evidence baseq2 assets differ")
     oracle_before = file_record(cm_oracle)
     if oracle_before["sha256"] != expected_cm_oracle_sha256:
         raise QualificationError("CM oracle SHA-256 does not match the explicit pin")
     if not os.access(cm_oracle, os.X_OK):
         raise QualificationError(f"CM oracle is not executable: {cm_oracle}")
-    fixtures = fixture_records(fixture_dir)
+    fixtures = fixture_records(fixture_dir, accepted)
     reported_fixtures = {row["case_id"]: row for row in compile_report["fixtures"]}
     reported_compiled = {row["case_id"]: row for row in compile_report["compiled"]}
     if set(reported_fixtures) != {row["case_id"] for row in fixtures}:
@@ -325,6 +512,13 @@ def prove_compilation(*, compile_report_path: Path, compiled_dir: Path,
                 raise QualificationError(f"CM identity lacks {field} for {case_id}")
         if identity["map_sha256"] != bsp["sha256"]:
             raise QualificationError(f"CM loaded the wrong BSP for {case_id}")
+        expected_physics = canonical_cm_physics_identity(
+            identity["tool_identity"], bsp["sha256"]
+        )
+        if identity["physics_identity"] != expected_physics:
+            raise QualificationError(
+                f"CM emitted a noncanonical physics identity for {case_id}"
+            )
         standing = responses[1]
         if (standing.get("startsolid") is not False
                 or standing.get("allsolid") is not False
@@ -390,6 +584,7 @@ def prove_compilation(*, compile_report_path: Path, compiled_dir: Path,
         "passed": True,
         "admission": qualification_only(),
         "compile_evidence": compile_record,
+        "toolchain_authority": accepted.manifest_record(),
         "q2tool": compile_report["q2tool"],
         "cm_oracle": oracle_before,
         "cm_oracle_sha256_pin": expected_cm_oracle_sha256,
@@ -410,9 +605,7 @@ def prove_compilation(*, compile_report_path: Path, compiled_dir: Path,
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--phase", choices=("compile", "prove", "all"), default="all")
-    result.add_argument("--fixture-dir", type=Path, default=DEFAULT_FIXTURE_DIR)
     result.add_argument("--q2tool", type=Path)
-    result.add_argument("--q2tool-sha256")
     result.add_argument("--basedir", type=Path)
     result.add_argument("--cm-oracle", type=Path)
     result.add_argument("--cm-oracle-sha256")
@@ -440,9 +633,10 @@ def require_sha256(value: str | None, name: str) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    fixture_dir = args.fixture_dir.expanduser().absolute()
+    fixture_dir = DEFAULT_FIXTURE_DIR
     report_path = args.report.expanduser().absolute()
     try:
+        authority = load_toolchain_authority(ROOT)
         if args.phase in ("compile", "all"):
             work_root = require(args.work_root, "--work-root")
             compile_report = compile_fixtures(
@@ -450,9 +644,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 basedir=require(args.basedir, "--basedir"), fixture_dir=fixture_dir,
                 work_root=work_root, workers=args.compile_workers,
                 timeout_seconds=args.compile_timeout_seconds,
-                expected_q2tool_sha256=require_sha256(
-                    args.q2tool_sha256, "--q2tool-sha256"
-                ),
+                authority=authority,
             )
             if args.phase == "compile":
                 write_canonical(report_path, compile_report)
@@ -467,16 +659,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             compile_report_path=compile_report_path, compiled_dir=compiled_dir,
             cm_oracle=require(args.cm_oracle, "--cm-oracle"),
             fixture_dir=fixture_dir, timeout_seconds=args.oracle_timeout_seconds,
-            expected_q2tool_sha256=require_sha256(
-                args.q2tool_sha256, "--q2tool-sha256"
-            ),
             expected_cm_oracle_sha256=require_sha256(
                 args.cm_oracle_sha256, "--cm-oracle-sha256"
             ),
+            authority=authority,
         )
         write_canonical(report_path, proof)
         return 0
-    except (OSError, QualificationError) as error:
+    except (OSError, QualificationError, ToolchainAuthorityError) as error:
         failure = {
             "schema": PROOF_SCHEMA if args.phase != "compile" else COMPILE_SCHEMA,
             "status": "failed-non-admissible-qualification",

@@ -236,6 +236,21 @@ def _sha256(value: object, label: str) -> str:
     return str(value)
 
 
+def canonical_cm_physics_identity(
+    tool_identity: object, map_sha256: object,
+) -> str:
+    """Return the sole admitted CM physics identity for one BSP."""
+
+    tool = _sha256(tool_identity, "CM tool identity")
+    map_digest = _sha256(map_sha256, "CM map digest")
+    return hashlib.sha256(
+        (
+            "schema=q2-physics-oracle-v1;kind=cm;tool_identity="
+            f"{tool};map={map_digest}"
+        ).encode("ascii")
+    ).hexdigest()
+
+
 def _positive_int(value: object, label: str) -> int:
     _reject(type(value) is not int or value <= 0, f"{label} must be positive")
     return int(value)
@@ -723,12 +738,9 @@ def _validate_authority_requalification(
         )
         admitted[name] = identity
 
-    collision_expected = hashlib.sha256(
-        (
-            "schema=q2-physics-oracle-v1;kind=cm;tool_identity="
-            f"{gate.oracle_tool_identity};map={probe_bsp_sha256}"
-        ).encode()
-    ).hexdigest()
+    collision_expected = canonical_cm_physics_identity(
+        gate.oracle_tool_identity, probe_bsp_sha256
+    )
     _reject(
         admitted["collision"]
         != {
@@ -1106,12 +1118,9 @@ def _validate_cm_identity(
     _reject(record["ok"] is not True or record["id"] != "b1-authority" or record["op"] != "identity", "CM identity response is not successful/causal")
     _reject(record["schema"] != "q2-cm-oracle-v1", "CM schema mismatch")
     _reject(record["tool_identity"] != gate.oracle_tool_identity, "CM tool identity differs from B1")
-    expected_physics = hashlib.sha256(
-        (
-            "schema=q2-physics-oracle-v1;kind=cm;tool_identity="
-            f"{gate.oracle_tool_identity};map={analysis_bsp_sha256}"
-        ).encode()
-    ).hexdigest()
+    expected_physics = canonical_cm_physics_identity(
+        gate.oracle_tool_identity, analysis_bsp_sha256
+    )
     _reject(record["physics_identity"] != expected_physics, "CM analysis-map physics identity is not canonical")
     _reject(record["map_sha256"] != analysis_bsp_sha256, "CM identity does not bind the analysis BSP")
     _reject(type(record["map_checksum"]) is not int, "CM map checksum is invalid")

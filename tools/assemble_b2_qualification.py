@@ -31,7 +31,12 @@ if str(ROOT) not in sys.path:
 
 from harness.atlas_b1_authority import (  # noqa: E402
     B1AuthorityError,
+    canonical_cm_physics_identity,
     load_b1_authority_gate,
+)
+from tools.b2_qualification_toolchain import (  # noqa: E402
+    ToolchainAuthorityError,
+    load_toolchain_authority,
 )
 from tools.run_b2_compiled_boundary_qualification import (  # noqa: E402
     CASES as BOUNDARY_CASES,
@@ -254,7 +259,8 @@ def _validate_declaration(
         {
             "schema", "qualification_id", "mode", "non_admissible",
             "retryable", "final_cohort_authorized", "generator",
-            "selection", "implementation", "maps",
+            "selection", "implementation", "toolchain_authority_sha256",
+            "maps",
         },
         "qualification declaration",
     )
@@ -272,6 +278,17 @@ def _validate_declaration(
     _require(declaration["retryable"] is True, "qualification must be retryable")
     _require(declaration["final_cohort_authorized"] is False, "qualification cannot authorize a final cohort")
     _require(declaration["implementation"] == implementation, "declaration implementation binding differs")
+    try:
+        authority = load_toolchain_authority(ROOT)
+    except ToolchainAuthorityError as error:
+        raise B2QualificationError(
+            f"canonical toolchain authority rejected: {error}"
+        ) from error
+    _require(
+        declaration["toolchain_authority_sha256"]
+        == authority.manifest_sha256,
+        "qualification declaration toolchain authority differs",
+    )
 
     generator = _mapping(declaration["generator"], "qualification generator")
     _exact_keys(generator, {"version", "grid", "gym", "observed_heat"}, "qualification generator")
@@ -418,12 +435,22 @@ def _validate_boundary_proof(
     collision_identity: Mapping[str, str],
     retired: Mapping[str, set[Any]],
 ) -> dict[str, Any]:
+    try:
+        toolchain = load_toolchain_authority(ROOT)
+    except ToolchainAuthorityError as error:
+        raise B2QualificationError(
+            f"canonical toolchain authority rejected: {error}"
+        ) from error
     _require_qualification_path(path, "compiled-boundary proof")
     proof, raw = _load_json(path)
     _require(proof.get("schema") == BOUNDARY_PROOF_SCHEMA, "compiled-boundary proof report is missing; compile-only evidence rejected")
     _require(proof.get("status") == "passed-non-admissible-qualification", "compiled-boundary proof status differs")
     _require(proof.get("passed") is True, "compiled-boundary proof is not passed")
     _require(proof.get("admission") == boundary_qualification_only(), "compiled-boundary proof is not qualification-only")
+    _require(
+        proof.get("toolchain_authority") == toolchain.manifest_record(),
+        "compiled-boundary toolchain authority differs",
+    )
     contract = _mapping(proof.get("contract"), "compiled-boundary contract")
     _require(
         contract.get("engine_link_lift_units") == 9
@@ -449,6 +476,65 @@ def _validate_boundary_proof(
         raise B2QualificationError(f"compiled-boundary compile evidence rejected: {error}") from error
     _require(loaded_record == actual_compile_record, "compiled-boundary loader record mismatch")
     _require(proof.get("q2tool") == compile_report.get("q2tool"), "compiled-boundary q2tool binding differs")
+    _require(
+        compile_report.get("toolchain_authority")
+        == toolchain.manifest_record(),
+        "compiled-boundary compile toolchain authority differs",
+    )
+    _require(
+        _mapping(compile_report.get("q2tool"), "compiled-boundary q2tool").get(
+            "sha256"
+        ) == toolchain.q2tool_sha256,
+        "compiled-boundary q2tool bytes differ from canonical authority",
+    )
+    _require(
+        compile_report.get("fixed_q2tool_flags")
+        == list(toolchain.q2tool_flags),
+        "compiled-boundary q2tool flags differ from canonical authority",
+    )
+    compile_basedir = _mapping(
+        compile_report.get("basedir"), "compiled-boundary baseq2 assets"
+    )
+    _require(
+        _mapping(compile_basedir.get("pak0"), "compiled-boundary pak0").get(
+            "sha256"
+        ) == toolchain.pak0_sha256
+        and _mapping(
+            compile_basedir.get("required_member"),
+            "compiled-boundary colormap",
+        ).get("sha256") == toolchain.colormap_sha256,
+        "compiled-boundary baseq2 assets differ from canonical authority",
+    )
+    reported_fixtures = {
+        row.get("case_id"): row
+        for raw in _array(
+            compile_report.get("fixtures"), "compiled-boundary compile fixtures"
+        )
+        for row in [_mapping(raw, "compiled-boundary compile fixture")]
+    }
+    _require(
+        set(reported_fixtures)
+        == {str(item["case_id"]) for item in toolchain.fixtures},
+        "compiled-boundary fixture authority membership differs",
+    )
+    for fixture in toolchain.fixtures:
+        case_id = str(fixture["case_id"])
+        reported = reported_fixtures[case_id]
+        geometry = _mapping(
+            reported.get("geometry"), f"{case_id} authored geometry"
+        )
+        _require(
+            _mapping(reported.get("source"), f"{case_id} source").get(
+                "sha256"
+            ) == fixture["sha256"]
+            and geometry.get("floor_top_units")
+            == fixture["floor_top_units"]
+            and geometry.get("ceiling_bottom_units")
+            == fixture["ceiling_bottom_units"]
+            and geometry.get("spawn_origin_units")
+            == fixture["spawn_origin_units"],
+            f"{case_id} fixture bytes/geometry differ from canonical authority",
+        )
 
     expected = {case["case_id"]: case for case in BOUNDARY_CASES}
     rows = _array(proof.get("proofs"), "compiled-boundary proofs")
@@ -469,11 +555,8 @@ def _validate_boundary_proof(
         _require(identity.get("tool_identity") == collision_identity["tool_identity"], f"{case_id} CM tool identity differs from fresh B1")
         bsp_sha256 = _mapping(row.get("bsp"), f"{case_id} BSP").get("sha256")
         _digest(bsp_sha256, f"{case_id} BSP digest")
-        expected_physics_identity = _sha256_bytes(
-            (
-                "schema=q2-physics-oracle-v1;kind=cm;tool_identity="
-                f"{collision_identity['tool_identity']};map={bsp_sha256}"
-            ).encode("ascii")
+        expected_physics_identity = canonical_cm_physics_identity(
+            collision_identity["tool_identity"], bsp_sha256
         )
         _require(identity.get("physics_identity") == expected_physics_identity, f"{case_id} CM physics identity is not canonical for its BSP")
         _require(identity.get("map_sha256") == bsp_sha256, f"{case_id} CM/BSP binding differs")
@@ -506,7 +589,8 @@ def _validate_stage_report(
         {
             "schema", "qualification_id", "mode", "stage",
             "non_admissible", "retryable", "final_cohort_authorized",
-            "declaration_sha256", "implementation", "input_report_sha256",
+            "declaration_sha256", "implementation",
+            "toolchain_authority_sha256", "input_report_sha256",
             "infrastructure_checks", "map_count", "pass_count", "maps",
             "failures",
         },
@@ -520,6 +604,11 @@ def _validate_stage_report(
     _require(report["final_cohort_authorized"] is False, f"{expected_stage} report authorizes a final cohort")
     _require(report["declaration_sha256"] == declaration_sha256, f"{expected_stage} declaration binding differs")
     _require(report["implementation"] == implementation, f"{expected_stage} implementation binding differs")
+    _require(
+        report["toolchain_authority_sha256"]
+        == declaration["toolchain_authority_sha256"],
+        f"{expected_stage} toolchain authority binding differs",
+    )
     _require(report["input_report_sha256"] == expected_input_sha256, f"{expected_stage} input report hash chain differs")
     infrastructure = _mapping(report["infrastructure_checks"], f"{expected_stage} infrastructure checks")
     required = REQUIRED_STAGE_CHECKS[expected_stage]
@@ -572,7 +661,8 @@ def _validate_infrastructure(
         {
             "schema", "qualification_id", "mode", "non_admissible",
             "retryable", "final_cohort_authorized", "declaration_sha256",
-            "implementation", "stage_report_sha256s", "checks",
+            "implementation", "toolchain_authority_sha256",
+            "stage_report_sha256s", "checks",
             "pass_count", "failures",
         },
         "qualification infrastructure report",
@@ -584,6 +674,11 @@ def _validate_infrastructure(
     _require(report["final_cohort_authorized"] is False, "infrastructure report authorizes final cohort")
     _require(report["declaration_sha256"] == declaration_sha256, "infrastructure declaration binding differs")
     _require(report["implementation"] == implementation, "infrastructure implementation binding differs")
+    _require(
+        report["toolchain_authority_sha256"]
+        == declaration["toolchain_authority_sha256"],
+        "infrastructure toolchain authority binding differs",
+    )
     _require(report["stage_report_sha256s"] == dict(stage_sha256s), "infrastructure stage hash binding differs")
     checks = _array(report["checks"], "qualification infrastructure checks")
     by_id: dict[str, Mapping[str, Any]] = {}
@@ -684,6 +779,12 @@ def assemble_qualification(args: argparse.Namespace) -> dict[str, Any]:
     _require(repo_root == ROOT.resolve(), "repo root must be the repository containing this tool")
     normative = _normative_documents(args.design, args.plan)
     implementation = repository_binding(repo_root)
+    try:
+        toolchain_authority = load_toolchain_authority(repo_root)
+    except ToolchainAuthorityError as error:
+        raise B2QualificationError(
+            f"canonical toolchain authority rejected: {error}"
+        ) from error
     retired = _retired_identities(repo_root)
     declaration, declaration_sha256 = _validate_declaration(
         args.declaration, implementation, retired
@@ -753,6 +854,7 @@ def assemble_qualification(args: argparse.Namespace) -> dict[str, Any]:
         "final_cohort_authorized": False,
         "normative_documents": normative,
         "implementation": implementation,
+        "toolchain_authority": toolchain_authority.manifest_record(),
         "b1_authority": b1,
         "compiled_boundary": boundary,
         "declaration": {
@@ -804,7 +906,8 @@ def validate_qualification(value: object) -> dict[str, Any]:
             "schema", "status", "qualification_id", "non_admissible",
             "retryable", "final_cohort_authorized", "normative_documents",
             "implementation", "b1_authority", "compiled_boundary",
-            "declaration", "stages", "infrastructure", "end_to_end",
+            "toolchain_authority", "declaration", "stages",
+            "infrastructure", "end_to_end",
             "authorization", "raw_evidence", "failures",
         },
         "B2 qualification",
@@ -834,6 +937,25 @@ def validate_qualification(value: object) -> dict[str, Any]:
         and isinstance(implementation.get("repository_tree"), str)
         and HEX40.fullmatch(implementation["repository_tree"]) is not None,
         "B2 qualification implementation identity is malformed",
+    )
+    toolchain = _mapping(
+        report["toolchain_authority"], "B2 qualification toolchain authority"
+    )
+    _exact_keys(
+        toolchain, {"bytes", "sha256"},
+        "B2 qualification toolchain authority",
+    )
+    _integer(toolchain["bytes"], "B2 qualification toolchain bytes", 1)
+    _digest(toolchain["sha256"], "B2 qualification toolchain digest")
+    try:
+        current_toolchain = load_toolchain_authority(ROOT)
+    except ToolchainAuthorityError as error:
+        raise B2QualificationError(
+            f"canonical toolchain authority rejected: {error}"
+        ) from error
+    _require(
+        dict(toolchain) == current_toolchain.manifest_record(),
+        "B2 qualification toolchain authority differs",
     )
     b1 = _mapping(report["b1_authority"], "B2 qualification B1 authority")
     _exact_keys(

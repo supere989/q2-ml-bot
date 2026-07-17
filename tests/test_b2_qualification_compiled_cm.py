@@ -7,6 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from harness.atlas_b1_authority import canonical_cm_physics_identity
+from tools.b2_qualification_toolchain import (
+    ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
+)
 from tools.assemble_b2_qualification import (
     DECLARATION_SCHEMA,
     STAGE_SCHEMA,
@@ -15,7 +19,6 @@ from tools.assemble_b2_qualification import (
 from tools.run_b2_qualification_compile import COMPILED_SUFFIXES
 from tools.run_b2_qualification_compiled_cm import (
     QualificationCompiledCmError,
-    _expected_physics_identity,
     run_qualification_compiled_cm,
     validate_published_qualification_compiled_cm,
 )
@@ -69,6 +72,7 @@ def _declaration() -> dict[str, object]:
         "non_admissible": True,
         "retryable": True,
         "final_cohort_authorized": False,
+        "toolchain_authority_sha256": ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
         "generator": {
             "version": "v6", "grid": 5, "gym": False,
             "observed_heat": None,
@@ -114,6 +118,7 @@ def _compile_report(
         "final_cohort_authorized": False,
         "declaration_sha256": declaration_sha256,
         "implementation": IMPLEMENTATION,
+        "toolchain_authority_sha256": ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
         "input_report_sha256": "ef" * 32,
         "infrastructure_checks": {
             "real-q2tool": True,
@@ -223,7 +228,7 @@ def _validator(
             "oracle": {
                 "executable_sha256": oracle_sha,
                 "tool_identity": tool,
-                "physics_identity": _expected_physics_identity(
+                "physics_identity": canonical_cm_physics_identity(
                     tool, bsp["sha256"]
                 ),
                 "map_sha256": bsp["sha256"],

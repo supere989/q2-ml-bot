@@ -4,6 +4,12 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import struct
+from dataclasses import replace
+
+import pytest
+
+from tools.b2_qualification_toolchain import load_toolchain_authority
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,11 +46,13 @@ import hashlib, json, pathlib, sys
 bsp = pathlib.Path(sys.argv[sys.argv.index('--map') + 1])
 ceiling = int(bsp.stem.rsplit('_', 1)[-1])
 digest = hashlib.sha256(bsp.read_bytes()).hexdigest()
+tool = '1' * 64
+physics = hashlib.sha256(('schema=q2-physics-oracle-v1;kind=cm;tool_identity=' + tool + ';map=' + digest).encode('ascii')).hexdigest()
 for line in sys.stdin:
     request = json.loads(line)
     common = {'ok': True, 'id': request['id'], 'op': request['op'],
-              'schema': 'q2-cm-oracle-v1', 'tool_identity': '1' * 64,
-              'physics_identity': '2' * 64, 'map_sha256': digest,
+              'schema': 'q2-cm-oracle-v1', 'tool_identity': tool,
+              'physics_identity': physics, 'map_sha256': digest,
               'map_checksum': 7}
     if request['op'] == 'identity':
         common.update({'model0': {'mins': [-145, -145, -17],
@@ -58,9 +66,17 @@ for line in sys.stdin:
     print(json.dumps(common, sort_keys=True, separators=(',', ':')))
 """
     _write_executable(cm, cm_source)
-    basedir = tmp_path / "assets"
-    (basedir / "baseq2").mkdir(parents=True)
-    (basedir / "baseq2/pak0.pak").write_bytes(b"test-only-pak")
+    basedir = tmp_path / "baseq2"
+    basedir.mkdir()
+    payload = b"colormap"
+    name = b"pics/colormap.pcx"
+    directory = struct.pack(
+        "<56sii", name + b"\0" * (56 - len(name)), 12, len(payload)
+    )
+    (basedir / "pak0.pak").write_bytes(
+        struct.pack("<4sii", b"PACK", 12 + len(payload), len(directory))
+        + payload + directory
+    )
     return q2tool, cm, basedir
 
 
@@ -68,14 +84,31 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_all_phase_fans_out_and_proves_real_boundary_contract(tmp_path: Path) -> None:
+def _install_fake_authority(
+    monkeypatch: pytest.MonkeyPatch, q2tool: Path, basedir: Path,
+) -> None:
+    authority = replace(
+        load_toolchain_authority(),
+        q2tool_sha256=_sha(q2tool),
+        pak0_sha256=_sha(basedir / "pak0.pak"),
+        colormap_sha256=hashlib.sha256(b"colormap").hexdigest(),
+    )
+    monkeypatch.setattr(
+        qualification, "load_toolchain_authority", lambda _root: authority
+    )
+
+
+def test_all_phase_fans_out_and_proves_real_boundary_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     q2tool, cm, basedir = _fake_toolchain(tmp_path)
+    _install_fake_authority(monkeypatch, q2tool, basedir)
     work_root = tmp_path / "work"
     report_path = tmp_path / "proof.json"
 
     result = qualification.main([
         "--phase", "all", "--q2tool", str(q2tool), "--basedir", str(basedir),
-        "--q2tool-sha256", _sha(q2tool), "--cm-oracle", str(cm),
+        "--cm-oracle", str(cm),
         "--cm-oracle-sha256", _sha(cm), "--work-root", str(work_root),
         "--report", str(report_path), "--compile-workers", "3",
     ])
@@ -101,13 +134,15 @@ def test_all_phase_fans_out_and_proves_real_boundary_contract(tmp_path: Path) ->
     ).hexdigest()
 
 
-def test_split_compile_and_prove_rebinds_copied_bsps(tmp_path: Path) -> None:
+def test_split_compile_and_prove_rebinds_copied_bsps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     q2tool, cm, basedir = _fake_toolchain(tmp_path)
+    _install_fake_authority(monkeypatch, q2tool, basedir)
     remote_root = tmp_path / "remote"
     compile_report = tmp_path / "compile.json"
     assert qualification.main([
         "--phase", "compile", "--q2tool", str(q2tool), "--basedir", str(basedir),
-        "--q2tool-sha256", _sha(q2tool),
         "--work-root", str(remote_root), "--report", str(compile_report),
     ]) == 0
     copied = tmp_path / "returned-bsps"
@@ -119,7 +154,6 @@ def test_split_compile_and_prove_rebinds_copied_bsps(tmp_path: Path) -> None:
     assert qualification.main([
         "--phase", "prove", "--compile-report", str(compile_report),
         "--compiled-dir", str(copied), "--cm-oracle", str(cm),
-        "--q2tool-sha256", _sha(q2tool),
         "--cm-oracle-sha256", _sha(cm),
         "--report", str(proof),
     ]) == 0
@@ -130,13 +164,16 @@ def test_split_compile_and_prove_rebinds_copied_bsps(tmp_path: Path) -> None:
     ).hexdigest()
 
 
-def test_malformed_cm_output_fails_closed_with_canonical_evidence(tmp_path: Path) -> None:
+def test_malformed_cm_output_fails_closed_with_canonical_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     q2tool, cm, basedir = _fake_toolchain(tmp_path, malformed_cm=True)
+    _install_fake_authority(monkeypatch, q2tool, basedir)
     report_path = tmp_path / "failure.json"
 
     result = qualification.main([
         "--phase", "all", "--q2tool", str(q2tool), "--basedir", str(basedir),
-        "--q2tool-sha256", _sha(q2tool), "--cm-oracle", str(cm),
+        "--cm-oracle", str(cm),
         "--cm-oracle-sha256", _sha(cm), "--work-root", str(tmp_path / "work"),
         "--report", str(report_path),
     ])
@@ -151,8 +188,11 @@ def test_malformed_cm_output_fails_closed_with_canonical_evidence(tmp_path: Path
     assert "invalid JSON" in report["failure"]["message"]
 
 
-def test_compile_report_must_be_canonical(tmp_path: Path) -> None:
+def test_compile_report_must_be_canonical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _q2tool, cm, _basedir = _fake_toolchain(tmp_path)
+    _install_fake_authority(monkeypatch, _q2tool, _basedir)
     compile_report = tmp_path / "compile.json"
     compile_report.write_text(json.dumps({"schema": qualification.COMPILE_SCHEMA}),
                               encoding="utf-8")
@@ -161,7 +201,6 @@ def test_compile_report_must_be_canonical(tmp_path: Path) -> None:
     result = qualification.main([
         "--phase", "prove", "--compile-report", str(compile_report),
         "--compiled-dir", str(tmp_path), "--cm-oracle", str(cm),
-        "--q2tool-sha256", _sha(_q2tool),
         "--cm-oracle-sha256", _sha(cm),
         "--report", str(report_path),
     ])

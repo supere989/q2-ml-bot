@@ -33,6 +33,10 @@ from tools.assemble_b2_qualification import (  # noqa: E402
     REQUIRED_STAGE_CHECKS,
     STAGE_SCHEMA,
 )
+from tools.b2_qualification_toolchain import (  # noqa: E402
+    ToolchainAuthorityError,
+    load_toolchain_authority,
+)
 from tools.retired_cohort_registry import (  # noqa: E402
     RetiredCohortRegistryError,
     _load_registry,
@@ -180,6 +184,7 @@ def build_declaration(
     implementation: Mapping[str, Any],
     *,
     retired: tuple[set[str], set[str], set[int]] | None = None,
+    toolchain_authority_sha256: str | None = None,
 ) -> dict[str, Any]:
     _require(
         isinstance(qualification_id, str)
@@ -219,6 +224,15 @@ def build_declaration(
             ordinal += 1
     _require(len({row["map"] for row in maps}) == MAP_COUNT, "map IDs are not unique")
     _require(len({row["seed"] for row in maps}) == MAP_COUNT, "map seeds are not unique")
+    authority_sha256 = (
+        load_toolchain_authority(ROOT).manifest_sha256
+        if toolchain_authority_sha256 is None else toolchain_authority_sha256
+    )
+    _require(
+        isinstance(authority_sha256, str)
+        and HEX64.fullmatch(authority_sha256) is not None,
+        "toolchain authority digest is malformed",
+    )
     return {
         "schema": DECLARATION_SCHEMA,
         "qualification_id": qualification_id,
@@ -226,6 +240,7 @@ def build_declaration(
         "non_admissible": True,
         "retryable": True,
         "final_cohort_authorized": False,
+        "toolchain_authority_sha256": authority_sha256,
         "generator": {
             "version": "v6", "grid": 5, "gym": False,
             "observed_heat": None,
@@ -452,8 +467,15 @@ def run_source_qualification(
     binding = _validate_binding(
         _binding if _binding is not None else repository_binding(repo_root)
     )
+    try:
+        toolchain_authority = load_toolchain_authority(repo_root)
+    except ToolchainAuthorityError as error:
+        raise QualificationSourceError(
+            f"canonical toolchain authority rejected: {error}"
+        ) from error
     declaration = build_declaration(
-        qualification_id, seed_base, binding, retired=_retired
+        qualification_id, seed_base, binding, retired=_retired,
+        toolchain_authority_sha256=toolchain_authority.manifest_sha256,
     )
     declaration_payload = canonical_bytes(declaration)
     declaration_sha256 = _sha256_bytes(declaration_payload)
@@ -511,6 +533,15 @@ def run_source_qualification(
     _require(len(set(evidence)) == MAP_COUNT, "per-map source evidence digests are not unique")
     if _binding is None:
         _require(repository_binding(repo_root) == binding, "repository changed during source qualification")
+    try:
+        _require(
+            load_toolchain_authority(repo_root) == toolchain_authority,
+            "toolchain authority changed during source qualification",
+        )
+    except ToolchainAuthorityError as error:
+        raise QualificationSourceError(
+            f"toolchain authority stability failed: {error}"
+        ) from error
 
     report = {
         "schema": STAGE_SCHEMA,
@@ -520,6 +551,7 @@ def run_source_qualification(
         "non_admissible": True,
         "retryable": True,
         "final_cohort_authorized": False,
+        "toolchain_authority_sha256": toolchain_authority.manifest_sha256,
         "declaration_sha256": declaration_sha256,
         "implementation": binding,
         "input_report_sha256": None,

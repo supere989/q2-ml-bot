@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 from harness.atlas_analyzer import AnalyzerLimits  # noqa: E402
 from harness.atlas_b1_authority import (  # noqa: E402
     B1AuthorityError,
+    canonical_cm_physics_identity,
     load_b1_authority_gate,
 )
 from tools.assemble_b2_qualification import (  # noqa: E402
@@ -198,15 +199,6 @@ def _compile_report(
     return report, raw, digest
 
 
-def _expected_physics_identity(tool_identity: str, bsp_sha256: str) -> str:
-    return _sha256(
-        (
-            "schema=q2-physics-oracle-v1;kind=cm;tool_identity="
-            f"{tool_identity};map={bsp_sha256}"
-        ).encode("ascii")
-    )
-
-
 def _spawn_invariants(value: object) -> bool:
     if not isinstance(value, Mapping):
         return False
@@ -276,7 +268,9 @@ def _map_criteria(
         and oracle.get("tool_identity") == gate.oracle_tool_identity
         and oracle.get("map_sha256") == bsp.get("sha256")
         and oracle.get("physics_identity")
-        == _expected_physics_identity(gate.oracle_tool_identity, bsp.get("sha256", ""))
+        == canonical_cm_physics_identity(
+            gate.oracle_tool_identity, bsp.get("sha256", "")
+        )
     )
     lightdata = result.get("compiled_lightdata")
     source_spawns = result.get("source_spawn_origins_milliunits")
@@ -555,6 +549,9 @@ def run_qualification_compiled_cm(
         "final_cohort_authorized": False,
         "declaration_sha256": declaration_sha256,
         "implementation": initial_implementation,
+        "toolchain_authority_sha256": declaration[
+            "toolchain_authority_sha256"
+        ],
         "input_report_sha256": compile_sha256,
         "infrastructure_checks": {
             "real-bsp-cm": True,

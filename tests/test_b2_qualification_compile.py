@@ -5,10 +5,15 @@ import os
 from pathlib import Path
 import struct
 import time
+from dataclasses import replace
 
 import pytest
 
 from harness.ibsp38 import HEADER_SIZE, LUMP_NAMES
+from tools.b2_qualification_toolchain import (
+    ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
+    load_toolchain_authority,
+)
 from tools.assemble_b2_qualification import (
     DECLARATION_SCHEMA,
     STAGE_SCHEMA,
@@ -159,6 +164,7 @@ def _declaration() -> dict[str, object]:
         "non_admissible": True,
         "retryable": True,
         "final_cohort_authorized": False,
+        "toolchain_authority_sha256": ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
         "generator": {"version": "v6", "grid": 5, "gym": False, "observed_heat": None},
         "selection": {
             "required_map_count": 28,
@@ -211,6 +217,7 @@ def _fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, objec
         "final_cohort_authorized": False,
         "declaration_sha256": _sha256(declaration_path.read_bytes()),
         "implementation": IMPLEMENTATION,
+        "toolchain_authority_sha256": ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
         "input_report_sha256": None,
         "infrastructure_checks": {
             "source-static": True,
@@ -231,6 +238,12 @@ def _fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, objec
     _write_pak(basedir / "pak0.pak")
     q2tool = tmp_path / "q2tool"
     _write_q2tool(q2tool)
+    authority = replace(
+        load_toolchain_authority(),
+        q2tool_sha256=_file_sha256(q2tool),
+        pak0_sha256=_file_sha256(basedir / "pak0.pak"),
+        colormap_sha256=_sha256(b"colormap"),
+    )
     bsp = tmp_path / "fixture.bsp"
     bsp.write_bytes(_bsp())
     events = tmp_path / "events.jsonl"
@@ -248,6 +261,7 @@ def _fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, objec
         "q2tool": q2tool,
         "basedir": basedir,
         "events": events,
+        "authority": authority,
     }
 
 
@@ -265,6 +279,7 @@ def _run(paths: dict[str, object], *, jobs: int = 4, timeout: float = 5.0) -> di
         jobs=jobs,
         timeout_seconds=timeout,
         implementation_provider=lambda _root: dict(IMPLEMENTATION),
+        authority_provider=lambda _root: paths["authority"],
     )
 
 

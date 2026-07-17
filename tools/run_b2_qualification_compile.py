@@ -20,7 +20,6 @@ import re
 import shutil
 import signal
 import stat
-import struct
 import subprocess
 import sys
 from typing import Any, Callable, Mapping, Sequence
@@ -31,6 +30,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from harness.ibsp38 import BspValidationError, parse_ibsp38  # noqa: E402
+from tools.b2_qualification_toolchain import (  # noqa: E402
+    ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256,
+    Q2TOOL_FLAGS,
+    ToolchainAuthority,
+    ToolchainAuthorityError,
+    inspect_baseq2_assets,
+    inspect_q2tool,
+    load_toolchain_authority,
+)
 from tools.assemble_b2_qualification import (  # noqa: E402
     DECLARATION_SCHEMA,
     EXPECTED_MAP_COUNT,
@@ -48,11 +56,6 @@ CONCRETE_STYLES = (
     "open", "towers", "canyon", "pits", "arena_open", "arena_vertical",
     "arena_lanes",
 )
-Q2TOOL_FLAGS = (
-    "-bsp", "-vis", "-fast", "-rad", "-bounce", "0", "-threads", "1",
-    "-basedir",
-)
-REQUIRED_PAK_MEMBER = "pics/colormap.pcx"
 DEFAULT_TIMEOUT_SECONDS = 3600.0
 DEFAULT_JOBS = min(4, os.cpu_count() or 1)
 MAX_JOBS = 8
@@ -232,7 +235,7 @@ def _validate_declaration(
         {
             "schema", "qualification_id", "mode", "non_admissible",
             "retryable", "final_cohort_authorized", "generator", "selection",
-            "implementation", "maps",
+            "implementation", "toolchain_authority_sha256", "maps",
         },
         "qualification declaration",
     )
@@ -254,6 +257,13 @@ def _validate_declaration(
         raise QualificationCompileError("qualification ID is invalid or final-mode")
     if declaration["implementation"] != implementation:
         raise QualificationCompileError("declaration implementation binding differs")
+    if (
+        declaration["toolchain_authority_sha256"]
+        != ACCEPTED_TOOLCHAIN_AUTHORITY_SHA256
+    ):
+        raise QualificationCompileError(
+            "declaration toolchain authority binding differs"
+        )
     generator = declaration["generator"]
     if generator != {"version": "v6", "grid": 5, "gym": False, "observed_heat": None}:
         raise QualificationCompileError("qualification generator contract differs")
@@ -384,7 +394,8 @@ def _validate_source_report(
         {
             "schema", "qualification_id", "mode", "stage", "non_admissible",
             "retryable", "final_cohort_authorized", "declaration_sha256",
-            "implementation", "input_report_sha256", "infrastructure_checks",
+            "implementation", "toolchain_authority_sha256",
+            "input_report_sha256", "infrastructure_checks",
             "map_count", "pass_count", "maps", "failures",
         },
         "qualification source report",
@@ -399,6 +410,8 @@ def _validate_source_report(
         or report["final_cohort_authorized"] is not False
         or report["declaration_sha256"] != declaration_sha256
         or report["implementation"] != implementation
+        or report["toolchain_authority_sha256"]
+        != declaration["toolchain_authority_sha256"]
         or report["input_report_sha256"] is not None
     ):
         raise QualificationCompileError("source-stage identity or binding differs")
@@ -449,39 +462,13 @@ def _validate_source_report(
     return report, raw, _sha256(raw)
 
 
-def _inspect_basedir(basedir: Path) -> dict[str, Any]:
-    if basedir.is_symlink() or not basedir.is_dir():
-        raise QualificationCompileError("basedir must be an existing baseq2 directory")
-    pak = basedir / "pak0.pak"
-    record = _file_record(pak)
-    with pak.open("rb") as stream:
-        header = stream.read(12)
-        if len(header) != 12:
-            raise QualificationCompileError("pak0.pak header is truncated")
-        magic, offset, length = struct.unpack("<4sii", header)
-        if (
-            magic != b"PACK" or offset < 12 or length < 0 or length % 64
-            or offset + length > record["bytes"]
-        ):
-            raise QualificationCompileError("pak0.pak directory is invalid")
-        stream.seek(offset)
-        directory = stream.read(length)
-    matches = []
-    for start in range(0, len(directory), 64):
-        raw_name, member_offset, member_bytes = struct.unpack(
-            "<56sii", directory[start:start + 64]
-        )
-        name = raw_name.split(b"\0", 1)[0].decode("ascii")
-        if member_offset < 12 or member_bytes < 0 or member_offset + member_bytes > record["bytes"]:
-            raise QualificationCompileError("pak0.pak member range is invalid")
-        if name.replace("\\", "/").casefold() == REQUIRED_PAK_MEMBER:
-            with pak.open("rb") as stream:
-                stream.seek(member_offset)
-                payload = stream.read(member_bytes)
-            matches.append({"name": name, "bytes": member_bytes, "sha256": _sha256(payload)})
-    if len(matches) != 1:
-        raise QualificationCompileError("pak0.pak must contain one pics/colormap.pcx")
-    return {"pak0": record, "required_member": matches[0]}
+def _inspect_basedir(
+    basedir: Path, authority: ToolchainAuthority,
+) -> dict[str, Any]:
+    try:
+        return inspect_baseq2_assets(basedir, authority)
+    except ToolchainAuthorityError as error:
+        raise QualificationCompileError(str(error)) from error
 
 
 def _bsp_record(path: Path) -> dict[str, Any]:
@@ -634,6 +621,7 @@ def compile_qualification(
     q2tool: Path, basedir: Path, jobs: int = DEFAULT_JOBS,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS, repo_root: Path = ROOT,
     implementation_provider: Callable[[Path], dict[str, Any]] = _current_implementation,
+    authority_provider: Callable[[Path], ToolchainAuthority] = load_toolchain_authority,
 ) -> dict[str, Any]:
     paths = {
         name: _qualification_path(path, name)
@@ -674,6 +662,12 @@ def compile_qualification(
     initial_implementation = _validate_implementation(
         implementation_provider(repo_root)
     )
+    try:
+        toolchain_authority = authority_provider(repo_root)
+    except ToolchainAuthorityError as error:
+        raise QualificationCompileError(
+            f"canonical toolchain authority rejected: {error}"
+        ) from error
     declaration, declaration_raw, declaration_sha256 = _validate_declaration(
         paths["declaration"], initial_implementation
     )
@@ -682,10 +676,14 @@ def compile_qualification(
         paths["source_report"], declaration, declaration_sha256,
         initial_implementation, source_records,
     )
+    try:
+        inspect_q2tool(paths["q2tool"], toolchain_authority)
+    except ToolchainAuthorityError as error:
+        raise QualificationCompileError(str(error)) from error
     q2tool_record = _file_record(paths["q2tool"])
     if not os.access(paths["q2tool"], os.X_OK):
         raise QualificationCompileError("q2tool is not executable")
-    basedir_record = _inspect_basedir(paths["basedir"])
+    basedir_record = _inspect_basedir(paths["basedir"], toolchain_authority)
 
     paths["staging_root"].mkdir(mode=0o755)
     paths["log_root"].mkdir(mode=0o755)
@@ -755,7 +753,10 @@ def compile_qualification(
                         declaration, paths["source_root"], SOURCE_SUFFIXES
                     ) == source_records
                     and _file_record(paths["q2tool"]) == q2tool_record
-                    and _inspect_basedir(paths["basedir"]) == basedir_record
+                    and _inspect_basedir(
+                        paths["basedir"], toolchain_authority
+                    ) == basedir_record
+                    and authority_provider(repo_root) == toolchain_authority
                     and _validate_implementation(
                         implementation_provider(repo_root)
                     ) == initial_implementation
@@ -791,6 +792,9 @@ def compile_qualification(
                 "final_cohort_authorized": False,
                 "declaration_sha256": declaration_sha256,
                 "implementation": initial_implementation,
+                "toolchain_authority_sha256": (
+                    toolchain_authority.manifest_sha256
+                ),
                 "input_report_sha256": source_report_sha256,
                 "infrastructure_checks": {
                     "real-q2tool": not systemic_failures,

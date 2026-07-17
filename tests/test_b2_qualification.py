@@ -10,6 +10,7 @@ import pytest
 
 import tools.assemble_b2_qualification as gate
 import tools.assemble_b2_gate as final_gate
+from tools.b2_qualification_toolchain import load_toolchain_authority
 from tools.run_generator_cohort import CONCRETE_STYLES, canonical_bytes
 
 
@@ -62,6 +63,9 @@ def _declaration(implementation: dict[str, object]) -> dict[str, object]:
         "non_admissible": True,
         "retryable": True,
         "final_cohort_authorized": False,
+        "toolchain_authority_sha256": (
+            load_toolchain_authority().manifest_sha256
+        ),
         "generator": {
             "version": "v6", "grid": 5, "gym": False,
             "observed_heat": None,
@@ -113,6 +117,9 @@ def _stage(
         "final_cohort_authorized": False,
         "declaration_sha256": declaration_sha256,
         "implementation": implementation,
+        "toolchain_authority_sha256": declaration[
+            "toolchain_authority_sha256"
+        ],
         "input_report_sha256": input_sha256,
         "infrastructure_checks": {
             name: True for name in gate.REQUIRED_STAGE_CHECKS[stage]
@@ -129,7 +136,28 @@ def _boundary(
     monkeypatch: pytest.MonkeyPatch,
     *, physics_identity: str | None = None,
 ) -> Path:
-    compile_report = {"q2tool": {"sha256": _digest("q2tool")}}
+    toolchain = load_toolchain_authority()
+    compile_report = {
+        "toolchain_authority": toolchain.manifest_record(),
+        "q2tool": {"sha256": toolchain.q2tool_sha256},
+        "fixed_q2tool_flags": list(toolchain.q2tool_flags),
+        "basedir": {
+            "pak0": {"sha256": toolchain.pak0_sha256},
+            "required_member": {"sha256": toolchain.colormap_sha256},
+        },
+        "fixtures": [
+            {
+                "case_id": fixture["case_id"],
+                "source": {"sha256": fixture["sha256"]},
+                "geometry": {
+                    "floor_top_units": fixture["floor_top_units"],
+                    "ceiling_bottom_units": fixture["ceiling_bottom_units"],
+                    "spawn_origin_units": fixture["spawn_origin_units"],
+                },
+            }
+            for fixture in toolchain.fixtures
+        ],
+    }
     compile_path = _write(tmp_path / "boundary-compile.json", compile_report)
     compile_record = {
         "path": str(compile_path.absolute()),
@@ -172,6 +200,7 @@ def _boundary(
         "status": "passed-non-admissible-qualification",
         "passed": True,
         "admission": gate.boundary_qualification_only(),
+        "toolchain_authority": toolchain.manifest_record(),
         "contract": {
             "engine_link_lift_units": 9,
             "column_requirement_units": 96,
@@ -207,6 +236,9 @@ def _infrastructure(
         "final_cohort_authorized": False,
         "declaration_sha256": declaration_sha256,
         "implementation": implementation,
+        "toolchain_authority_sha256": declaration[
+            "toolchain_authority_sha256"
+        ],
         "stage_report_sha256s": stage_sha256s,
         "checks": checks,
         "pass_count": len(checks),
