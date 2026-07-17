@@ -3,8 +3,10 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 
 import pytest
@@ -1128,6 +1130,57 @@ def test_full_network_executor_releases_port_lease_on_failure():
         executor.run(qualification.scenario_plan(41)[0], {})
     with qualification._PortAllocator._lock:
         assert qualification._PortAllocator._leased == before
+
+
+def test_absolute_script_from_outside_repo_imports_repo_harness(tmp_path):
+    script = (
+        Path(qualification.__file__).resolve().parent
+        / "qualify_network_client_frame_barrier.py"
+    )
+    outside = tmp_path / "outside-repository"
+    outside.mkdir()
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [
+            sys.executable, str(script), "finalize",
+            "--execution", str(outside / "absent-execution.json"),
+            "--runtime-manifest", str(outside / "absent-manifest.json"),
+            "--output", str(outside / "qualification.json"),
+        ],
+        cwd=outside,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert completed.returncode == 2
+    assert "execution evidence must be an exact regular file" in completed.stderr
+    assert "ModuleNotFoundError" not in completed.stderr
+
+
+def test_scenario_failure_reports_bounded_redacted_cause(tmp_path):
+    class FailingExecutor:
+        def run(self, spec, table):
+            del spec, table
+            raise ModuleNotFoundError(
+                "No module named 'harness'; token="
+                "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
+            )
+
+    with pytest.raises(qualification.QualificationError) as raised:
+        qualification.produce_execution_evidence(
+            identity=_identity(), output=(tmp_path / "failure.json").resolve(),
+            seed=41, timeout_ms=1500, executor=FailingExecutor(), jobs=1,
+            test_mode=True,
+        )
+    diagnostic = str(raised.value)
+    assert "full-network scenario baseline-cold-1 failed closed" in diagnostic
+    assert "ModuleNotFoundError: No module named 'harness'" in diagnostic
+    assert "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG" not in diagnostic
+    assert "token=<redacted>" in diagnostic
+    assert len(diagnostic) < 400
 
 
 def test_production_rejects_injected_executor_and_tampered_scenario(tmp_path):

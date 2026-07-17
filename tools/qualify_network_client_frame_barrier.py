@@ -24,6 +24,7 @@ import secrets
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -81,6 +82,16 @@ TEST_FAULT_VOCABULARY = (
     "drain-sigkill,load-delay,old-telemetry"
 )
 ROOT = Path(__file__).resolve().parents[1]
+# Direct execution (``python /path/to/tools/qualify_....py``) otherwise places
+# only ``tools/`` at sys.path[0].  Pin the resolved repository root ahead of
+# every lazy harness import; qualification must not depend on cwd or PYTHONPATH.
+_ROOT_IMPORT_PATH = os.fspath(ROOT)
+if sys.path[:1] != [_ROOT_IMPORT_PATH]:
+    try:
+        sys.path.remove(_ROOT_IMPORT_PATH)
+    except ValueError:
+        pass
+    sys.path.insert(0, _ROOT_IMPORT_PATH)
 
 _SHA_CHARS = frozenset("0123456789abcdef")
 _TOKEN = re.compile(r"^[A-Za-z0-9._~-]+$")
@@ -108,6 +119,23 @@ _REQUIRED_GAME_MARKERS = (
 
 class QualificationError(RuntimeError):
     """Fail-closed full-network qualification error."""
+
+
+def _bounded_failure_cause(error: BaseException) -> str:
+    """Return useful one-line diagnostics without reproducing bearer secrets."""
+    detail = " ".join(str(error).split())
+    detail = re.sub(
+        r"(?i)\b(token|password|secret|credential|authorization)\b"
+        r"\s*(?:=|:)\s*[^\s,;]+",
+        r"\1=<redacted>",
+        detail,
+    )
+    # Qualification bearer values are long URL-safe atoms.  Redact any such
+    # atom even when a lower layer omitted the field name.
+    detail = re.sub(r"(?<![\w.~/-])[A-Za-z0-9_-]{24,}(?![\w.~/-])", "<redacted>", detail)
+    if not detail:
+        detail = "no detail"
+    return f"{type(error).__name__}: {detail[:240]}"
 
 
 def _valid_sha256(value: Any) -> bool:
@@ -2656,7 +2684,8 @@ def produce_execution_evidence(
                 raw = future.result()
             except Exception as error:
                 raise QualificationError(
-                    f"full-network scenario {spec.name} failed closed"
+                    f"full-network scenario {spec.name} failed closed: "
+                    f"{_bounded_failure_cause(error)}"
                 ) from error
             results_by_name[spec.name] = _require_raw(
                 spec, raw, tables[spec.seed], test_mode=test_mode,
