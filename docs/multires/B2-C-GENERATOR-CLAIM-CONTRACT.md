@@ -778,7 +778,7 @@ retirement registry rejects it before any producer or gate reads campaign
 evidence. The replacement authorization below does not alter that terminal
 history or permit any 71443 byte to cross into a successor.
 
-### Sole 71444 final-attempt authorization
+### Retired 71444 final attempt
 
 The test-runtime and publisher-ordering defects are corrected at the
 methodology boundary: all execution-runtime dependency probes are pre-source,
@@ -808,6 +808,31 @@ Any source or later-stage failure permanently retires 71444; there is no
 resume, repair, repeated invocation, replacement member, passing subset,
 salvage, or reuse under that declaration.
 
+The sole 71444 attempt is terminal. Source, compile, compiled membership,
+compiled-CM, and compiled/static evidence passed 28/28, then the final
+materializer rejected at `authority-preflight` before attempting a map. Its
+materialization authority preflight therefore failed before population work.
+wrapper still pinned historical B1 gate SHA-256 `909b1e46...` instead of the
+fresh repository gate
+`eb99e08e5934d281556b0b6584ab23fe236adb8fce81f1cc7045229b368b9a25`.
+`B2-GENERATED-COHORT-71444-FAILURE.json`, canonical SHA-256
+`b709b038772e349583de4eea549ec16d6180ac820ea9ff1a4e382a0ec14ccf01`,
+binds source report `0986e0c70e04c7d1a70427c0218e079b885f2bbe269b3280a81a4245c2c7c098`,
+compile report `2a93eb8782c488768eb1c81bade03872eced3e64ad65de16eec948d614986e33`,
+compiled-CM report `a465649db8a9dc34da0e6513ef93710416bb849049608808cdaa256e9adaf4ff`,
+and terminal materialization report
+`75c4d8fd2d38d9cc7ad4fdf32b612d4d761ff9ea3b46fdf66d3ec0a367cc1962`.
+No map subprocess, materialized staging, publication, Dyn, test, deployment, or
+training action occurred.
+
+Cohort 71444 is permanently retired. The alias remains historical and is
+rejected before evidence. No replacement declaration is authorized until the final
+authority path is fixed, the exact read-only
+`tools/preflight_b2_materialization_authorities.py` check runs before both
+qualification source and final source, B1 is freshly resealed, and a new
+disposable qualification is green. No 71444 byte or passing subset may cross
+that boundary.
+
 The declaration-bearing 71444 producer commit must be a strict successor of
 qualified commit `275d4fa646ccf2c64ba8628cd4aa8b21644fa90d`. Gate replay
 must prove that ancestry, the exact qualified commit/tree and report binding,
@@ -819,6 +844,8 @@ toolchain, or unrelated change rejects the qualification.
 Before source generation, the exact clean declaration-bearing snapshot must
 pass the no-write `/usr/bin/python3.10 -B` syntax-floor scan, the pinned
 `/home/raymond/miniconda3/bin/python3.11` materializer import/CLI preflights,
+a no-write `tools/preflight_b2_materialization_authorities.py` invocation over
+the exact five final oracle/attestation paths,
 a same-process `import pytest, zstandard` probe, and
 `python -m pytest --version`. These checks may run concurrently only when they
 are read-only and must all finish green before the one source invocation. The
@@ -834,8 +861,8 @@ necessarily preceded the declaration. Its retained-evidence replay required
 that commit to be an ancestor, identical generator/routes/Atlas-analyzer
 authority fields, and exactly the frozen 71443 declaration/gate/test
 authorization paths in the Git delta. That retired authorization cannot admit
-71444 or any 71443 byte; the sole current successor relation is the 71444
-binding above.
+71444 or any 71443 byte; the later 71444 successor relation is now historical
+as well and cannot authorize a future cohort.
 
 The interpreter boundary is now a pre-declaration authority, not a check to
 discover after compilation. The exact clean immediate-predecessor
@@ -876,12 +903,12 @@ check.
 
 ## Offline workflow
 
-The active final `COHORT_ID` is `b2g26_final_71444`; declaration publication
-alone is not producer progress. Commands must never name retired cohorts 71426
-through 71443. No 71444 producer may run until all pre-source checks above are
-exact and green, and no retired or qualification population, report, Dyn
-evidence, compiled byte, or passing subset may be copied into the fresh 71444
-root.
+There is no active final `COHORT_ID`; the current alias names retired
+`b2g26_final_71444` for historical fail-closed admission only. Commands must
+never name retired cohorts 71426 through 71444. A successor requires a new
+declaration after the authority fix, B1 reseal, and fresh qualification, and
+no retired or qualification population, report, Dyn evidence, compiled byte,
+or passing subset may be copied into its root.
 
 The declaration-aware compiler remains the required final-cohort shape.
 Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer

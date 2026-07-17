@@ -14,6 +14,16 @@ import sys
 from typing import Any, Callable, Mapping, Sequence
 
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.materialize_generated_cohort import MaterializeCohortError
+from tools.preflight_b2_materialization_authorities import (
+    preflight as preflight_materialization_authorities,
+)
+
+
 PLAN_SCHEMA = "q2-b2-qualification-driver-plan-v2"
 STATE_SCHEMA = "q2-b2-qualification-driver-state-v1"
 STAGE_SCHEMA = "q2-b2-qualification-stage-v1"
@@ -170,6 +180,27 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             raise QualificationDriverError(
                 f"canonical Atlas {supplied} bytes differ from supplied authority"
             )
+    try:
+        materialization_authority_preflight = preflight_materialization_authorities(
+            cm_oracle=args.cm_oracle,
+            pmove_oracle=args.pmove_oracle,
+            hook_oracle=args.hook_oracle,
+            fall_oracle=args.fall_oracle,
+            hook_parity_attestation=args.hook_attestation,
+        )
+    except (MaterializeCohortError, OSError) as error:
+        raise QualificationDriverError(
+            f"final materialization authority preflight failed: {error}"
+        ) from error
+    if (
+        materialization_authority_preflight.get("passed") is not True
+        or materialization_authority_preflight.get("authorities", {})
+        .get("b1_gate", {}).get("actual_sha256")
+        != pinned_inputs["b1_gate"]["sha256"]
+    ):
+        raise QualificationDriverError(
+            "final materialization authority preflight differs from supplied B1 gate"
+        )
 
     commands: list[dict[str, Any]] = []
     command = [str(python), str(_tool(repo, "run_b2_qualification_source.py"))]
@@ -329,6 +360,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "toolchain_authority": toolchain_authority,
         "runtime_inputs": runtime_inputs,
         "pinned_inputs": pinned_inputs,
+        "materialization_authority_preflight": materialization_authority_preflight,
         "outputs": sorted(str(path) for path in {
             declaration, source, source_cold, compile_staging, compiled,
             compile_logs, cm_evidence, materialize_staging, materialized,
@@ -411,6 +443,27 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
             raise QualificationDriverError(
                 f"canonical Atlas {supplied} bytes differ from supplied authority"
             )
+    try:
+        replayed_preflight = preflight_materialization_authorities(
+            cm_oracle=Path(pinned["cm_oracle"]["path"]),
+            pmove_oracle=Path(pinned["pmove_oracle"]["path"]),
+            hook_oracle=Path(pinned["hook_oracle"]["path"]),
+            fall_oracle=Path(pinned["fall_oracle"]["path"]),
+            hook_parity_attestation=Path(pinned["hook_attestation"]["path"]),
+        )
+    except (MaterializeCohortError, OSError) as error:
+        raise QualificationDriverError(
+            f"final materialization authority preflight drifted: {error}"
+        ) from error
+    if (
+        plan.get("materialization_authority_preflight") != replayed_preflight
+        or replayed_preflight.get("authorities", {})
+        .get("b1_gate", {}).get("actual_sha256")
+        != pinned["b1_gate"]["sha256"]
+    ):
+        raise QualificationDriverError(
+            "final materialization authority preflight binding differs"
+        )
     reports = [Path(step["report"]) for step in plan["commands"]]
     if len(set(reports)) != len(reports) or any(
         path != workspace / "reports" / path.name for path in reports

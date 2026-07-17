@@ -9,6 +9,7 @@ import subprocess
 import pytest
 
 from tools import materialize_generated_cohort as cohort
+from harness.atlas_b1_authority import load_b1_authority_gate
 from tools.run_generator_cohort import (
     STAGE_SUFFIXES,
     canonical_bytes,
@@ -242,6 +243,9 @@ def _write_authorities(
         paths[label] = path
         expected[label] = _sha(payload)
     monkeypatch.setattr(cohort, "EXPECTED_SHA256", expected)
+    monkeypatch.setattr(
+        cohort, "_expected_authority_sha256", lambda _attestation: expected
+    )
     return paths
 
 
@@ -340,6 +344,57 @@ def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return declaration, _paths(
         tmp_path, compiled, declaration_path, authorities
     )
+
+
+def test_final_wrapper_compatibility_digests_match_current_validated_b1_gate() -> None:
+    gate = load_b1_authority_gate(cohort.ROOT)
+
+    assert cohort.file_sha256(cohort.ROOT / "docs/multires/B1-GATE.json") == (
+        cohort.CURRENT_B1_GATE_SHA256
+    )
+    assert cohort.EXPECTED_SHA256["cm"] == gate.cm_executable_sha256
+    assert cohort.EXPECTED_SHA256["pmove"] == gate.pmove_executable_sha256
+    assert cohort.EXPECTED_SHA256["fall"] == gate.fall_executable_sha256
+    assert (
+        cohort.EXPECTED_SHA256["hook_attestation"]
+        == gate.hook_attestation_sha256
+    )
+
+
+def test_final_wrapper_derives_all_six_exact_authorities_from_current_gate() -> None:
+    attestation = (
+        cohort.ROOT / "tests/fixtures/multires/hook-parity-pullspeed-1700.json"
+    )
+
+    assert cohort._expected_authority_sha256(attestation) == {
+        "b1_gate": cohort.CURRENT_B1_GATE_SHA256,
+        "cm": "781edaee1b9317766dbf831ad5edc8b5fdebe696969ca1efe0e54e2f3e5c7d1e",
+        "pmove": "66b481e924ec3d0a5e4eaf5458dd34cfe3c0927d5b7650455bceb368666718e4",
+        "hook": "cd8bc4107ae2e9f4ac006fbe469b360832db80b96a5597c2e5dfe12c32dc9284",
+        "fall": "dfdcf7ed74cc3ad7b8aa73df86986a8a4a31207da98ccffb4dd61673c324bef8",
+        "hook_attestation": (
+            "2e473d8face6b89f5b32798ddc5264bb8cc406e8dc29fd837e85bbd11b53d5ab"
+        ),
+    }
+
+
+def test_historical_b1_pin_rejects_current_gate_before_producer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cohort,
+        "CURRENT_B1_GATE_SHA256",
+        "909b1e46b4c3dca8adb6ab9017cd8716daa8c6cdd3eb106ae11aa09bee0572f8",
+    )
+    attestation = (
+        cohort.ROOT / "tests/fixtures/multires/hook-parity-pullspeed-1700.json"
+    )
+
+    with pytest.raises(
+        cohort.MaterializeCohortError,
+        match="current B1 gate exact bytes differ.*909b1e46.*eb99e08e",
+    ):
+        cohort._expected_authority_sha256(attestation)
 
 
 def test_success_runs_in_declaration_order_and_publishes_exact_membership(

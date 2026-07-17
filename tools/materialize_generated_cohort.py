@@ -41,6 +41,11 @@ from harness.hook_claims_v4 import (  # noqa: E402
     load_materialization,
     validate_runtime_sidecar,
 )
+from harness.atlas_b1_authority import (  # noqa: E402
+    B1AuthorityError,
+    admit_hook_parity_attestation,
+    load_b1_authority_gate,
+)
 
 
 REPORT_SCHEMA = "q2-generated-cohort-materialization-v1"
@@ -52,11 +57,14 @@ DEFAULT_MATERIALIZER_TIMEOUT_SECONDS = 900
 MAX_MATERIALIZER_TIMEOUT_SECONDS = 3600
 AT_FDCWD = -100
 RENAME_NOREPLACE = 1
+CURRENT_B1_GATE_SHA256 = (
+    "eb99e08e5934d281556b0b6584ab23fe236adb8fce81f1cc7045229b368b9a25"
+)
 
-# These are the immutable authorities admitted by docs/multires/B1-GATE.json.
-# Paths are operator inputs; admission is by exact bytes, never by filename.
+# Compatibility constants used by the report/test helpers.  Final producer
+# admission derives every expected digest from the validated current B1 gate
+# and its admitted hook attestation in ``_expected_authority_sha256`` below.
 EXPECTED_SHA256 = {
-    "b1_gate": "909b1e46b4c3dca8adb6ab9017cd8716daa8c6cdd3eb106ae11aa09bee0572f8",
     "cm": "781edaee1b9317766dbf831ad5edc8b5fdebe696969ca1efe0e54e2f3e5c7d1e",
     "pmove": "66b481e924ec3d0a5e4eaf5458dd34cfe3c0927d5b7650455bceb368666718e4",
     "hook": "cd8bc4107ae2e9f4ac006fbe469b360832db80b96a5597c2e5dfe12c32dc9284",
@@ -332,7 +340,37 @@ def _can_publish_failure_report(
     )
 
 
-def _authority_records(
+def _expected_authority_sha256(hook_attestation: Path) -> dict[str, str]:
+    """Derive final-producer byte admission from the validated current B1 seal."""
+
+    gate_path = ROOT / "docs/multires/B1-GATE.json"
+    try:
+        gate = load_b1_authority_gate(ROOT)
+        parity = admit_hook_parity_attestation(
+            hook_attestation, repo_root=ROOT
+        )
+    except B1AuthorityError as error:
+        raise MaterializeCohortError(
+            "authority-preflight", f"current B1 authority admission failed: {error}"
+        ) from error
+    gate_sha256 = file_sha256(gate_path)
+    if gate_sha256 != CURRENT_B1_GATE_SHA256:
+        raise MaterializeCohortError(
+            "authority-preflight",
+            "current B1 gate exact bytes differ: "
+            f"expected {CURRENT_B1_GATE_SHA256}, got {gate_sha256}",
+        )
+    return {
+        "b1_gate": gate_sha256,
+        "cm": gate.cm_executable_sha256,
+        "pmove": gate.pmove_executable_sha256,
+        "hook": parity.hook_executable_sha256,
+        "fall": gate.fall_executable_sha256,
+        "hook_attestation": parity.attestation_sha256,
+    }
+
+
+def preflight_authority_records(
     *,
     cm_oracle: Path,
     pmove_oracle: Path,
@@ -340,6 +378,7 @@ def _authority_records(
     fall_oracle: Path,
     hook_attestation: Path,
 ) -> dict[str, dict[str, Any]]:
+    expected_sha256 = _expected_authority_sha256(hook_attestation)
     paths = {
         "b1_gate": ROOT / "docs/multires/B1-GATE.json",
         "cm": cm_oracle,
@@ -350,7 +389,7 @@ def _authority_records(
     }
     records: dict[str, dict[str, Any]] = {}
     for label, path in paths.items():
-        expected = EXPECTED_SHA256[label]
+        expected = expected_sha256[label]
         if not path.is_file() or path.is_symlink():
             raise MaterializeCohortError(
                 "authority-preflight", f"{label} authority is missing or is a symlink"
@@ -732,7 +771,7 @@ def materialize_cohort(
                 "compiled-membership", "compiled stage is not the exact 168-file declaration"
             )
 
-        authorities = _authority_records(
+        authorities = preflight_authority_records(
             cm_oracle=cm_oracle,
             pmove_oracle=pmove_oracle,
             hook_oracle=hook_oracle,
@@ -884,7 +923,7 @@ def materialize_cohort(
                 "declaration-finalization",
                 "cohort declaration changed during materialization",
             )
-        final_authorities = _authority_records(
+        final_authorities = preflight_authority_records(
             cm_oracle=cm_oracle,
             pmove_oracle=pmove_oracle,
             hook_oracle=hook_oracle,

@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tools import run_b2_qualification as qualification
+from tools.materialize_generated_cohort import MaterializeCohortError
 from tools.run_b2_qualification import (
     DRIVER_STAGES,
     INFRASTRUCTURE_SCHEMA,
@@ -76,6 +78,9 @@ def _args(tmp_path: Path) -> argparse.Namespace:
     ):
         path = tmp_path / name
         path.write_bytes(f"fixture:{name}\n".encode("ascii"))
+    (tmp_path / "b1.json").write_bytes(
+        (repo / "docs/multires/B1-GATE.json").read_bytes()
+    )
     (tmp_path / "baseq2").mkdir()
     (tmp_path / "baseq2/pak0.pak").write_bytes(b"fixture:pak0\n")
     (tmp_path / "client/release").mkdir(parents=True)
@@ -90,6 +95,44 @@ def _args(tmp_path: Path) -> argparse.Namespace:
         (tmp_path / "hook").read_bytes()
     )
     return argparse.Namespace(**values)
+
+
+@pytest.fixture(autouse=True)
+def _stub_final_materialization_authority_preflight(monkeypatch) -> None:
+    gate = Path(__file__).resolve().parents[1] / "docs/multires/B1-GATE.json"
+
+    def fake_preflight(**kwargs):
+        return {
+            "schema": "q2-b2-materialization-authority-preflight-v1",
+            "passed": True,
+            "authorities": {
+                "b1_gate": {
+                    "filename": gate.name,
+                    "expected_sha256": _sha(gate),
+                    "actual_sha256": _sha(gate),
+                    "passed": True,
+                },
+                **{
+                    label: {
+                        "filename": path.name,
+                        "expected_sha256": _sha(path),
+                        "actual_sha256": _sha(path),
+                        "passed": True,
+                    }
+                    for label, path in {
+                        "cm": kwargs["cm_oracle"],
+                        "pmove": kwargs["pmove_oracle"],
+                        "hook": kwargs["hook_oracle"],
+                        "fall": kwargs["fall_oracle"],
+                        "hook_attestation": kwargs["hook_parity_attestation"],
+                    }.items()
+                },
+            },
+        }
+
+    monkeypatch.setattr(
+        qualification, "preflight_materialization_authorities", fake_preflight
+    )
 
 
 class FakeTools:
@@ -217,6 +260,56 @@ def test_command_plan_is_sequential_and_dry_to_build(tmp_path: Path) -> None:
     }
     assert plan["schema"] == "q2-b2-qualification-driver-plan-v2"
     assert len(plan["pinned_inputs"]) == 17
+    assert plan["materialization_authority_preflight"]["passed"] is True
+
+
+def test_build_plan_runs_exact_final_authority_preflight_before_workspace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    args = _args(tmp_path)
+    calls = []
+    original = qualification.preflight_materialization_authorities
+
+    def recording_preflight(**kwargs):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        qualification, "preflight_materialization_authorities",
+        recording_preflight,
+    )
+    build_plan(args)
+
+    assert len(calls) == 1
+    assert calls[0] == {
+        "cm_oracle": args.cm_oracle,
+        "pmove_oracle": args.pmove_oracle,
+        "hook_oracle": args.hook_oracle,
+        "fall_oracle": args.fall_oracle,
+        "hook_parity_attestation": args.hook_attestation,
+    }
+    assert not args.workspace.exists()
+
+
+def test_stale_final_authority_pin_refuses_before_workspace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    args = _args(tmp_path)
+
+    def reject(**_kwargs):
+        raise MaterializeCohortError(
+            "authority-preflight", "current B1 gate exact bytes differ"
+        )
+
+    monkeypatch.setattr(
+        qualification, "preflight_materialization_authorities", reject
+    )
+    with pytest.raises(
+        QualificationDriverError,
+        match="final materialization authority preflight failed",
+    ):
+        build_plan(args)
+    assert not args.workspace.exists()
 
 
 def test_missing_canonical_atlas_authority_fails_before_generation(

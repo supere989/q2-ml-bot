@@ -725,6 +725,10 @@ def test_fresh_71444_identity_and_cli_contract_are_exact() -> None:
             ROOT / "docs/multires/B2-GENERATED-COHORT-71443-DECLARATION.json",
             "71443",
         ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71444-DECLARATION.json",
+            "71444",
+        ),
     ],
 )
 def test_gate_refuses_retired_declaration_before_evidence(
@@ -734,12 +738,11 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_gate_accepts_fresh_current_71444_alias() -> None:
-    declaration, _sha256 = _validate_declaration(
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
-    assert declaration["cohort_id"] == EXPECTED_COHORT
-    assert declaration["maps"] == _expected_71444_rows()
+def test_gate_rejects_retired_current_71444_alias_before_evidence() -> None:
+    with pytest.raises(B2GateError, match=r"71444.*permanently retired"):
+        _validate_declaration(
+            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+        )
 
 
 def test_qualification_successor_accepts_only_the_declared_authorization_delta(

@@ -160,7 +160,7 @@ Its alias remains historical only and is rejected by the retirement registry
 before campaign evidence is read. The replacement authorization below does not
 alter that terminal history or permit any 71443 byte to cross into a successor.
 
-## Sole 71444 final-attempt authorization
+## Retired 71444 final attempt
 
 The test-runtime and publisher-ordering defects are corrected at the
 methodology boundary: all execution-runtime dependency probes are pre-source,
@@ -190,6 +190,31 @@ Any source or later-stage failure permanently retires 71444; there is no
 resume, repair, repeated invocation, replacement member, passing subset,
 salvage, or reuse under that declaration.
 
+That terminal condition occurred at the final materialization authority preflight.
+Source generation, q2tool compilation, compiled membership,
+compiled-CM, and compiled/static validation passed all 28 maps. The sole
+materializer invocation then rejected before any map subprocess because its
+final-wrapper constant still named historical B1 gate SHA-256 `909b1e46...`
+while the repository correctly contained fresh B1 gate SHA-256
+`eb99e08e5934d281556b0b6584ab23fe236adb8fce81f1cc7045229b368b9a25`.
+No materialized staging or publication exists; the materialization log root is
+empty. `B2-GENERATED-COHORT-71444-FAILURE.json` is the exact terminal
+authority, canonical SHA-256
+`b709b038772e349583de4eea549ec16d6180ac820ea9ff1a4e382a0ec14ccf01`.
+It binds source report `0986e0c70e04c7d1a70427c0218e079b885f2bbe269b3280a81a4245c2c7c098`,
+compile report `2a93eb8782c488768eb1c81bade03872eced3e64ad65de16eec948d614986e33`,
+compiled-CM report `a465649db8a9dc34da0e6513ef93710416bb849049608808cdaa256e9adaf4ff`,
+and materialization failure report
+`75c4d8fd2d38d9cc7ad4fdf32b612d4d761ff9ea3b46fdf66d3ec0a367cc1962`.
+
+Cohort 71444 is permanently retired. None of its source, compiled, CM,
+static, materialization-report, log, WSL, or producer-snapshot bytes may be
+retried, resumed, reused, copied forward, salvaged, substituted, or admitted.
+Its unchanged current alias is historical only and the retirement registry
+rejects it before evidence. No replacement declaration is authorized until
+the final-wrapper authority fix, its exact no-write preflight, a fresh B1
+reseal, and a new disposable qualification are committed and green.
+
 The declaration-bearing 71444 producer commit must be a strict successor of
 qualified commit `275d4fa646ccf2c64ba8628cd4aa8b21644fa90d`. Gate replay
 must prove that ancestry, the exact qualified commit/tree and report binding,
@@ -201,6 +226,8 @@ toolchain, or unrelated change rejects the qualification.
 Before source generation, the exact clean declaration-bearing snapshot must
 pass the no-write `/usr/bin/python3.10 -B` syntax-floor scan, the pinned
 `/home/raymond/miniconda3/bin/python3.11` materializer import/CLI preflights,
+a no-write `tools/preflight_b2_materialization_authorities.py` invocation over
+the exact five final oracle/attestation paths,
 a same-process `import pytest, zstandard` probe, and
 `python -m pytest --version`. These checks may run concurrently only when they
 are read-only and must all finish green before the one source invocation. The
@@ -216,7 +243,8 @@ equal the final producer commit. That retired relation required the qualified
 commit to be an ancestor, identical generator/routes/Atlas-analyzer authority
 fields, and a complete Git delta equal to the frozen 71443
 declaration/gate/test authorization path set. It cannot authorize 71444 or any
-71443 byte; the sole current successor relation is the 71444 binding above.
+71443 byte; the later 71444 successor relation is also now historical and
+cannot authorize a future cohort.
 
 The exact clean immediate-predecessor implementation snapshot at commit
 `8d89df4a787e261f8a4fb935908191f8df7634b2` and tree
@@ -258,9 +286,9 @@ separate CPython 3.11.4 executable and zstandard module digests above. The
 syntax report must never be required to identify the execution runtime.
 
 The assembler must reject declarations for retired cohorts 71426 through
-71443 before reading campaign evidence. The only eligible successor is the
-separately committed 71444 declaration authorized above, and only while its
-fresh B1 and non-admissible qualification bindings remain exact.
+71444 before reading campaign evidence. There is currently no eligible final
+successor; a new immutable declaration can be authorized only after the
+authority fix, fresh B1 reseal, and a new green non-admissible qualification.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -273,16 +301,16 @@ satisfied the disposable prerequisite but remains `non_admissible: true` and
 cannot override 71443 retirement. Qualification or retired bytes and passing
 subsets can never satisfy a future final gate.
 
-The current successor prerequisite is instead the independent green 28/28
+The retired 71444 prerequisite was the independent green 28/28
 qualification `b2q26_275d4fa_71623700`, report SHA-256
 `09bd298d87739515d468f432219eefcad01e8586a87a71339f5121900a6f57c5`,
 bound to fresh B1 gate SHA-256
 `eb99e08e5934d281556b0b6584ab23fe236adb8fce81f1cc7045229b368b9a25`
 and qualified implementation commit/tree
 `275d4fa646ccf2c64ba8628cd4aa8b21644fa90d` /
-`7bd808b2194a44b80dc64fb88c700209d4657e9a`. It authorizes only the one
-71444 attempt described above and remains non-admissible evidence rather than
-final population input.
+`7bd808b2194a44b80dc64fb88c700209d4657e9a`. Its one authorization was
+consumed by 71444 and it remains non-admissible historical evidence rather
+than final population input or successor authority.
 
 The disposable campaign is orchestrated by
 `tools/run_b2_qualification.py`. Driver-plan schema v2 hash-binds every
@@ -433,9 +461,10 @@ reuse of any retired cohort byte.
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. The current alias authorizes only fresh cohort 71444.
-This template is executable only against fresh 71444 roots and the exact B1
-seal and green non-admissible qualification authority bound above.
+clean-tree authority. The current alias names retired cohort 71444 and cannot
+execute this template. The command shape below is retained for historical
+review and becomes executable only after a fresh successor updates the frozen
+cohort identity and exact B1/qualification bindings.
 
 ```sh
 python tools/assemble_b2_gate.py \

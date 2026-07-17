@@ -106,6 +106,16 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "71444600..71444603",
         "Exactly one immutable/no-retry final producer attempt is authorized",
         "The first source-generation invocation consumes the sole authorization",
+        "B2-GENERATED-COHORT-71444-FAILURE.json",
+        "Cohort 71444 is permanently retired",
+        "b709b038772e349583de4eea549ec16d6180ac820ea9ff1a4e382a0ec14ccf01",
+        "0986e0c70e04c7d1a70427c0218e079b885f2bbe269b3280a81a4245c2c7c098",
+        "2a93eb8782c488768eb1c81bade03872eced3e64ad65de16eec948d614986e33",
+        "a465649db8a9dc34da0e6513ef93710416bb849049608808cdaa256e9adaf4ff",
+        "75c4d8fd2d38d9cc7ad4fdf32b612d4d761ff9ea3b46fdf66d3ec0a367cc1962",
+        "materialization authority preflight",
+        "tools/preflight_b2_materialization_authorities.py",
+        "No replacement declaration is authorized",
         "final producer lane itself is strictly sequential",
         "Tests never overlap compilation",
         "qualification",
@@ -126,6 +136,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert "b2g26_final_71443" in text
     assert "Cohort 71443 is permanently retired" in text
     assert "b2g26_final_71444" in text
+    assert "Cohort 71444 is permanently retired" in text
     assert "Exactly one immutable/no-retry final producer attempt" in text
     assert "future-only" not in text
     assert '--basedir "$FUTURE_ROOT/assets"' not in text

@@ -41,6 +41,9 @@ NAMED_71444 = (
 FAILURE_71443 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71443-FAILURE.json"
 )
+FAILURE_71444 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71444-FAILURE.json"
+)
 RETIRED_DECLARATIONS = (
     NAMED_71438,
     NAMED_71439,
@@ -48,6 +51,7 @@ RETIRED_DECLARATIONS = (
     NAMED_71441,
     NAMED_71442,
     NAMED_71443,
+    NAMED_71444,
 )
 
 
@@ -253,7 +257,7 @@ def test_alias_and_named_71441_are_retired(declaration_path: Path) -> None:
         )
 
 
-def test_current_alias_71444_is_fresh_and_matches_named_declaration() -> None:
+def test_current_alias_71444_is_retired_until_replaced() -> None:
     current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
 
     assert current["cohort_id"] == "b2g26_final_71444"
@@ -261,12 +265,12 @@ def test_current_alias_71444_is_fresh_and_matches_named_declaration() -> None:
     assert current_sha256 == (
         "da27e96b3fe8c3719a7ff1593e37b4ac768f53a36f38c877566af495a6b551bf"
     )
-    assert (
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71444.*permanently retired"
+    ):
         registry.require_unretired_declaration(
             CURRENT_ALIAS, current, current_sha256
         )
-        is None
-    )
 
 
 def test_71443_terminal_failure_authority_is_canonical_and_exact() -> None:
@@ -356,6 +360,60 @@ def test_71443_terminal_failure_authority_is_canonical_and_exact() -> None:
     }
 
 
+def test_71444_terminal_failure_authority_is_canonical_and_exact() -> None:
+    payload = FAILURE_71444.read_bytes()
+    authority = json.loads(payload)
+
+    assert payload == cohort.canonical_bytes(authority)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "b709b038772e349583de4eea549ec16d6180ac820ea9ff1a4e382a0ec14ccf01"
+    )
+    assert authority["schema"] == registry.FAILURE_SCHEMA
+    assert authority["status"] == (
+        "permanently-failed-materialization-authority-preflight"
+    )
+    assert authority["cohort_id"] == "b2g26_final_71444"
+    assert authority["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71444-DECLARATION.json",
+        "sha256": "da27e96b3fe8c3719a7ff1593e37b4ac768f53a36f38c877566af495a6b551bf",
+    }
+    admission = authority["admission"]
+    assert admission["permanently_non_admissible"] is True
+    assert admission["source_stage_published"] is True
+    assert admission["compiled_stage_published"] is True
+    for stage in ("materialized", "claims", "analysis"):
+        assert admission[f"{stage}_stage_published"] is False
+    evidence = authority["evidence"]
+    assert evidence["source_freeze"]["report_sha256"] == (
+        "0986e0c70e04c7d1a70427c0218e079b885f2bbe269b3280a81a4245c2c7c098"
+    )
+    assert evidence["wsl_compile"]["report_sha256"] == (
+        "2a93eb8782c488768eb1c81bade03872eced3e64ad65de16eec948d614986e33"
+    )
+    assert evidence["compiled_cm_preflight"]["report_sha256"] == (
+        "a465649db8a9dc34da0e6513ef93710416bb849049608808cdaa256e9adaf4ff"
+    )
+    materialization = evidence["materialization_failure"]
+    assert materialization["report_sha256"] == (
+        "75c4d8fd2d38d9cc7ad4fdf32b612d4d761ff9ea3b46fdf66d3ec0a367cc1962"
+    )
+    assert materialization["attempted_count"] == 0
+    assert materialization["log_file_count"] == 0
+    assert materialization["materialized_staging_path_exists"] is False
+    assert materialization["materialized_publish_path_exists"] is False
+    assert authority["failure"]["phase"] == (
+        "materialization-authority-preflight"
+    )
+    publication = authority["failure"]["publication_contract"]
+    assert publication["materialization_run"] is True
+    assert publication["maps_materialization_attempted"] == 0
+    assert publication["materialized_stage_published"] is False
+    assert publication["dyn_run"] is False
+    assert publication["test_campaign_run"] is False
+    assert publication["deployment_run"] is False
+    assert publication["training_run"] is False
+
+
 @pytest.mark.parametrize(
     ("identity", "pattern"),
     [("map", "map ID .* permanently retired"), ("seed", "seed .* permanently retired")],
@@ -443,6 +501,11 @@ def test_contradictory_failure_registry_fails_closed(
             NAMED_71443,
             "b2g26_final_71443",
             "d890e151cbc3446622a8c0f5fdd2bd23352583c6431e1484262587c3c7246713",
+        ),
+        (
+            NAMED_71444,
+            "b2g26_final_71444",
+            "da27e96b3fe8c3719a7ff1593e37b4ac768f53a36f38c877566af495a6b551bf",
         ),
     ],
 )
