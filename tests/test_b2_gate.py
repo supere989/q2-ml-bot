@@ -27,6 +27,8 @@ from tools.assemble_b2_gate import (
     _decode_dyn_snapshot,
     _dyn_source_authority,
     _expected_71442_rows,
+    _preflight_implementation_identity,
+    _validate_compiled_cm_preflight,
     _validate_declaration,
     _validate_dyn_evidence,
     _validate_materialized,
@@ -84,6 +86,7 @@ def _paths(tmp_path: Path) -> B2GatePaths:
         compiled_dir=dummy,
         compiled_membership_report=dummy,
         compiled_static_report=dummy,
+        compiled_cm_preflight_report=dummy,
         materialized_dir=dummy,
         materialized_membership_report=dummy,
         claims_dir=tmp_path / "claims",
@@ -99,6 +102,7 @@ def _paths(tmp_path: Path) -> B2GatePaths:
         dyn_evidence_executable=tmp_path / "q2-dyn-evidence",
         dyn_evidence_report=tmp_path / "dyn/b2-dyn-evidence.json",
         test_report=dummy,
+        qualification_report=dummy,
     )
 
 
@@ -684,6 +688,8 @@ def test_retired_71442_historical_identity_and_cli_contract_are_exact() -> None:
     assert "--source-dir" in options
     assert "--stock-analysis-dir" in options
     assert "--dyn-evidence-report" in options
+    assert "--compiled-cm-preflight-report" in options
+    assert "--qualification-report" in options
     assert "--glob" not in options
     assert "--generated-dir" not in options
     assert "--expected-count" not in options
@@ -728,6 +734,120 @@ def test_gate_refuses_retired_current_alias_until_new_qualification() -> None:
     ):
         _validate_declaration(
             ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+        )
+
+
+def _write_compiled_cm_gate_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[B2GatePaths, dict, dict[str, str]]:
+    paths = _paths(tmp_path)
+    compiled = tmp_path / "compiled"
+    compiled.mkdir()
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text("{}\n", encoding="utf-8")
+    b1_gate = tmp_path / "B1-GATE.json"
+    b1_gate.write_text("{}\n", encoding="utf-8")
+    report_path = tmp_path / "compiled-cm.json"
+    paths = replace(
+        paths,
+        compiled_dir=compiled,
+        declaration=declaration_path,
+        b1_gate=b1_gate,
+        compiled_cm_preflight_report=report_path,
+    )
+    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71442_rows()}
+    membership = {"schema": "fixture-membership", "passed": True, "failures": []}
+    monkeypatch.setattr(b2_gate, "verify_stage_membership", lambda *_args: membership)
+    binaries = {
+        "cm": "01" * 32,
+        "cm_tool_identity": "02" * 32,
+        "cm_source_closure_sha256": "03" * 32,
+    }
+    report = {
+        "schema": b2_gate.COMPILED_CM_PREFLIGHT_SCHEMA,
+        "stage": b2_gate.COMPILED_CM_PREFLIGHT_STAGE,
+        "admission_status": b2_gate.COMPILED_CM_PREFLIGHT_STATUS,
+        "promotion_authority": False,
+        "cohort_id": EXPECTED_COHORT,
+        "declaration": {
+            "path": str(declaration_path.absolute()),
+            "sha256": SHA,
+            "map_count": 28,
+        },
+        "compiled_root": str(compiled.absolute()),
+        "compiled_membership": {
+            "report": membership,
+            "report_sha256": _sha256(canonical_bytes(membership)),
+        },
+        "b1_authority": {
+            "gate_sha256": _sha256(b1_gate.read_bytes()),
+            "cm_executable_sha256": binaries["cm"],
+            "cm_tool_identity": binaries["cm_tool_identity"],
+            "cm_source_closure_sha256": binaries["cm_source_closure_sha256"],
+        },
+        "implementation": _preflight_implementation_identity(ROOT),
+        "execution": {
+            "parallel_jobs": 4,
+            "oracle_batch_timeout_milliseconds": 10_000,
+            "map_order": "canonical-declaration-order",
+        },
+        "checks": {
+            "compiled_spawn_origins_exact": True,
+            "engine_spawn_link_lift_milliunits": 9000,
+            "standing_and_crouched_stationary_hulls": True,
+            "support_depth_milliunits": 96_000,
+            "oracle_swept_column_minimum_milliunits": 96_000,
+            "minimum_spawn_xy_separation_milliunits": 384_000,
+            "bounded_basic_escape": True,
+            "basic_hazard_containment": True,
+            "compiled_lightdata_presence": True,
+            "all_to_all_reachability": "deferred-to-full-Atlas-admission",
+        },
+        "input_stability": {
+            "declaration": True,
+            "compiled_membership": True,
+            "implementation": True,
+            "cm_oracle": True,
+        },
+        "maps": [],
+        "map_count": 28,
+        "pass_count": 28,
+        "failure_count": 0,
+        "failures": [],
+        "passed": True,
+    }
+    report["canonical_record_sha256"] = _sha256(canonical_bytes(report))
+    return paths, report, binaries
+
+
+def test_compiled_cm_gate_rejects_old_report_without_hazard_and_lightdata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, report, binaries = _write_compiled_cm_gate_fixture(tmp_path, monkeypatch)
+    report["checks"].pop("basic_hazard_containment")
+    report["checks"].pop("compiled_lightdata_presence")
+    paths.compiled_cm_preflight_report.write_bytes(canonical_bytes(report))
+    with pytest.raises(B2GateError, match="compiled-CM checks keys differ"):
+        _validate_compiled_cm_preflight(
+            paths, {"cohort_id": EXPECTED_COHORT, "maps": _expected_71442_rows()},
+            SHA, binaries,
+        )
+
+
+def test_compiled_cm_gate_rejects_unstable_input_before_map_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, report, binaries = _write_compiled_cm_gate_fixture(tmp_path, monkeypatch)
+    report["input_stability"]["cm_oracle"] = False
+    report["canonical_record_sha256"] = _sha256(canonical_bytes({
+        key: value for key, value in report.items()
+        if key != "canonical_record_sha256"
+    }))
+    paths.compiled_cm_preflight_report.write_bytes(canonical_bytes(report))
+    with pytest.raises(B2GateError, match="input stability failed"):
+        _validate_compiled_cm_preflight(
+            paths, {"cohort_id": EXPECTED_COHORT, "maps": _expected_71442_rows()},
+            SHA, binaries,
         )
 
 
@@ -1054,6 +1174,18 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert gate_schema["properties"]["generated_cohort"]["properties"][
         "cohort_id"
     ]["const"] == EXPECTED_COHORT
+    assert gate_schema["properties"]["generated_cohort"]["properties"][
+        "compiled_cm_preflight"
+    ]["$ref"] == "#/$defs/compiled_cm_preflight_stage"
+    assert gate_schema["properties"]["toolchain_qualification"][
+        "$ref"
+    ] == "#/$defs/toolchain_qualification"
+    assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
+        "non_admissible"
+    ]["const"] is True
+    assert gate_schema["$defs"]["compiled_cm_preflight_stage"]["properties"][
+        "pass_count"
+    ]["const"] == 28
     assert gate_schema["properties"]["representative_budgets"]["properties"][
         "four_client_feature_assembly_p99_ns"
     ]["exclusiveMaximum"] == 500000

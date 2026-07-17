@@ -12,6 +12,7 @@
     "normative_documents",
     "implementation",
     "b1_authority",
+    "toolchain_qualification",
     "generated_cohort",
     "stock_corpus",
     "representative_budgets",
@@ -50,6 +51,7 @@
       }
     },
     "implementation": {"$ref": "#/$defs/implementation"},
+    "toolchain_qualification": {"$ref": "#/$defs/toolchain_qualification"},
     "b1_authority": {
       "type": "object",
       "additionalProperties": false,
@@ -87,6 +89,7 @@
         "declaration_sha256",
         "source",
         "compiled",
+        "compiled_cm_preflight",
         "materialized",
         "claims",
         "analysis"
@@ -97,6 +100,7 @@
         "declaration_sha256": {"$ref": "#/$defs/sha256"},
         "source": {"$ref": "#/$defs/source_stage"},
         "compiled": {"$ref": "#/$defs/compiled_stage"},
+        "compiled_cm_preflight": {"$ref": "#/$defs/compiled_cm_preflight_stage"},
         "materialized": {"$ref": "#/$defs/materialized_stage"},
         "claims": {"$ref": "#/$defs/claims_stage"},
         "analysis": {"$ref": "#/$defs/analysis_stage"}
@@ -208,6 +212,8 @@
         "stock_pins_match",
         "generated_maps_passed",
         "generated_static_pass_rate_preserved",
+        "toolchain_qualification_non_admissible",
+        "compiled_cm_preflight_maps_passed",
         "oracle_failures_overridable",
         "atlas_budgets_passed",
         "feature_assembly_budget_passed",
@@ -220,6 +226,8 @@
         "stock_pins_match": {"const": true},
         "generated_maps_passed": {"const": 28},
         "generated_static_pass_rate_preserved": {"const": true},
+        "toolchain_qualification_non_admissible": {"const": true},
+        "compiled_cm_preflight_maps_passed": {"const": 28},
         "oracle_failures_overridable": {"const": false},
         "atlas_budgets_passed": {"const": true},
         "feature_assembly_budget_passed": {"const": true},
@@ -300,6 +308,26 @@
         "routes_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
+    "toolchain_qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "report", "schema", "qualification_id", "status",
+        "non_admissible", "retryable", "final_cohort_authorized",
+        "end_to_end_pass_count", "required_end_to_end_pass_count"
+      ],
+      "properties": {
+        "report": {"$ref": "#/$defs/file"},
+        "schema": {"const": "q2-b2-toolchain-qualification-v1"},
+        "qualification_id": {"type": "string", "minLength": 1},
+        "status": {"const": "green"},
+        "non_admissible": {"const": true},
+        "retryable": {"const": true},
+        "final_cohort_authorized": {"const": false},
+        "end_to_end_pass_count": {"type": "integer", "minimum": 20, "maximum": 28},
+        "required_end_to_end_pass_count": {"const": 20}
+      }
+    },
     "source_stage": {
       "type": "object",
       "additionalProperties": false,
@@ -319,6 +347,25 @@
         "membership": {"$ref": "#/$defs/file"},
         "static": {"$ref": "#/$defs/file"},
         "map_count": {"const": 28}
+      }
+    },
+    "compiled_cm_preflight_stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "report", "schema", "stage", "admission_status",
+        "compiled_membership_sha256", "implementation_source_closure_sha256",
+        "map_count", "pass_count"
+      ],
+      "properties": {
+        "report": {"$ref": "#/$defs/file"},
+        "schema": {"const": "q2-b2-compiled-cm-preflight-v1"},
+        "stage": {"const": "post-q2tool-compiled-cm-preflight"},
+        "admission_status": {"const": "non-admissible-preflight-only"},
+        "compiled_membership_sha256": {"$ref": "#/$defs/sha256"},
+        "implementation_source_closure_sha256": {"$ref": "#/$defs/sha256"},
+        "map_count": {"const": 28},
+        "pass_count": {"const": 28}
       }
     },
     "materialized_stage": {

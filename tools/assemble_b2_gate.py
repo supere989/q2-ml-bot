@@ -41,11 +41,18 @@ from harness.hook_claims_v4 import (  # noqa: E402
     validate_materialization as validate_hook_materialization_v4,
     validate_runtime_sidecar,
 )
+from harness.ibsp38 import BspValidationError, parse_ibsp38  # noqa: E402
 from tools.generator_claim_validator import (  # noqa: E402
     ClaimValidationError,
+    _hurt_bounds,
     build_generator_claims,
     validate_report as validate_claim_report,
     validate_stock_analysis,
+)
+from tools.assemble_b2_qualification import (  # noqa: E402
+    B2QualificationError,
+    QUALIFICATION_SCHEMA,
+    validate_qualification,
 )
 from tools.run_generator_claim_campaign import (  # noqa: E402
     CAMPAIGN_SCHEMA,
@@ -72,10 +79,21 @@ from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
 GATE_SCHEMA = "q2-multires-b2-gate-v1"
 EXPECTED_COHORT = "b2g26_final_71442"
 EXPECTED_DESIGN_SHA256 = (
-    "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5"
+    "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
 )
 EXPECTED_PLAN_SHA256 = (
-    "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b"
+    "371577feb8c40f542c90eec4b4aa91ef84c4a8e2019bf1614e59c46aedfec410"
+)
+COMPILED_CM_PREFLIGHT_SCHEMA = "q2-b2-compiled-cm-preflight-v1"
+COMPILED_CM_PREFLIGHT_STAGE = "post-q2tool-compiled-cm-preflight"
+COMPILED_CM_PREFLIGHT_STATUS = "non-admissible-preflight-only"
+PREFLIGHT_IMPLEMENTATION_PATHS = (
+    "tools/run_compiled_cm_preflight.py",
+    "harness/atlas_analyzer.py",
+    "harness/atlas_b1_authority.py",
+    "harness/ibsp38.py",
+    "tools/run_generator_cohort.py",
+    "tools/validate_maps.py",
 )
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -112,6 +130,7 @@ class B2GatePaths:
     compiled_dir: Path
     compiled_membership_report: Path
     compiled_static_report: Path
+    compiled_cm_preflight_report: Path
     materialized_dir: Path
     materialized_membership_report: Path
     claims_dir: Path
@@ -127,6 +146,7 @@ class B2GatePaths:
     dyn_evidence_executable: Path
     dyn_evidence_report: Path
     test_report: Path
+    qualification_report: Path
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -383,6 +403,12 @@ def _validate_b1_and_oracles(
     _require(fall.get("executable_sha256") == binaries["fall"], "fall oracle differs from B1")
     _require(parity.get("sha256") == binaries["hook_attestation"], "hook attestation differs from B1")
     _require(parity.get("passed") is True, "B1 hook parity is not passed")
+    for name in ("oracle_tool_identity", "oracle_source_closure_sha256"):
+        _digest(transformed.get(name), f"B1 collision {name}")
+    binaries["cm_tool_identity"] = transformed["oracle_tool_identity"]
+    binaries["cm_source_closure_sha256"] = transformed[
+        "oracle_source_closure_sha256"
+    ]
     hook_attestation = _mapping(
         _load_json(paths.hook_attestation, canonical=False),
         "B1 hook parity attestation",
@@ -411,6 +437,76 @@ def _validate_b1_and_oracles(
             "atlas_verifier": paths.atlas_verifier,
         }.items()},
     }, binaries
+
+
+def _validate_qualification_report(
+    paths: B2GatePaths,
+    normative: Mapping[str, Any],
+    implementation: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        report = validate_qualification(
+            _load_json(paths.qualification_report)
+        )
+    except B2QualificationError as exc:
+        raise B2GateError(f"B2 toolchain qualification rejected: {exc}") from exc
+    _require(
+        report["normative_documents"] == normative,
+        "B2 qualification normative document binding differs",
+    )
+    _require(
+        report["implementation"] == implementation,
+        "B2 qualification implementation binding differs",
+    )
+    b1_gate = _mapping(
+        _load_json(paths.b1_gate, canonical=False), "B1 gate"
+    )
+    requalification = _mapping(
+        b1_gate.get("authority_requalification"),
+        "B1 authority requalification",
+    )
+    runtime_seal = _mapping(
+        requalification.get("probe_runtime_authority_seal"),
+        "B1 probe runtime authority seal",
+    )
+    repository = _mapping(
+        requalification.get("repository"), "B1 requalification repository"
+    )
+    live = _mapping(
+        requalification.get("live_identities"), "B1 requalification identities"
+    )
+    collision = _mapping(
+        live.get("collision"), "B1 requalification collision identity"
+    )
+    expected_b1 = {
+        "gate": _file_record(paths.b1_gate),
+        "requalification_sha256": _sha256_bytes(canonical_bytes(requalification)),
+        "runtime_authority_seal_sha256": _sha256_bytes(
+            canonical_bytes(runtime_seal)
+        ),
+        "reseal_repository": dict(repository),
+        "collision_identity": {
+            "tool_identity": collision.get("tool_identity"),
+            "physics_identity": collision.get("physics_identity"),
+        },
+    }
+    _require(
+        report["b1_authority"] == expected_b1,
+        "B2 qualification B1 reseal binding differs",
+    )
+    return {
+        "report": _file_record(paths.qualification_report),
+        "schema": QUALIFICATION_SCHEMA,
+        "qualification_id": report["qualification_id"],
+        "status": "green",
+        "non_admissible": True,
+        "retryable": True,
+        "final_cohort_authorized": False,
+        "end_to_end_pass_count": report["end_to_end"]["pass_count"],
+        "required_end_to_end_pass_count": report["end_to_end"][
+            "required_pass_count"
+        ],
+    }
 
 
 def _expected_71442_rows() -> list[dict[str, Any]]:
@@ -763,6 +859,521 @@ def _validate_compiled_and_static(
         "membership": _file_record(paths.compiled_membership_report),
         "static": _file_record(paths.compiled_static_report),
         "map_count": 28,
+    }
+
+
+def _preflight_implementation_identity(repo_root: Path) -> dict[str, Any]:
+    files = []
+    for relative in PREFLIGHT_IMPLEMENTATION_PATHS:
+        path = repo_root / relative
+        record = _file_record(path)
+        files.append({
+            "path": relative,
+            "bytes": record["bytes"],
+            "sha256": record["sha256"],
+        })
+    return {
+        "schema": "q2-b2-compiled-cm-preflight-implementation-v1",
+        "files": files,
+        "source_closure_sha256": _sha256_bytes(canonical_bytes(files)),
+    }
+
+
+def _origin_milliunits(raw: str, label: str) -> list[int]:
+    words = raw.split()
+    if len(words) != 3:
+        raise B2GateError(f"{label} must have a three-axis origin")
+    result = []
+    for word in words:
+        try:
+            value = float(word)
+        except ValueError as exc:
+            raise B2GateError(f"{label} origin is not numeric") from exc
+        _require(math.isfinite(value), f"{label} origin is not finite")
+        milliunits = round(value * 1000)
+        _require(
+            abs(value * 1000 - milliunits) <= 1e-6,
+            f"{label} origin is not representable in milliunits",
+        )
+        result.append(milliunits)
+    return result
+
+
+def _validate_preflight_spawn(
+    value: object,
+    compiled_origins: Mapping[int, list[int]],
+    map_id: str,
+) -> None:
+    spawn = _mapping(value, f"compiled-CM spawn {map_id}")
+    _exact_keys(
+        spawn,
+        {
+            "entity_ordinal", "authored_origin_milliunits",
+            "engine_link_lift_milliunits", "standing_clear",
+            "crouched_clear", "supported", "support_drop_milliunits",
+            "column_clearance_milliunits", "column_clear_96", "basic_escape",
+            "failures", "passed",
+        },
+        f"compiled-CM spawn {map_id}",
+    )
+    entity_ordinal = _integer(
+        spawn["entity_ordinal"], f"compiled-CM spawn entity ordinal {map_id}"
+    )
+    _require(
+        entity_ordinal in compiled_origins,
+        f"compiled-CM spawn entity is absent from BSP for {map_id}",
+    )
+    _require(
+        spawn["authored_origin_milliunits"] == compiled_origins[entity_ordinal],
+        f"compiled-CM spawn origin differs from BSP for {map_id}",
+    )
+    _require(
+        spawn["engine_link_lift_milliunits"] == 9000,
+        f"compiled-CM spawn link lift differs for {map_id}",
+    )
+    _require(
+        spawn["standing_clear"] is True
+        and spawn["crouched_clear"] is True
+        and spawn["supported"] is True,
+        f"compiled-CM stance/support failed for {map_id}",
+    )
+    support_drop = spawn["support_drop_milliunits"]
+    _require(
+        isinstance(support_drop, int) and not isinstance(support_drop, bool)
+        and 0 <= support_drop <= 96_000,
+        f"compiled-CM support drop differs for {map_id}",
+    )
+    _require(
+        _integer(
+            spawn["column_clearance_milliunits"],
+            f"compiled-CM column clearance {map_id}",
+        ) >= 96_000
+        and spawn["column_clear_96"] is True,
+        f"compiled-CM 96-unit column failed for {map_id}",
+    )
+    escape = _mapping(spawn["basic_escape"], f"compiled-CM escape {map_id}")
+    _exact_keys(
+        escape,
+        {
+            "distance_milliunits", "support_step_milliunits",
+            "passing_direction_indices", "passed",
+        },
+        f"compiled-CM escape {map_id}",
+    )
+    directions = _list(
+        escape["passing_direction_indices"],
+        f"compiled-CM escape directions {map_id}",
+    )
+    _require(
+        escape["distance_milliunits"] == 96_000
+        and escape["support_step_milliunits"] == 16_000
+        and escape["passed"] is True
+        and directions
+        and len(directions) == len(set(directions))
+        and all(
+            isinstance(item, int) and not isinstance(item, bool) and 0 <= item < 8
+            for item in directions
+        ),
+        f"compiled-CM basic escape failed for {map_id}",
+    )
+    _require(
+        spawn["failures"] == [] and spawn["passed"] is True,
+        f"compiled-CM spawn retained failures for {map_id}",
+    )
+
+
+def _compiled_preflight_hazard_claims(compiled_dir: Path, map_id: str) -> list[dict[str, Any]]:
+    lattice = _mapping(
+        _load_json(compiled_dir / f"{map_id}.lattice.json", canonical=False),
+        f"compiled-CM lattice hazards {map_id}",
+    )
+    danger = _list(lattice.get("danger"), f"compiled-CM danger claims {map_id}")
+    claims = []
+    danger_bounds = []
+    for index, value in enumerate(danger):
+        bounds = _list(value, f"compiled-CM danger bounds {map_id}:{index}")
+        _require(
+            len(bounds) == 6,
+            f"compiled-CM danger bounds width differs for {map_id}",
+        )
+        scaled = []
+        for axis, item in enumerate(bounds):
+            _require(
+                isinstance(item, (int, float)) and not isinstance(item, bool)
+                and math.isfinite(float(item)),
+                f"compiled-CM danger bound is invalid for {map_id}:{index}:{axis}",
+            )
+            milliunits = round(float(item) * 1000)
+            _require(
+                abs(float(item) * 1000 - milliunits) <= 1e-6,
+                f"compiled-CM danger bound is not milliunit-exact for {map_id}",
+            )
+            scaled.append(milliunits)
+        _require(
+            all(scaled[axis] < scaled[axis + 3] for axis in range(3)),
+            f"compiled-CM danger bounds are unordered for {map_id}",
+        )
+        danger_bounds.append(scaled)
+    for index, scaled in enumerate(sorted(danger_bounds)):
+        claims.append({
+            "claim_id": f"hazard:lava:{index:04d}",
+            "type": "lava",
+            "bounds_milliunits": scaled,
+        })
+    try:
+        hurt = _hurt_bounds(
+            (compiled_dir / f"{map_id}.map").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, ClaimValidationError) as exc:
+        raise B2GateError(
+            f"cannot derive compiled-CM hurt claims for {map_id}: {exc}"
+        ) from exc
+    for index, bounds in enumerate(hurt):
+        claims.append({
+            "claim_id": f"hazard:hurt:{index:04d}",
+            "type": "hurt",
+            "bounds_milliunits": bounds,
+        })
+    return sorted(claims, key=lambda claim: claim["claim_id"])
+
+
+def _validate_compiled_cm_preflight(
+    paths: B2GatePaths,
+    declaration: Mapping[str, Any],
+    declaration_sha256: str,
+    binaries: Mapping[str, str],
+) -> dict[str, Any]:
+    report = _mapping(
+        _load_json(paths.compiled_cm_preflight_report),
+        "compiled-CM preflight report",
+    )
+    _exact_keys(
+        report,
+        {
+            "schema", "stage", "admission_status", "promotion_authority",
+            "cohort_id", "declaration", "compiled_root",
+            "compiled_membership", "b1_authority", "implementation",
+            "execution", "checks", "input_stability", "maps", "map_count",
+            "pass_count", "failure_count", "failures", "passed",
+            "canonical_record_sha256",
+        },
+        "compiled-CM preflight report",
+    )
+    _require(
+        report["schema"] == COMPILED_CM_PREFLIGHT_SCHEMA
+        and report["stage"] == COMPILED_CM_PREFLIGHT_STAGE,
+        "compiled-CM preflight identity differs",
+    )
+    _require(
+        report["admission_status"] == COMPILED_CM_PREFLIGHT_STATUS
+        and report["promotion_authority"] is False,
+        "compiled-CM preflight must remain non-admission evidence",
+    )
+    _require(
+        report["cohort_id"] == declaration["cohort_id"],
+        "compiled-CM preflight cohort differs",
+    )
+    declared = _mapping(report["declaration"], "compiled-CM declaration")
+    _exact_keys(
+        declared, {"path", "sha256", "map_count"},
+        "compiled-CM declaration",
+    )
+    _require(
+        declared == {
+            "path": str(paths.declaration.expanduser().absolute()),
+            "sha256": declaration_sha256,
+            "map_count": 28,
+        },
+        "compiled-CM declaration binding differs",
+    )
+    _require(
+        report["compiled_root"] == str(paths.compiled_dir.expanduser().absolute()),
+        "compiled-CM root binding differs",
+    )
+    membership = verify_stage_membership(
+        declaration, paths.compiled_dir, "compiled"
+    )
+    membership_identity = _mapping(
+        report["compiled_membership"], "compiled-CM membership identity"
+    )
+    _exact_keys(
+        membership_identity, {"report", "report_sha256"},
+        "compiled-CM membership identity",
+    )
+    _require(
+        membership_identity["report"] == membership
+        and membership_identity["report_sha256"]
+        == _sha256_bytes(canonical_bytes(membership)),
+        "compiled-CM membership binding differs",
+    )
+    b1 = _mapping(report["b1_authority"], "compiled-CM B1 authority")
+    _exact_keys(
+        b1,
+        {
+            "gate_sha256", "cm_executable_sha256", "cm_tool_identity",
+            "cm_source_closure_sha256",
+        },
+        "compiled-CM B1 authority",
+    )
+    _require(
+        b1 == {
+            "gate_sha256": _file_sha256(paths.b1_gate),
+            "cm_executable_sha256": binaries["cm"],
+            "cm_tool_identity": binaries["cm_tool_identity"],
+            "cm_source_closure_sha256": binaries["cm_source_closure_sha256"],
+        },
+        "compiled-CM B1/CM binding differs",
+    )
+    expected_implementation = _preflight_implementation_identity(paths.repo_root)
+    _require(
+        report["implementation"] == expected_implementation,
+        "compiled-CM implementation closure differs",
+    )
+    execution = _mapping(report["execution"], "compiled-CM execution")
+    _exact_keys(
+        execution,
+        {
+            "parallel_jobs", "oracle_batch_timeout_milliseconds", "map_order"
+        },
+        "compiled-CM execution",
+    )
+    _require(
+        1 <= _integer(execution["parallel_jobs"], "compiled-CM parallel jobs") <= 32
+        and 1 <= _integer(
+            execution["oracle_batch_timeout_milliseconds"],
+            "compiled-CM timeout",
+        ) <= 60_000
+        and execution["map_order"] == "canonical-declaration-order",
+        "compiled-CM execution contract differs",
+    )
+    checks = _mapping(report["checks"], "compiled-CM checks")
+    _exact_keys(
+        checks,
+        {
+            "compiled_spawn_origins_exact", "engine_spawn_link_lift_milliunits",
+            "standing_and_crouched_stationary_hulls",
+            "support_depth_milliunits", "oracle_swept_column_minimum_milliunits",
+            "minimum_spawn_xy_separation_milliunits", "bounded_basic_escape",
+            "basic_hazard_containment", "compiled_lightdata_presence",
+            "all_to_all_reachability",
+        },
+        "compiled-CM checks",
+    )
+    _require(
+        checks == {
+            "compiled_spawn_origins_exact": True,
+            "engine_spawn_link_lift_milliunits": 9000,
+            "standing_and_crouched_stationary_hulls": True,
+            "support_depth_milliunits": 96_000,
+            "oracle_swept_column_minimum_milliunits": 96_000,
+            "minimum_spawn_xy_separation_milliunits": 384_000,
+            "bounded_basic_escape": True,
+            "basic_hazard_containment": True,
+            "compiled_lightdata_presence": True,
+            "all_to_all_reachability": "deferred-to-full-Atlas-admission",
+        },
+        "compiled-CM declared check contract differs",
+    )
+    _require(
+        report["input_stability"] == {
+            "declaration": True,
+            "compiled_membership": True,
+            "implementation": True,
+            "cm_oracle": True,
+        },
+        "compiled-CM input stability failed",
+    )
+    rows = _list(report["maps"], "compiled-CM map rows")
+    _require(len(rows) == 28, "compiled-CM preflight does not contain 28 maps")
+    for declared_row, raw_row in zip(declaration["maps"], rows):
+        row = _mapping(raw_row, "compiled-CM map row")
+        _exact_keys(
+            row,
+            {
+                "ordinal", "map", "bsp", "source_spawn_origins_milliunits",
+                "compiled_spawn_origins_milliunits", "spawn_origin_sets_match",
+                "minimum_spawn_xy_separation_milliunits", "oracle",
+                "spawn_count", "spawns", "compiled_lightdata",
+                "basic_hazard_containment", "basic_escape_scope",
+                "all_to_all_reachability", "failures", "passed",
+            },
+            "compiled-CM map row",
+        )
+        map_id = declared_row["map"]
+        _require(
+            row["ordinal"] == declared_row["ordinal"] and row["map"] == map_id,
+            "compiled-CM map order or identity differs",
+        )
+        bsp_path = paths.compiled_dir / f"{map_id}.bsp"
+        _require(row["bsp"] == _file_record(bsp_path), f"compiled-CM BSP differs for {map_id}")
+        try:
+            metadata = parse_ibsp38(bsp_path)
+        except BspValidationError as exc:
+            raise B2GateError(f"cannot parse compiled-CM BSP {map_id}: {exc}") from exc
+        compiled_origins = {
+            entity.index: _origin_milliunits(
+                entity.value("origin"), f"compiled-CM entity {entity.index} {map_id}"
+            )
+            for entity in metadata.entities
+            if entity.classname == "info_player_deathmatch"
+        }
+        source_origins = sorted([
+            [round(float(axis) * 1000) for axis in origin]
+            for origin in deathmatch_spawn_origins(
+                paths.compiled_dir / f"{map_id}.map"
+            )
+        ])
+        _require(
+            len(compiled_origins) == 8
+            and row["source_spawn_origins_milliunits"] == source_origins
+            and row["compiled_spawn_origins_milliunits"]
+            == sorted(compiled_origins.values())
+            and row["spawn_origin_sets_match"] is True,
+            f"compiled-CM spawn identity differs for {map_id}",
+        )
+        _require(
+            _integer(
+                row["minimum_spawn_xy_separation_milliunits"],
+                f"compiled-CM spawn separation {map_id}",
+            ) >= 384_000,
+            f"compiled-CM spawn separation failed for {map_id}",
+        )
+        oracle = _mapping(row["oracle"], f"compiled-CM oracle {map_id}")
+        _exact_keys(
+            oracle,
+            {"executable_sha256", "tool_identity", "physics_identity", "map_sha256"},
+            f"compiled-CM oracle {map_id}",
+        )
+        _require(
+            oracle["executable_sha256"] == binaries["cm"]
+            and oracle["tool_identity"] == binaries["cm_tool_identity"]
+            and oracle["map_sha256"] == row["bsp"]["sha256"],
+            f"compiled-CM oracle binding differs for {map_id}",
+        )
+        _digest(oracle["physics_identity"], f"compiled-CM physics identity {map_id}")
+        spawns = _list(row["spawns"], f"compiled-CM spawns {map_id}")
+        _require(
+            row["spawn_count"] == 8 and len(spawns) == 8,
+            f"compiled-CM spawn count differs for {map_id}",
+        )
+        for spawn in spawns:
+            _validate_preflight_spawn(spawn, compiled_origins, map_id)
+        _require(
+            len({spawn["entity_ordinal"] for spawn in spawns}) == 8,
+            f"compiled-CM spawn rows are duplicated for {map_id}",
+        )
+        lighting_lump = next(
+            (lump for lump in metadata.lumps if lump.name == "lighting"), None
+        )
+        _require(lighting_lump is not None, f"compiled-CM lighting lump is absent for {map_id}")
+        bsp_payload = bsp_path.read_bytes()
+        lightdata_payload = bsp_payload[
+            lighting_lump.offset:lighting_lump.offset + lighting_lump.length
+        ]
+        lightdata = _mapping(
+            row["compiled_lightdata"], f"compiled-CM lightdata {map_id}"
+        )
+        _exact_keys(
+            lightdata, {"bytes", "sha256", "present"},
+            f"compiled-CM lightdata {map_id}",
+        )
+        _require(
+            lightdata == {
+                "bytes": len(lightdata_payload),
+                "sha256": _sha256_bytes(lightdata_payload),
+                "present": True,
+            }
+            and len(lightdata_payload) == metadata.lightmaps.byte_count
+            and len(lightdata_payload) > 0,
+            f"compiled-CM lightdata check failed for {map_id}",
+        )
+        hazard = _mapping(
+            row["basic_hazard_containment"],
+            f"compiled-CM hazard containment {map_id}",
+        )
+        _exact_keys(
+            hazard,
+            {
+                "declared_hazard_count", "checked_hazard_count", "hazards",
+                "failures", "passed",
+            },
+            f"compiled-CM hazard containment {map_id}",
+        )
+        expected_hazards = _compiled_preflight_hazard_claims(
+            paths.compiled_dir, map_id
+        )
+        evidence_rows = _list(
+            hazard["hazards"], f"compiled-CM hazard evidence {map_id}"
+        )
+        _require(
+            bool(expected_hazards)
+            and hazard["declared_hazard_count"] == len(expected_hazards)
+            and hazard["checked_hazard_count"] == len(expected_hazards)
+            and len(evidence_rows) == len(expected_hazards)
+            and hazard["failures"] == [] and hazard["passed"] is True,
+            f"compiled-CM hazard containment failed for {map_id}",
+        )
+        for expected_hazard, raw_hazard in zip(expected_hazards, evidence_rows):
+            evidence = _mapping(
+                raw_hazard, f"compiled-CM hazard evidence row {map_id}"
+            )
+            _exact_keys(
+                evidence,
+                {
+                    "claim_id", "type", "bounds_milliunits", "probe_count",
+                    "failures", "passed",
+                },
+                f"compiled-CM hazard evidence row {map_id}",
+            )
+            _require(
+                {name: evidence[name] for name in (
+                    "claim_id", "type", "bounds_milliunits"
+                )} == expected_hazard
+                and _integer(
+                    evidence["probe_count"],
+                    f"compiled-CM hazard probe count {map_id}",
+                    minimum=1,
+                ) >= 1
+                and evidence["failures"] == []
+                and evidence["passed"] is True,
+                f"compiled-CM hazard evidence differs for {map_id}",
+            )
+        _require(
+            row["basic_escape_scope"]
+            == (
+                "bounded straight standing-hull CM sweeps with 16-unit support "
+                "samples; not an all-to-all Atlas reachability claim"
+            )
+            and row["all_to_all_reachability"] == "not-evaluated-by-preflight"
+            and row["failures"] == []
+            and row["passed"] is True,
+            f"compiled-CM map retained failures for {map_id}",
+        )
+    _require(
+        report["map_count"] == 28
+        and report["pass_count"] == 28
+        and report["failure_count"] == 0
+        and report["failures"] == []
+        and report["passed"] is True,
+        "compiled-CM preflight is not 28/28 green",
+    )
+    canonical_record = dict(report)
+    recorded_sha256 = canonical_record.pop("canonical_record_sha256")
+    _require(
+        recorded_sha256 == _sha256_bytes(canonical_bytes(canonical_record)),
+        "compiled-CM canonical record digest differs",
+    )
+    return {
+        "report": _file_record(paths.compiled_cm_preflight_report),
+        "schema": COMPILED_CM_PREFLIGHT_SCHEMA,
+        "stage": COMPILED_CM_PREFLIGHT_STAGE,
+        "admission_status": COMPILED_CM_PREFLIGHT_STATUS,
+        "compiled_membership_sha256": membership_identity["report_sha256"],
+        "implementation_source_closure_sha256": expected_implementation[
+            "source_closure_sha256"
+        ],
+        "map_count": 28,
+        "pass_count": 28,
     }
 
 
@@ -1924,11 +2535,17 @@ def assemble_gate(
     implementation = _validate_implementation(paths, implementation_binding)
     b1, binaries = _validate_b1_and_oracles(paths, normative)
     declaration, declaration_sha256 = _validate_declaration(paths.declaration)
+    qualification = _validate_qualification_report(
+        paths, normative, implementation
+    )
     source = _validate_source_freeze(
         paths, declaration, declaration_sha256, implementation
     )
     compiled = _validate_compiled_and_static(
         paths, declaration, declaration_sha256
+    )
+    compiled_cm_preflight = _validate_compiled_cm_preflight(
+        paths, declaration, declaration_sha256, binaries
     )
     materialized = _validate_materialized(
         paths, declaration, declaration_sha256, binaries, normative
@@ -1958,12 +2575,14 @@ def assemble_gate(
         "normative_documents": normative,
         "implementation": implementation,
         "b1_authority": b1,
+        "toolchain_qualification": qualification,
         "generated_cohort": {
             "cohort_id": EXPECTED_COHORT,
             "declaration": _file_record(paths.declaration),
             "declaration_sha256": declaration_sha256,
             "source": source,
             "compiled": compiled,
+            "compiled_cm_preflight": compiled_cm_preflight,
             "materialized": materialized,
             "claims": claims,
             "analysis": generated,
@@ -1982,6 +2601,8 @@ def assemble_gate(
             "stock_pins_match": True,
             "generated_maps_passed": 28,
             "generated_static_pass_rate_preserved": True,
+            "toolchain_qualification_non_admissible": True,
+            "compiled_cm_preflight_maps_passed": 28,
             "oracle_failures_overridable": False,
             "atlas_budgets_passed": True,
             "feature_assembly_budget_passed": True,
@@ -2003,14 +2624,39 @@ def validate_gate(value: object) -> dict[str, Any]:
     gate = _mapping(value, "B2 gate")
     _exact_keys(
         gate,
-        {"schema", "batch", "status", "owner_directive", "normative_documents", "implementation", "b1_authority", "generated_cohort", "stock_corpus", "representative_budgets", "dyn_evidence", "tests", "deployment", "gate"},
+        {"schema", "batch", "status", "owner_directive", "normative_documents", "implementation", "b1_authority", "toolchain_qualification", "generated_cohort", "stock_corpus", "representative_budgets", "dyn_evidence", "tests", "deployment", "gate"},
         "B2 gate",
     )
     _require(gate["schema"] == GATE_SCHEMA and gate["batch"] == "B2", "B2 gate identity differs")
     _require(gate["status"] == "green", "B2 gate status is not green")
     predicate = _mapping(gate["gate"], "B2 predicate")
     _require(predicate.get("green") is True and predicate.get("failures") == [], "B2 predicate is not green")
-    _require(_mapping(gate["generated_cohort"], "generated cohort").get("cohort_id") == EXPECTED_COHORT, "B2 gate cohort differs")
+    _require(
+        predicate.get("toolchain_qualification_non_admissible") is True
+        and predicate.get("compiled_cm_preflight_maps_passed") == 28,
+        "B2 qualification or compiled-CM predicate differs",
+    )
+    qualification = _mapping(
+        gate["toolchain_qualification"], "B2 toolchain qualification"
+    )
+    _require(
+        qualification.get("schema") == QUALIFICATION_SCHEMA
+        and qualification.get("non_admissible") is True
+        and qualification.get("retryable") is True
+        and qualification.get("final_cohort_authorized") is False,
+        "B2 toolchain qualification disposition differs",
+    )
+    generated = _mapping(gate["generated_cohort"], "generated cohort")
+    _require(generated.get("cohort_id") == EXPECTED_COHORT, "B2 gate cohort differs")
+    preflight = _mapping(
+        generated.get("compiled_cm_preflight"), "B2 compiled-CM preflight"
+    )
+    _require(
+        preflight.get("schema") == COMPILED_CM_PREFLIGHT_SCHEMA
+        and preflight.get("admission_status") == COMPILED_CM_PREFLIGHT_STATUS
+        and preflight.get("pass_count") == 28,
+        "B2 compiled-CM evidence differs",
+    )
     _require(_mapping(gate["stock_corpus"], "stock corpus").get("map_count") == 8, "B2 stock count differs")
     return dict(gate)
 
@@ -2034,6 +2680,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--compiled-dir", type=Path, required=True)
     parser.add_argument("--compiled-membership-report", type=Path, required=True)
     parser.add_argument("--compiled-static-report", type=Path, required=True)
+    parser.add_argument("--compiled-cm-preflight-report", type=Path, required=True)
     parser.add_argument("--materialized-dir", type=Path, required=True)
     parser.add_argument("--materialized-membership-report", type=Path, required=True)
     parser.add_argument("--claims-dir", type=Path, required=True)
@@ -2049,6 +2696,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dyn-evidence-executable", type=Path, required=True)
     parser.add_argument("--dyn-evidence-report", type=Path, required=True)
     parser.add_argument("--test-report", type=Path, required=True)
+    parser.add_argument("--qualification-report", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -2080,7 +2728,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.buffer.write(payload)
         return 0
     except (
-        B2GateError, GeneratorCohortError, ClaimValidationError,
+        B2GateError, B2QualificationError, GeneratorCohortError, ClaimValidationError,
         HookClaimsV4Error, OSError, subprocess.CalledProcessError,
     ) as exc:
         print(f"B2 gate refused: {exc}", file=sys.stderr)
