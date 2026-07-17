@@ -314,7 +314,8 @@
       "required": [
         "report", "schema", "qualification_id", "status",
         "non_admissible", "retryable", "final_cohort_authorized",
-        "end_to_end_pass_count", "required_end_to_end_pass_count"
+        "end_to_end_pass_count", "required_end_to_end_pass_count",
+        "implementation_successor"
       ],
       "properties": {
         "report": {"$ref": "#/$defs/file"},
@@ -325,7 +326,30 @@
         "retryable": {"const": true},
         "final_cohort_authorized": {"const": false},
         "end_to_end_pass_count": {"type": "integer", "minimum": 20, "maximum": 28},
-        "required_end_to_end_pass_count": {"const": 20}
+        "required_end_to_end_pass_count": {"const": 20},
+        "implementation_successor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "qualified_repository_commit", "qualified_repository_tree",
+            "final_repository_commit", "final_repository_tree",
+            "stable_authority_equal", "changed_paths"
+          ],
+          "properties": {
+            "qualified_repository_commit": {"$ref": "#/$defs/git_sha"},
+            "qualified_repository_tree": {"$ref": "#/$defs/git_sha"},
+            "final_repository_commit": {"$ref": "#/$defs/git_sha"},
+            "final_repository_tree": {"$ref": "#/$defs/git_sha"},
+            "stable_authority_equal": {"const": true},
+            "changed_paths": {
+              "type": "array",
+              "minItems": 13,
+              "maxItems": 13,
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            }
+          }
+        }
       }
     },
     "source_stage": {

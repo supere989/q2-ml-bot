@@ -378,6 +378,39 @@ def test_hand_authored_summary_forgery_validates_but_replay_and_final_gate_rejec
         final_gate._validate_qualification_report(paths, {}, {})
 
 
+def test_retained_replay_can_bind_the_qualified_predecessor_implementation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _inputs(tmp_path, monkeypatch)
+    for name in (
+        "source_root", "source_cold_root", "compiled_root",
+        "compile_evidence_root", "q2tool", "basedir",
+        "compiled_cm_evidence_root", "cm_oracle", "pmove_oracle",
+        "hook_oracle", "fall_oracle", "hook_attestation", "python_runtime",
+        "materialized_root", "materialization_log_root", "claims_root",
+        "analysis_root", "atlas_evidence_root", "promotion_evidence_root",
+        "infrastructure_evidence_root", "syntax_report",
+    ):
+        path = tmp_path / name
+        path.mkdir()
+        setattr(args, name, path)
+    monkeypatch.setattr(gate, "_validate_retained_stage_evidence", lambda *unused: None)
+    legitimate = gate.assemble_qualification(args)
+    qualified = dict(legitimate["implementation"])
+    successor = dict(qualified)
+    successor["repository_commit"] = "ab" * 20
+    successor["repository_tree"] = "cd" * 20
+    monkeypatch.setattr(gate, "repository_binding", lambda _root: successor)
+
+    with pytest.raises(gate.B2QualificationError, match="implementation binding differs"):
+        gate.replay_qualification(legitimate, repo_root=gate.ROOT)
+    assert gate.replay_qualification(
+        legitimate,
+        repo_root=gate.ROOT,
+        use_reported_implementation=True,
+    ) == legitimate
+
+
 def test_retained_replay_wires_all_strict_pre_atlas_consumers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

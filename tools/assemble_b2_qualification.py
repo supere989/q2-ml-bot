@@ -850,11 +850,19 @@ def _validate_retained_stage_evidence(
         ) from error
 
 
-def assemble_qualification(args: argparse.Namespace) -> dict[str, Any]:
+def assemble_qualification(
+    args: argparse.Namespace,
+    *,
+    replay_implementation: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     repo_root = args.repo_root.resolve()
     _require(repo_root == ROOT.resolve(), "repo root must be the repository containing this tool")
     normative = _normative_documents(args.design, args.plan)
-    implementation = repository_binding(repo_root)
+    implementation = (
+        dict(replay_implementation)
+        if replay_implementation is not None
+        else repository_binding(repo_root)
+    )
     try:
         toolchain_authority = load_toolchain_authority(repo_root)
     except ToolchainAuthorityError as error:
@@ -1156,7 +1164,12 @@ def validate_qualification(value: object) -> dict[str, Any]:
     return dict(report)
 
 
-def replay_qualification(value: object, *, repo_root: Path = ROOT) -> dict[str, Any]:
+def replay_qualification(
+    value: object,
+    *,
+    repo_root: Path = ROOT,
+    use_reported_implementation: bool = False,
+) -> dict[str, Any]:
     """Reopen every retained raw input and reproduce the exact summary bytes."""
 
     report = validate_qualification(value)
@@ -1205,7 +1218,14 @@ def replay_qualification(value: object, *, repo_root: Path = ROOT) -> dict[str, 
         ),
         **{name: Path(str(value)) for name, value in stage_evidence.items()},
     )
-    recomputed = assemble_qualification(arguments)
+    recomputed = assemble_qualification(
+        arguments,
+        replay_implementation=(
+            _mapping(report["implementation"], "B2 qualification implementation")
+            if use_reported_implementation
+            else None
+        ),
+    )
     _require(
         canonical_bytes(recomputed) == canonical_bytes(report),
         "qualification canonical summary differs from raw-evidence replay",

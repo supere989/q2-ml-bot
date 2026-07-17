@@ -133,6 +133,16 @@ They declare 28 fresh rows in ordinal order, four per concrete style, using
 seed blocks 71443000..71443003 through 71443600..71443603. No 71443 producer,
 artifact, report, Dyn, test, gate, deployment, or training action exists yet.
 
+Qualification necessarily precedes the separately committed final declaration,
+so its repository commit cannot equal the final producer commit. Gate replay
+therefore reuses the qualification report's own implementation identity and
+then proves a strict successor relation: the qualified commit must be an
+ancestor, generator/routes/Atlas-analyzer authority fields must be identical,
+and the complete Git delta must equal the frozen 71443 declaration/gate/test
+authorization path set. Any producer, analyzer, validator, physics, toolchain,
+or unrelated file change rejects the qualification instead of treating a later
+commit as qualified.
+
 The exact clean immediate-predecessor implementation snapshot at commit
 `8d89df4a787e261f8a4fb935908191f8df7634b2` and tree
 `0a0f48f7686c860cc7c5afc6d3b3252ef0952681` passed the mandatory no-write

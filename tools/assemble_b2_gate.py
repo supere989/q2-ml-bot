@@ -109,6 +109,28 @@ MAX_ATLAS_BYTES = 32 * 1024 * 1024
 MAX_BUILD_RSS_BYTES = 512 * 1024 * 1024
 MAX_DYN_BATCH_BYTES = 8 * 1024 * 1024
 MAX_FEATURE_ASSEMBLY_P99_NS = 500_000
+QUALIFICATION_STABLE_IMPLEMENTATION_KEYS = frozenset({
+    "atlas_analyzer_authority_file_count",
+    "atlas_analyzer_authority_sha256",
+    "generator_sha256",
+    "git_clean",
+    "routes_sha256",
+})
+QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+    "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
+    "docs/multires/B2-GATE-ASSEMBLY.md",
+    "docs/multires/B2-GENERATED-COHORT-71443-DECLARATION.json",
+    "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
+    "schemas/q2-multires-b2-gate-v1.schema.json",
+    "tests/test_b2_gate.py",
+    "tests/test_b2_qualification.py",
+    "tests/test_b2_operational_docs.py",
+    "tests/test_generator_claim_campaign.py",
+    "tests/test_generator_cohort.py",
+    "tests/test_retired_cohort_registry.py",
+    "tools/assemble_b2_gate.py",
+    "tools/assemble_b2_qualification.py",
+})
 
 
 class B2GateError(ValueError):
@@ -459,6 +481,83 @@ def _validate_b1_and_oracles(
     }, binaries
 
 
+def _git_capture(repo_root: Path, arguments: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
+    environment = os.environ.copy()
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo_root), *arguments],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise B2GateError(f"qualification successor git check failed: {error}") from error
+
+
+def _validate_qualification_successor(
+    repo_root: Path,
+    qualified: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_keys = QUALIFICATION_STABLE_IMPLEMENTATION_KEYS | {
+        "repository_commit", "repository_tree"
+    }
+    _require(
+        set(qualified) == expected_keys and set(current) == expected_keys,
+        "B2 qualification implementation keys differ",
+    )
+    _require(
+        all(qualified[key] == current[key] for key in QUALIFICATION_STABLE_IMPLEMENTATION_KEYS),
+        "B2 qualification producer/analyzer authority differs",
+    )
+    qualified_commit = str(qualified["repository_commit"])
+    current_commit = str(current["repository_commit"])
+    _require(
+        HEX40.fullmatch(qualified_commit) is not None
+        and HEX40.fullmatch(current_commit) is not None,
+        "B2 qualification successor commit is malformed",
+    )
+    ancestor = _git_capture(
+        repo_root, ["merge-base", "--is-ancestor", qualified_commit, current_commit]
+    )
+    _require(
+        ancestor.returncode == 0,
+        "B2 qualification commit is not an ancestor of the final implementation",
+    )
+    diff = _git_capture(
+        repo_root,
+        ["diff", "--name-status", "--no-renames", qualified_commit, current_commit],
+    )
+    _require(diff.returncode == 0, "B2 qualification successor diff failed")
+    changed: dict[str, str] = {}
+    for raw_line in diff.stdout.decode("utf-8", errors="strict").splitlines():
+        parts = raw_line.split("\t")
+        _require(
+            len(parts) == 2 and parts[0] in {"A", "M"} and parts[1] not in changed,
+            "B2 qualification successor diff is malformed",
+        )
+        changed[parts[1]] = parts[0]
+    _require(
+        set(changed) == QUALIFICATION_SUCCESSOR_PATHS,
+        "B2 qualification successor changed files differ from the declaration-only authority",
+    )
+    _require(
+        changed["docs/multires/B2-GENERATED-COHORT-71443-DECLARATION.json"] == "A",
+        "B2 qualification successor did not add the immutable 71443 declaration",
+    )
+    return {
+        "qualified_repository_commit": qualified_commit,
+        "qualified_repository_tree": qualified["repository_tree"],
+        "final_repository_commit": current_commit,
+        "final_repository_tree": current["repository_tree"],
+        "stable_authority_equal": True,
+        "changed_paths": sorted(changed),
+    }
+
+
 def _validate_qualification_report(
     paths: B2GatePaths,
     normative: Mapping[str, Any],
@@ -467,6 +566,7 @@ def _validate_qualification_report(
     try:
         report = replay_qualification(
             _load_json(paths.qualification_report), repo_root=paths.repo_root,
+            use_reported_implementation=True,
         )
     except B2QualificationError as exc:
         raise B2GateError(f"B2 toolchain qualification rejected: {exc}") from exc
@@ -474,9 +574,8 @@ def _validate_qualification_report(
         report["normative_documents"] == normative,
         "B2 qualification normative document binding differs",
     )
-    _require(
-        report["implementation"] == implementation,
-        "B2 qualification implementation binding differs",
+    relation = _validate_qualification_successor(
+        paths.repo_root, report["implementation"], implementation
     )
     b1_gate = _mapping(
         _load_json(paths.b1_gate, canonical=False), "B1 gate"
@@ -526,6 +625,7 @@ def _validate_qualification_report(
         "required_end_to_end_pass_count": report["end_to_end"][
             "required_pass_count"
         ],
+        "implementation_successor": relation,
     }
 
 

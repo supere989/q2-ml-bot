@@ -749,6 +749,14 @@ Its 28 rows use fresh seed blocks 71443000..71443003 through
 producer, artifact, report, Dyn, test, gate, deployment, or training action has
 run; declaration publication is not producer progress.
 
+The final gate treats the qualified implementation as an exact predecessor,
+not as the impossible same commit: qualification must precede the declaration.
+It replays retained evidence under the report's bound implementation, requires
+that commit to be an ancestor of the final commit, requires identical
+generator/routes/Atlas-analyzer authority fields, and permits exactly the
+frozen 71443 declaration/gate/test authorization paths in the Git delta. Any
+other changed path or authority drift fails closed before final admission.
+
 The interpreter boundary is now a pre-declaration authority, not a check to
 discover after compilation. The exact clean immediate-predecessor
 implementation snapshot at commit

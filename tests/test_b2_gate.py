@@ -23,6 +23,7 @@ from tools.assemble_b2_gate import (
     B2GatePaths,
     EXPECTED_COHORT,
     EXPECTED_DESIGN_SHA256,
+    QUALIFICATION_SUCCESSOR_PATHS,
     _exact_directory_files,
     _decode_dyn_snapshot,
     _dyn_source_authority,
@@ -32,6 +33,7 @@ from tools.assemble_b2_gate import (
     _validate_declaration,
     _validate_dyn_evidence,
     _validate_materialized,
+    _validate_qualification_successor,
     _validate_source_route_contract,
     _validate_source_spawn_origin_binding,
     _validate_source_spawn_origin_binding_pass_count,
@@ -736,6 +738,46 @@ def test_gate_accepts_fresh_current_alias() -> None:
     assert len(digest) == 64
 
 
+def test_qualification_successor_accepts_only_the_declared_authorization_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qualified = _implementation()
+    current = dict(qualified)
+    current["repository_commit"] = "ab" * 20
+    current["repository_tree"] = "cd" * 20
+    diff = "".join(
+        f"{'A' if path.endswith('71443-DECLARATION.json') else 'M'}\t{path}\n"
+        for path in sorted(QUALIFICATION_SUCCESSOR_PATHS)
+    ).encode("utf-8")
+
+    def capture(_root: Path, arguments: list[str]):
+        if arguments[0] == "merge-base":
+            return b2_gate.subprocess.CompletedProcess(arguments, 0, b"", b"")
+        return b2_gate.subprocess.CompletedProcess(arguments, 0, diff, b"")
+
+    monkeypatch.setattr(b2_gate, "_git_capture", capture)
+    relation = _validate_qualification_successor(ROOT, qualified, current)
+    assert relation["stable_authority_equal"] is True
+    assert relation["changed_paths"] == sorted(QUALIFICATION_SUCCESSOR_PATHS)
+
+
+def test_qualification_successor_rejects_unqualified_producer_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qualified = _implementation()
+    current = dict(qualified)
+    current["repository_commit"] = "ab" * 20
+    current["repository_tree"] = "cd" * 20
+    current["generator_sha256"] = "ef" * 32
+    monkeypatch.setattr(
+        b2_gate,
+        "_git_capture",
+        lambda *_args: pytest.fail("git must not run after authority drift"),
+    )
+    with pytest.raises(B2GateError, match="producer/analyzer authority differs"):
+        _validate_qualification_successor(ROOT, qualified, current)
+
+
 def _write_compiled_cm_gate_fixture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[B2GatePaths, dict, dict[str, str]]:
@@ -1182,6 +1224,14 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
         "non_admissible"
     ]["const"] is True
+    assert "implementation_successor" in gate_schema["$defs"][
+        "toolchain_qualification"
+    ]["required"]
+    assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
+        "implementation_successor"
+    ]["properties"]["changed_paths"]["minItems"] == len(
+        QUALIFICATION_SUCCESSOR_PATHS
+    )
     assert gate_schema["$defs"]["compiled_cm_preflight_stage"]["properties"][
         "pass_count"
     ]["const"] == 28
