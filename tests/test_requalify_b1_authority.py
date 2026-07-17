@@ -12,7 +12,7 @@ from tools import requalify_b1_authority as requalify
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HISTORICAL_GATE_PATH = ROOT / authority.GATE_RELATIVE_PATH
+HISTORICAL_GATE_PATH = ROOT / authority.HISTORICAL_GATE_RELATIVE_PATH
 
 
 def verified_inputs() -> tuple[

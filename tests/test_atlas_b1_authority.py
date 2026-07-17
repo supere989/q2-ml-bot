@@ -20,7 +20,7 @@ ATTESTATION = (
 
 def historical_gate() -> authority.B1AuthorityGate:
     return authority.load_historical_b1_authority_gate(
-        ROOT / authority.GATE_RELATIVE_PATH, repo_root=ROOT
+        ROOT / authority.HISTORICAL_GATE_RELATIVE_PATH, repo_root=ROOT
     )
 
 
@@ -106,7 +106,9 @@ def requalification_record(
 
 
 def requalified_gate_document() -> dict:
-    document = json.loads((ROOT / authority.GATE_RELATIVE_PATH).read_text())
+    document = json.loads(
+        (ROOT / authority.HISTORICAL_GATE_RELATIVE_PATH).read_text()
+    )
     document["normative_documents"] = {
         "design_sha256": authority.ACCEPTED_DESIGN_SHA256,
         "plan_sha256": authority.ACCEPTED_PLAN_SHA256,
@@ -245,10 +247,23 @@ def fall_identity(gate: authority.B1AuthorityGate) -> dict:
 def test_historical_gate_is_not_current_but_fresh_gate_is_admitted(
     tmp_path: Path,
 ) -> None:
+    historical_root = tmp_path / "historical"
+    for relative in (
+        authority.DESIGN_RELATIVE_PATH,
+        authority.PLAN_RELATIVE_PATH,
+        authority.GATE_RELATIVE_PATH,
+    ):
+        destination = historical_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source = (
+            ROOT / authority.HISTORICAL_GATE_RELATIVE_PATH
+            if relative == authority.GATE_RELATIVE_PATH else ROOT / relative
+        )
+        shutil.copy2(source, destination)
     with pytest.raises(authority.B1AuthorityError):
-        authority.load_b1_authority_gate(ROOT)
+        authority.load_b1_authority_gate(historical_root)
 
-    root = copied_authority_root(tmp_path)
+    root = copied_authority_root(tmp_path / "fresh")
     gate = authority.load_b1_authority_gate(root)
     admitted = authority.admit_hook_parity_attestation(ATTESTATION, repo_root=root)
 

@@ -5,6 +5,10 @@ Batch B1 evidence to an Atlas analysis process. It does not discover tools,
 trust filenames, or accept a caller-provided gate. It loads only the repository
 `docs/multires/B1-GATE.json` and requires:
 
+- the immutable historical evidence root at
+  `docs/multires/B1-GATE-HISTORICAL-2026-07-14.json` to remain byte-exact
+  (`909b1e46b4c3dca8adb6ab9017cd8716daa8c6cdd3eb106ae11aa09bee0572f8`);
+
 - the exact B1 schema, batch, green status/predicate, one-way retirement
   directive, admission invariants, and no recorded failures
 - the accepted design and plan SHA-256 values, recomputed from the current

@@ -30,6 +30,9 @@ PLAN_RELATIVE_PATH = Path(
     "docs/MULTIRES-LATTICE-MAP-ATLAS-PLAN-2026-07-14.md"
 )
 GATE_RELATIVE_PATH = Path("docs/multires/B1-GATE.json")
+HISTORICAL_GATE_RELATIVE_PATH = Path(
+    "docs/multires/B1-GATE-HISTORICAL-2026-07-14.json"
+)
 
 # These are the accepted, externally reviewed and methodology-amended
 # documents.  Checking only a mutable gate against mutable files would let a
