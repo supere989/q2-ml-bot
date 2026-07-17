@@ -184,6 +184,32 @@ def test_static_failure_is_a_map_failure_not_an_infrastructure_claim(
     ]
 
 
+def test_consumer_replays_cold_source_and_rejects_forged_report(tmp_path: Path) -> None:
+    declaration, report, paths = _run(tmp_path)
+    replayed, raw, digest, passed = source.validate_published_qualification_source(
+        declaration_path=paths["declaration"], source_root=paths["source"],
+        cold_root=paths["cold"], report_path=paths["report"],
+        implementation_provider=lambda _root: _binding(),
+        static_validator=_static, metadata_validator=_metadata,
+        route_loader=_route, spawn_binding=_spawn,
+    )
+    assert replayed == report
+    assert digest == source._sha256_bytes(raw)
+    assert len(passed) == 28
+
+    forged = json.loads(paths["report"].read_text())
+    forged["maps"][4]["evidence_sha256"] = "f" * 64
+    paths["report"].write_bytes(canonical_bytes(forged))
+    with pytest.raises(source.QualificationSourceError, match="source report differs"):
+        source.validate_published_qualification_source(
+            declaration_path=paths["declaration"], source_root=paths["source"],
+            cold_root=paths["cold"], report_path=paths["report"],
+            implementation_provider=lambda _root: _binding(),
+            static_validator=_static, metadata_validator=_metadata,
+            route_loader=_route, spawn_binding=_spawn,
+        )
+
+
 def test_rejects_retired_seed_before_creating_roots(tmp_path: Path) -> None:
     retired_seed = 880_000
     with pytest.raises(source.QualificationSourceError, match="retired map seed"):

@@ -884,6 +884,212 @@ def claims_qualification(
     raise QualificationPostcompileError("; ".join(global_failures))
 
 
+def validate_published_qualification_postcompile(
+    *, declaration_path: Path, compile_report_path: Path, compiled_root: Path,
+    compiled_cm_report_path: Path, compiled_cm_evidence_root: Path,
+    materialization_report_path: Path, materialized_root: Path,
+    materialization_log_root: Path, claims_report_path: Path, claims_root: Path,
+    cm_oracle: Path, pmove_oracle: Path, hook_oracle: Path, fall_oracle: Path,
+    hook_attestation: Path, python_runtime: Path, repo_root: Path = ROOT,
+    implementation_provider: Callable[[Path], dict[str, Any]] = _current_implementation,
+    authority_provider: Callable[..., dict[str, Any]] = _authority_records,
+    runtime_provider: Callable[[Path, Path], dict[str, Any]] = _validate_pinned_python_runtime,
+    result_validator: Callable[..., Any] = _validate_result,
+    claim_builder: Callable[[Path], Mapping[str, Any]] = build_generator_claims,
+    compiled_cm_validator: Callable[..., tuple[
+        dict[str, Any], bytes, str, set[str]
+    ]] = validate_published_qualification_compiled_cm,
+) -> dict[str, Any]:
+    """Replay sparse materialization and claims from real upstream evidence."""
+
+    implementation = _validate_implementation(implementation_provider(repo_root))
+    declaration, declaration_raw, declaration_sha256 = _validate_declaration(
+        declaration_path, implementation
+    )
+    try:
+        cm_report, cm_raw, cm_sha256, cm_passed = compiled_cm_validator(
+            declaration_path=declaration_path,
+            compile_report_path=compile_report_path,
+            compiled_root=compiled_root, cm_oracle=cm_oracle,
+            evidence_root=compiled_cm_evidence_root,
+            report_path=compiled_cm_report_path, repo_root=repo_root,
+        )
+    except QualificationCompiledCmError as error:
+        raise QualificationPostcompileError(str(error)) from error
+    material_report, material_raw, material_sha256, material_passed = _validate_prior_stage(
+        materialization_report_path, "materialization", declaration,
+        declaration_sha256, implementation,
+    )
+    if material_report["input_report_sha256"] != cm_sha256:
+        raise QualificationPostcompileError(
+            "materialization raw hash chain differs from compiled-CM report"
+        )
+    material_records = _sparse_records(
+        declaration, materialized_root, MATERIALIZED_SUFFIXES, material_passed
+    )
+    replayed_material, replayed_raw, replayed_sha, replayed_passed = (
+        _validate_materialization_prior(
+            report_path=materialization_report_path,
+            upstream_report_path=compiled_cm_report_path,
+            declaration=declaration, declaration_sha256=declaration_sha256,
+            implementation=implementation, materialized_records=material_records,
+        )
+    )
+    if (
+        replayed_material != material_report or replayed_raw != material_raw
+        or replayed_sha != material_sha256 or replayed_passed != material_passed
+        or not material_passed.issubset(cm_passed)
+    ):
+        raise QualificationPostcompileError("materialization replay disposition differs")
+    authorities = authority_provider(
+        repo_root=repo_root, cm_oracle=cm_oracle, pmove_oracle=pmove_oracle,
+        hook_oracle=hook_oracle, fall_oracle=fall_oracle,
+        hook_attestation=hook_attestation,
+    )
+    runtime_identity = runtime_provider(python_runtime, repo_root)
+    if materialization_log_root.is_symlink() or not materialization_log_root.is_dir():
+        raise QualificationPostcompileError("materialization log root is absent or a symlink")
+    actual_logs: set[str] = set()
+    for path in materialization_log_root.iterdir():
+        if path.is_symlink() or not path.is_file():
+            raise QualificationPostcompileError(
+                f"materialization logs contain non-regular entry: {path.name}"
+            )
+        actual_logs.add(path.name)
+    required_logs = {
+        f"{map_id}{suffix}" for map_id in material_passed
+        for suffix in (".stdout.json", ".stderr.log")
+    }
+    allowed_logs = {
+        f"{map_id}{suffix}" for map_id in cm_passed
+        for suffix in (".stdout.json", ".stderr.log")
+    }
+    if not required_logs.issubset(actual_logs) or not actual_logs.issubset(allowed_logs):
+        raise QualificationPostcompileError("materialization log membership differs")
+    authority_sha256 = {
+        name: authorities[name]["sha256"]
+        for name in ("cm", "pmove", "hook", "fall", "hook_attestation")
+    }
+    for map_id in sorted(material_passed):
+        stdout = (materialization_log_root / f"{map_id}.stdout.json").read_bytes()
+        try:
+            result_validator(
+                stdout, map_id=map_id,
+                attestation=materialized_root / f"{map_id}.hook-materialization.json",
+                runtime_sidecar=materialized_root / f"{map_id}.json",
+                bsp=materialized_root / f"{map_id}.bsp",
+                compiled_files={
+                    suffix: material_records[map_id][suffix]
+                    for suffix in COMPILED_SUFFIXES
+                },
+                authority_sha256=authority_sha256,
+            )
+        except MaterializeCohortError as error:
+            raise QualificationPostcompileError(
+                f"materialization result replay failed for {map_id}: {error}"
+            ) from error
+        for suffix in COMPILED_SUFFIXES:
+            if suffix == ".json":
+                continue
+            if material_records[map_id][suffix] != _file_record(
+                compiled_root / f"{map_id}{suffix}"
+            ):
+                raise QualificationPostcompileError(
+                    f"materialization changed compiled input {map_id}{suffix}"
+                )
+
+    claims_report, claims_raw, claims_sha256, claims_passed = _validate_prior_stage(
+        claims_report_path, "claims", declaration, declaration_sha256,
+        implementation,
+    )
+    if claims_report["input_report_sha256"] != material_sha256:
+        raise QualificationPostcompileError(
+            "claims raw hash chain differs from materialization report"
+        )
+    claims_records = _sparse_records(
+        declaration, claims_root, CLAIMS_SUFFIXES, claims_passed
+    )
+    expected_claim_criteria = {
+        "prior-stage-passed", "immutable-claims", "claims-membership",
+        "input-stability",
+    }
+    for declared, row in zip(declaration["maps"], claims_report["maps"]):
+        map_id = str(declared["map"])
+        prior = map_id in material_passed
+        passing = map_id in claims_passed
+        if (
+            set(row["criteria"]) != expected_claim_criteria
+            or row["criteria"]["prior-stage-passed"] is not prior
+            or row["passed"] is not passing
+        ):
+            raise QualificationPostcompileError(
+                f"claims eligibility differs for {map_id}"
+            )
+        if passing:
+            if (
+                not prior or row["evidence_sha256"] != stage_evidence_sha256(
+                    map_id, prior, claims_records[map_id]
+                )
+                or not all(row["criteria"].values()) or row["failures"] != []
+            ):
+                raise QualificationPostcompileError(
+                    f"claims raw evidence differs for {map_id}"
+                )
+            for suffix in MATERIALIZED_SUFFIXES:
+                if claims_records[map_id][suffix] != material_records[map_id][suffix]:
+                    raise QualificationPostcompileError(
+                        f"claims changed materialized input {map_id}{suffix}"
+                    )
+            expected_claims = canonical_bytes(
+                claim_builder(claims_root / f"{map_id}.map")
+            )
+            if (claims_root / f"{map_id}.generator-claims.json").read_bytes() != expected_claims:
+                raise QualificationPostcompileError(
+                    f"generator claims differ from independent rebuild for {map_id}"
+                )
+        else:
+            expected_digest = _sha256(canonical_bytes({
+                "map": map_id, "stage": "claims", "failures": row["failures"],
+            }))
+            if row["evidence_sha256"] != expected_digest or not row["failures"]:
+                raise QualificationPostcompileError(
+                    f"claims failure evidence differs for {map_id}"
+                )
+    if not claims_passed.issubset(material_passed):
+        raise QualificationPostcompileError("claims pass set exceeds materialization")
+    stable = (
+        declaration_path.read_bytes() == declaration_raw
+        and compiled_cm_report_path.read_bytes() == cm_raw
+        and materialization_report_path.read_bytes() == material_raw
+        and claims_report_path.read_bytes() == claims_raw
+        and _sparse_records(
+            declaration, materialized_root, MATERIALIZED_SUFFIXES, material_passed
+        ) == material_records
+        and _sparse_records(
+            declaration, claims_root, CLAIMS_SUFFIXES, claims_passed
+        ) == claims_records
+        and authority_provider(
+            repo_root=repo_root, cm_oracle=cm_oracle, pmove_oracle=pmove_oracle,
+            hook_oracle=hook_oracle, fall_oracle=fall_oracle,
+            hook_attestation=hook_attestation,
+        ) == authorities
+        and runtime_provider(python_runtime, repo_root) == runtime_identity
+        and _validate_implementation(implementation_provider(repo_root)) == implementation
+    )
+    if not stable:
+        raise QualificationPostcompileError("postcompile replay inputs changed")
+    return {
+        "compiled_cm_sha256": cm_sha256,
+        "materialization_sha256": material_sha256,
+        "claims_sha256": claims_sha256,
+        "compiled_cm_passed": sorted(cm_passed),
+        "materialization_passed": sorted(material_passed),
+        "claims_passed": sorted(claims_passed),
+        "runtime": runtime_identity,
+        "authorities": authorities,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)

@@ -25,6 +25,7 @@ from tools.run_b2_qualification_postcompile import (
     claims_qualification,
     materialize_qualification,
     stage_evidence_sha256,
+    validate_published_qualification_postcompile,
 )
 from tools.run_generator_cohort import canonical_bytes
 from tools.b2_qualification_toolchain import (
@@ -392,6 +393,67 @@ def test_twenty_of_twenty_eight_propagates_through_sparse_claims(
     assert materialized["pass_count"] == claims["pass_count"] == 20
     assert len(list(paths["materialized"].iterdir())) == 20 * len(MATERIALIZED_SUFFIXES)
     assert len(list(paths["claims"].iterdir())) == 20 * len(CLAIMS_SUFFIXES)
+
+
+def test_consumer_replays_sparse_postcompile_and_rejects_forgery(
+    tmp_path: Path,
+) -> None:
+    declaration = _declaration()
+    rejected = {row["map"] for row in declaration["maps"][:8]}
+    paths = _fixture(tmp_path, prior_failed=rejected)
+    materialized = _run_materialize(paths)
+    claims = _run_claims(paths)
+    for row in materialized["maps"]:
+        if not row["passed"]:
+            continue
+        map_id = row["map"]
+        (paths["logs"] / f"{map_id}.stdout.json").write_bytes(b"{}\n")
+        (paths["logs"] / f"{map_id}.stderr.log").write_bytes(b"")
+
+    kwargs = {
+        "declaration_path": paths["declaration_path"],
+        "compile_report_path": paths["compile_report"],
+        "compiled_root": paths["compiled"],
+        "compiled_cm_report_path": paths["prior"],
+        "compiled_cm_evidence_root": paths["prior_evidence"],
+        "materialization_report_path": paths["materialize_report"],
+        "materialized_root": paths["materialized"],
+        "materialization_log_root": paths["logs"],
+        "claims_report_path": paths["claims_report"],
+        "claims_root": paths["claims"],
+        "cm_oracle": paths["cm"],
+        "pmove_oracle": paths["pmove"],
+        "hook_oracle": paths["hook"],
+        "fall_oracle": paths["fall"],
+        "hook_attestation": paths["hook_attestation"],
+        "python_runtime": paths["python"],
+        "implementation_provider": lambda _root: dict(IMPLEMENTATION),
+        "authority_provider": _authorities,
+        "runtime_provider": _runtime,
+        "result_validator": lambda *args, **kwargs: None,
+        "claim_builder": _claim_builder,
+        "compiled_cm_validator": _compiled_cm_validator,
+    }
+    replay = validate_published_qualification_postcompile(**kwargs)
+    assert len(replay["compiled_cm_passed"]) == 20
+    assert len(replay["materialization_passed"]) == 20
+    assert len(replay["claims_passed"]) == 20
+
+    original_material_report = paths["materialize_report"].read_bytes()
+    forged_material_report = json.loads(original_material_report)
+    passing_row = next(row for row in forged_material_report["maps"] if row["passed"])
+    passing_row["evidence_sha256"] = "00" * 32
+    paths["materialize_report"].write_bytes(canonical_bytes(forged_material_report))
+    with pytest.raises(QualificationPostcompileError):
+        validate_published_qualification_postcompile(**kwargs)
+    paths["materialize_report"].write_bytes(original_material_report)
+
+    passing_map = next(row["map"] for row in claims["maps"] if row["passed"])
+    (paths["claims"] / f"{passing_map}.generator-claims.json").write_bytes(
+        canonical_bytes({"schema": "forged-claims-v1", "map": passing_map})
+    )
+    with pytest.raises(QualificationPostcompileError):
+        validate_published_qualification_postcompile(**kwargs)
 
 
 def test_claims_reject_forged_raw_upstream_chain_before_staging(

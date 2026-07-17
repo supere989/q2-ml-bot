@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
@@ -11,7 +12,7 @@ from tools.assemble_b2_qualification import STAGES, _validate_infrastructure
 from tools.b2_qualification_stage_support import QualificationStageError
 from tools.run_b2_qualification_infrastructure import (
     PINNED_PYTHON_SHA256, _timeout_probe as real_timeout_probe,
-    produce_infrastructure_report,
+    _membership_evidence, produce_infrastructure_report,
 )
 from tools.run_generator_cohort import STAGE_SUFFIXES, canonical_bytes
 
@@ -198,3 +199,35 @@ def test_timeout_probe_actually_kills_the_process_group():
     assert result["timed_out"] is True
     assert result["process_group_killed"] is True
     assert result["exit_code"] == -9
+
+
+def test_exact_membership_accepts_honest_sparse_twenty_map_lifecycle(tmp_path: Path):
+    paths = _inputs(tmp_path)
+    declared = declaration()
+    reports = {
+        stage: json.loads(path.read_text())
+        for stage, path in paths["reports"].items()
+    }
+    rejected = {row["map"] for row in declared["maps"][20:]}
+    for stage in ("compile", "materialization", "claims"):
+        for row in reports[stage]["maps"]:
+            if row["map"] not in rejected:
+                continue
+            first = next(iter(row["criteria"]))
+            row["criteria"][first] = False
+            row["failures"] = ["honest sparse rejection"]
+            row["passed"] = False
+        reports[stage]["pass_count"] = 20
+    roots = paths["roots"]
+    for map_id in rejected:
+        (roots["compile"] / f"{map_id}.bsp").unlink()
+        for suffix in STAGE_SUFFIXES["materialized"]:
+            (roots["materialization"] / f"{map_id}{suffix}").unlink()
+        for suffix in STAGE_SUFFIXES["claims"]:
+            (roots["claims"] / f"{map_id}{suffix}").unlink()
+    evidence = _membership_evidence(declared, reports, roots)
+    exact = evidence["exact_roots"]
+    assert len(exact["source"]) == 28 * len(STAGE_SUFFIXES["source"])
+    assert len(exact["compile"]) == 28 * len(STAGE_SUFFIXES["source"]) + 20
+    assert len(exact["materialization"]) == 20 * len(STAGE_SUFFIXES["materialized"])
+    assert len(exact["claims"]) == 20 * len(STAGE_SUFFIXES["claims"])

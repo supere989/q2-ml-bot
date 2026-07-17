@@ -171,6 +171,15 @@ def _membership_evidence(
 ) -> dict[str, Any]:
     records: dict[str, Any] = {}
     all_maps = {str(row["map"]) for row in declaration["maps"]}
+    source_passed = {
+        str(row["map"])
+        for row in stage_reports["source"]["maps"]
+        if row["passed"] is True
+    }
+    require(
+        source_passed == all_maps,
+        "source producer semantics require a complete 28-map source root",
+    )
     stage_passed = {
         stage: {
             str(row["map"])

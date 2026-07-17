@@ -348,7 +348,11 @@ def test_hand_authored_summary_forgery_validates_but_replay_and_final_gate_rejec
 ) -> None:
     args = _inputs(tmp_path, monkeypatch)
     for name in (
-        "source_root", "compiled_root", "materialized_root", "claims_root",
+        "source_root", "source_cold_root", "compiled_root",
+        "compile_evidence_root", "q2tool", "basedir",
+        "compiled_cm_evidence_root", "cm_oracle", "pmove_oracle",
+        "hook_oracle", "fall_oracle", "hook_attestation", "python_runtime",
+        "materialized_root", "materialization_log_root", "claims_root",
         "analysis_root", "atlas_evidence_root",
         "promotion_evidence_root", "infrastructure_evidence_root",
         "syntax_report",
@@ -573,6 +577,10 @@ def test_main_exclusive_creates_canonical_output_outside_repo(
             "claims-root", "analysis-root", "atlas-evidence-root",
             "promotion-evidence-root", "infrastructure-evidence-root",
             "source-root", "compiled-root", "materialized-root", "syntax-report",
+            "source-cold-root", "compile-evidence-root", "q2tool", "basedir",
+            "compiled-cm-evidence-root", "cm-oracle", "pmove-oracle",
+            "hook-oracle", "fall-oracle", "hook-attestation", "python-runtime",
+            "materialization-log-root",
         ):
         argv.extend((f"--{name}", str(tmp_path / f"{name}.json")))
     argv.extend(("--repo-root", str(gate.ROOT), "--output", str(output)))

@@ -26,6 +26,7 @@ from tools.run_b2_qualification_compile import (
     _file_sha256,
     _source_evidence_sha256,
     compile_qualification,
+    validate_published_qualification_compile,
 )
 from tools.run_generator_cohort import canonical_bytes
 
@@ -319,6 +320,41 @@ def test_one_q2tool_failure_publishes_honest_sparse_population(
     assert failed_row["criteria"]["compiled-stage-published"] is False
     assert not (paths["compiled"] / f"{failed}.bsp").exists()
     assert len(list(paths["compiled"].iterdir())) == 28 * len(SOURCE_SUFFIXES) + 27
+
+
+def test_consumer_replays_sparse_q2tool_logs_and_rejects_forgery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    failed = paths["declaration"]["maps"][6]["map"]
+    monkeypatch.setenv("Q2_FAKE_FAIL_MAP", failed)
+    report = _run(paths)
+    replayed, raw, digest, passed = validate_published_qualification_compile(
+        declaration_path=paths["declaration_path"],
+        source_report_path=paths["source_report"], source_root=paths["source"],
+        compiled_root=paths["compiled"], evidence_root=paths["logs"],
+        report_path=paths["report"], q2tool=paths["q2tool"],
+        basedir=paths["basedir"],
+        implementation_provider=lambda _root: dict(IMPLEMENTATION),
+        authority_provider=lambda _root: paths["authority"],
+    )
+    assert replayed == report and digest == _sha256(raw)
+    assert len(passed) == 27 and failed not in passed
+
+    target = paths["logs"] / f"006-{failed}.evidence.json"
+    forged = json.loads(target.read_text())
+    forged["passed"] = True
+    target.write_bytes(canonical_bytes(forged))
+    with pytest.raises(QualificationCompileError, match="result evidence differs"):
+        validate_published_qualification_compile(
+            declaration_path=paths["declaration_path"],
+            source_report_path=paths["source_report"], source_root=paths["source"],
+            compiled_root=paths["compiled"], evidence_root=paths["logs"],
+            report_path=paths["report"], q2tool=paths["q2tool"],
+            basedir=paths["basedir"],
+            implementation_provider=lambda _root: dict(IMPLEMENTATION),
+            authority_provider=lambda _root: paths["authority"],
+        )
 
 
 def test_source_hash_drift_fails_closed(

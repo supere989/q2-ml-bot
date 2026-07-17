@@ -352,6 +352,97 @@ def source_evidence_sha256(map_id: str, files: Mapping[str, Any]) -> str:
     return _sha256_bytes(canonical_bytes({"map": map_id, "files": dict(files)}))
 
 
+def validate_published_qualification_source(
+    *, declaration_path: Path, source_root: Path, cold_root: Path,
+    report_path: Path, repo_root: Path = ROOT,
+    implementation_provider: Callable[[Path], Mapping[str, Any]] = repository_binding,
+    static_validator: Callable[[Path], Mapping[str, Any]] = _default_static_validator,
+    metadata_validator: Callable[[Path, Mapping[str, Any]], Mapping[str, Any]] = _validate_metadata,
+    route_loader: Callable[[Path, str], Mapping[str, Any]] = load_source_route_contract,
+    spawn_binding: Callable[[Path, Mapping[str, Any], str], Mapping[str, Any]] = _source_spawn_origin_binding,
+) -> tuple[dict[str, Any], bytes, str, set[str]]:
+    """Recompute every source criterion from both retained cold populations."""
+
+    from tools.run_b2_qualification_compile import (
+        _load_json, _validate_declaration, _validate_implementation,
+    )
+
+    implementation = _validate_implementation(implementation_provider(repo_root))
+    try:
+        toolchain_authority = load_toolchain_authority(repo_root)
+    except ToolchainAuthorityError as error:
+        raise QualificationSourceError(
+            f"canonical toolchain authority rejected: {error}"
+        ) from error
+    declaration, declaration_raw, declaration_sha256 = _validate_declaration(
+        declaration_path, implementation
+    )
+    _require(
+        declaration["toolchain_authority_sha256"]
+        == toolchain_authority.manifest_sha256,
+        "declaration toolchain authority differs during source replay",
+    )
+    report, report_raw = _load_json(report_path)
+    primary_membership = _source_membership(declaration["maps"], source_root)
+    cold_membership = _source_membership(declaration["maps"], cold_root)
+    _require(primary_membership["passed"] is True, "published source membership differs")
+    _require(cold_membership["passed"] is True, "published cold-source membership differs")
+    rows = [
+        _inspect_map(
+            row, source_root, cold_root, static_validator, metadata_validator,
+            route_loader, spawn_binding,
+        )
+        for row in declaration["maps"]
+    ]
+    layout_counts = Counter(row["_layout_sha256"] for row in rows)
+    for row in rows:
+        row["criteria"]["layout-unique"] = layout_counts[row["_layout_sha256"]] == 1
+        if not row["criteria"]["layout-unique"]:
+            row["failures"].append("source map layout duplicates another qualification member")
+        row["failures"] = sorted(set(row["failures"]))
+        row["passed"] = all(row["criteria"].values()) and not row["failures"]
+        del row["_layout_sha256"]
+    expected = {
+        "schema": STAGE_SCHEMA,
+        "qualification_id": declaration["qualification_id"],
+        "mode": "qualification", "stage": "source", "non_admissible": True,
+        "retryable": True, "final_cohort_authorized": False,
+        "declaration_sha256": declaration_sha256,
+        "implementation": implementation,
+        "toolchain_authority_sha256": toolchain_authority.manifest_sha256,
+        "input_report_sha256": None,
+        "infrastructure_checks": {
+            **{name: True for name in REQUIRED_STAGE_CHECKS["source"]},
+            "bounded-parallel-workers": True, "exact-membership": True,
+            "input-stability": True,
+        },
+        "map_count": MAP_COUNT,
+        "pass_count": sum(row["passed"] is True for row in rows),
+        "maps": rows, "failures": [],
+    }
+    _require(report_raw == canonical_bytes(expected),
+             "published source report differs from cold-source replay")
+    stable = (
+        declaration_path.read_bytes() == declaration_raw
+        and report_path.read_bytes() == report_raw
+        and _source_membership(declaration["maps"], source_root)
+        == primary_membership
+        and _source_membership(declaration["maps"], cold_root)
+        == cold_membership
+        and _validate_implementation(implementation_provider(repo_root))
+        == implementation
+        and load_toolchain_authority(repo_root) == toolchain_authority
+    )
+    for declared, row in zip(declaration["maps"], rows):
+        files, identical = _source_files(declared, source_root, cold_root)
+        stable = stable and identical and row["evidence_sha256"] == (
+            source_evidence_sha256(str(declared["map"]), files)
+        )
+    _require(stable, "source replay inputs changed")
+    passed = {str(row["map"]) for row in rows if row["passed"]}
+    return report, report_raw, _sha256_bytes(report_raw), passed
+
+
 def _inspect_map(
     row: Mapping[str, Any],
     primary: Path,

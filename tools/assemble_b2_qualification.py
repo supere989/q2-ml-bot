@@ -718,7 +718,11 @@ def _raw_evidence_path(path: Path) -> dict[str, Any]:
 
 def _stage_evidence_paths(args: argparse.Namespace) -> dict[str, str] | None:
     names = (
-        "source_root", "compiled_root", "materialized_root", "claims_root",
+        "source_root", "source_cold_root", "compiled_root",
+        "compile_evidence_root", "q2tool", "basedir",
+        "compiled_cm_evidence_root", "cm_oracle", "pmove_oracle",
+        "hook_oracle", "fall_oracle", "hook_attestation", "python_runtime",
+        "materialized_root", "materialization_log_root", "claims_root",
         "analysis_root", "atlas_evidence_root",
         "promotion_evidence_root", "infrastructure_evidence_root",
         "syntax_report",
@@ -737,8 +741,21 @@ def _stage_evidence_paths(args: argparse.Namespace) -> dict[str, str] | None:
 def _validate_retained_stage_evidence(
     declaration: Mapping[str, Any], stage_documents: Mapping[str, Mapping[str, Any]],
     infrastructure_document: Mapping[str, Any], roots: Mapping[str, str],
+    args: argparse.Namespace, repo_root: Path,
 ) -> None:
     try:
+        from tools.run_b2_qualification_source import (
+            validate_published_qualification_source,
+        )
+        from tools.run_b2_qualification_compile import (
+            validate_published_qualification_compile,
+        )
+        from tools.run_b2_qualification_compiled_cm import (
+            validate_published_qualification_compiled_cm,
+        )
+        from tools.run_b2_qualification_postcompile import (
+            validate_published_qualification_postcompile,
+        )
         from tools.run_b2_qualification_promotion import (
             _validate_atlas_artifacts,
             validate_promotion_evidence,
@@ -746,6 +763,65 @@ def _validate_retained_stage_evidence(
         from tools.run_b2_qualification_infrastructure import (
             validate_infrastructure_evidence,
         )
+        _, _, _, source_passed = validate_published_qualification_source(
+            declaration_path=args.declaration,
+            source_root=Path(roots["source_root"]),
+            cold_root=Path(roots["source_cold_root"]),
+            report_path=args.source_report, repo_root=repo_root,
+        )
+        _, _, _, compile_passed = validate_published_qualification_compile(
+            declaration_path=args.declaration,
+            source_report_path=args.source_report,
+            source_root=Path(roots["source_root"]),
+            compiled_root=Path(roots["compiled_root"]),
+            evidence_root=Path(roots["compile_evidence_root"]),
+            report_path=args.compile_report, q2tool=Path(roots["q2tool"]),
+            basedir=Path(roots["basedir"]), repo_root=repo_root,
+        )
+        _, _, _, cm_passed = validate_published_qualification_compiled_cm(
+            declaration_path=args.declaration,
+            compile_report_path=args.compile_report,
+            compiled_root=Path(roots["compiled_root"]),
+            cm_oracle=Path(roots["cm_oracle"]),
+            evidence_root=Path(roots["compiled_cm_evidence_root"]),
+            report_path=args.compiled_cm_preflight_report,
+            repo_root=repo_root,
+        )
+        postcompile = validate_published_qualification_postcompile(
+            declaration_path=args.declaration,
+            compile_report_path=args.compile_report,
+            compiled_root=Path(roots["compiled_root"]),
+            compiled_cm_report_path=args.compiled_cm_preflight_report,
+            compiled_cm_evidence_root=Path(roots["compiled_cm_evidence_root"]),
+            materialization_report_path=args.materialization_report,
+            materialized_root=Path(roots["materialized_root"]),
+            materialization_log_root=Path(roots["materialization_log_root"]),
+            claims_report_path=args.claims_report,
+            claims_root=Path(roots["claims_root"]),
+            cm_oracle=Path(roots["cm_oracle"]),
+            pmove_oracle=Path(roots["pmove_oracle"]),
+            hook_oracle=Path(roots["hook_oracle"]),
+            fall_oracle=Path(roots["fall_oracle"]),
+            hook_attestation=Path(roots["hook_attestation"]),
+            python_runtime=Path(roots["python_runtime"]), repo_root=repo_root,
+        )
+        expected_passes = {
+            stage: {
+                str(row["map"]) for row in stage_documents[stage]["maps"]
+                if row["passed"] is True
+            }
+            for stage in STAGES
+        }
+        _require(source_passed == expected_passes["source"],
+                 "source replay pass set differs")
+        _require(compile_passed == expected_passes["compile"],
+                 "compile replay pass set differs")
+        _require(cm_passed == expected_passes["compiled-cm-preflight"],
+                 "compiled-CM replay pass set differs")
+        _require(set(postcompile["materialization_passed"]) == expected_passes["materialization"],
+                 "materialization replay pass set differs")
+        _require(set(postcompile["claims_passed"]) == expected_passes["claims"],
+                 "claims replay pass set differs")
         _validate_atlas_artifacts(
             declaration, stage_documents["atlas-build"],
             Path(roots["analysis_root"]), Path(roots["atlas_evidence_root"]),
@@ -844,6 +920,7 @@ def assemble_qualification(args: argparse.Namespace) -> dict[str, Any]:
         _validate_retained_stage_evidence(
             declaration, stage_documents, infrastructure_document,
             retained_stage_evidence,
+            args, repo_root,
         )
     return {
         "schema": QUALIFICATION_SCHEMA,
@@ -1063,7 +1140,11 @@ def validate_qualification(value: object) -> dict[str, Any]:
     if stage_evidence is not None:
         roots = _mapping(stage_evidence, "raw retained stage evidence")
         _exact_keys(roots, {
-            "source_root", "compiled_root", "materialized_root", "claims_root",
+            "source_root", "source_cold_root", "compiled_root",
+            "compile_evidence_root", "q2tool", "basedir",
+            "compiled_cm_evidence_root", "cm_oracle", "pmove_oracle",
+            "hook_oracle", "fall_oracle", "hook_attestation", "python_runtime",
+            "materialized_root", "materialization_log_root", "claims_root",
             "analysis_root", "atlas_evidence_root",
             "promotion_evidence_root", "infrastructure_evidence_root",
             "syntax_report",
@@ -1152,8 +1233,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--infrastructure-report", type=Path, required=True)
     parser.add_argument("--claims-root", type=Path, required=True)
     parser.add_argument("--source-root", type=Path, required=True)
+    parser.add_argument("--source-cold-root", type=Path, required=True)
     parser.add_argument("--compiled-root", type=Path, required=True)
+    parser.add_argument("--compile-evidence-root", type=Path, required=True)
+    parser.add_argument("--q2tool", type=Path, required=True)
+    parser.add_argument("--basedir", type=Path, required=True)
+    parser.add_argument("--compiled-cm-evidence-root", type=Path, required=True)
+    parser.add_argument("--cm-oracle", type=Path, required=True)
+    parser.add_argument("--pmove-oracle", type=Path, required=True)
+    parser.add_argument("--hook-oracle", type=Path, required=True)
+    parser.add_argument("--fall-oracle", type=Path, required=True)
+    parser.add_argument("--hook-attestation", type=Path, required=True)
+    parser.add_argument("--python-runtime", type=Path, required=True)
     parser.add_argument("--materialized-root", type=Path, required=True)
+    parser.add_argument("--materialization-log-root", type=Path, required=True)
     parser.add_argument("--analysis-root", type=Path, required=True)
     parser.add_argument("--atlas-evidence-root", type=Path, required=True)
     parser.add_argument("--promotion-evidence-root", type=Path, required=True)

@@ -438,6 +438,30 @@ def test_consumer_replays_every_raw_evidence_document(tmp_path: Path) -> None:
     assert digest == _sha256(raw)
 
 
+def test_sparse_twenty_map_compile_flows_through_cm_and_replay(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    rejected = {
+        row["map"] for row in paths["declaration"]["maps"][:8]
+    }
+    compile_report = json.loads(paths["compile_path"].read_text())
+    for row in compile_report["maps"]:
+        if row["map"] not in rejected:
+            continue
+        row["criteria"]["q2tool-exit-zero"] = False
+        row["failures"] = ["q2tool exit code 23"]
+        row["passed"] = False
+        (paths["compiled"] / f"{row['map']}.bsp").unlink()
+    compile_report["pass_count"] = 20
+    paths["compile_path"].write_bytes(canonical_bytes(compile_report))
+
+    report = _run(paths)
+    assert report["pass_count"] == 20
+    assert {row["map"] for row in report["maps"] if not row["passed"]} == rejected
+    replayed, _raw, _digest, passed = _replay(paths)
+    assert replayed == report
+    assert len(passed) == 20 and passed.isdisjoint(rejected)
+
+
 @pytest.mark.parametrize("mutation", ("evidence", "extra", "compiled", "compile"))
 def test_consumer_rejects_forged_or_drifted_predecessor(
     tmp_path: Path, mutation: str,

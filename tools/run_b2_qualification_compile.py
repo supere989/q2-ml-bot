@@ -462,6 +462,252 @@ def _validate_source_report(
     return report, raw, _sha256(raw)
 
 
+def validate_published_qualification_compile(
+    *, declaration_path: Path, source_report_path: Path, source_root: Path,
+    compiled_root: Path, evidence_root: Path, report_path: Path,
+    q2tool: Path, basedir: Path, repo_root: Path = ROOT,
+    implementation_provider: Callable[[Path], dict[str, Any]] = _current_implementation,
+    authority_provider: Callable[[Path], ToolchainAuthority] = load_toolchain_authority,
+) -> tuple[dict[str, Any], bytes, str, set[str]]:
+    """Replay q2tool evidence, logs, BSP bytes, and sparse membership."""
+
+    implementation = _validate_implementation(implementation_provider(repo_root))
+    try:
+        toolchain_authority = authority_provider(repo_root)
+    except ToolchainAuthorityError as error:
+        raise QualificationCompileError(
+            f"canonical toolchain authority rejected: {error}"
+        ) from error
+    declaration, declaration_raw, declaration_sha256 = _validate_declaration(
+        declaration_path, implementation
+    )
+    source_records = _flat_records(declaration, source_root, SOURCE_SUFFIXES)
+    source_report, source_raw, source_sha256 = _validate_source_report(
+        source_report_path, declaration, declaration_sha256, implementation,
+        source_records,
+    )
+    report, report_raw = _load_json(report_path)
+    _exact_keys(report, {
+        "schema", "qualification_id", "mode", "stage", "non_admissible",
+        "retryable", "final_cohort_authorized", "declaration_sha256",
+        "implementation", "toolchain_authority_sha256",
+        "input_report_sha256", "infrastructure_checks", "map_count",
+        "pass_count", "maps", "failures",
+    }, "qualification compile report")
+    infrastructure = report["infrastructure_checks"]
+    expected_checks = {
+        "real-q2tool", "compiled-membership", "bounded-parallel-workers",
+        "input-stability", "ibsp38-validation-complete", "exclusive-publication",
+    }
+    if (
+        report["schema"] != STAGE_SCHEMA
+        or report["qualification_id"] != declaration["qualification_id"]
+        or report["mode"] != "qualification" or report["stage"] != "compile"
+        or report["non_admissible"] is not True or report["retryable"] is not True
+        or report["final_cohort_authorized"] is not False
+        or report["declaration_sha256"] != declaration_sha256
+        or report["implementation"] != implementation
+        or report["toolchain_authority_sha256"]
+        != toolchain_authority.manifest_sha256
+        or report["toolchain_authority_sha256"]
+        != declaration["toolchain_authority_sha256"]
+        or report["input_report_sha256"] != source_sha256
+        or not isinstance(infrastructure, Mapping)
+        or set(infrastructure) != expected_checks
+        or not all(value is True for value in infrastructure.values())
+        or report["failures"] != []
+        or report["map_count"] != EXPECTED_MAP_COUNT
+        or not isinstance(report["maps"], list)
+        or len(report["maps"]) != EXPECTED_MAP_COUNT
+    ):
+        raise QualificationCompileError(
+            "qualification compile identity/infrastructure differs"
+        )
+    try:
+        inspect_q2tool(q2tool, toolchain_authority)
+    except ToolchainAuthorityError as error:
+        raise QualificationCompileError(str(error)) from error
+    q2tool_record = _file_record(q2tool)
+    if not os.access(q2tool, os.X_OK):
+        raise QualificationCompileError("q2tool is not executable")
+    basedir_record = _inspect_basedir(basedir, toolchain_authority)
+    expected_log_names = {
+        f"{int(row['ordinal']):03d}-{row['map']}{suffix}"
+        for row in declaration["maps"]
+        for suffix in (".evidence.json", ".stdout.log", ".stderr.log")
+    }
+    if evidence_root.is_symlink() or not evidence_root.is_dir():
+        raise QualificationCompileError(
+            "compile evidence root is absent or a symlink"
+        )
+    actual_log_names: set[str] = set()
+    for path in evidence_root.iterdir():
+        if path.is_symlink() or not path.is_file():
+            raise QualificationCompileError(
+                f"compile evidence contains non-regular entry: {path.name}"
+            )
+        actual_log_names.add(path.name)
+    if actual_log_names != expected_log_names:
+        raise QualificationCompileError("compile evidence membership differs")
+    evidence_records = {
+        name: _file_record(evidence_root / name) for name in expected_log_names
+    }
+    declared_passed = {
+        str(row["map"]) for row in report["maps"] if row.get("passed") is True
+    }
+    compiled_records = _sparse_compiled_records(
+        declaration, compiled_root, declared_passed
+    )
+    if any(
+        compiled_records[map_id][suffix] != source_records[map_id][suffix]
+        for map_id in source_records for suffix in SOURCE_SUFFIXES
+    ):
+        raise QualificationCompileError("compiled root changed source artifacts")
+    replayed_passed: set[str] = set()
+    evidence_keys = {
+        "schema", "ordinal", "map", "source_files", "q2tool", "basedir",
+        "execution", "command", "exit_code", "timed_out", "invocation_error",
+        "stdout", "stderr", "bsp", "criteria", "failures", "passed",
+    }
+    criteria_keys = {
+        "source-stage-bound", "q2tool-exit-zero", "q2tool-not-timed-out",
+        "ibsp38-lightdata", "compiled-stage-published",
+    }
+    for declared, source_row, report_row in zip(
+        declaration["maps"], source_report["maps"], report["maps"]
+    ):
+        ordinal = int(declared["ordinal"])
+        map_id = str(declared["map"])
+        stem = f"{ordinal:03d}-{map_id}"
+        evidence, evidence_raw = _load_json(
+            evidence_root / f"{stem}.evidence.json"
+        )
+        if set(evidence) != evidence_keys:
+            raise QualificationCompileError(
+                f"compile evidence keys differ for {map_id}"
+            )
+        execution = evidence["execution"]
+        command = evidence["command"]
+        exit_code = evidence["exit_code"]
+        timed_out = evidence["timed_out"]
+        invocation_error = evidence["invocation_error"]
+        if (
+            evidence["schema"] != "q2-b2-qualification-compile-map-evidence-v1"
+            or evidence["ordinal"] != ordinal or evidence["map"] != map_id
+            or evidence["source_files"] != source_records[map_id]
+            or evidence["q2tool"] != q2tool_record
+            or evidence["basedir"] != basedir_record
+            or not isinstance(execution, Mapping)
+            or set(execution) != {
+                "parallel_worker_limit", "q2tool_threads",
+                "per_map_timeout_milliseconds",
+            }
+            or isinstance(execution["parallel_worker_limit"], bool)
+            or not isinstance(execution["parallel_worker_limit"], int)
+            or not 1 <= execution["parallel_worker_limit"] <= MAX_JOBS
+            or execution["q2tool_threads"] != 1
+            or isinstance(execution["per_map_timeout_milliseconds"], bool)
+            or not isinstance(execution["per_map_timeout_milliseconds"], int)
+            or not 0 < execution["per_map_timeout_milliseconds"] <= 86_400_000
+            or not isinstance(command, list)
+            or len(command) != len(Q2TOOL_FLAGS) + 3
+            or command[0] != str(q2tool)
+            or command[1:1 + len(Q2TOOL_FLAGS)] != list(Q2TOOL_FLAGS)
+            or command[-2] != str(basedir)
+            or Path(command[-1]).name != f"{map_id}.map"
+            or isinstance(exit_code, bool)
+            or not isinstance(exit_code, int)
+            or not isinstance(timed_out, bool)
+            or (
+                invocation_error is not None
+                and not isinstance(invocation_error, str)
+            )
+        ):
+            raise QualificationCompileError(
+                f"compile invocation evidence differs for {map_id}"
+            )
+        stdout = _file_record(evidence_root / f"{stem}.stdout.log")
+        stderr = _file_record(evidence_root / f"{stem}.stderr.log")
+        if evidence["stdout"] != stdout or evidence["stderr"] != stderr:
+            raise QualificationCompileError(f"compile logs differ for {map_id}")
+        failures: list[str] = []
+        if timed_out:
+            seconds = execution["per_map_timeout_milliseconds"] / 1000
+            failures.append(f"q2tool exceeded {seconds:g}-second timeout")
+        if invocation_error:
+            failures.append(invocation_error)
+        if exit_code != 0:
+            failures.append(f"q2tool exit code {exit_code}")
+        bsp = None
+        if not failures:
+            if map_id not in declared_passed:
+                raise QualificationCompileError(
+                    f"successful compile is absent from pass set for {map_id}"
+                )
+            bsp = _bsp_record(compiled_root / f"{map_id}.bsp")
+        criteria = {
+            "source-stage-bound": source_row["passed"] is True,
+            "q2tool-exit-zero": exit_code == 0,
+            "q2tool-not-timed-out": timed_out is False,
+            "ibsp38-lightdata": bsp is not None,
+            "compiled-stage-published": bsp is not None,
+        }
+        passed = all(criteria.values()) and failures == []
+        if (
+            set(evidence["criteria"]) != criteria_keys
+            or evidence["criteria"] != criteria
+            or evidence["bsp"] != bsp
+            or evidence["failures"] != failures
+            or evidence["passed"] is not passed
+        ):
+            raise QualificationCompileError(
+                f"compile result evidence differs for {map_id}"
+            )
+        expected_row = {
+            "ordinal": ordinal, "map": map_id, "criteria": criteria,
+            "evidence_sha256": _sha256(evidence_raw), "failures": failures,
+            "passed": passed,
+        }
+        if report_row != expected_row:
+            raise QualificationCompileError(
+                f"compile report row differs for {map_id}"
+            )
+        if passed:
+            replayed_passed.add(map_id)
+    if (
+        report["pass_count"] != len(replayed_passed)
+        or replayed_passed != declared_passed
+    ):
+        raise QualificationCompileError(
+            "compile pass count/set differs from raw evidence"
+        )
+    try:
+        stable_authority = authority_provider(repo_root)
+    except ToolchainAuthorityError as error:
+        raise QualificationCompileError(
+            f"canonical toolchain authority changed: {error}"
+        ) from error
+    if (
+        declaration_path.read_bytes() != declaration_raw
+        or source_report_path.read_bytes() != source_raw
+        or report_path.read_bytes() != report_raw
+        or {
+            name: _file_record(evidence_root / name)
+            for name in expected_log_names
+        } != evidence_records
+        or _sparse_compiled_records(
+            declaration, compiled_root, replayed_passed
+        ) != compiled_records
+        or _file_record(q2tool) != q2tool_record
+        or _inspect_basedir(basedir, toolchain_authority) != basedir_record
+        or stable_authority != toolchain_authority
+        or _validate_implementation(implementation_provider(repo_root))
+        != implementation
+    ):
+        raise QualificationCompileError("compile replay inputs changed")
+    return report, report_raw, _sha256(report_raw), replayed_passed
+
+
 def _inspect_basedir(
     basedir: Path, authority: ToolchainAuthority,
 ) -> dict[str, Any]:
