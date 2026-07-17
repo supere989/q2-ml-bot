@@ -81,7 +81,7 @@ from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
 
 
 GATE_SCHEMA = "q2-multires-b2-gate-v1"
-EXPECTED_COHORT = "b2g26_final_71445"
+EXPECTED_COHORT = "b2g26_final_71446"
 EXPECTED_DESIGN_SHA256 = (
     "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
 )
@@ -119,7 +119,7 @@ QUALIFICATION_STABLE_IMPLEMENTATION_KEYS = frozenset({
 QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
     "docs/multires/B2-GATE-ASSEMBLY.md",
-    "docs/multires/B2-GENERATED-COHORT-71445-DECLARATION.json",
+    "docs/multires/B2-GENERATED-COHORT-71446-DECLARATION.json",
     "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
     "schemas/q2-multires-b2-gate-v1.schema.json",
     "tests/test_b2_gate.py",
@@ -543,8 +543,8 @@ def _validate_qualification_successor(
         "B2 qualification successor changed files differ from the declaration-only authority",
     )
     _require(
-        changed["docs/multires/B2-GENERATED-COHORT-71445-DECLARATION.json"] == "A",
-        "B2 qualification successor did not add the immutable 71445 declaration",
+        changed["docs/multires/B2-GENERATED-COHORT-71446-DECLARATION.json"] == "A",
+        "B2 qualification successor did not add the immutable 71446 declaration",
     )
     return {
         "qualified_repository_commit": qualified_commit,
@@ -627,12 +627,12 @@ def _validate_qualification_report(
     }
 
 
-def _expected_71445_rows() -> list[dict[str, Any]]:
+def _expected_71446_rows() -> list[dict[str, Any]]:
     rows = []
     ordinal = 0
     for style_index, style in enumerate(CONCRETE_STYLES):
         for member in range(4):
-            seed = 71_445_000 + style_index * 100 + member
+            seed = 71_446_000 + style_index * 100 + member
             rows.append({
                 "ordinal": ordinal,
                 "map": f"b2g26_{style}_{seed}",
@@ -653,11 +653,11 @@ def _validate_declaration(path: Path) -> tuple[dict[str, Any], str]:
         raise B2GateError(f"B2 declaration admission refused: {exc}") from exc
     _require(
         declaration["cohort_id"] == EXPECTED_COHORT,
-        "B2 gate accepts only cohort 71445",
+        "B2 gate accepts only cohort 71446",
     )
     _require(
-        declaration["maps"] == _expected_71445_rows(),
-        "71445 map/seed selection differs",
+        declaration["maps"] == _expected_71446_rows(),
+        "71446 map/seed selection differs",
     )
     return declaration, digest
 
@@ -2324,7 +2324,7 @@ def _validate_dyn_evidence(
     map_id = authority["canonical_map_id"]
     _require(
         map_id in {row["map"] for row in declaration["maps"]},
-        "Dyn map is outside cohort 71445",
+        "Dyn map is outside cohort 71446",
     )
 
     host = _mapping(report["host"], "Dyn host")

@@ -886,13 +886,50 @@ salvaged, substituted, or admitted. A successor requires the transactional
 lava/reward fix, deterministic rejection-path coverage, and a fresh green
 non-admissible qualification before a new immutable declaration.
 
-The declaration-bearing 71445 producer commit must be a strict successor of
+### Authorized 71446 final attempt
+
+The transactional lava/reward fix and deterministic rejection-path test are
+committed at `a05ddb7037774c1b246a6b13972b228570acb8ef`, tree
+`01c27fc60da4ae6f2aedd6138c50dabfcd866525`. Fresh B1 gate SHA-256
+`58295d227ddd3694a0ddae5af46e2bbc98cc60dbe6b6751b4e42df01c06b1cd6`
+and disposable qualification `b2q26_a05ddb7_71626100` bind that exact
+implementation and generator SHA-256
+`fb71a121d05dc02ad4d634f537abb331ed7d4ea29da0e5c3199afe8c0b442001`.
+The unchanged routes and Atlas-analyzer authorities are also bound. Every
+population stage is green 28/28 with zero failures, including the independent
+cold Atlas rebuild and promotion; infrastructure is 6/6. The canonical
+assembled qualification report SHA-256 is
+`69e2b1979feae22c706839dc24f8923b60e34d5b623c8f03b0e5ebb51181a549`.
+It remains explicitly non-admissible and supplies no final-lane bytes.
+
+Exactly one immutable/no-retry final producer attempt is authorized for
+`b2g26_final_71446`. The current canonical alias and immutable named
+`B2-GENERATED-COHORT-71446-DECLARATION.json` are byte-identical with SHA-256
+`58d52bd958249a70bf8115ab1c442fb6888a6d69b290a636303986f69acb658f`.
+They declare exactly 28 fresh rows, four per concrete style in declaration
+order, using seed blocks 71446000..71446003 through 71446600..71446603.
+No producer may run before all clean-snapshot pre-source checks are green.
+
+The first source-generation invocation consumes the sole 71446 authorization.
+Any source or later-stage failure permanently retires 71446; there is no
+resume, retry, repair, repeated invocation, replacement member, passing
+subset, salvage, or reuse. Qualification artifacts and every retired
+71426..71445 byte remain forbidden inputs.
+
+The declaration-bearing 71446 producer commit must be a strict successor of
+qualified commit `a05ddb7037774c1b246a6b13972b228570acb8ef`. Gate replay
+must prove ancestry, the exact qualified commit/tree and report binding,
+byte-identical stable authority fields, and a complete Git delta equal to the
+frozen 71446 declaration/gate/schema/direct-test authorization path set. Any
+unrelated committed change rejects the qualification.
+
+The declaration-bearing 71445 producer commit was required to be a strict successor of
 qualified commit `3b17223ab32e20152aead1eb32a79e239d6f4d8a`. Gate replay
 must prove that ancestry, the exact qualified commit/tree and report binding,
 byte-identical generator/routes/Atlas-analyzer authority fields, and a complete
 Git delta equal to the frozen 71445 declaration/gate/schema/direct-test
-authorization path set. Any producer, analyzer, validator, physics,
-toolchain, or unrelated change rejects the qualification.
+authorization path set. That relation is historical and cannot authorize a
+future cohort.
 
 The declaration-bearing 71444 producer commit must be a strict successor of
 qualified commit `275d4fa646ccf2c64ba8628cd4aa8b21644fa90d`. Gate replay
@@ -964,9 +1001,9 @@ check.
 
 ## Offline workflow
 
-There is no active final `COHORT_ID`; the current alias names retired
-`b2g26_final_71445` for fail-closed historical admission. Commands must never
-name retired cohorts 71426 through 71445. No retired or qualification
+The active final `COHORT_ID` is `b2g26_final_71446`; the current alias and
+immutable named declaration are byte-identical. Commands must never name
+retired cohorts 71426 through 71445. No retired or qualification
 population, report, Dyn evidence, compiled byte, or passing subset may be
 copied into a successor root.
 
