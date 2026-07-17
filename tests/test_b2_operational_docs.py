@@ -69,6 +69,9 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "/home/raymond/miniconda3/bin/python3.11",
         "b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4",
         "zstandard 0.19.0",
+        "import pytest, zstandard",
+        "python -m pytest --version",
+        "only after generated promotion and Dyn",
         "permanently retired",
         "B2-GENERATED-COHORT-71440-FAILURE.json",
         "2abbb7c9de511fd4b497111317d61be439f37c96702441d6d7190e9afb5cf19c",
@@ -81,6 +84,15 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "Cohort 71442 is permanently retired",
         "b2g26_final_71443",
         "d890e151cbc3446622a8c0f5fdd2bd23352583c6431e1484262587c3c7246713",
+        "B2-GENERATED-COHORT-71443-FAILURE.json",
+        "Cohort 71443 is permanently retired",
+        "da89be636079b0cc38583281113002f0578d2608c5a31af052fca8c03d05f723",
+        "6e748dd45bfd013cfd9c57f2ec60289b9abf40da946e511d771efe096d02a456",
+        "c0c7f8c857e8ef60f0f74b959fef6b34f458fc69223146d7245ce2e79de76d84",
+        "196d25d0de40e4333dda9fe4c946e84ae571133554cb72e5ffa1c835bef1bb2d",
+        "six collection errors",
+        "zero executed tests",
+        "publisher-ordering",
         "99c13db93a8dacb9fe24f181126b8c30203f4005fdd5e96fb0b9a165ba2168f9",
         "qualification",
         "non-admissible",
@@ -98,6 +110,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert "b2g26_final_71441" in text
     assert "b2g26_final_71442" in text
     assert "b2g26_final_71443" in text
+    assert "Cohort 71443 is permanently retired" in text
     assert "future-only" not in text
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 

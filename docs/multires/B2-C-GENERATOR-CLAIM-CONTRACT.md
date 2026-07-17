@@ -740,22 +740,52 @@ claims, full Atlas, and promotion. Its canonical report SHA-256 is
 It remains explicitly non-admissible and contributes no map, seed, stage, or
 passing subset to the final cohort.
 
-Fresh replacement cohort `b2g26_final_71443` is explicitly authorized by the
-current alias and byte-identical immutable named declaration
+Historical declaration statement:
+
+Fresh replacement cohort `b2g26_final_71443` was explicitly authorized by the
+then-current alias and byte-identical immutable named declaration
 `B2-GENERATED-COHORT-71443-DECLARATION.json`, both SHA-256
 `d890e151cbc3446622a8c0f5fdd2bd23352583c6431e1484262587c3c7246713`.
 Its 28 rows use fresh seed blocks 71443000..71443003 through
-71443600..71443603, four per concrete style in declaration order. No 71443
-producer, artifact, report, Dyn, test, gate, deployment, or training action has
-run; declaration publication is not producer progress.
+71443600..71443603, four per concrete style in declaration order. Its sole
+source freeze passed all 28 maps, and its declaration-aware q2tool compile
+later atomically published all 28 BSPs and the exact 168-file compiled stage.
 
-The final gate treats the qualified implementation as an exact predecessor,
-not as the impossible same commit: qualification must precede the declaration.
-It replays retained evidence under the report's bound implementation, requires
-that commit to be an ancestor of the final commit, requires identical
-generator/routes/Atlas-analyzer authority fields, and permits exactly the
-frozen 71443 declaration/gate/test authorization paths in the Git delta. Any
-other changed path or authority drift fails closed before final admission.
+The test publisher was incorrectly launched in parallel with compilation,
+before compiled-CM preflight, promotion, Dyn, and the required final test
+position. It selected syntax-only `/usr/bin/python3.10`, which had pytest 9.1.1
+but no `zstandard` module. Pytest exited 2 with six collection errors
+(`ModuleNotFoundError`) and zero executed tests; the publisher then
+rejected the log and published neither its atomic output root nor a test
+report. Compilation completed independently, but no compiled-CM preflight,
+materialization, claims, analysis, Dyn, gate, deployment, or training action
+ran. Exact terminal evidence is archived in
+`B2-GENERATED-COHORT-71443-FAILURE.json`, canonical SHA-256
+`da89be636079b0cc38583281113002f0578d2608c5a31af052fca8c03d05f723`.
+Its terminal phase is `out-of-order-test-runtime-preflight`.
+It binds source-freeze report SHA-256
+`6e748dd45bfd013cfd9c57f2ec60289b9abf40da946e511d771efe096d02a456`,
+compiled report SHA-256
+`c0c7f8c857e8ef60f0f74b959fef6b34f458fc69223146d7245ce2e79de76d84`,
+and diagnostic log SHA-256
+`196d25d0de40e4333dda9fe4c946e84ae571133554cb72e5ffa1c835bef1bb2d`.
+
+Cohort 71443 is permanently retired. None of its source, compiled, log,
+diagnostic, report, test, WSL, or producer-snapshot bytes may be retried,
+repaired, resumed, reused, copied forward, salvaged, substituted, or admitted.
+The alias may continue to name its immutable historical declaration, but the
+retirement registry rejects it before any producer or gate reads campaign
+evidence. No replacement is authorized until the test-runtime and
+publisher-ordering defects are corrected and a separately committed fresh declaration
+is eligible under the applicable qualification-successor rules.
+
+The 71443 final gate treated the qualified implementation as an exact
+predecessor, not as the impossible same commit: qualification necessarily
+preceded the declaration. Its retained-evidence replay required that commit to
+be an ancestor, identical generator/routes/Atlas-analyzer authority fields,
+and exactly the frozen 71443 declaration/gate/test authorization paths in the
+Git delta. That historical authorization cannot admit a successor cohort or
+any 71443 byte.
 
 The interpreter boundary is now a pre-declaration authority, not a check to
 discover after compilation. The exact clean immediate-predecessor
@@ -780,8 +810,15 @@ and `40ece7fa91097e53ee4785cef01baae3f220f8dc891e20d94d4e07a1d77c9120`.
 The adjacent `/home/raymond/miniconda3/bin/python` convenience path is a
 symlink to those same bytes and is deliberately rejected: qualification input
 paths must identify regular files directly.
-The system Python lacks zstandard and must not run materialization. All checks
-use `-B`, create no bytecode or cohort paths, and finish before generation.
+The system Python lacks zstandard and must not run materialization or the full
+test publisher; it is syntax-floor authority only. All syntax checks use `-B`,
+create no bytecode or cohort paths, and finish before generation.
+The exact interpreter path reserved for the future final test publisher must
+also pass a same-process `import pytest, zstandard` probe and
+`python -m pytest --version` before any final source is generated. The fixed
+publisher repeats the dependency probe before creating its evidence staging
+root. Its sole eight-command campaign runs only after generated promotion and Dyn
+and must never overlap compilation or another final-cohort stage.
 Python 3.14's
 `ast.parse(feature_version=(3,10))` did not reject the PEP-701 f-string that
 failed 71439, so a newer local interpreter cannot substitute for this WSL
@@ -789,11 +826,11 @@ check.
 
 ## Offline workflow
 
-The active final `COHORT_ID` is `b2g26_final_71443`. The green qualification
-above and this separately committed declaration authorize its single immutable
-producer attempt. Commands must never name retired cohorts 71426 through
-71442, and no retired or qualification population, report, Dyn evidence, or
-compiled byte may be copied into the fresh 71443 roots.
+There is no active final `COHORT_ID`. The alias names retired 71443 as
+historical authority and is not executable authorization. Commands must never
+name retired cohorts 71426 through 71443, and no retired or qualification
+population, report, Dyn evidence, compiled byte, or passing subset may be
+copied into a future final-cohort root.
 
 The declaration-aware compiler remains the required final-cohort shape.
 Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer

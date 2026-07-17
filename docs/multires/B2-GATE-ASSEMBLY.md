@@ -126,12 +126,40 @@ Its canonical report SHA-256 is
 it remains explicitly non-admissible and cannot contribute population bytes or
 a passing subset to the final gate.
 
-Fresh replacement cohort `b2g26_final_71443` is explicitly authorized. Its
-canonical named declaration and current alias are byte-identical with SHA-256
+Historical declaration statement: fresh replacement cohort
+`b2g26_final_71443` was explicitly authorized. Its canonical named declaration
+and then-current alias were byte-identical with SHA-256
 `d890e151cbc3446622a8c0f5fdd2bd23352583c6431e1484262587c3c7246713`.
 They declare 28 fresh rows in ordinal order, four per concrete style, using
-seed blocks 71443000..71443003 through 71443600..71443603. No 71443 producer,
-artifact, report, Dyn, test, gate, deployment, or training action exists yet.
+seed blocks 71443000..71443003 through 71443600..71443603. The sole source
+freeze and declaration-aware q2tool compile passed all 28 maps; compilation
+atomically published the exact 168-file stage.
+
+The test publisher was started out of order in parallel with compilation,
+before compiled-CM preflight, promotion, Dyn, and the required final test
+position. It selected syntax-only `/usr/bin/python3.10`, where pytest 9.1.1 was
+present but `zstandard` was absent. Pytest exited 2 with six collection errors
+and zero executed tests, and the publisher emitted neither its atomic output
+root nor a test report. Compilation later completed, but no compiled-CM
+preflight, materialization, claims, analysis, Dyn, gate, deployment, or
+training action ran. `B2-GENERATED-COHORT-71443-FAILURE.json` is the exact
+terminal authority, canonical SHA-256
+`da89be636079b0cc38583281113002f0578d2608c5a31af052fca8c03d05f723`.
+Its terminal phase is `out-of-order-test-runtime-preflight`.
+It binds source-freeze report SHA-256
+`6e748dd45bfd013cfd9c57f2ec60289b9abf40da946e511d771efe096d02a456`,
+compiled report SHA-256
+`c0c7f8c857e8ef60f0f74b959fef6b34f458fc69223146d7245ce2e79de76d84`,
+and diagnostic log SHA-256
+`196d25d0de40e4333dda9fe4c946e84ae571133554cb72e5ffa1c835bef1bb2d`.
+
+Cohort 71443 is permanently retired. None of its source, compiled, log,
+diagnostic, report, test, WSL, or producer-snapshot bytes may be retried,
+repaired, resumed, reused, copied forward, salvaged, substituted, or admitted.
+Its alias remains historical only and is rejected by the retirement registry
+before campaign evidence is read. No replacement declaration is authorized
+until the test-runtime and publisher-ordering defects are corrected and a
+fresh declaration is eligible under the qualification-successor rules.
 
 Qualification necessarily precedes the separately committed final declaration,
 so its repository commit cannot equal the final producer commit. Gate replay
@@ -168,6 +196,13 @@ The system Python 3.10 interpreter is syntax authority only because it lacks
 zstandard. These repeated checks must finish before source generation or WSL
 cohort bootstrap; a local newer-Python parse is not sufficient because Python 3.14
 accepted the PEP-701 construct that terminated 71439 on Python 3.10.
+Before any future final-cohort source generation, the exact interpreter path
+reserved for `tools/run_b2_test_suite.py` must also pass a same-process
+`import pytest, zstandard` probe and `python -m pytest --version`. A missing
+dependency retires no cohort because this is a pre-source infrastructure
+check; after source publication the canonical test suite remains a single
+no-retry action and runs only after generated promotion and Dyn, never in
+parallel with compilation or another final stage.
 Infrastructure evidence records these as two distinct authorities: the
 `python310-syntax-floor` check binds `/usr/bin/python3.10` (CPython 3.10.12,
 SHA-256 `7d51cd6b48b521277f5caa4610a82126e315fa2be4df069823a8b1eeb5bd4a86`),
@@ -176,7 +211,7 @@ separate CPython 3.11.4 executable and zstandard module digests above. The
 syntax report must never be required to identify the execution runtime.
 
 The assembler must reject declarations for retired cohorts 71426 through
-71442 before reading campaign evidence. A future final declaration is eligible
+71443 before reading campaign evidence. A future final declaration is eligible
 only after the fresh B1 seal and non-admissible qualification report pass.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
@@ -184,10 +219,11 @@ admission evidence is historical only.
 
 ## Frozen producer-report contract
 
-There is no 71443 producer report yet. Qualification report
+The 71443 test publisher produced no atomic test report. Qualification report
 `99c13db93a8dacb9fe24f181126b8c30203f4005fdd5e96fb0b9a165ba2168f9`
-satisfied the disposable prerequisite but remains `non_admissible: true`.
-Qualification bytes or passing subsets can never satisfy the final gate.
+satisfied the disposable prerequisite but remains `non_admissible: true` and
+cannot override 71443 retirement. Qualification or retired bytes and passing
+subsets can never satisfy a future final gate.
 
 The disposable campaign is orchestrated by
 `tools/run_b2_qualification.py`. Driver-plan schema v2 hash-binds every
@@ -338,9 +374,10 @@ reuse of any retired cohort byte.
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. The current alias authorizes only the fresh 71443
-identity. This template becomes executable only against fresh 71443 roots and
-the exact B1 seal and green non-admissible qualification report named above.
+clean-tree authority. The current alias names retired 71443, so this template
+fails at declaration admission before reading campaign evidence. It becomes
+executable only after a separately committed fresh declaration is eligible
+against its exact B1 seal and green non-admissible qualification authority.
 
 ```sh
 python tools/assemble_b2_gate.py \

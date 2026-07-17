@@ -34,6 +34,18 @@ CARGO_SUMMARY = re.compile(
 SHA256 = re.compile(r"[0-9a-f]{64}")
 RENAME_NOREPLACE = 1
 AT_FDCWD = -100
+PYTHON_DEPENDENCY_PREFLIGHT = """\
+import importlib
+
+missing = []
+for dependency in ("pytest", "zstandard"):
+    try:
+        importlib.import_module(dependency)
+    except Exception:
+        missing.append(dependency)
+if missing:
+    raise SystemExit("missing Python dependencies: " + ", ".join(missing))
+"""
 
 
 class B2TestSuiteError(ValueError):
@@ -148,8 +160,14 @@ def _parse_counts(name: str, payload: bytes, exit_code: int) -> tuple[int, int, 
         return 0, 0, 0
     if name == "python":
         matches = list(PYTEST_SUMMARY.finditer(text))
-        if len(matches) != 1:
-            raise B2TestSuiteError("pytest log lacks one unambiguous pass summary")
+        if len(matches) > 1:
+            raise B2TestSuiteError("pytest log has ambiguous pass summaries")
+        if not matches:
+            if exit_code == 0:
+                raise B2TestSuiteError(
+                    "successful pytest log lacks one pass summary"
+                )
+            return 0, 0, 0
         return (
             int(matches[0].group("passed")),
             int(matches[0].group("skipped") or 0),
@@ -167,6 +185,24 @@ def _parse_counts(name: str, payload: bytes, exit_code: int) -> tuple[int, int, 
     if exit_code != 0:
         return 0, 0, 0
     return 1, 0, 0
+
+
+def _preflight_python_dependencies(python: str) -> None:
+    completed = subprocess.run(
+        [python, "-B", "-c", PYTHON_DEPENDENCY_PREFLIGHT],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if completed.returncode == 0:
+        return
+    detail = completed.stdout.decode("utf-8", errors="replace").strip()
+    suffix = f": {detail}" if detail else ""
+    raise B2TestSuiteError(
+        f"Python dependency preflight failed for {python!r} "
+        f"(exit {completed.returncode}){suffix}"
+    )
 
 
 def _commands(python: str) -> tuple[tuple[str, list[str]], ...]:
@@ -198,6 +234,7 @@ def run_suite(output: Path, *, python: str = sys.executable) -> dict[str, Any]:
     binding = repository_binding(ROOT)
     if binding.get("git_clean") is not True:
         raise B2TestSuiteError("implementation repository is not clean")
+    _preflight_python_dependencies(python)
     stage = Path(tempfile.mkdtemp(prefix=f".{output.name}.partial-", dir=output.parent))
     published = False
     try:

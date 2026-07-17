@@ -18,6 +18,7 @@ from harness.hook_claims_v4 import (
     validation_traces_sha256,
 )
 import tools.assemble_b2_gate as b2_gate
+import tools.run_b2_test_suite as b2_test_suite
 from tools.assemble_b2_gate import (
     B2GateError,
     B2GatePaths,
@@ -729,13 +730,11 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_gate_accepts_fresh_current_alias() -> None:
-    declaration, digest = _validate_declaration(
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
-    assert declaration["cohort_id"] == EXPECTED_COHORT
-    assert declaration["maps"] == _expected_71443_rows()
-    assert len(digest) == 64
+def test_gate_rejects_retired_current_alias_until_replaced() -> None:
+    with pytest.raises(B2GateError, match="71443.*permanently retired"):
+        _validate_declaration(
+            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+        )
 
 
 def test_qualification_successor_accepts_only_the_declared_authorization_delta(
@@ -1275,11 +1274,111 @@ def test_test_evidence_adapter_has_fixed_suites_and_parses_counts() -> None:
         11,
         0,
     )
+    collection_failure = b"no tests collected, 6 errors in 0.66s\n"
+    assert _parse_counts("python", collection_failure, 2) == (0, 0, 0)
+    with pytest.raises(B2TestSuiteError, match="successful pytest log"):
+        _parse_counts("python", collection_failure, 0)
+    ambiguous = b"21 passed in 1.0s\n22 passed in 2.0s\n"
+    with pytest.raises(B2TestSuiteError, match="ambiguous pass summaries"):
+        _parse_counts("python", ambiguous, 0)
+    with pytest.raises(B2TestSuiteError, match="ambiguous pass summaries"):
+        _parse_counts("python", ambiguous, 1)
+    assert _parse_counts("python", b"3 failed, 19 passed in 2.0s\n", 1) == (
+        19,
+        0,
+        0,
+    )
     cargo = (
         b"test result: ok. 42 passed; 0 failed; 2 ignored; 0 measured\n"
         b"test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured\n"
     )
     assert _parse_counts("rust-tests", cargo, 0) == (45, 0, 2)
+
+
+def test_failed_pytest_evidence_is_published_instead_of_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "b2-tests"
+    implementation = _implementation()
+    collection_failure = b"no tests collected, 6 errors in 0.66s\n"
+    monkeypatch.setattr(
+        b2_test_suite, "repository_binding", lambda _root: implementation,
+    )
+    monkeypatch.setattr(
+        b2_test_suite, "_commands",
+        lambda _python: (("python", ["python3", "-m", "pytest", "-q"]),),
+    )
+
+    def fake_run(
+        command: list[str], **_kwargs: object,
+    ) -> b2_test_suite.subprocess.CompletedProcess[bytes]:
+        if command[1:3] == ["-B", "-c"]:
+            return b2_test_suite.subprocess.CompletedProcess(
+                args=command, returncode=0, stdout=b"",
+            )
+        return b2_test_suite.subprocess.CompletedProcess(
+            args=command, returncode=2, stdout=collection_failure,
+        )
+
+    monkeypatch.setattr(b2_test_suite.subprocess, "run", fake_run)
+
+    report = b2_test_suite.run_suite(output, python="python3")
+
+    assert report["passed"] is False
+    assert report["failures"] == ["python: exit 2"]
+    assert report["runs"][0]["passed_count"] == 0
+    assert (output / "python.log").read_bytes() == collection_failure
+    assert json.loads((output / b2_test_suite.REPORT_NAME).read_bytes()) == report
+    assert not list(tmp_path.glob(".b2-tests.partial-*"))
+
+
+@pytest.mark.parametrize("missing", ["pytest", "zstandard"])
+def test_python_dependency_preflight_fails_before_suite_or_evidence_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str,
+) -> None:
+    output = tmp_path / "b2-tests"
+    implementation = _implementation()
+    suite_commands_created = False
+    preflight_commands = []
+
+    monkeypatch.setattr(
+        b2_test_suite, "repository_binding", lambda _root: implementation,
+    )
+
+    def reject_suite_commands(
+        _python: str,
+    ) -> tuple[tuple[str, list[str]], ...]:
+        nonlocal suite_commands_created
+        suite_commands_created = True
+        return ()
+
+    def fail_preflight(
+        command: list[str], **_kwargs: object,
+    ) -> b2_test_suite.subprocess.CompletedProcess[bytes]:
+        preflight_commands.append(command)
+        return b2_test_suite.subprocess.CompletedProcess(
+            args=command,
+            returncode=1,
+            stdout=f"missing Python dependencies: {missing}\n".encode(),
+        )
+
+    monkeypatch.setattr(b2_test_suite, "_commands", reject_suite_commands)
+    monkeypatch.setattr(b2_test_suite.subprocess, "run", fail_preflight)
+
+    with pytest.raises(
+        B2TestSuiteError,
+        match=rf"dependency preflight failed.*{missing}",
+    ):
+        b2_test_suite.run_suite(output, python="/chosen/python")
+
+    assert len(preflight_commands) == 1
+    assert preflight_commands[0][:3] == ["/chosen/python", "-B", "-c"]
+    preflight_source = preflight_commands[0][3]
+    assert 'importlib.import_module(dependency)' in preflight_source
+    assert '("pytest", "zstandard")' in preflight_source
+    assert suite_commands_created is False
+    assert not output.exists()
+    assert not list(tmp_path.glob(".b2-tests.partial-*"))
 
 
 def test_test_evidence_publication_never_replaces_destination(

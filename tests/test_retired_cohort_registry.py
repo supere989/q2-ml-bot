@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 import sys
 
@@ -33,12 +35,16 @@ NAMED_71442 = (
 NAMED_71443 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71443-DECLARATION.json"
 )
+FAILURE_71443 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71443-FAILURE.json"
+)
 RETIRED_DECLARATIONS = (
     NAMED_71438,
     NAMED_71439,
     NAMED_71440,
     NAMED_71441,
     NAMED_71442,
+    NAMED_71443,
 )
 
 
@@ -244,12 +250,104 @@ def test_alias_and_named_71441_are_retired(declaration_path: Path) -> None:
         )
 
 
-def test_current_alias_71443_is_fresh_and_matches_named_declaration() -> None:
+def test_current_alias_71443_is_retired_until_replaced() -> None:
     current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
 
     assert current["cohort_id"] == "b2g26_final_71443"
     assert CURRENT_ALIAS.read_bytes() == NAMED_71443.read_bytes()
-    registry.require_unretired_declaration(CURRENT_ALIAS, current, current_sha256)
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71443.*permanently retired"
+    ):
+        registry.require_unretired_declaration(
+            CURRENT_ALIAS, current, current_sha256
+        )
+
+
+def test_71443_terminal_failure_authority_is_canonical_and_exact() -> None:
+    payload = FAILURE_71443.read_bytes()
+    authority = json.loads(payload)
+
+    assert payload == cohort.canonical_bytes(authority)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "da89be636079b0cc38583281113002f0578d2608c5a31af052fca8c03d05f723"
+    )
+    assert authority["schema"] == registry.FAILURE_SCHEMA
+    assert authority["status"] == "permanently-failed-test-runtime-preflight"
+    assert authority["cohort_id"] == "b2g26_final_71443"
+    assert authority["declaration"] == {
+        "path": "docs/multires/B2-GENERATED-COHORT-71443-DECLARATION.json",
+        "sha256": "d890e151cbc3446622a8c0f5fdd2bd23352583c6431e1484262587c3c7246713",
+    }
+    assert authority["admission"]["permanently_non_admissible"] is True
+    assert authority["admission"]["source_stage_published"] is True
+    assert authority["admission"]["compiled_stage_published"] is True
+    for stage in ("materialized", "claims", "analysis"):
+        assert authority["admission"][f"{stage}_stage_published"] is False
+    for control in (
+        "dyn_execution_allowed",
+        "older_population_reuse_allowed",
+        "passing_subset_allowed",
+        "regeneration_under_same_declaration_allowed",
+        "replacement_member_allowed",
+        "retry_under_same_declaration_allowed",
+        "salvage_allowed",
+        "substitution_allowed",
+    ):
+        assert authority["admission"][control] is False
+
+    evidence = authority["evidence"]
+    assert evidence["implementation"]["repository_commit"] == (
+        "dedb8392a6fc96946a8f9e346791c89ecdcc7e14"
+    )
+    assert evidence["implementation"]["repository_tree"] == (
+        "0a3a66d7c7159bab66cd411c7597e3e49223afdd"
+    )
+    assert evidence["source_freeze"]["report_sha256"] == (
+        "6e748dd45bfd013cfd9c57f2ec60289b9abf40da946e511d771efe096d02a456"
+    )
+    assert evidence["wsl_compile"]["report_sha256"] == (
+        "c0c7f8c857e8ef60f0f74b959fef6b34f458fc69223146d7245ce2e79de76d84"
+    )
+    assert evidence["test_runtime_failure"] == {
+        "commands_launched": 2,
+        "diagnostic_log": {
+            "bytes": 5243,
+            "path": "/home/raymond/q2-multires-isolated/B2/b2g26_final_71443-failure/pytest-diagnostic.log",
+            "sha256": "196d25d0de40e4333dda9fe4c946e84ae571133554cb72e5ffa1c835bef1bb2d",
+        },
+        "output_root_exists": False,
+        "pytest_exit_code": 2,
+        "pytest_version": "9.1.1",
+        "raw_logs_published": False,
+        "report_published": False,
+        "runner_error": "pytest log lacks one unambiguous pass summary",
+        "test_interpreter": {
+            "path": "/usr/bin/python3.10",
+            "sha256": "7d51cd6b48b521277f5caa4610a82126e315fa2be4df069823a8b1eeb5bd4a86",
+            "version": "3.10.12",
+        },
+        "tests_executed": 0,
+        "zstandard_import_available": False,
+    }
+    assert authority["failure"]["phase"] == (
+        "out-of-order-test-runtime-preflight"
+    )
+    assert authority["failure"]["publication_contract"] == {
+        "analysis_run": False,
+        "claims_prepare_run": False,
+        "compiled_cm_preflight_run": False,
+        "compiled_maps_passed": 28,
+        "compiled_stage_published": True,
+        "dyn_run": False,
+        "gate_run": False,
+        "maps_declared": 28,
+        "materialization_run": False,
+        "source_maps_passed": 28,
+        "source_stage_published": True,
+        "test_campaign_run": True,
+        "test_report_published": False,
+        "training_run": False,
+    }
 
 
 @pytest.mark.parametrize(
@@ -261,7 +359,7 @@ def test_fresh_cohort_cannot_reuse_retired_map_or_seed(
 ) -> None:
     declaration_path = _write_fresh_declaration(tmp_path / "fresh.json")
     declaration, _sha256 = cohort.load_declaration(declaration_path)
-    retired, _retired_sha256 = cohort.load_declaration(NAMED_71441)
+    retired, _retired_sha256 = cohort.load_declaration(NAMED_71443)
     declaration["maps"][0][identity] = retired["maps"][0][identity]
     declaration_path.write_bytes(cohort.canonical_bytes(declaration))
     declaration, declaration_sha256 = cohort.load_declaration(declaration_path)
@@ -334,6 +432,11 @@ def test_contradictory_failure_registry_fails_closed(
             NAMED_71441,
             "b2g26_final_71441",
             "5929532e0edae77b48073abccf4a4f3afdbacfb6905d1eadfb7f18d1dc5ba151",
+        ),
+        (
+            NAMED_71443,
+            "b2g26_final_71443",
+            "d890e151cbc3446622a8c0f5fdd2bd23352583c6431e1484262587c3c7246713",
         ),
     ],
 )
