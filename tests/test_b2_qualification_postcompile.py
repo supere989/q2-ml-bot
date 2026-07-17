@@ -411,6 +411,17 @@ def test_consumer_replays_sparse_postcompile_and_rejects_forgery(
         (paths["logs"] / f"{map_id}.stdout.json").write_bytes(b"{}\n")
         (paths["logs"] / f"{map_id}.stderr.log").write_bytes(b"")
 
+    replayed_maps: set[str] = set()
+
+    def result_validator(_stdout: bytes, *, map_id: str, compiled_files, **_kwargs):
+        assert compiled_files[".json"] == _file_record(
+            paths["compiled"] / f"{map_id}.json"
+        )
+        assert compiled_files[".json"] != _file_record(
+            paths["materialized"] / f"{map_id}.json"
+        )
+        replayed_maps.add(map_id)
+
     kwargs = {
         "declaration_path": paths["declaration_path"],
         "compile_report_path": paths["compile_report"],
@@ -431,7 +442,7 @@ def test_consumer_replays_sparse_postcompile_and_rejects_forgery(
         "implementation_provider": lambda _root: dict(IMPLEMENTATION),
         "authority_provider": _authorities,
         "runtime_provider": _runtime,
-        "result_validator": lambda *args, **kwargs: None,
+        "result_validator": result_validator,
         "claim_builder": _claim_builder,
         "compiled_cm_validator": _compiled_cm_validator,
     }
@@ -439,6 +450,7 @@ def test_consumer_replays_sparse_postcompile_and_rejects_forgery(
     assert len(replay["compiled_cm_passed"]) == 20
     assert len(replay["materialization_passed"]) == 20
     assert len(replay["claims_passed"]) == 20
+    assert replayed_maps == set(replay["materialization_passed"])
 
     original_material_report = paths["materialize_report"].read_bytes()
     forged_material_report = json.loads(original_material_report)

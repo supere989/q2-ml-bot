@@ -1005,7 +1005,7 @@ def validate_published_qualification_postcompile(
                 runtime_sidecar=materialized_root / f"{map_id}.json",
                 bsp=materialized_root / f"{map_id}.bsp",
                 compiled_files={
-                    suffix: material_records[map_id][suffix]
+                    suffix: _file_record(compiled_root / f"{map_id}{suffix}")
                     for suffix in COMPILED_SUFFIXES
                 },
                 authority_sha256=authority_sha256,

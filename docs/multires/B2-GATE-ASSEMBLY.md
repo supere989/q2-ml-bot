@@ -179,6 +179,11 @@ input drift therefore fails the dry run instead of producing a late 28-map
 Atlas rejection. The base `pak0.pak`, toolchain, syntax report, normative
 documents, boundary proof, runtime modules, packer, and verifier are covered by
 the same pre-generation binding.
+During retained-evidence replay, a hook-materialization attestation's
+`source_projection_sha256` is checked against the original compiled `.json`.
+The materialized `.json` is the intentionally upgraded runtime projection and
+must never be substituted as its own source; BSP and every other immutable
+compiled member still require byte identity across the two roots.
 
 After qualification is green, a separately committed fresh declaration may
 authorize one immutable/no-retry final producer attempt. Its required order is
