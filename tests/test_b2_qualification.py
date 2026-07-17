@@ -378,6 +378,93 @@ def test_hand_authored_summary_forgery_validates_but_replay_and_final_gate_rejec
         final_gate._validate_qualification_report(paths, {}, {})
 
 
+def test_retained_replay_wires_all_strict_pre_atlas_consumers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools import run_b2_qualification_compile as compile_stage
+    from tools import run_b2_qualification_compiled_cm as cm_stage
+    from tools import run_b2_qualification_infrastructure as infrastructure_stage
+    from tools import run_b2_qualification_postcompile as postcompile_stage
+    from tools import run_b2_qualification_promotion as promotion_stage
+    from tools import run_b2_qualification_source as source_stage
+
+    args = _inputs(tmp_path, monkeypatch)
+    declaration = json.loads(args.declaration.read_bytes())
+    report_paths = {
+        "source": args.source_report,
+        "compile": args.compile_report,
+        "compiled-cm-preflight": args.compiled_cm_preflight_report,
+        "materialization": args.materialization_report,
+        "claims": args.claims_report,
+        "atlas-build": args.atlas_build_report,
+        "generated-promotion": args.generated_promotion_report,
+    }
+    stage_documents = {
+        stage: json.loads(path.read_bytes())
+        for stage, path in report_paths.items()
+    }
+    passed = {
+        stage: {
+            row["map"] for row in report["maps"] if row["passed"] is True
+        }
+        for stage, report in stage_documents.items()
+    }
+    roots = {
+        name: str((tmp_path / name).absolute())
+        for name in (
+            "source_root", "source_cold_root", "compiled_root",
+            "compile_evidence_root", "q2tool", "basedir",
+            "compiled_cm_evidence_root", "cm_oracle", "pmove_oracle",
+            "hook_oracle", "fall_oracle", "hook_attestation",
+            "python_runtime", "materialized_root",
+            "materialization_log_root", "claims_root", "analysis_root",
+            "atlas_evidence_root", "promotion_evidence_root",
+            "infrastructure_evidence_root", "syntax_report",
+        )
+    }
+    successes = {
+        (source_stage, "validate_published_qualification_source"):
+            lambda **unused: ({}, b"", "0" * 64, passed["source"]),
+        (compile_stage, "validate_published_qualification_compile"):
+            lambda **unused: ({}, b"", "0" * 64, passed["compile"]),
+        (cm_stage, "validate_published_qualification_compiled_cm"):
+            lambda **unused: (
+                {}, b"", "0" * 64, passed["compiled-cm-preflight"]
+            ),
+        (postcompile_stage, "validate_published_qualification_postcompile"):
+            lambda **unused: {
+                "materialization_passed": sorted(passed["materialization"]),
+                "claims_passed": sorted(passed["claims"]),
+            },
+    }
+    for (module, name), success in successes.items():
+        monkeypatch.setattr(module, name, success)
+    monkeypatch.setattr(promotion_stage, "_validate_atlas_artifacts", lambda *unused: None)
+    monkeypatch.setattr(promotion_stage, "validate_promotion_evidence", lambda *unused: None)
+    monkeypatch.setattr(
+        infrastructure_stage, "validate_infrastructure_evidence",
+        lambda *unused, **kwargs: None,
+    )
+    infrastructure = json.loads(args.infrastructure_report.read_bytes())
+    gate._validate_retained_stage_evidence(
+        declaration, stage_documents, infrastructure, roots, args, gate.ROOT,
+    )
+
+    for (module, name), success in successes.items():
+        def reject(**unused):
+            raise RuntimeError(f"handcrafted {name} report")
+
+        monkeypatch.setattr(module, name, reject)
+        with pytest.raises(
+            gate.B2QualificationError, match=f"handcrafted {name} report"
+        ):
+            gate._validate_retained_stage_evidence(
+                declaration, stage_documents, infrastructure, roots, args,
+                gate.ROOT,
+            )
+        monkeypatch.setattr(module, name, success)
+
+
 def test_rejects_final_mode_declaration_and_retired_seed(tmp_path: Path) -> None:
     implementation = _implementation()
     declaration = _declaration(implementation)

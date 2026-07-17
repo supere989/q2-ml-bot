@@ -208,6 +208,25 @@ def test_every_generated_argv_parses_with_its_actual_stage_parser(
         assert parsed is not None, step["stage"]
 
 
+def test_assemble_receives_every_retained_replay_input(tmp_path: Path) -> None:
+    plan = build_plan(_args(tmp_path))
+    command = next(
+        step["command"] for step in plan["commands"]
+        if step["stage"] == "assemble"
+    )
+    arguments = dict(zip(command[2::2], command[3::2]))
+    assert {
+        "--source-root", "--source-cold-root", "--compiled-root",
+        "--compile-evidence-root", "--q2tool", "--basedir",
+        "--compiled-cm-evidence-root", "--cm-oracle", "--pmove-oracle",
+        "--hook-oracle", "--fall-oracle", "--hook-attestation",
+        "--python-runtime", "--materialized-root",
+        "--materialization-log-root", "--claims-root", "--analysis-root",
+        "--atlas-evidence-root", "--promotion-evidence-root",
+        "--infrastructure-evidence-root", "--syntax-report",
+    }.issubset(arguments)
+
+
 def test_fake_tools_prove_order_and_exact_raw_hash_chaining(tmp_path: Path) -> None:
     plan = build_plan(_args(tmp_path))
     fake = FakeTools(plan)

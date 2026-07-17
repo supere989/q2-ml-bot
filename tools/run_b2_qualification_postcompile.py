@@ -275,9 +275,18 @@ def _validate_materialization_prior(
         map_id = str(declared["map"])
         prior_passed = map_id in upstream_passed
         has_artifacts = map_id in materialized_records
+        expected_row_criteria = {
+            "prior-stage-passed": prior_passed,
+            "real-authority-materialization": (
+                not prior_passed or has_artifacts
+            ),
+            "materialized-membership": True,
+            "input-stability": True,
+            "pinned-python-runtime": True,
+        }
         if (
             set(row["criteria"]) != expected_criteria
-            or row["criteria"]["prior-stage-passed"] is not prior_passed
+            or row["criteria"] != expected_row_criteria
             or upstream_row["passed"] is not prior_passed
             or (map_id in passed) is not has_artifacts
         ):
@@ -298,10 +307,23 @@ def _validate_materialization_prior(
                 raise QualificationPostcompileError(
                     f"materialization raw evidence differs for {map_id}"
                 )
-        elif row["passed"] is not False or not row["failures"]:
-            raise QualificationPostcompileError(
-                f"materialization failure evidence differs for {map_id}"
-            )
+        else:
+            expected_failure_digest = _sha256(canonical_bytes({
+                "map": map_id, "stage": "materialization",
+                "failures": row["failures"],
+            }))
+            if (
+                row["passed"] is not False or not row["failures"]
+                or row["evidence_sha256"] != expected_failure_digest
+                or (
+                    not prior_passed
+                    and row["failures"]
+                    != ["prior stage did not pass this map"]
+                )
+            ):
+                raise QualificationPostcompileError(
+                    f"materialization failure evidence differs for {map_id}"
+                )
     if report["pass_count"] != len(materialized_records):
         raise QualificationPostcompileError(
             "materialization pass count differs from sparse artifact root"
@@ -966,6 +988,10 @@ def validate_published_qualification_postcompile(
     }
     if not required_logs.issubset(actual_logs) or not actual_logs.issubset(allowed_logs):
         raise QualificationPostcompileError("materialization log membership differs")
+    log_records = {
+        name: _file_record(materialization_log_root / name)
+        for name in actual_logs
+    }
     authority_sha256 = {
         name: authorities[name]["sha256"]
         for name in ("cm", "pmove", "hook", "fall", "hook_attestation")
@@ -1017,9 +1043,15 @@ def validate_published_qualification_postcompile(
         map_id = str(declared["map"])
         prior = map_id in material_passed
         passing = map_id in claims_passed
+        expected_row_criteria = {
+            "prior-stage-passed": prior,
+            "immutable-claims": not prior or passing,
+            "claims-membership": True,
+            "input-stability": True,
+        }
         if (
             set(row["criteria"]) != expected_claim_criteria
-            or row["criteria"]["prior-stage-passed"] is not prior
+            or row["criteria"] != expected_row_criteria
             or row["passed"] is not passing
         ):
             raise QualificationPostcompileError(
@@ -1051,7 +1083,14 @@ def validate_published_qualification_postcompile(
             expected_digest = _sha256(canonical_bytes({
                 "map": map_id, "stage": "claims", "failures": row["failures"],
             }))
-            if row["evidence_sha256"] != expected_digest or not row["failures"]:
+            if (
+                row["evidence_sha256"] != expected_digest or not row["failures"]
+                or (
+                    not prior
+                    and row["failures"]
+                    != ["prior stage did not pass this map"]
+                )
+            ):
                 raise QualificationPostcompileError(
                     f"claims failure evidence differs for {map_id}"
                 )
@@ -1068,6 +1107,10 @@ def validate_published_qualification_postcompile(
         and _sparse_records(
             declaration, claims_root, CLAIMS_SUFFIXES, claims_passed
         ) == claims_records
+        and {
+            name: _file_record(materialization_log_root / name)
+            for name in actual_logs
+        } == log_records
         and authority_provider(
             repo_root=repo_root, cm_oracle=cm_oracle, pmove_oracle=pmove_oracle,
             hook_oracle=hook_oracle, fall_oracle=fall_oracle,
