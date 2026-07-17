@@ -116,9 +116,22 @@ CM evidence measured only 92 units of the required 96-unit spawn column.
 Cohort 71442 is permanently retired. None of its source, compiled,
 materialized, claims, analysis, report, test, or WSL bytes may be retried,
 repaired, resumed, reused, copied forward, salvaged, substituted, or admitted.
-No Dyn, assembled gate, deployment, or training action ran. There is no active
-final cohort; a replacement declaration is forbidden until the fresh B1 seal
-and disposable qualification lane are green.
+No Dyn, assembled gate, deployment, or training action ran. At that historical
+boundary there was no active final cohort, and replacement remained forbidden
+until the fresh B1 seal and disposable qualification lane became green.
+
+The fresh disposable qualification `b2q26_7005800_71618000` is green 28/28.
+Its canonical report SHA-256 is
+`99c13db93a8dacb9fe24f181126b8c30203f4005fdd5e96fb0b9a165ba2168f9`;
+it remains explicitly non-admissible and cannot contribute population bytes or
+a passing subset to the final gate.
+
+Fresh replacement cohort `b2g26_final_71443` is explicitly authorized. Its
+canonical named declaration and current alias are byte-identical with SHA-256
+`d890e151cbc3446622a8c0f5fdd2bd23352583c6431e1484262587c3c7246713`.
+They declare 28 fresh rows in ordinal order, four per concrete style, using
+seed blocks 71443000..71443003 through 71443600..71443603. No 71443 producer,
+artifact, report, Dyn, test, gate, deployment, or training action exists yet.
 
 The exact clean immediate-predecessor implementation snapshot at commit
 `8d89df4a787e261f8a4fb935908191f8df7634b2` and tree
@@ -161,13 +174,10 @@ admission evidence is historical only.
 
 ## Frozen producer-report contract
 
-There is no authorized final-cohort producer report. First produce a canonical
-disposable qualification report with `non_admissible: true`. It must bind the
-fresh amended-document B1 seal, real q2tool/BSP/CM golden fixtures (`+9` spawn
-lift; 104 and 105 fail; 106 passes), and one 28-map qualification campaign.
-Every golden and infrastructure preflight must pass, and at least 20 maps must
-complete the full lifecycle through promotion validation. Qualification bytes
-or passing subsets can never satisfy the final gate.
+There is no 71443 producer report yet. Qualification report
+`99c13db93a8dacb9fe24f181126b8c30203f4005fdd5e96fb0b9a165ba2168f9`
+satisfied the disposable prerequisite but remains `non_admissible: true`.
+Qualification bytes or passing subsets can never satisfy the final gate.
 
 The disposable campaign is orchestrated by
 `tools/run_b2_qualification.py`. Driver-plan schema v2 hash-binds every
@@ -318,9 +328,9 @@ reuse of any retired cohort byte.
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. No current alias authorizes execution. This template
-becomes executable only after the fresh B1 seal, green non-admissible
-qualification report, and separately committed final declaration exist.
+clean-tree authority. The current alias authorizes only the fresh 71443
+identity. This template becomes executable only against fresh 71443 roots and
+the exact B1 seal and green non-admissible qualification report named above.
 
 ```sh
 python tools/assemble_b2_gate.py \

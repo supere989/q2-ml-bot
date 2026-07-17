@@ -26,7 +26,7 @@ from tools.assemble_b2_gate import (
     _exact_directory_files,
     _decode_dyn_snapshot,
     _dyn_source_authority,
-    _expected_71442_rows,
+    _expected_71443_rows,
     _preflight_implementation_identity,
     _validate_compiled_cm_preflight,
     _validate_declaration,
@@ -526,7 +526,7 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
     paths.claims_dir.mkdir()
     paths.analysis_dir.mkdir()
     paths.dyn_evidence_report.parent.mkdir()
-    map_id = _expected_71442_rows()[0]["map"]
+    map_id = _expected_71443_rows()[0]["map"]
 
     bsp = b"IBSP fixture"
     (paths.claims_dir / f"{map_id}.bsp").write_bytes(bsp)
@@ -667,22 +667,22 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
         },
     }
     paths.dyn_evidence_report.write_bytes(canonical_bytes(report))
-    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71442_rows()}
+    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71443_rows()}
     return paths, declaration, report
 
 
-def test_retired_71442_historical_identity_and_cli_contract_are_exact() -> None:
-    rows = _expected_71442_rows()
+def test_fresh_71443_identity_and_cli_contract_are_exact() -> None:
+    rows = _expected_71443_rows()
     assert len(rows) == 28
     assert rows[0] == {
         "ordinal": 0,
-        "map": "b2g26_open_71442000",
-        "seed": 71442000,
+        "map": "b2g26_open_71443000",
+        "seed": 71443000,
         "style": "open",
         "grid": 5,
         "observed_heat": None,
     }
-    assert rows[-1]["map"] == "b2g26_arena_lanes_71442603"
+    assert rows[-1]["map"] == "b2g26_arena_lanes_71443603"
     options = _parser().format_help()
     assert "--declaration" in options
     assert "--source-dir" in options
@@ -727,14 +727,13 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_gate_refuses_retired_current_alias_until_new_qualification() -> None:
-    with pytest.raises(
-        B2GateError,
-        match=r"71442.*permanently retired",
-    ):
-        _validate_declaration(
-            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-        )
+def test_gate_accepts_fresh_current_alias() -> None:
+    declaration, digest = _validate_declaration(
+        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+    )
+    assert declaration["cohort_id"] == EXPECTED_COHORT
+    assert declaration["maps"] == _expected_71443_rows()
+    assert len(digest) == 64
 
 
 def _write_compiled_cm_gate_fixture(
@@ -755,7 +754,7 @@ def _write_compiled_cm_gate_fixture(
         b1_gate=b1_gate,
         compiled_cm_preflight_report=report_path,
     )
-    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71442_rows()}
+    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71443_rows()}
     membership = {"schema": "fixture-membership", "passed": True, "failures": []}
     monkeypatch.setattr(b2_gate, "verify_stage_membership", lambda *_args: membership)
     binaries = {
@@ -829,7 +828,7 @@ def test_compiled_cm_gate_rejects_old_report_without_hazard_and_lightdata(
     paths.compiled_cm_preflight_report.write_bytes(canonical_bytes(report))
     with pytest.raises(B2GateError, match="compiled-CM checks keys differ"):
         _validate_compiled_cm_preflight(
-            paths, {"cohort_id": EXPECTED_COHORT, "maps": _expected_71442_rows()},
+            paths, {"cohort_id": EXPECTED_COHORT, "maps": _expected_71443_rows()},
             SHA, binaries,
         )
 
@@ -846,7 +845,7 @@ def test_compiled_cm_gate_rejects_unstable_input_before_map_evidence(
     paths.compiled_cm_preflight_report.write_bytes(canonical_bytes(report))
     with pytest.raises(B2GateError, match="input stability failed"):
         _validate_compiled_cm_preflight(
-            paths, {"cohort_id": EXPECTED_COHORT, "maps": _expected_71442_rows()},
+            paths, {"cohort_id": EXPECTED_COHORT, "maps": _expected_71443_rows()},
             SHA, binaries,
         )
 

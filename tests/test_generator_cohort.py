@@ -19,12 +19,12 @@ DECLARATION = (
     ROOT
     / "tests/fixtures/multires/B2-GENERATED-COHORT-FRESH-DECLARATION.json"
 )
-DECLARATION_71442 = (
-    ROOT / "docs/multires/B2-GENERATED-COHORT-71442-DECLARATION.json"
+DECLARATION_71443 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71443-DECLARATION.json"
 )
 HISTORICAL_DECLARATIONS = tuple(
     ROOT / f"docs/multires/B2-GENERATED-COHORT-{number}-DECLARATION.json"
-    for number in range(71427, 71442)
+    for number in range(71427, 71443)
 )
 HEX64 = "a" * 64
 GIT40 = "b" * 40
@@ -187,19 +187,19 @@ def static_pass(map_path: Path) -> dict[str, object]:
 def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> None:
     declaration, digest = cohort.load_declaration(AUTHORITATIVE_DECLARATION)
     declaration_bytes = AUTHORITATIVE_DECLARATION.read_bytes()
-    assert declaration_bytes == DECLARATION_71442.read_bytes()
+    assert declaration_bytes == DECLARATION_71443.read_bytes()
     assert declaration_bytes == cohort.canonical_bytes(declaration)
     assert hashlib.sha256(declaration_bytes).hexdigest() == (
-        "fe4b86bbb0ab331dca4f7fd1418106c69ba4d4ea34b36774cb7e9259d27502bc"
+        "d890e151cbc3446622a8c0f5fdd2bd23352583c6431e1484262587c3c7246713"
     )
     style_bases = (
-        ("open", 71442000),
-        ("towers", 71442100),
-        ("canyon", 71442200),
-        ("pits", 71442300),
-        ("arena_open", 71442400),
-        ("arena_vertical", 71442500),
-        ("arena_lanes", 71442600),
+        ("open", 71443000),
+        ("towers", 71443100),
+        ("canyon", 71443200),
+        ("pits", 71443300),
+        ("arena_open", 71443400),
+        ("arena_vertical", 71443500),
+        ("arena_lanes", 71443600),
     )
     expected = [
         {
@@ -215,7 +215,7 @@ def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> Non
     ]
 
     assert len(digest) == 64
-    assert declaration["cohort_id"] == "b2g26_final_71442"
+    assert declaration["cohort_id"] == "b2g26_final_71443"
     assert declaration["maps"] == expected
     assert declaration["selection"] == {
         "timing": "declared-before-generation",

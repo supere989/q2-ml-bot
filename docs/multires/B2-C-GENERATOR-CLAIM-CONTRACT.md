@@ -733,6 +733,22 @@ repaired, resumed, reused, copied forward, salvaged, substituted, or admitted.
 No Dyn, assembled gate, deployment, or training action ran. A replacement
 declaration is forbidden until the qualification methodology above is green.
 
+The fresh disposable qualification `b2q26_7005800_71618000` is green 28/28
+through source, q2tool compilation, compiled-CM preflight, materialization,
+claims, full Atlas, and promotion. Its canonical report SHA-256 is
+`99c13db93a8dacb9fe24f181126b8c30203f4005fdd5e96fb0b9a165ba2168f9`.
+It remains explicitly non-admissible and contributes no map, seed, stage, or
+passing subset to the final cohort.
+
+Fresh replacement cohort `b2g26_final_71443` is explicitly authorized by the
+current alias and byte-identical immutable named declaration
+`B2-GENERATED-COHORT-71443-DECLARATION.json`, both SHA-256
+`d890e151cbc3446622a8c0f5fdd2bd23352583c6431e1484262587c3c7246713`.
+Its 28 rows use fresh seed blocks 71443000..71443003 through
+71443600..71443603, four per concrete style in declaration order. No 71443
+producer, artifact, report, Dyn, test, gate, deployment, or training action has
+run; declaration publication is not producer progress.
+
 The interpreter boundary is now a pre-declaration authority, not a check to
 discover after compilation. The exact clean immediate-predecessor
 implementation snapshot at commit
@@ -765,14 +781,11 @@ check.
 
 ## Offline workflow
 
-There is no active final `COHORT_ID`. The alias may continue to name retired
-71442 as historical authority, but it is not executable authorization. First
-run the disposable qualification lane and publish its canonical
-`non_admissible: true` report. Only after it is green may a separate commit
-declare a fresh final cohort with new seeds and fresh absent stage roots.
-Commands must never name retired cohorts 71426 through 71442, and no retired
-or qualification population, report, Dyn evidence, or compiled byte may be
-copied into a final-cohort path.
+The active final `COHORT_ID` is `b2g26_final_71443`. The green qualification
+above and this separately committed declaration authorize its single immutable
+producer attempt. Commands must never name retired cohorts 71426 through
+71442, and no retired or qualification population, report, Dyn evidence, or
+compiled byte may be copied into the fresh 71443 roots.
 
 The declaration-aware compiler remains the required final-cohort shape.
 Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer

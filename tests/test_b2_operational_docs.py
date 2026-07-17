@@ -79,6 +79,9 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "292e0e483c66596bfba58972bdf0e58ed36d938b3412c8868a3b2c10ba510aa3",
         "B2-GENERATED-COHORT-71442-FAILURE.json",
         "Cohort 71442 is permanently retired",
+        "b2g26_final_71443",
+        "d890e151cbc3446622a8c0f5fdd2bd23352583c6431e1484262587c3c7246713",
+        "99c13db93a8dacb9fe24f181126b8c30203f4005fdd5e96fb0b9a165ba2168f9",
         "qualification",
         "non-admissible",
         "fe4b86bbb0ab331dca4f7fd1418106c69ba4d4ea34b36774cb7e9259d27502bc",
@@ -94,6 +97,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert "permanently retired" in text
     assert "b2g26_final_71441" in text
     assert "b2g26_final_71442" in text
+    assert "b2g26_final_71443" in text
     assert "future-only" not in text
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
