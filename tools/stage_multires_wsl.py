@@ -515,8 +515,8 @@ def _checkout_and_verify_repository(
     destination = repositories_root / name
     destination.mkdir(mode=0o700)
     bundle = incoming / f"bundles/{name}.bundle"
-    _run(("git", "bundle", "verify", str(bundle)))
     _run(("git", "init", "--quiet", str(destination)))
+    _run(("git", "-C", str(destination), "bundle", "verify", str(bundle)))
     refspec = f"refs/heads/{source['branch']}:refs/heads/{source['branch']}"
     _run(("git", "-C", str(destination), "fetch", "--quiet", str(bundle), refspec))
     _run(("git", "-C", str(destination), "checkout", "--quiet", source["branch"]))
@@ -763,7 +763,7 @@ def _bundle_repository(repo: Mapping[str, Any], bundle: Path) -> dict[str, Any]:
             f"refs/heads/{repo['branch']}",
         )
     )
-    _run(("git", "bundle", "verify", str(bundle)))
+    _run(("git", "-C", str(source_path), "bundle", "verify", str(bundle)))
     digest, size = sha256_file(bundle)
     public_source = {
         key: value

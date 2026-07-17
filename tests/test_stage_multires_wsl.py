@@ -151,6 +151,82 @@ def test_stage_reconstructs_exact_clean_triple_and_writes_canonical_0600_manifes
     }
 
 
+def test_local_transport_bundle_checkout_is_independent_of_cli_cwd(
+    staging_fixture: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside-any-repository"
+    outside.mkdir()
+    probe = subprocess.run(
+        ("git", "-C", str(outside), "rev-parse", "--git-dir"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert probe.returncode != 0
+    monkeypatch.chdir(outside)
+    result = _execute(staging_fixture, "stage")
+    destination = Path(staging_fixture["destination"])
+    assert result["published"] is True
+    assert destination.is_dir()
+    for source in staging_fixture["specs"]:  # type: ignore[assignment]
+        repository = destination / "repositories" / source["name"]
+        assert _git(repository, "rev-parse", "HEAD") == source["commit"]
+
+
+class _BundleVerifyFailingTransport:
+    def __init__(self, hostname: str, temp: Path):
+        self.delegate = staging.LocalRemoteTransport(hostname)
+        self.temp = temp
+
+    def execute(
+        self, mode: str, request: object, archive_path: Path | None
+    ) -> dict[str, object]:
+        if mode != "stage" or archive_path is None:
+            return self.delegate.execute(mode, request, archive_path)  # type: ignore[arg-type]
+        altered_path = self.temp / "bundle-verify-failure.tar"
+        with tarfile.open(archive_path, "r") as source:
+            members = {}
+            for member in source.getmembers():
+                extracted = source.extractfile(member)
+                assert extracted is not None
+                members[member.name] = extracted.read()
+        bundle_name = "bundles/q2-ml-client.bundle"
+        members[bundle_name] = b"not a valid git bundle\n"
+        transfer = json.loads(members["transfer.json"])
+        record = next(
+            item for item in transfer["repositories"]
+            if item["name"] == "q2-ml-client"
+        )
+        record["bundle_sha256"] = hashlib.sha256(members[bundle_name]).hexdigest()
+        record["bundle_size_bytes"] = len(members[bundle_name])
+        members["transfer.json"] = staging.canonical_bytes(transfer)
+        with tarfile.open(altered_path, "w") as output:
+            for name in sorted(members):
+                info = tarfile.TarInfo(name)
+                info.size = len(members[name])
+                info.mode = 0o600
+                output.addfile(
+                    info, fileobj=__import__("io").BytesIO(members[name])
+                )
+        return self.delegate.execute(mode, request, altered_path)  # type: ignore[arg-type]
+
+
+def test_remote_bundle_verify_failure_cleans_temporary_checkout_from_outside_cwd(
+    staging_fixture: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside-any-repository-failure"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    destination = Path(staging_fixture["destination"])
+    transport = _BundleVerifyFailingTransport(
+        staging.EXPECTED_HOST_IDENTITY, tmp_path
+    )
+    with pytest.raises(staging.StagingError, match=r"command failed \(git\)"):
+        _execute(staging_fixture, "stage", transport=transport)
+    assert not destination.exists()
+    assert not list(destination.parent.glob(f".{destination.name}.partial-*"))
+
+
 class _NeverCalledTransport:
     def execute(self, mode: str, request: object, archive_path: Path | None) -> dict[str, object]:
         raise AssertionError("transport must not run after a source-side failure")
