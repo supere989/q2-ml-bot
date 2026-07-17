@@ -210,18 +210,55 @@ and materialization failure report
 Cohort 71444 is permanently retired. None of its source, compiled, CM,
 static, materialization-report, log, WSL, or producer-snapshot bytes may be
 retried, resumed, reused, copied forward, salvaged, substituted, or admitted.
-Its unchanged current alias is historical only and the retirement registry
-rejects it before evidence. No replacement declaration is authorized until
-the final-wrapper authority fix, its exact no-write preflight, a fresh B1
-reseal, and a new disposable qualification are committed and green.
+Its immutable named declaration is historical only and the retirement registry
+rejects it before evidence. The final-wrapper authority fix, its exact no-write
+preflight, the fresh B1 reseal, and a new disposable qualification are now
+committed and green; they authorize only the distinct 71445 declaration below.
 
-The declaration-bearing 71444 producer commit must be a strict successor of
+## Authorized 71445 final attempt
+
+Fresh B1 gate SHA-256
+`58295d227ddd3694a0ddae5af46e2bbc98cc60dbe6b6751b4e42df01c06b1cd6`
+and disposable qualification `b2q26_3b17223_71625100` bind implementation
+commit `3b17223ab32e20152aead1eb32a79e239d6f4d8a`, tree
+`fa2b106d19dbb115e6acd4c344b3820b3013464a`, and unchanged generator,
+routes, and Atlas-analyzer authorities. The qualification is green 28/28 at
+every population stage with zero failures; its canonical assembled report
+SHA-256 is
+`351baccaabf405e0ef240c1def18e4ede796ff417e73230524e9f0f9b0c0491b`.
+It remains explicitly non-admissible and supplies no map, seed, stage,
+artifact, Dyn evidence, or passing subset to the final lane.
+
+Exactly one immutable/no-retry final producer attempt is authorized for
+`b2g26_final_71445`. The current canonical alias and immutable named
+`B2-GENERATED-COHORT-71445-DECLARATION.json` are byte-identical with SHA-256
+`ffa5b9ccfee0340f1bad533a23fedd103a08d14d125149d1516a2326fb8a091b`.
+They declare exactly 28 fresh rows: four per concrete style, in declaration
+order, using seed blocks 71445000..71445003 through 71445600..71445603. No
+71445 producer may run until this declaration-bearing commit is clean and
+every pre-source check below is green.
+
+The first source-generation invocation consumes the sole authorization.
+Any source or later-stage failure permanently retires 71445; there is no
+resume, repair, repeated invocation, replacement member, passing subset,
+salvage, or reuse under that declaration. Qualification artifacts and every
+retired 71426..71444 byte remain forbidden inputs.
+
+The declaration-bearing 71445 producer commit must be a strict successor of
+qualified commit `3b17223ab32e20152aead1eb32a79e239d6f4d8a`. Gate replay
+must prove that ancestry, the exact qualified commit/tree and report binding,
+byte-identical generator/routes/Atlas-analyzer authority fields, and a complete
+Git delta equal to the frozen 71445 declaration/gate/schema/direct-test
+authorization path set. Any producer, analyzer, validator, physics,
+toolchain, or unrelated change rejects the qualification.
+
+The declaration-bearing 71444 producer commit was required to be a strict successor of
 qualified commit `275d4fa646ccf2c64ba8628cd4aa8b21644fa90d`. Gate replay
 must prove that ancestry, the exact qualified commit/tree and report binding,
 byte-identical generator/routes/Atlas-analyzer authority fields, and a complete
 Git delta equal to the frozen 71444 declaration/gate/schema/direct-test
-authorization path set. Any producer, analyzer, validator, physics,
-toolchain, or unrelated change rejects the qualification.
+authorization path set. That relation is historical and cannot authorize a
+future cohort.
 
 Before source generation, the exact clean declaration-bearing snapshot must
 pass the no-write `/usr/bin/python3.10 -B` syntax-floor scan, the pinned
@@ -286,9 +323,9 @@ separate CPython 3.11.4 executable and zstandard module digests above. The
 syntax report must never be required to identify the execution runtime.
 
 The assembler must reject declarations for retired cohorts 71426 through
-71444 before reading campaign evidence. There is currently no eligible final
-successor; a new immutable declaration can be authorized only after the
-authority fix, fresh B1 reseal, and a new green non-admissible qualification.
+71444 before reading campaign evidence. The only eligible final successor is
+the immutable 71445 declaration bound to the fresh B1 reseal and green
+non-admissible qualification above.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -311,6 +348,17 @@ and qualified implementation commit/tree
 `7bd808b2194a44b80dc64fb88c700209d4657e9a`. Its one authorization was
 consumed by 71444 and it remains non-admissible historical evidence rather
 than final population input or successor authority.
+
+The active 71445 prerequisite is the independent green 28/28 qualification
+`b2q26_3b17223_71625100`, report SHA-256
+`351baccaabf405e0ef240c1def18e4ede796ff417e73230524e9f0f9b0c0491b`,
+bound to fresh B1 gate SHA-256
+`58295d227ddd3694a0ddae5af46e2bbc98cc60dbe6b6751b4e42df01c06b1cd6`
+and qualified implementation commit/tree
+`3b17223ab32e20152aead1eb32a79e239d6f4d8a` /
+`fa2b106d19dbb115e6acd4c344b3820b3013464a`. It is non-admissible proof of
+the fixed toolchain only; its population remains forbidden from the final
+71445 lane.
 
 The disposable campaign is orchestrated by
 `tools/run_b2_qualification.py`. Driver-plan schema v2 hash-binds every
@@ -461,10 +509,9 @@ reuse of any retired cohort byte.
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. The current alias names retired cohort 71444 and cannot
-execute this template. The command shape below is retained for historical
-review and becomes executable only after a fresh successor updates the frozen
-cohort identity and exact B1/qualification bindings.
+clean-tree authority. The current alias names fresh cohort 71445. The command
+shape below becomes executable only after its one-shot final evidence exists
+and must use the exact B1/qualification bindings above.
 
 ```sh
 python tools/assemble_b2_gate.py \

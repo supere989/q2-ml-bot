@@ -28,7 +28,7 @@ from tools.assemble_b2_gate import (
     _exact_directory_files,
     _decode_dyn_snapshot,
     _dyn_source_authority,
-    _expected_71444_rows,
+    _expected_71445_rows,
     _preflight_implementation_identity,
     _validate_compiled_cm_preflight,
     _validate_declaration,
@@ -529,7 +529,7 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
     paths.claims_dir.mkdir()
     paths.analysis_dir.mkdir()
     paths.dyn_evidence_report.parent.mkdir()
-    map_id = _expected_71444_rows()[0]["map"]
+    map_id = _expected_71445_rows()[0]["map"]
 
     bsp = b"IBSP fixture"
     (paths.claims_dir / f"{map_id}.bsp").write_bytes(bsp)
@@ -670,22 +670,22 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
         },
     }
     paths.dyn_evidence_report.write_bytes(canonical_bytes(report))
-    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71444_rows()}
+    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71445_rows()}
     return paths, declaration, report
 
 
-def test_fresh_71444_identity_and_cli_contract_are_exact() -> None:
-    rows = _expected_71444_rows()
+def test_fresh_71445_identity_and_cli_contract_are_exact() -> None:
+    rows = _expected_71445_rows()
     assert len(rows) == 28
     assert rows[0] == {
         "ordinal": 0,
-        "map": "b2g26_open_71444000",
-        "seed": 71444000,
+        "map": "b2g26_open_71445000",
+        "seed": 71445000,
         "style": "open",
         "grid": 5,
         "observed_heat": None,
     }
-    assert rows[-1]["map"] == "b2g26_arena_lanes_71444603"
+    assert rows[-1]["map"] == "b2g26_arena_lanes_71445603"
     options = _parser().format_help()
     assert "--declaration" in options
     assert "--source-dir" in options
@@ -738,11 +738,12 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_gate_rejects_retired_current_71444_alias_before_evidence() -> None:
-    with pytest.raises(B2GateError, match=r"71444.*permanently retired"):
-        _validate_declaration(
-            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-        )
+def test_gate_accepts_fresh_current_71445_alias() -> None:
+    declaration, _sha256 = _validate_declaration(
+        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+    )
+    assert declaration["cohort_id"] == EXPECTED_COHORT
+    assert declaration["maps"] == _expected_71445_rows()
 
 
 def test_qualification_successor_accepts_only_the_declared_authorization_delta(
@@ -753,7 +754,7 @@ def test_qualification_successor_accepts_only_the_declared_authorization_delta(
     current["repository_commit"] = "ab" * 20
     current["repository_tree"] = "cd" * 20
     diff = "".join(
-        f"{'A' if path.endswith('71444-DECLARATION.json') else 'M'}\t{path}\n"
+        f"{'A' if path.endswith('71445-DECLARATION.json') else 'M'}\t{path}\n"
         for path in sorted(QUALIFICATION_SUCCESSOR_PATHS)
     ).encode("utf-8")
 
@@ -803,7 +804,7 @@ def _write_compiled_cm_gate_fixture(
         b1_gate=b1_gate,
         compiled_cm_preflight_report=report_path,
     )
-    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71444_rows()}
+    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71445_rows()}
     membership = {"schema": "fixture-membership", "passed": True, "failures": []}
     monkeypatch.setattr(b2_gate, "verify_stage_membership", lambda *_args: membership)
     binaries = {
@@ -877,7 +878,7 @@ def test_compiled_cm_gate_rejects_old_report_without_hazard_and_lightdata(
     paths.compiled_cm_preflight_report.write_bytes(canonical_bytes(report))
     with pytest.raises(B2GateError, match="compiled-CM checks keys differ"):
         _validate_compiled_cm_preflight(
-            paths, {"cohort_id": EXPECTED_COHORT, "maps": _expected_71444_rows()},
+            paths, {"cohort_id": EXPECTED_COHORT, "maps": _expected_71445_rows()},
             SHA, binaries,
         )
 
@@ -894,7 +895,7 @@ def test_compiled_cm_gate_rejects_unstable_input_before_map_evidence(
     paths.compiled_cm_preflight_report.write_bytes(canonical_bytes(report))
     with pytest.raises(B2GateError, match="input stability failed"):
         _validate_compiled_cm_preflight(
-            paths, {"cohort_id": EXPECTED_COHORT, "maps": _expected_71444_rows()},
+            paths, {"cohort_id": EXPECTED_COHORT, "maps": _expected_71445_rows()},
             SHA, binaries,
         )
 

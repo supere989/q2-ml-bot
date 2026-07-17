@@ -825,13 +825,51 @@ and terminal materialization report
 No map subprocess, materialized staging, publication, Dyn, test, deployment, or
 training action occurred.
 
-Cohort 71444 is permanently retired. The alias remains historical and is
-rejected before evidence. No replacement declaration is authorized until the final
-authority path is fixed, the exact read-only
+Cohort 71444 is permanently retired. Its immutable named declaration remains
+historical and is rejected before evidence. At the time, no replacement could
+be authorized until the final authority path was fixed, the exact read-only
 `tools/preflight_b2_materialization_authorities.py` check runs before both
 qualification source and final source, B1 is freshly resealed, and a new
-disposable qualification is green. No 71444 byte or passing subset may cross
+disposable qualification is green. Those conditions are now satisfied by the
+distinct 71445 authorization below. No 71444 byte or passing subset may cross
 that boundary.
+
+### Authorized 71445 final attempt
+
+Fresh B1 gate SHA-256
+`58295d227ddd3694a0ddae5af46e2bbc98cc60dbe6b6751b4e42df01c06b1cd6`
+and disposable qualification `b2q26_3b17223_71625100` bind implementation
+commit `3b17223ab32e20152aead1eb32a79e239d6f4d8a`, tree
+`fa2b106d19dbb115e6acd4c344b3820b3013464a`, and unchanged generator,
+routes, and Atlas-analyzer authorities. The qualification is green 28/28 at
+every population stage with zero failures; its canonical assembled report
+SHA-256 is
+`351baccaabf405e0ef240c1def18e4ede796ff417e73230524e9f0f9b0c0491b`.
+It remains explicitly non-admissible and supplies no map, seed, stage,
+artifact, Dyn evidence, or passing subset to the final lane.
+
+Exactly one immutable/no-retry final producer attempt is authorized for
+`b2g26_final_71445`. The current canonical alias and immutable named
+`B2-GENERATED-COHORT-71445-DECLARATION.json` are byte-identical with SHA-256
+`ffa5b9ccfee0340f1bad533a23fedd103a08d14d125149d1516a2326fb8a091b`.
+They declare exactly 28 fresh rows: four per concrete style, in declaration
+order, using seed blocks 71445000..71445003 through 71445600..71445603. No
+71445 producer may run until this declaration-bearing commit is clean and
+every pre-source check below is green.
+
+The first source-generation invocation consumes the sole authorization.
+Any source or later-stage failure permanently retires 71445; there is no
+resume, repair, repeated invocation, replacement member, passing subset,
+salvage, or reuse under that declaration. Qualification artifacts and every
+retired 71426..71444 byte remain forbidden inputs.
+
+The declaration-bearing 71445 producer commit must be a strict successor of
+qualified commit `3b17223ab32e20152aead1eb32a79e239d6f4d8a`. Gate replay
+must prove that ancestry, the exact qualified commit/tree and report binding,
+byte-identical generator/routes/Atlas-analyzer authority fields, and a complete
+Git delta equal to the frozen 71445 declaration/gate/schema/direct-test
+authorization path set. Any producer, analyzer, validator, physics,
+toolchain, or unrelated change rejects the qualification.
 
 The declaration-bearing 71444 producer commit must be a strict successor of
 qualified commit `275d4fa646ccf2c64ba8628cd4aa8b21644fa90d`. Gate replay
@@ -903,12 +941,10 @@ check.
 
 ## Offline workflow
 
-There is no active final `COHORT_ID`; the current alias names retired
-`b2g26_final_71444` for historical fail-closed admission only. Commands must
-never name retired cohorts 71426 through 71444. A successor requires a new
-declaration after the authority fix, B1 reseal, and fresh qualification, and
-no retired or qualification population, report, Dyn evidence, compiled byte,
-or passing subset may be copied into its root.
+The active final `COHORT_ID` is `b2g26_final_71445`; the current alias names
+its immutable fresh declaration. Commands must never name retired cohorts
+71426 through 71444. No retired or qualification population, report, Dyn
+evidence, compiled byte, or passing subset may be copied into its root.
 
 The declaration-aware compiler remains the required final-cohort shape.
 Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer

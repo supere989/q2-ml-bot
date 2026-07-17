@@ -108,6 +108,16 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "The first source-generation invocation consumes the sole authorization",
         "B2-GENERATED-COHORT-71444-FAILURE.json",
         "Cohort 71444 is permanently retired",
+        "b2q26_3b17223_71625100",
+        "351baccaabf405e0ef240c1def18e4ede796ff417e73230524e9f0f9b0c0491b",
+        "58295d227ddd3694a0ddae5af46e2bbc98cc60dbe6b6751b4e42df01c06b1cd6",
+        "3b17223ab32e20152aead1eb32a79e239d6f4d8a",
+        "fa2b106d19dbb115e6acd4c344b3820b3013464a",
+        "b2g26_final_71445",
+        "B2-GENERATED-COHORT-71445-DECLARATION.json",
+        "ffa5b9ccfee0340f1bad533a23fedd103a08d14d125149d1516a2326fb8a091b",
+        "71445000..71445003",
+        "71445600..71445603",
         "b709b038772e349583de4eea549ec16d6180ac820ea9ff1a4e382a0ec14ccf01",
         "0986e0c70e04c7d1a70427c0218e079b885f2bbe269b3280a81a4245c2c7c098",
         "2a93eb8782c488768eb1c81bade03872eced3e64ad65de16eec948d614986e33",
@@ -115,7 +125,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "75c4d8fd2d38d9cc7ad4fdf32b612d4d761ff9ea3b46fdf66d3ec0a367cc1962",
         "materialization authority preflight",
         "tools/preflight_b2_materialization_authorities.py",
-        "No replacement declaration is authorized",
+        "Qualification artifacts",
         "final producer lane itself is strictly sequential",
         "Tests never overlap compilation",
         "qualification",
@@ -137,6 +147,8 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert "Cohort 71443 is permanently retired" in text
     assert "b2g26_final_71444" in text
     assert "Cohort 71444 is permanently retired" in text
+    assert "b2g26_final_71445" in text
+    assert "Authorized 71445 final attempt" in text
     assert "Exactly one immutable/no-retry final producer attempt" in text
     assert "future-only" not in text
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
