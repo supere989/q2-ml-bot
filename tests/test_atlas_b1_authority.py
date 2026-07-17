@@ -18,6 +18,106 @@ ATTESTATION = (
 )
 
 
+def historical_gate() -> authority.B1AuthorityGate:
+    return authority.load_historical_b1_authority_gate(
+        ROOT / authority.GATE_RELATIVE_PATH, repo_root=ROOT
+    )
+
+
+def requalification_record(
+    gate: authority.B1AuthorityGate, probe_bsp_sha256: str = "a" * 64
+) -> dict:
+    pmove = pmove_identity(gate, probe_bsp_sha256)
+    collision = cm_identity(gate, probe_bsp_sha256)
+    identities = {
+        "collision": {
+            "tool_identity": collision["tool_identity"],
+            "physics_identity": collision["physics_identity"],
+        },
+        "pmove": {
+            "tool_identity": pmove["tool_identity"],
+            "physics_identity": pmove["physics_identity"],
+            "parameters": pmove["parameters"],
+        },
+        "hook": {
+            "tool_identity": gate.hook_tool_identity,
+            "physics_identity": gate.hook_physics_identity,
+        },
+        "fall": {
+            "tool_identity": gate.fall_tool_identity,
+            "physics_identity": gate.fall_default_physics_identity,
+        },
+    }
+    executables = {
+        "cm_sha256": gate.cm_executable_sha256,
+        "pmove_sha256": gate.pmove_executable_sha256,
+        "hook_sha256": authority.HISTORICAL_HOOK_EXECUTABLE_SHA256,
+        "fall_sha256": gate.fall_executable_sha256,
+    }
+    return {
+        "schema": authority.REQUALIFICATION_SCHEMA,
+        "status": "green",
+        "recorded_at": "2026-07-16T12:00:00Z",
+        "historical_gate_sha256": authority.HISTORICAL_GATE_SHA256,
+        "historical_normative_documents": {
+            "design_sha256": authority.HISTORICAL_DESIGN_SHA256,
+            "plan_sha256": authority.HISTORICAL_PLAN_SHA256,
+        },
+        "current_normative_documents": {
+            "design_sha256": authority.ACCEPTED_DESIGN_SHA256,
+            "plan_sha256": authority.ACCEPTED_PLAN_SHA256,
+        },
+        "probe_bsp_sha256": probe_bsp_sha256,
+        "repository": {"commit": "1" * 40, "tree": "2" * 40, "clean": True},
+        "inputs": {
+            "hook_parity_attestation_sha256": gate.hook_attestation_sha256,
+            "executables": executables,
+        },
+        "live_identities": identities,
+        "probe_runtime_authority_seal": {
+            "schema": authority.SEAL_SCHEMA,
+            "normative_documents": {
+                "design_sha256": authority.ACCEPTED_DESIGN_SHA256,
+                "plan_sha256": authority.ACCEPTED_PLAN_SHA256,
+            },
+            "hook_parity_attestation_sha256": gate.hook_attestation_sha256,
+            "fixture_bsp_sha256": gate.fixture_bsp_sha256,
+            "analysis_bsp_sha256": probe_bsp_sha256,
+            "executables": executables,
+            "identities": {
+                name: {
+                    "tool_identity": identity["tool_identity"],
+                    "physics_identity": identity["physics_identity"],
+                }
+                for name, identity in identities.items()
+            },
+        },
+        "checks": {
+            "historical_gate_exact_bytes": True,
+            "normative_documents_rehashed": True,
+            "repository_clean": True,
+            "executable_bytes_match_historical_gate": True,
+            "hook_attestation_revalidated": True,
+            "live_identities_recomputed": True,
+            "live_identity_preimages_validated": True,
+        },
+        "failures": [],
+    }
+
+
+def requalified_gate_document() -> dict:
+    document = json.loads((ROOT / authority.GATE_RELATIVE_PATH).read_text())
+    document["normative_documents"] = {
+        "design_sha256": authority.ACCEPTED_DESIGN_SHA256,
+        "plan_sha256": authority.ACCEPTED_PLAN_SHA256,
+    }
+    document["amended_at"] = "2026-07-16T12:00:00Z"
+    document["authority_requalification"] = requalification_record(
+        historical_gate()
+    )
+    return document
+
+
 def copied_authority_root(tmp_path: Path) -> Path:
     for relative in (
         authority.DESIGN_RELATIVE_PATH,
@@ -27,6 +127,9 @@ def copied_authority_root(tmp_path: Path) -> Path:
         destination = tmp_path / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, destination)
+    (tmp_path / authority.GATE_RELATIVE_PATH).write_text(
+        json.dumps(requalified_gate_document())
+    )
     return tmp_path
 
 
@@ -139,9 +242,15 @@ def fall_identity(gate: authority.B1AuthorityGate) -> dict:
     }
 
 
-def test_repository_gate_and_relocated_hook_attestation_are_admitted() -> None:
-    gate = authority.load_b1_authority_gate(ROOT)
-    admitted = authority.admit_hook_parity_attestation(ATTESTATION, repo_root=ROOT)
+def test_historical_gate_is_not_current_but_fresh_gate_is_admitted(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(authority.B1AuthorityError):
+        authority.load_b1_authority_gate(ROOT)
+
+    root = copied_authority_root(tmp_path)
+    gate = authority.load_b1_authority_gate(root)
+    admitted = authority.admit_hook_parity_attestation(ATTESTATION, repo_root=root)
 
     assert gate.design_sha256 == authority.ACCEPTED_DESIGN_SHA256
     assert gate.plan_sha256 == authority.ACCEPTED_PLAN_SHA256
@@ -151,7 +260,7 @@ def test_repository_gate_and_relocated_hook_attestation_are_admitted() -> None:
 
 
 def test_real_cm_finite_json_bounds_are_admitted_but_nonfinite_are_not() -> None:
-    gate = authority.load_b1_authority_gate(ROOT)
+    gate = historical_gate()
     map_sha = "a" * 64
     record = cm_identity(gate, map_sha)
     record["model0"]["mins"] = [-4096.0, -2048.0, -128.0]
@@ -196,6 +305,28 @@ def test_gate_rejects_changed_normative_document(tmp_path: Path) -> None:
         authority.load_b1_authority_gate(root)
 
 
+@pytest.mark.parametrize("change", ["historical", "binary", "pmove", "check"])
+def test_gate_rejects_forged_requalification(
+    tmp_path: Path, change: str
+) -> None:
+    root = copied_authority_root(tmp_path)
+    gate_path = root / authority.GATE_RELATIVE_PATH
+    document = json.loads(gate_path.read_text())
+    record = document["authority_requalification"]
+    if change == "historical":
+        record["historical_gate_sha256"] = "0" * 64
+    elif change == "binary":
+        record["inputs"]["executables"]["cm_sha256"] = "0" * 64
+    elif change == "pmove":
+        record["live_identities"]["pmove"]["parameters"]["gravity"] = 799
+    else:
+        record["checks"]["live_identity_preimages_validated"] = 1
+    gate_path.write_text(json.dumps(document))
+
+    with pytest.raises(authority.B1AuthorityError):
+        authority.load_b1_authority_gate(root)
+
+
 def test_recorded_absolute_artifact_path_is_not_authority(tmp_path: Path) -> None:
     root = copied_authority_root(tmp_path)
     gate_path = root / authority.GATE_RELATIVE_PATH
@@ -221,13 +352,14 @@ def test_self_declared_passed_attestation_does_not_override_byte_digest(
     document["passed"] = True
     candidate = tmp_path / "self-declared.json"
     candidate.write_bytes(authority._canonical_json_bytes(document))
+    root = copied_authority_root(tmp_path / "authority-root")
 
     with pytest.raises(authority.B1AuthorityError, match="not the B1 artifact"):
-        authority.admit_hook_parity_attestation(candidate, repo_root=ROOT)
+        authority.admit_hook_parity_attestation(candidate, repo_root=root)
 
 
 def test_attestation_semantics_reject_unknown_fields_even_with_rebound_digest() -> None:
-    gate = authority.load_b1_authority_gate(ROOT)
+    gate = historical_gate()
     document = json.loads(ATTESTATION.read_text())
     document["unexpected"] = True
     data = authority._canonical_json_bytes(document)
@@ -240,7 +372,7 @@ def test_attestation_semantics_reject_unknown_fields_even_with_rebound_digest() 
 
 
 def test_attestation_semantics_reject_case_and_check_tampering() -> None:
-    gate = authority.load_b1_authority_gate(ROOT)
+    gate = historical_gate()
     for mutation in ("case", "check"):
         document = json.loads(ATTESTATION.read_text())
         if mutation == "case":
@@ -258,7 +390,7 @@ def test_attestation_semantics_reject_case_and_check_tampering() -> None:
 
 
 def test_cm_and_pmove_bind_actual_map_tool_source_and_canonical_physics() -> None:
-    gate = authority.load_b1_authority_gate(ROOT)
+    gate = historical_gate()
     map_sha = hashlib.sha256(b"analysis-bsp").hexdigest()
     authority._validate_cm_identity(cm_identity(gate, map_sha), gate, map_sha)
     authority._validate_pmove_identity(pmove_identity(gate, map_sha), gate, map_sha)
@@ -275,7 +407,7 @@ def test_cm_and_pmove_bind_actual_map_tool_source_and_canonical_physics() -> Non
 
 
 def test_hook_runtime_identity_must_equal_attestation() -> None:
-    gate = authority.load_b1_authority_gate(ROOT)
+    gate = historical_gate()
     parity, document = authority._load_hook_parity_attestation(ATTESTATION, gate)
     hook = deepcopy(document["identities"]["hook"])
     record = {
@@ -296,7 +428,7 @@ def test_hook_runtime_identity_must_equal_attestation() -> None:
 
 
 def test_fall_runtime_binds_executable_tool_source_and_default_physics() -> None:
-    gate = authority.load_b1_authority_gate(ROOT)
+    gate = historical_gate()
     record = fall_identity(gate)
     assert record["physics_identity"] == gate.fall_default_physics_identity
     authority._validate_fall_identity(record, gate)

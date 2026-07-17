@@ -22,6 +22,7 @@ from typing import Any, Mapping, Sequence
 
 GATE_SCHEMA = "q2-multires-batch-gate-v1"
 SEAL_SCHEMA = "q2-b1-runtime-authority-seal-v1"
+REQUALIFICATION_SCHEMA = "q2-b1-authority-requalification-v1"
 DESIGN_RELATIVE_PATH = Path(
     "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md"
 )
@@ -30,14 +31,31 @@ PLAN_RELATIVE_PATH = Path(
 )
 GATE_RELATIVE_PATH = Path("docs/multires/B1-GATE.json")
 
-# These are the accepted, externally reviewed documents.  Checking only a
-# mutable gate against mutable files would let a replacement gate bless a
-# replacement specification.
+# These are the accepted, externally reviewed and methodology-amended
+# documents.  Checking only a mutable gate against mutable files would let a
+# replacement gate bless a replacement specification.
 ACCEPTED_DESIGN_SHA256 = (
-    "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5"
+    "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
 )
 ACCEPTED_PLAN_SHA256 = (
+    "371577feb8c40f542c90eec4b4aa91ef84c4a8e2019bf1614e59c46aedfec410"
+)
+
+# The only historical gate that may seed the 2026-07-16 requalification.  Its
+# B1 test and parity evidence remain historical evidence; it is not itself a
+# current authority.  Requalification must prove these exact bytes, then
+# re-admit the byte-identical oracle binaries and their live identities.
+HISTORICAL_GATE_SHA256 = (
+    "909b1e46b4c3dca8adb6ab9017cd8716daa8c6cdd3eb106ae11aa09bee0572f8"
+)
+HISTORICAL_DESIGN_SHA256 = (
+    "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5"
+)
+HISTORICAL_PLAN_SHA256 = (
     "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b"
+)
+HISTORICAL_HOOK_EXECUTABLE_SHA256 = (
+    "cd8bc4107ae2e9f4ac006fbe469b360832db80b96a5597c2e5dfe12c32dc9284"
 )
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -304,16 +322,27 @@ def _require_true_fields(value: Mapping[str, Any], label: str) -> None:
         _reject(item is not True, f"{label}.{name} must be true")
 
 
-def _validate_gate_document(document: Mapping[str, Any], repo_root: Path) -> B1AuthorityGate:
+def _validate_gate_document(
+    document: Mapping[str, Any],
+    repo_root: Path,
+    *,
+    expected_design_sha256: str = ACCEPTED_DESIGN_SHA256,
+    expected_plan_sha256: str = ACCEPTED_PLAN_SHA256,
+    verify_normative_files: bool = True,
+    require_requalification: bool = True,
+) -> B1AuthorityGate:
+    top_level_keys = {
+        "schema", "batch", "status", "recorded_at", "amended_at",
+        "owner_directive", "normative_documents", "integration_heads",
+        "integrated_work", "artifacts", "physics_source_sha256", "tests",
+        "admission_invariants", "limitations_carried_to_B2", "deployment",
+        "gate",
+    }
+    if require_requalification:
+        top_level_keys.add("authority_requalification")
     _exact_keys(
         document,
-        {
-            "schema", "batch", "status", "recorded_at", "amended_at",
-            "owner_directive", "normative_documents", "integration_heads",
-            "integrated_work", "artifacts", "physics_source_sha256", "tests",
-            "admission_invariants", "limitations_carried_to_B2", "deployment",
-            "gate",
-        },
+        top_level_keys,
         "B1 gate",
     )
     _reject(document["schema"] != GATE_SCHEMA, "B1 gate schema mismatch")
@@ -348,12 +377,15 @@ def _validate_gate_document(document: Mapping[str, Any], repo_root: Path) -> B1A
     _exact_keys(normative, {"design_sha256", "plan_sha256"}, "normative documents")
     design_sha = _sha256(normative["design_sha256"], "design digest")
     plan_sha = _sha256(normative["plan_sha256"], "plan digest")
-    _reject(design_sha != ACCEPTED_DESIGN_SHA256, "unaccepted design digest in B1 gate")
-    _reject(plan_sha != ACCEPTED_PLAN_SHA256, "unaccepted plan digest in B1 gate")
-    actual_design = _file_sha256(repo_root / DESIGN_RELATIVE_PATH, "normative design")
-    actual_plan = _file_sha256(repo_root / PLAN_RELATIVE_PATH, "normative plan")
-    _reject(actual_design != design_sha, "normative design bytes changed")
-    _reject(actual_plan != plan_sha, "normative plan bytes changed")
+    _reject(design_sha != expected_design_sha256, "unaccepted design digest in B1 gate")
+    _reject(plan_sha != expected_plan_sha256, "unaccepted plan digest in B1 gate")
+    if verify_normative_files:
+        actual_design = _file_sha256(
+            repo_root / DESIGN_RELATIVE_PATH, "normative design"
+        )
+        actual_plan = _file_sha256(repo_root / PLAN_RELATIVE_PATH, "normative plan")
+        _reject(actual_design != design_sha, "normative design bytes changed")
+        _reject(actual_plan != plan_sha, "normative plan bytes changed")
 
     heads = _mapping(document["integration_heads"], "integration heads")
     _exact_keys(heads, {"q2-ml-bot", "q2-ml-client", "q2-lithium-3zb2"}, "integration heads")
@@ -517,7 +549,7 @@ def _validate_gate_document(document: Mapping[str, Any], repo_root: Path) -> B1A
     _reject(gate["failures"] != [], "B1 gate records failures")
     _reject(not isinstance(document["tests"], Mapping), "B1 tests must be an object")
 
-    return B1AuthorityGate(
+    result = B1AuthorityGate(
         repo_root=repo_root,
         design_sha256=design_sha,
         plan_sha256=plan_sha,
@@ -550,6 +582,269 @@ def _validate_gate_document(document: Mapping[str, Any], repo_root: Path) -> B1A
         fall_integration_sha256=str(sources["fall_runtime_adapter"]),
         fall_constants_sha256=str(sources["fall_constants"]),
     )
+    if require_requalification:
+        _validate_authority_requalification(
+            document["authority_requalification"], result
+        )
+    return result
+
+
+def _validate_authority_requalification(
+    value: object, gate: B1AuthorityGate
+) -> None:
+    record = _mapping(value, "B1 authority requalification")
+    _exact_keys(
+        record,
+        {
+            "schema", "status", "recorded_at", "historical_gate_sha256",
+            "historical_normative_documents", "current_normative_documents",
+            "probe_bsp_sha256", "repository", "inputs", "live_identities",
+            "probe_runtime_authority_seal", "checks", "failures",
+        },
+        "B1 authority requalification",
+    )
+    _reject(
+        record["schema"] != REQUALIFICATION_SCHEMA,
+        "B1 authority requalification schema mismatch",
+    )
+    _reject(
+        record["status"] != "green",
+        "B1 authority requalification is not green",
+    )
+    _reject(
+        not isinstance(record["recorded_at"], str) or not record["recorded_at"],
+        "B1 authority requalification timestamp is invalid",
+    )
+    _reject(
+        record["historical_gate_sha256"] != HISTORICAL_GATE_SHA256,
+        "B1 authority requalification does not bind the historical gate",
+    )
+
+    historical = _mapping(
+        record["historical_normative_documents"],
+        "historical B1 normative documents",
+    )
+    current = _mapping(
+        record["current_normative_documents"],
+        "current B1 normative documents",
+    )
+    for documents, label in (
+        (historical, "historical B1 normative documents"),
+        (current, "current B1 normative documents"),
+    ):
+        _exact_keys(documents, {"design_sha256", "plan_sha256"}, label)
+        for name, digest in documents.items():
+            _sha256(digest, f"{label} {name}")
+    _reject(
+        historical
+        != {
+            "design_sha256": HISTORICAL_DESIGN_SHA256,
+            "plan_sha256": HISTORICAL_PLAN_SHA256,
+        },
+        "historical B1 normative binding differs",
+    )
+    _reject(
+        current
+        != {
+            "design_sha256": gate.design_sha256,
+            "plan_sha256": gate.plan_sha256,
+        },
+        "current B1 normative binding differs from the gate",
+    )
+    probe_bsp_sha256 = _sha256(
+        record["probe_bsp_sha256"], "B1 requalification probe BSP"
+    )
+
+    repository = _mapping(record["repository"], "B1 requalification repository")
+    _exact_keys(repository, {"commit", "tree", "clean"}, "B1 requalification repository")
+    for name in ("commit", "tree"):
+        _reject(
+            not isinstance(repository[name], str)
+            or re.fullmatch(r"[0-9a-f]{40}", repository[name]) is None,
+            f"B1 requalification repository {name} is invalid",
+        )
+    _reject(repository["clean"] is not True, "B1 requalification repository was dirty")
+
+    inputs = _mapping(record["inputs"], "B1 requalification inputs")
+    _exact_keys(
+        inputs,
+        {"hook_parity_attestation_sha256", "executables"},
+        "B1 requalification inputs",
+    )
+    _reject(
+        inputs["hook_parity_attestation_sha256"]
+        != gate.hook_attestation_sha256,
+        "requalified hook attestation differs from B1",
+    )
+    executables = _mapping(
+        inputs["executables"], "B1 requalification executables"
+    )
+    _exact_keys(
+        executables,
+        {"cm_sha256", "pmove_sha256", "hook_sha256", "fall_sha256"},
+        "B1 requalification executables",
+    )
+    for name, digest in executables.items():
+        _sha256(digest, f"B1 requalification executable {name}")
+    _reject(
+        executables
+        != {
+            "cm_sha256": gate.cm_executable_sha256,
+            "pmove_sha256": gate.pmove_executable_sha256,
+            "hook_sha256": HISTORICAL_HOOK_EXECUTABLE_SHA256,
+            "fall_sha256": gate.fall_executable_sha256,
+        },
+        "requalified executable bytes differ from historical B1",
+    )
+
+    identities = _mapping(
+        record["live_identities"], "B1 requalification live identities"
+    )
+    _exact_keys(
+        identities,
+        {"collision", "pmove", "hook", "fall"},
+        "B1 requalification live identities",
+    )
+    admitted: dict[str, Mapping[str, Any]] = {}
+    for name, raw in identities.items():
+        identity = _mapping(raw, f"B1 requalification {name} identity")
+        expected_keys = {"tool_identity", "physics_identity"}
+        if name == "pmove":
+            expected_keys.add("parameters")
+        _exact_keys(
+            identity,
+            expected_keys,
+            f"B1 requalification {name} identity",
+        )
+        _sha256(identity["tool_identity"], f"B1 requalification {name} tool")
+        _sha256(
+            identity["physics_identity"],
+            f"B1 requalification {name} physics",
+        )
+        admitted[name] = identity
+
+    collision_expected = hashlib.sha256(
+        (
+            "schema=q2-physics-oracle-v1;kind=cm;tool_identity="
+            f"{gate.oracle_tool_identity};map={probe_bsp_sha256}"
+        ).encode()
+    ).hexdigest()
+    _reject(
+        admitted["collision"]
+        != {
+            "tool_identity": gate.oracle_tool_identity,
+            "physics_identity": collision_expected,
+        },
+        "requalified collision identity is not canonical",
+    )
+    # Pmove's constants are a sealed part of its live identity response.  The
+    # producer validates the complete response and records the resulting
+    # physics digest; the gate independently fixes its tool identity here.
+    _reject(
+        admitted["pmove"]["tool_identity"] != gate.oracle_tool_identity,
+        "requalified Pmove tool identity differs from B1",
+    )
+    pmove_parameters = _mapping(
+        admitted["pmove"]["parameters"],
+        "B1 requalification Pmove parameters",
+    )
+    _exact_keys(
+        pmove_parameters,
+        {"gravity", "airaccelerate", "constants"},
+        "B1 requalification Pmove parameters",
+    )
+    _reject(
+        pmove_parameters["gravity"] != 800
+        or pmove_parameters["airaccelerate"] != 0
+        or not isinstance(pmove_parameters["constants"], str)
+        or not pmove_parameters["constants"],
+        "requalified Pmove parameters differ from B1",
+    )
+    pmove_expected = hashlib.sha256(
+        (
+            "schema=q2-physics-oracle-v1;kind=pmove;tool_identity="
+            f"{gate.oracle_tool_identity};map={probe_bsp_sha256};gravity=800;"
+            f"airaccelerate=0;constants={pmove_parameters['constants']}"
+        ).encode()
+    ).hexdigest()
+    _reject(
+        admitted["pmove"]["physics_identity"] != pmove_expected,
+        "requalified Pmove identity is not canonical",
+    )
+    _reject(
+        admitted["hook"]
+        != {
+            "tool_identity": gate.hook_tool_identity,
+            "physics_identity": gate.hook_physics_identity,
+        },
+        "requalified hook identity differs from B1",
+    )
+    _reject(
+        admitted["fall"]
+        != {
+            "tool_identity": gate.fall_tool_identity,
+            "physics_identity": gate.fall_default_physics_identity,
+        },
+        "requalified fall identity differs from B1",
+    )
+
+    probe_seal = _mapping(
+        record["probe_runtime_authority_seal"],
+        "B1 requalification probe runtime authority seal",
+    )
+    _exact_keys(
+        probe_seal,
+        {
+            "schema", "normative_documents", "hook_parity_attestation_sha256",
+            "fixture_bsp_sha256", "analysis_bsp_sha256", "executables",
+            "identities",
+        },
+        "B1 requalification probe runtime authority seal",
+    )
+    _reject(
+        probe_seal["schema"] != SEAL_SCHEMA,
+        "B1 requalification probe seal schema mismatch",
+    )
+    _reject(
+        probe_seal["normative_documents"] != current,
+        "B1 requalification probe seal does not bind current documents",
+    )
+    _reject(
+        probe_seal["hook_parity_attestation_sha256"]
+        != gate.hook_attestation_sha256
+        or probe_seal["fixture_bsp_sha256"] != gate.fixture_bsp_sha256
+        or probe_seal["analysis_bsp_sha256"] != probe_bsp_sha256,
+        "B1 requalification probe seal artifact binding differs",
+    )
+    _reject(
+        probe_seal["executables"] != executables,
+        "B1 requalification probe seal executable binding differs",
+    )
+    projected_identities = {
+        name: {
+            "tool_identity": identity["tool_identity"],
+            "physics_identity": identity["physics_identity"],
+        }
+        for name, identity in admitted.items()
+    }
+    _reject(
+        probe_seal["identities"] != projected_identities,
+        "B1 requalification probe seal identity binding differs",
+    )
+
+    checks = _mapping(record["checks"], "B1 requalification checks")
+    _exact_keys(
+        checks,
+        {
+            "historical_gate_exact_bytes", "normative_documents_rehashed",
+            "repository_clean", "executable_bytes_match_historical_gate",
+            "hook_attestation_revalidated", "live_identities_recomputed",
+            "live_identity_preimages_validated",
+        },
+        "B1 requalification checks",
+    )
+    _require_true_fields(checks, "B1 requalification check")
+    _reject(record["failures"] != [], "B1 authority requalification records failures")
 
 
 def load_b1_authority_gate(repo_root: Path | str | None = None) -> B1AuthorityGate:
@@ -566,6 +861,39 @@ def load_b1_authority_gate(repo_root: Path | str | None = None) -> B1AuthorityGa
     )
     data = _regular_file_bytes(root / GATE_RELATIVE_PATH, "repository B1 gate", limit=1024 * 1024)
     return _validate_gate_document(_decode_json_object(data, "repository B1 gate"), root)
+
+
+def load_historical_b1_authority_gate(
+    path: Path | str, *, repo_root: Path | str | None = None
+) -> B1AuthorityGate:
+    """Load only the exact historical gate as a requalification input.
+
+    This does not make the historical gate current.  It exists solely so the
+    requalification producer can verify the old evidence root byte-for-byte
+    before challenging the sealed binaries again under amended documents.
+    """
+
+    gate_path = Path(path)
+    data = _regular_file_bytes(
+        gate_path, "historical B1 gate", limit=1024 * 1024
+    )
+    _reject(
+        hashlib.sha256(data).hexdigest() != HISTORICAL_GATE_SHA256,
+        "historical B1 gate bytes differ from the accepted evidence root",
+    )
+    root = (
+        Path(repo_root).resolve()
+        if repo_root is not None
+        else Path(__file__).resolve().parents[1]
+    )
+    return _validate_gate_document(
+        _decode_json_object(data, "historical B1 gate"),
+        root,
+        expected_design_sha256=HISTORICAL_DESIGN_SHA256,
+        expected_plan_sha256=HISTORICAL_PLAN_SHA256,
+        verify_normative_files=False,
+        require_requalification=False,
+    )
 
 
 def _hook_physics_identity(parameters: Mapping[str, Any], source: Mapping[str, Any]) -> str:
@@ -1094,4 +1422,5 @@ __all__ = [
     "admit_b1_runtime_authorities",
     "admit_hook_parity_attestation",
     "load_b1_authority_gate",
+    "load_historical_b1_authority_gate",
 ]
