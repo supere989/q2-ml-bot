@@ -104,7 +104,7 @@ def _inputs(tmp_path: Path, *, sparse: bool = False) -> dict[str, object]:
     syntax = write_json(tmp_path / "syntax.json", {
         "enumeration": "git-tracked", "failures": [], "file_count": 17,
         "files_sha256": sha(b"files"),
-        "interpreter": {"executable": "/home/raymond/miniconda3/bin/python",
+        "interpreter": {"executable": "/home/raymond/miniconda3/bin/python3.11",
                         "implementation": "cpython", "sha256": PINNED_PYTHON_SHA256,
                         "version": [3, 11, 4]},
         "passed": True, "schema": "q2-python-syntax-floor-v1",

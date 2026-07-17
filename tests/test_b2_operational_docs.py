@@ -66,7 +66,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "harness/atlas_analyzer.py:5404",
         "tools/check_python_syntax_floor.py",
         "Python 3.10",
-        "/home/raymond/miniconda3/bin/python",
+        "/home/raymond/miniconda3/bin/python3.11",
         "b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4",
         "zstandard 0.19.0",
         "permanently retired",

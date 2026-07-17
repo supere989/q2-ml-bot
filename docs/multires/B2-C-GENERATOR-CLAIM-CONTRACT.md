@@ -748,11 +748,14 @@ For every future declaration, an exact clean snapshot of the
 declaration-bearing commit must repeat the syntax scan and materializer
 import/CLI preflights under the pinned execution runtime before any source
 generation or WSL cohort bootstrap. The pinned execution runtime is
-`/home/raymond/miniconda3/bin/python`: CPython 3.11.4, executable SHA-256
+`/home/raymond/miniconda3/bin/python3.11`: CPython 3.11.4, executable SHA-256
 `b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4`,
 with zstandard 0.19.0 init/backend SHA-256 values
 `8a65cd4ab44112e1433a097daee7ce8600047995f3289f13d758bb001c06a553`
 and `40ece7fa91097e53ee4785cef01baae3f220f8dc891e20d94d4e07a1d77c9120`.
+The adjacent `/home/raymond/miniconda3/bin/python` convenience path is a
+symlink to those same bytes and is deliberately rejected: qualification input
+paths must identify regular files directly.
 The system Python lacks zstandard and must not run materialization. All checks
 use `-B`, create no bytecode or cohort paths, and finish before generation.
 Python 3.14's
@@ -816,7 +819,7 @@ generator hint; independent analysis later requires the sealed exact landing
 and ordered trace to replay identically:
 
 ```sh
-MATERIALIZER_PY=/home/raymond/miniconda3/bin/python
+MATERIALIZER_PY=/home/raymond/miniconda3/bin/python3.11
 B1_AUTHORITIES=/path/to/fresh/design-plan-bound-b1-authorities
 "$MATERIALIZER_PY" -B tools/materialize_generated_cohort.py \
   --declaration docs/multires/B2-GENERATED-COHORT-DECLARATION.json \

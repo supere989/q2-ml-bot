@@ -19,6 +19,7 @@ from tools.run_b2_qualification_compile import (
 from tools.run_b2_qualification_postcompile import (
     CLAIMS_SUFFIXES,
     MATERIALIZED_SUFFIXES,
+    PINNED_PYTHON,
     QualificationPostcompileError,
     ROOT,
     _validate_pinned_python_runtime,
@@ -476,3 +477,7 @@ def test_wrong_python_path_is_rejected_before_any_preflight(tmp_path: Path) -> N
     wrong.chmod(0o755)
     with pytest.raises(QualificationPostcompileError, match="pinned runtime"):
         _validate_pinned_python_runtime(wrong, ROOT)
+
+
+def test_pinned_python_names_resolved_regular_executable() -> None:
+    assert PINNED_PYTHON == Path("/home/raymond/miniconda3/bin/python3.11")

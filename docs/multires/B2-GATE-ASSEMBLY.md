@@ -132,12 +132,15 @@ producer snapshot. Every future declaration-bearing commit must repeat
 `python3.10 -B tools/check_python_syntax_floor.py --root SNAPSHOT` and the
 materializer import/CLI preflights under the actual pinned runtime before any
 source generation or WSL cohort bootstrap. The pinned runtime is
-`/home/raymond/miniconda3/bin/python` (CPython 3.11.4, executable
+`/home/raymond/miniconda3/bin/python3.11` (CPython 3.11.4, executable
 SHA-256 `b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4`).
 That runtime supplies zstandard 0.19.0 through `__init__.py` SHA-256
 `8a65cd4ab44112e1433a097daee7ce8600047995f3289f13d758bb001c06a553`
 and the active C backend SHA-256
 `40ece7fa91097e53ee4785cef01baae3f220f8dc891e20d94d4e07a1d77c9120`.
+The neighboring `/home/raymond/miniconda3/bin/python` convenience symlink
+resolves to the same executable but is not an admissible input; the gate binds
+the regular `python3.11` file directly.
 The system Python 3.10 interpreter is syntax authority only because it lacks
 zstandard. These repeated checks must finish before source generation or WSL
 cohort bootstrap; a local newer-Python parse is not sufficient because Python 3.14
@@ -250,7 +253,7 @@ Only an all-green population is published with
 `renameat2(RENAME_NOREPLACE)`.
 
 ```sh
-MATERIALIZER_PY=/home/raymond/miniconda3/bin/python
+MATERIALIZER_PY=/home/raymond/miniconda3/bin/python3.11
 B1_AUTHORITIES=/home/raymond/q2-multires-isolated/B1-authorities-909b1e46
 "$MATERIALIZER_PY" -B tools/materialize_generated_cohort.py \
   --declaration docs/multires/B2-GENERATED-COHORT-71441-DECLARATION.json \

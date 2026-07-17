@@ -53,7 +53,7 @@ DEFAULT_LITHIUM = Path("/home/raymondj/multires-worktrees/integration/q2-lithium
 DEFAULT_ATTESTATION = Path(
     "/home/raymondj/multires-artifacts/atlas-v1/B1/hook-parity-pullspeed-1700.json"
 )
-PINNED_PYTHON = Path("/home/raymond/miniconda3/bin/python")
+PINNED_PYTHON = Path("/home/raymond/miniconda3/bin/python3.11")
 PINNED_PYTHON_SHA256 = "b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4"
 DEFAULT_JOBS = min(4, os.cpu_count() or 1)
 MAX_JOBS = 8
