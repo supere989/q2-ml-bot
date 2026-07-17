@@ -1306,8 +1306,7 @@ def _validate_compiled_cm_preflight(
             hazard["hazards"], f"compiled-CM hazard evidence {map_id}"
         )
         _require(
-            bool(expected_hazards)
-            and hazard["declared_hazard_count"] == len(expected_hazards)
+            hazard["declared_hazard_count"] == len(expected_hazards)
             and hazard["checked_hazard_count"] == len(expected_hazards)
             and len(evidence_rows) == len(expected_hazards)
             and hazard["failures"] == [] and hazard["passed"] is True,
