@@ -27,6 +27,8 @@ if str(ROOT) not in sys.path:
 
 from harness.atlas_analyzer import (  # noqa: E402
     AnalyzerLimits,
+    CONTENTS_LAVA,
+    CONTENTS_SOLID,
     CROUCHED_MAXS,
     CROUCHED_MINS,
     MASK_PLAYERSOLID,
@@ -47,7 +49,10 @@ from tools.run_generator_cohort import (  # noqa: E402
     sha256_bytes,
     verify_stage_membership,
 )
-from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
+from tools.validate_maps import (  # noqa: E402
+    _parse_brush_geometry,
+    deathmatch_spawn_origins,
+)
 
 
 SCHEMA = "q2-b2-compiled-cm-preflight-v1"
@@ -65,6 +70,15 @@ ESCAPE_STEP_UNITS = 16
 SUPPORT_DEPTH_UNITS = 96
 MILLIUNITS = 1000
 MAX_JOBS = 32
+HAZARD_SAMPLE_FRACTIONS = (
+    (0.5, 0.5, 0.5),
+    (0.25, 0.5, 0.5),
+    (0.75, 0.5, 0.5),
+    (0.5, 0.25, 0.5),
+    (0.5, 0.75, 0.5),
+    (0.5, 0.5, 0.25),
+    (0.5, 0.5, 0.75),
+)
 IMPLEMENTATION_PATHS = (
     "tools/run_compiled_cm_preflight.py",
     "harness/atlas_analyzer.py",
@@ -189,8 +203,7 @@ def _source_spawn_milliunits(map_path: Path) -> list[list[int]]:
     return sorted(values)
 
 
-def _compiled_spawns(bsp_path: Path) -> list[tuple[int, tuple[int, int, int]]]:
-    metadata = parse_ibsp38(bsp_path)
+def _compiled_spawns(metadata: Any) -> list[tuple[int, tuple[int, int, int]]]:
     values = []
     for entity in metadata.entities:
         if entity.classname != "info_player_deathmatch":
@@ -208,6 +221,301 @@ def _compiled_spawns(bsp_path: Path) -> list[tuple[int, tuple[int, int, int]]]:
     if len({origin for _, origin in values}) != len(values):
         raise CompiledCmPreflightError("compiled BSP spawn origins are not unique")
     return values
+
+
+def _strict_json(path: Path, label: str) -> Any:
+    def no_duplicates(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise CompiledCmPreflightError(
+                    f"{label} contains duplicate key {key!r}"
+                )
+            value[key] = item
+        return value
+
+    def invalid_constant(token: str) -> None:
+        raise CompiledCmPreflightError(
+            f"{label} contains non-finite number {token}"
+        )
+
+    try:
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=no_duplicates,
+            parse_constant=invalid_constant,
+        )
+    except CompiledCmPreflightError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise CompiledCmPreflightError(f"cannot read {label}: {error}") from error
+
+
+def _bounds_milliunits(value: Any, label: str) -> list[int]:
+    if not isinstance(value, (list, tuple)) or len(value) != 6:
+        raise CompiledCmPreflightError(f"{label} must contain six bounds")
+    output = []
+    for index, item in enumerate(value):
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise CompiledCmPreflightError(f"{label}[{index}] is not numeric")
+        number = float(item)
+        if not math.isfinite(number):
+            raise CompiledCmPreflightError(f"{label}[{index}] is not finite")
+        scaled = number * MILLIUNITS
+        rounded = round(scaled)
+        if abs(scaled - rounded) > 1e-6:
+            raise CompiledCmPreflightError(
+                f"{label}[{index}] is not representable in milliunits"
+            )
+        output.append(rounded)
+    if any(output[axis] >= output[axis + 3] for axis in range(3)):
+        raise CompiledCmPreflightError(f"{label} is not strictly ordered")
+    return output
+
+
+def _source_hazard_claims(
+    lattice_path: Path, map_path: Path,
+) -> list[dict[str, Any]]:
+    """Reconstruct the canonical early hazard population from exact inputs."""
+
+    lattice = _strict_json(lattice_path, f"{lattice_path.name} lattice")
+    if not isinstance(lattice, Mapping):
+        raise CompiledCmPreflightError("lattice sidecar must be an object")
+    danger = lattice.get("danger")
+    if not isinstance(danger, list):
+        raise CompiledCmPreflightError("lattice danger claims must be a list")
+    lava_bounds = sorted(
+        _bounds_milliunits(item, f"danger {index}")
+        for index, item in enumerate(danger)
+    )
+    if len({tuple(bounds) for bounds in lava_bounds}) != len(lava_bounds):
+        raise CompiledCmPreflightError("lattice danger bounds are duplicated")
+
+    try:
+        source = map_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise CompiledCmPreflightError(
+            f"cannot read {map_path.name} hazard brushes: {error}"
+        ) from error
+    hurt_bounds = sorted(
+        _bounds_milliunits(brush.bounds, f"trigger_hurt brush {index}")
+        for index, brush in enumerate(_parse_brush_geometry(source))
+        if brush.owner_classname == "trigger_hurt"
+    )
+    if len({tuple(bounds) for bounds in hurt_bounds}) != len(hurt_bounds):
+        raise CompiledCmPreflightError("trigger_hurt bounds are duplicated")
+
+    claims = [
+        {
+            "claim_id": f"hazard:lava:{index:04d}",
+            "type": "lava",
+            "bounds_milliunits": bounds,
+        }
+        for index, bounds in enumerate(lava_bounds)
+    ]
+    claims.extend(
+        {
+            "claim_id": f"hazard:hurt:{index:04d}",
+            "type": "hurt",
+            "bounds_milliunits": bounds,
+        }
+        for index, bounds in enumerate(hurt_bounds)
+    )
+    claims.sort(key=lambda claim: claim["claim_id"])
+    return claims
+
+
+def _entity_origin(entity: Any) -> tuple[float, float, float]:
+    raw = entity.value("origin")
+    if not raw:
+        return (0.0, 0.0, 0.0)
+    words = raw.split()
+    if len(words) != 3:
+        raise CompiledCmPreflightError(
+            f"compiled trigger_hurt entity {entity.index} has invalid origin"
+        )
+    try:
+        values = tuple(float(word) for word in words)
+    except ValueError as error:
+        raise CompiledCmPreflightError(
+            f"compiled trigger_hurt entity {entity.index} has invalid origin"
+        ) from error
+    if not all(math.isfinite(value) for value in values):
+        raise CompiledCmPreflightError(
+            f"compiled trigger_hurt entity {entity.index} has non-finite origin"
+        )
+    return values  # type: ignore[return-value]
+
+
+def _compiled_hurt_models(metadata: Any) -> dict[tuple[int, ...], dict[str, Any]]:
+    models: dict[tuple[int, ...], dict[str, Any]] = {}
+    for entity in metadata.entities:
+        if entity.classname != "trigger_hurt":
+            continue
+        model_name = entity.value("model")
+        if not model_name.startswith("*"):
+            raise CompiledCmPreflightError(
+                f"compiled trigger_hurt entity {entity.index} lacks an inline model"
+            )
+        try:
+            model = metadata.models[int(model_name[1:])]
+        except (ValueError, IndexError) as error:
+            raise CompiledCmPreflightError(
+                f"compiled trigger_hurt entity {entity.index} has invalid model"
+            ) from error
+        origin = _entity_origin(entity)
+        bounds = _bounds_milliunits(
+            [
+                *(model.mins[axis] + origin[axis] for axis in range(3)),
+                *(model.maxs[axis] + origin[axis] for axis in range(3)),
+            ],
+            f"compiled trigger_hurt entity {entity.index} bounds",
+        )
+        key = tuple(bounds)
+        if key in models:
+            raise CompiledCmPreflightError(
+                "compiled trigger_hurt model bounds are duplicated"
+            )
+        try:
+            damage = int(entity.value("dmg"), 10)
+            spawnflags = int(entity.value("spawnflags") or "0", 10)
+        except ValueError as error:
+            raise CompiledCmPreflightError(
+                f"compiled trigger_hurt entity {entity.index} has invalid properties"
+            ) from error
+        models[key] = {
+            "entity_index": entity.index,
+            "model": model,
+            "origin": origin,
+            "damage": damage,
+            "spawnflags": spawnflags,
+        }
+    return models
+
+
+def _hazard_sample_points(bounds: Sequence[int]) -> list[list[float]]:
+    return [
+        [
+            (
+                bounds[axis]
+                + (bounds[axis + 3] - bounds[axis]) * fractions[axis]
+            ) / MILLIUNITS
+            for axis in range(3)
+        ]
+        for fractions in HAZARD_SAMPLE_FRACTIONS
+    ]
+
+
+def _hazard_record(
+    oracle: OracleProcess,
+    claim: Mapping[str, Any],
+    compiled_hurt: Mapping[tuple[int, ...], Mapping[str, Any]],
+) -> dict[str, Any]:
+    claim_id = str(claim["claim_id"])
+    hazard_type = str(claim["type"])
+    bounds = [int(value) for value in claim["bounds_milliunits"]]
+    points = _hazard_sample_points(bounds)
+    failures = []
+    requests = []
+    expected_contents = CONTENTS_LAVA
+    if hazard_type == "lava":
+        requests = [
+            {
+                "id": f"{claim_id}:contents:{sample_index}",
+                "op": "point_contents",
+                "point": point,
+            }
+            for sample_index, point in enumerate(points)
+        ]
+    elif hazard_type == "hurt":
+        matched = compiled_hurt.get(tuple(bounds))
+        if matched is None:
+            failures.append("no exact compiled trigger_hurt inline-model bounds")
+        else:
+            if int(matched["damage"]) <= 0:
+                failures.append("compiled trigger_hurt damage is not positive")
+            if int(matched["spawnflags"]) & (1 | 2):
+                failures.append("compiled trigger_hurt is stateful or initially disabled")
+            model = matched["model"]
+            requests = [
+                {
+                    "id": f"{claim_id}:inline-geometry:{sample_index}",
+                    "op": "transformed_point_contents",
+                    "point": point,
+                    "headnode": model.headnode,
+                    "origin": list(matched["origin"]),
+                    "angles": [0.0, 0.0, 0.0],
+                }
+                for sample_index, point in enumerate(points)
+            ]
+        # The inline brush is compiled as solid geometry.  Runtime
+        # trigger_hurt behavior comes from the BSP entity classname/properties;
+        # this check deliberately does not call CONTENTS_SOLID "hurt contents".
+        expected_contents = CONTENTS_SOLID
+    else:
+        failures.append("unsupported hazard type")
+
+    responses = oracle.call(requests) if requests else []
+    for sample_index, response in enumerate(responses):
+        contents = response.get("contents")
+        if (
+            isinstance(contents, bool)
+            or not isinstance(contents, int)
+            or (contents & expected_contents) == 0
+        ):
+            if hazard_type == "lava":
+                failures.append(
+                    f"CM sample {sample_index} has no compiled lava contents"
+                )
+            else:
+                failures.append(
+                    f"CM sample {sample_index} has no compiled inline brush geometry"
+                )
+    return {
+        "claim_id": claim_id,
+        "type": hazard_type,
+        "bounds_milliunits": bounds,
+        "probe_count": len(responses),
+        "failures": failures,
+        "passed": not failures and len(responses) == len(HAZARD_SAMPLE_FRACTIONS),
+    }
+
+
+def _basic_hazard_containment(
+    oracle: OracleProcess,
+    claims: Sequence[Mapping[str, Any]],
+    metadata: Any,
+) -> dict[str, Any]:
+    compiled_hurt = _compiled_hurt_models(metadata)
+    expected_hurt = {
+        tuple(int(value) for value in claim["bounds_milliunits"])
+        for claim in claims
+        if claim["type"] == "hurt"
+    }
+    unexpected_hurt = sorted(set(compiled_hurt) - expected_hurt)
+    failures = []
+    if unexpected_hurt:
+        failures.append("compiled BSP has undeclared trigger_hurt model bounds")
+    hazards = [
+        _hazard_record(oracle, claim, compiled_hurt)
+        for claim in claims
+    ]
+    for hazard in hazards:
+        failures.extend(
+            f"{hazard['claim_id']}: {failure}"
+            for failure in hazard["failures"]
+        )
+    return {
+        "declared_hazard_count": len(claims),
+        "checked_hazard_count": len(hazards),
+        "hazards": hazards,
+        "failures": failures,
+        "passed": (
+            len(hazards) == len(claims)
+            and not failures
+            and all(hazard["passed"] for hazard in hazards)
+        ),
+    }
 
 
 def _trace_clear(value: Mapping[str, Any]) -> bool:
@@ -422,13 +730,23 @@ def _validate_map(
     name = str(row["map"])
     bsp_path = compiled_dir / f"{name}.bsp"
     map_path = compiled_dir / f"{name}.map"
+    lattice_path = compiled_dir / f"{name}.lattice.json"
     try:
         bsp_stat = bsp_path.stat()
         bsp_digest = file_sha256(bsp_path)
+        metadata = parse_ibsp38(bsp_path)
+        compiled_lightdata = {
+            "bytes": metadata.lightmaps.byte_count,
+            "sha256": metadata.lightmaps.sha256,
+            "present": metadata.lightmaps.byte_count > 0,
+        }
         source_origins = _source_spawn_milliunits(map_path)
-        compiled = _compiled_spawns(bsp_path)
+        compiled = _compiled_spawns(metadata)
+        hazard_claims = _source_hazard_claims(lattice_path, map_path)
         compiled_origins = sorted([list(origin) for _, origin in compiled])
         failures = []
+        if not compiled_lightdata["present"]:
+            failures.append("compiled BSP has no lightdata")
         if compiled_origins != source_origins:
             failures.append("compiled BSP spawn origins differ from source map")
         minimum_xy = _minimum_spawn_xy([origin for _, origin in compiled])
@@ -452,15 +770,25 @@ def _validate_map(
                 _spawn_record(oracle, entity_ordinal, origin)
                 for entity_ordinal, origin in compiled
             ]
+            basic_hazards = _basic_hazard_containment(
+                oracle, hazard_claims, metadata
+            )
         for record in spawn_records:
             failures.extend(
                 f"spawn {record['entity_ordinal']}: {message}"
                 for message in record["failures"]
             )
+        failures.extend(
+            f"hazard containment: {message}"
+            for message in basic_hazards["failures"]
+        )
+        if not basic_hazards["passed"]:
+            failures.append("basic hazard containment did not pass")
         return {
             "ordinal": int(row["ordinal"]),
             "map": name,
             "bsp": {"bytes": bsp_stat.st_size, "sha256": bsp_digest},
+            "compiled_lightdata": compiled_lightdata,
             "source_spawn_origins_milliunits": source_origins,
             "compiled_spawn_origins_milliunits": compiled_origins,
             "spawn_origin_sets_match": compiled_origins == source_origins,
@@ -478,6 +806,7 @@ def _validate_map(
                 "samples; not an all-to-all Atlas reachability claim"
             ),
             "all_to_all_reachability": "not-evaluated-by-preflight",
+            "basic_hazard_containment": basic_hazards,
             "failures": failures,
             "passed": not failures,
         }
@@ -654,6 +983,8 @@ def build_report(
                 MIN_SPAWN_XY_SEPARATION_UNITS * MILLIUNITS
             ),
             "bounded_basic_escape": True,
+            "compiled_lightdata_presence": True,
+            "basic_hazard_containment": True,
             "all_to_all_reachability": "deferred-to-full-Atlas-admission",
         },
         "input_stability": {
