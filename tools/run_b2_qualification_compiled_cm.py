@@ -199,7 +199,12 @@ def _compile_report(
 
 
 def _expected_physics_identity(tool_identity: str, bsp_sha256: str) -> str:
-    return _sha256(f"{tool_identity};map={bsp_sha256}".encode("ascii"))
+    return _sha256(
+        (
+            "schema=q2-physics-oracle-v1;kind=cm;tool_identity="
+            f"{tool_identity};map={bsp_sha256}"
+        ).encode("ascii")
+    )
 
 
 def _spawn_invariants(value: object) -> bool:

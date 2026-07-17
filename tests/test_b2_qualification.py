@@ -126,7 +126,7 @@ def _stage(
 def _boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *, physics_identity: str,
+    *, physics_identity: str | None = None,
 ) -> Path:
     compile_report = {"q2tool": {"sha256": _digest("q2tool")}}
     compile_path = _write(tmp_path / "boundary-compile.json", compile_report)
@@ -143,6 +143,12 @@ def _boundary(
     proofs = []
     for case in gate.BOUNDARY_CASES:
         bsp_sha = _digest(case["case_id"])
+        canonical_physics_identity = gate._sha256_bytes(
+            (
+                "schema=q2-physics-oracle-v1;kind=cm;tool_identity="
+                f"{_digest('cm-tool')};map={bsp_sha}"
+            ).encode("ascii")
+        )
         proofs.append({
             "case_id": case["case_id"],
             "authored_floor_to_ceiling_units": case["ceiling_units"],
@@ -153,7 +159,10 @@ def _boundary(
             "bsp": {"sha256": bsp_sha},
             "cm_identity": {
                 "tool_identity": _digest("cm-tool"),
-                "physics_identity": physics_identity,
+                "physics_identity": (
+                    canonical_physics_identity
+                    if physics_identity is None else physics_identity
+                ),
                 "map_sha256": bsp_sha,
             },
         })
@@ -237,9 +246,7 @@ def _inputs(
     plan = tmp_path / "plan.md"
     design.write_text("amended design\n")
     plan.write_text("amended plan\n")
-    boundary = _boundary(
-        tmp_path, monkeypatch, physics_identity=_digest("cm-physics")
-    )
+    boundary = _boundary(tmp_path, monkeypatch)
     authority = SimpleNamespace(
         cm_executable_sha256=_digest("cm-executable"),
         oracle_tool_identity=_digest("cm-tool"),

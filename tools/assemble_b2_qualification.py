@@ -467,8 +467,16 @@ def _validate_boundary_proof(
         _require(row.get("linked_standing_clear") is True, f"{case_id} linked spawn is not clear")
         identity = _mapping(row.get("cm_identity"), f"{case_id} CM identity")
         _require(identity.get("tool_identity") == collision_identity["tool_identity"], f"{case_id} CM tool identity differs from fresh B1")
-        _require(identity.get("physics_identity") == collision_identity["physics_identity"], f"{case_id} CM physics identity differs from fresh B1")
-        _require(identity.get("map_sha256") == _mapping(row.get("bsp"), f"{case_id} BSP").get("sha256"), f"{case_id} CM/BSP binding differs")
+        bsp_sha256 = _mapping(row.get("bsp"), f"{case_id} BSP").get("sha256")
+        _digest(bsp_sha256, f"{case_id} BSP digest")
+        expected_physics_identity = _sha256_bytes(
+            (
+                "schema=q2-physics-oracle-v1;kind=cm;tool_identity="
+                f"{collision_identity['tool_identity']};map={bsp_sha256}"
+            ).encode("ascii")
+        )
+        _require(identity.get("physics_identity") == expected_physics_identity, f"{case_id} CM physics identity is not canonical for its BSP")
+        _require(identity.get("map_sha256") == bsp_sha256, f"{case_id} CM/BSP binding differs")
     _require(seen == set(expected), "compiled-boundary proof membership differs")
     digest = _sha256_bytes(raw)
     _require(digest not in retired["digests"], "retired compiled-boundary proof reused")
