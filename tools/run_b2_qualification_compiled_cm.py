@@ -574,6 +574,211 @@ def run_qualification_compiled_cm(
     return report
 
 
+def validate_published_qualification_compiled_cm(
+    *,
+    declaration_path: Path,
+    compile_report_path: Path,
+    compiled_root: Path,
+    cm_oracle: Path,
+    evidence_root: Path,
+    report_path: Path,
+    repo_root: Path = ROOT,
+    implementation_provider: Callable[[Path], dict[str, Any]] = repository_binding,
+    gate_loader: Callable[[Path], Any] = load_b1_authority_gate,
+    preflight_implementation_provider: Callable[[Path], dict[str, Any]] = _implementation_identity,
+) -> tuple[dict[str, Any], bytes, str, set[str]]:
+    """Replay a published compiled-CM stage from its raw evidence.
+
+    This is the consumer-side trust boundary.  It deliberately does not trust
+    the stage report's booleans or opaque evidence digests: every evidence
+    document is canonical-loaded, rebound to the current compiled population
+    and B1 authority, and its criteria/result are independently recomputed.
+    """
+
+    paths = {
+        name: _qualification_path(path, name)
+        for name, path in {
+            "declaration": declaration_path,
+            "compile_report": compile_report_path,
+            "compiled_root": compiled_root,
+            "cm_oracle": cm_oracle,
+            "evidence_root": evidence_root,
+            "report": report_path,
+        }.items()
+    }
+    try:
+        implementation = implementation_provider(repo_root)
+        retired = _retired_identities(repo_root)
+        declaration, declaration_sha256 = _validate_declaration(
+            paths["declaration"], implementation, retired
+        )
+        compile_report, compile_raw, compile_sha256 = _compile_report(
+            paths["compile_report"], declaration, declaration_sha256,
+            implementation, retired,
+        )
+        compiled_records = _flat_records(
+            declaration, paths["compiled_root"], COMPILED_SUFFIXES
+        )
+        report, report_raw = _load_json(paths["report"])
+        _validate_stage_report(
+            paths["report"], STAGE, declaration, declaration_sha256,
+            implementation, compile_sha256, retired,
+        )
+        gate = gate_loader(repo_root)
+        preflight_implementation = preflight_implementation_provider(repo_root)
+        cm_record = _file_record(paths["cm_oracle"], executable=True)
+        gate_path = repo_root / "docs/multires/B1-GATE.json"
+        gate_record = _file_record(gate_path)
+    except (
+        B1AuthorityError,
+        B2QualificationError,
+        QualificationCompileError,
+        OSError,
+    ) as error:
+        raise QualificationCompiledCmError(
+            f"published compiled-CM stage rejected: {error}"
+        ) from error
+    _require(
+        cm_record["sha256"] == gate.cm_executable_sha256,
+        "published compiled-CM oracle differs from fresh B1 authority",
+    )
+    expected_names = {
+        f"{int(row['ordinal']):03d}-{row['map']}.evidence.json"
+        for row in declaration["maps"]
+    }
+    _require(
+        paths["evidence_root"].is_dir()
+        and not paths["evidence_root"].is_symlink(),
+        "published compiled-CM evidence root is absent or a symlink",
+    )
+    actual_names: set[str] = set()
+    evidence_raw: dict[str, bytes] = {}
+    for path in paths["evidence_root"].iterdir():
+        _require(
+            path.is_file() and not path.is_symlink(),
+            f"compiled-CM evidence contains non-regular entry: {path.name}",
+        )
+        actual_names.add(path.name)
+    _require(
+        actual_names == expected_names,
+        "compiled-CM evidence membership differs; "
+        f"missing={sorted(expected_names - actual_names)}, "
+        f"extra={sorted(actual_names - expected_names)}",
+    )
+
+    b1_identity = {
+        "gate": gate_record,
+        "cm_executable_sha256": gate.cm_executable_sha256,
+        "cm_tool_identity": gate.oracle_tool_identity,
+        "cm_source_closure_sha256": gate.oracle_source_closure_sha256,
+    }
+    expected_evidence_keys = {
+        "schema", "qualification_id", "ordinal", "map",
+        "compile_report_sha256", "compile_map_evidence_sha256",
+        "compiled_files", "b1_authority", "preflight_implementation",
+        "real_preflight_result", "criteria", "failures", "passed",
+    }
+    passed: set[str] = set()
+    for declared, compile_row, report_row in zip(
+        declaration["maps"], compile_report["maps"], report["maps"]
+    ):
+        map_id = str(declared["map"])
+        name = f"{int(declared['ordinal']):03d}-{map_id}.evidence.json"
+        try:
+            evidence, raw = _load_json(paths["evidence_root"] / name)
+        except QualificationCompileError as error:
+            raise QualificationCompiledCmError(
+                f"compiled-CM evidence rejected for {map_id}: {error}"
+            ) from error
+        evidence_raw[name] = raw
+        _require(
+            set(evidence) == expected_evidence_keys,
+            f"compiled-CM evidence keys differ for {map_id}",
+        )
+        result = evidence["real_preflight_result"]
+        _require(
+            isinstance(result, Mapping),
+            f"compiled-CM real result is not an object for {map_id}",
+        )
+        criteria = _map_criteria(
+            declared, compile_row, compiled_records[map_id], result,
+            cm_record, gate,
+        )
+        failures = list(result.get("failures", [])) if isinstance(
+            result.get("failures"), list
+        ) else ["real compiled-CM preflight failures are malformed"]
+        if not all(criteria.values()) and not failures:
+            failures.append(
+                "real compiled-CM result is incomplete or internally inconsistent"
+            )
+        failures = sorted(set(
+            str(failure) for failure in failures if str(failure)
+        ))
+        is_passed = all(criteria.values()) and not failures
+        expected_evidence = {
+            "schema": MAP_EVIDENCE_SCHEMA,
+            "qualification_id": declaration["qualification_id"],
+            "ordinal": declared["ordinal"],
+            "map": map_id,
+            "compile_report_sha256": compile_sha256,
+            "compile_map_evidence_sha256": compile_row["evidence_sha256"],
+            "compiled_files": compiled_records[map_id],
+            "b1_authority": b1_identity,
+            "preflight_implementation": preflight_implementation,
+            "real_preflight_result": dict(result),
+            "criteria": criteria,
+            "failures": failures,
+            "passed": is_passed,
+        }
+        _require(
+            raw == canonical_bytes(expected_evidence),
+            f"compiled-CM evidence replay differs for {map_id}",
+        )
+        expected_row = {
+            "ordinal": declared["ordinal"],
+            "map": map_id,
+            "criteria": criteria,
+            "evidence_sha256": _sha256(raw),
+            "failures": failures,
+            "passed": is_passed,
+        }
+        _require(
+            report_row == expected_row,
+            f"compiled-CM report row differs from raw evidence for {map_id}",
+        )
+        if is_passed:
+            passed.add(map_id)
+    _require(
+        report["pass_count"] == len(passed),
+        "compiled-CM report pass count differs from raw evidence",
+    )
+    try:
+        stable = (
+            paths["declaration"].read_bytes() == canonical_bytes(declaration)
+            and paths["compile_report"].read_bytes() == compile_raw
+            and paths["report"].read_bytes() == report_raw
+            and {
+                name: (paths["evidence_root"] / name).read_bytes()
+                for name in expected_names
+            } == evidence_raw
+            and _flat_records(
+                declaration, paths["compiled_root"], COMPILED_SUFFIXES
+            ) == compiled_records
+            and _file_record(paths["cm_oracle"], executable=True) == cm_record
+            and _file_record(gate_path) == gate_record
+            and gate_loader(repo_root) == gate
+            and implementation_provider(repo_root) == implementation
+            and preflight_implementation_provider(repo_root)
+            == preflight_implementation
+        )
+    except Exception as error:
+        raise QualificationCompiledCmError(
+            f"compiled-CM replay stability check failed: {error}"
+        ) from error
+    _require(stable, "compiled-CM replay inputs changed during validation")
+    return report, report_raw, _sha256(report_raw), passed
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--declaration", type=Path, required=True)

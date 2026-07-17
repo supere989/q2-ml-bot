@@ -20,6 +20,8 @@ from tools.run_b2_qualification_postcompile import (
     CLAIMS_SUFFIXES,
     MATERIALIZED_SUFFIXES,
     QualificationPostcompileError,
+    ROOT,
+    _validate_pinned_python_runtime,
     claims_qualification,
     materialize_qualification,
     stage_evidence_sha256,
@@ -121,9 +123,14 @@ def _fixture(tmp_path: Path, *, prior_failed: set[str] | None = None) -> dict:
     declaration = _declaration()
     declaration_path = tmp_path / "declaration.json"
     declaration_path.write_bytes(canonical_bytes(declaration))
+    compile_path = tmp_path / "compile-report.json"
+    compile_path.write_bytes(canonical_bytes({"fixture": "compile"}))
     prior = _prior_report(declaration, "compiled-cm-preflight", prior_failed)
+    prior["input_report_sha256"] = _sha(compile_path.read_bytes())
     prior_path = tmp_path / "preflight-report.json"
     prior_path.write_bytes(canonical_bytes(prior))
+    evidence = tmp_path / "compiled-cm-evidence"
+    evidence.mkdir()
     compiled = tmp_path / "compiled"
     compiled.mkdir()
     for declared in declaration["maps"]:
@@ -140,6 +147,9 @@ def _fixture(tmp_path: Path, *, prior_failed: set[str] | None = None) -> dict:
         "declaration": declaration,
         "declaration_path": declaration_path,
         "prior": prior_path,
+        "compile_report": compile_path,
+        "prior_evidence": evidence,
+        "python": tmp_path / "python",
         "compiled": compiled,
         "materialize_staging": tmp_path / "materialize-staging",
         "materialized": tmp_path / "materialized",
@@ -173,10 +183,28 @@ def _materializer(**kwargs) -> None:
     )
 
 
+def _compiled_cm_validator(**kwargs):
+    declaration = json.loads(Path(kwargs["declaration_path"]).read_text())
+    report, raw = json.loads(Path(kwargs["report_path"]).read_text()), Path(
+        kwargs["report_path"]
+    ).read_bytes()
+    assert report["input_report_sha256"] == _sha(
+        Path(kwargs["compile_report_path"]).read_bytes()
+    )
+    passed = {row["map"] for row in report["maps"] if row["passed"]}
+    return report, raw, _sha(raw), passed
+
+
+def _runtime(_python: Path, _root: Path) -> dict:
+    return {"schema": "fixture-pinned-runtime-v1"}
+
+
 def _run_materialize(paths: dict, *, materializer=_materializer) -> dict:
     return materialize_qualification(
         declaration_path=paths["declaration_path"],
         prior_report_path=paths["prior"],
+        prior_evidence_root=paths["prior_evidence"],
+        compile_report_path=paths["compile_report"],
         compiled_root=paths["compiled"],
         staging_root=paths["materialize_staging"],
         materialized_root=paths["materialized"],
@@ -187,9 +215,12 @@ def _run_materialize(paths: dict, *, materializer=_materializer) -> dict:
         hook_oracle=paths["hook"],
         fall_oracle=paths["fall"],
         hook_attestation=paths["hook_attestation"],
+        python_runtime=paths["python"],
         implementation_provider=lambda _root: dict(IMPLEMENTATION),
         authority_provider=_authorities,
         map_materializer=materializer,
+        compiled_cm_validator=_compiled_cm_validator,
+        runtime_provider=_runtime,
     )
 
 
@@ -201,6 +232,7 @@ def _run_claims(paths: dict, *, builder=_claim_builder) -> dict:
     return claims_qualification(
         declaration_path=paths["declaration_path"],
         prior_report_path=paths["materialize_report"],
+        upstream_report_path=paths["prior"],
         materialized_root=paths["materialized"],
         staging_root=paths["claims_staging"],
         claims_root=paths["claims"],
@@ -249,16 +281,16 @@ def test_prior_failure_propagates_without_breaking_exact_membership(tmp_path: Pa
     paths = _fixture(tmp_path, prior_failed=rejected)
     materialized = _run_materialize(paths)
     assert materialized["pass_count"] == 27
-    assert len(list(paths["materialized"].iterdir())) == 196
+    assert len(list(paths["materialized"].iterdir())) == 27 * len(MATERIALIZED_SUFFIXES)
     claims = _run_claims(paths)
     assert claims["pass_count"] == 27
     rejected_row = next(row for row in claims["maps"] if row["map"] in rejected)
     assert rejected_row["criteria"]["prior-stage-passed"] is False
     assert rejected_row["passed"] is False
-    assert len(list(paths["claims"].iterdir())) == 224
+    assert len(list(paths["claims"].iterdir())) == 27 * len(CLAIMS_SUFFIXES)
 
 
-def test_one_materializer_failure_never_publishes_partial_root(tmp_path: Path) -> None:
+def test_one_materializer_failure_publishes_honest_sparse_root(tmp_path: Path) -> None:
     paths = _fixture(tmp_path)
     failed = paths["declaration"]["maps"][3]["map"]
 
@@ -267,15 +299,16 @@ def test_one_materializer_failure_never_publishes_partial_root(tmp_path: Path) -
             raise RuntimeError("fixture materializer failure")
         _materializer(**kwargs)
 
-    with pytest.raises(QualificationPostcompileError, match=failed):
-        _run_materialize(paths, materializer=failing)
-    assert not paths["materialized"].exists()
-    report = json.loads(paths["materialize_report"].read_text())
-    assert report["pass_count"] == 0
-    assert report["failures"]
+    report = _run_materialize(paths, materializer=failing)
+    assert report["pass_count"] == 27
+    assert report["failures"] == []
+    assert len(list(paths["materialized"].iterdir())) == 27 * len(MATERIALIZED_SUFFIXES)
+    row = next(item for item in report["maps"] if item["map"] == failed)
+    assert row["passed"] is False
+    assert "fixture materializer failure" in row["failures"][0]
 
 
-def test_one_claim_failure_never_publishes_partial_root(tmp_path: Path) -> None:
+def test_one_claim_failure_publishes_honest_sparse_root(tmp_path: Path) -> None:
     paths = _fixture(tmp_path)
     _run_materialize(paths)
     failed = paths["declaration"]["maps"][7]["map"]
@@ -285,11 +318,10 @@ def test_one_claim_failure_never_publishes_partial_root(tmp_path: Path) -> None:
             raise ValueError("fixture claims failure")
         return _claim_builder(path)
 
-    with pytest.raises(QualificationPostcompileError, match=failed):
-        _run_claims(paths, builder=failing)
-    assert not paths["claims"].exists()
-    report = json.loads(paths["claims_report"].read_text())
-    assert report["pass_count"] == 0
+    report = _run_claims(paths, builder=failing)
+    assert report["pass_count"] == 27
+    assert report["failures"] == []
+    assert len(list(paths["claims"].iterdir())) == 27 * len(CLAIMS_SUFFIXES)
 
 
 def test_authority_drift_fails_materialization_before_publication(tmp_path: Path) -> None:
@@ -307,14 +339,20 @@ def test_authority_drift_fails_materialization_before_publication(tmp_path: Path
     with pytest.raises(QualificationPostcompileError, match="input stability"):
         materialize_qualification(
             declaration_path=paths["declaration_path"],
-            prior_report_path=paths["prior"], compiled_root=paths["compiled"],
+            prior_report_path=paths["prior"],
+            prior_evidence_root=paths["prior_evidence"],
+            compile_report_path=paths["compile_report"],
+            compiled_root=paths["compiled"],
             staging_root=paths["materialize_staging"],
             materialized_root=paths["materialized"], log_root=paths["logs"],
             report_path=paths["materialize_report"], cm_oracle=paths["cm"],
             pmove_oracle=paths["pmove"], hook_oracle=paths["hook"],
             fall_oracle=paths["fall"], hook_attestation=paths["hook_attestation"],
+            python_runtime=paths["python"],
             implementation_provider=lambda _root: dict(IMPLEMENTATION),
             authority_provider=drifting, map_materializer=_materializer,
+            compiled_cm_validator=_compiled_cm_validator,
+            runtime_provider=_runtime,
         )
     assert not paths["materialized"].exists()
 
@@ -329,3 +367,45 @@ def test_reports_and_publications_are_exclusive(tmp_path: Path) -> None:
     assert paths["claims_report"].read_bytes() == canonical_bytes(claims)
     with pytest.raises(QualificationPostcompileError, match="output must be fresh"):
         _run_claims(paths)
+
+
+def test_twenty_of_twenty_eight_propagates_through_sparse_claims(
+    tmp_path: Path,
+) -> None:
+    paths = _fixture(tmp_path)
+    rejected = {
+        row["map"] for row in paths["declaration"]["maps"][:8]
+    }
+
+    def selective(**kwargs) -> None:
+        if kwargs["map_id"] in rejected:
+            raise RuntimeError("semantic materialization rejection")
+        _materializer(**kwargs)
+
+    materialized = _run_materialize(paths, materializer=selective)
+    claims = _run_claims(paths)
+    assert materialized["pass_count"] == claims["pass_count"] == 20
+    assert len(list(paths["materialized"].iterdir())) == 20 * len(MATERIALIZED_SUFFIXES)
+    assert len(list(paths["claims"].iterdir())) == 20 * len(CLAIMS_SUFFIXES)
+
+
+def test_claims_reject_forged_raw_upstream_chain_before_staging(
+    tmp_path: Path,
+) -> None:
+    paths = _fixture(tmp_path)
+    _run_materialize(paths)
+    forged = json.loads(paths["materialize_report"].read_text())
+    forged["input_report_sha256"] = "00" * 32
+    paths["materialize_report"].write_bytes(canonical_bytes(forged))
+    with pytest.raises(QualificationPostcompileError, match="hash"):
+        _run_claims(paths)
+    assert not paths["claims_staging"].exists()
+    assert not paths["claims"].exists()
+
+
+def test_wrong_python_path_is_rejected_before_any_preflight(tmp_path: Path) -> None:
+    wrong = tmp_path / "python"
+    wrong.write_bytes(b"not the pinned runtime\n")
+    wrong.chmod(0o755)
+    with pytest.raises(QualificationPostcompileError, match="pinned runtime"):
+        _validate_pinned_python_runtime(wrong, ROOT)

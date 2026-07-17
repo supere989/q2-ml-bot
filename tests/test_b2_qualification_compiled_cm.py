@@ -17,6 +17,7 @@ from tools.run_b2_qualification_compiled_cm import (
     QualificationCompiledCmError,
     _expected_physics_identity,
     run_qualification_compiled_cm,
+    validate_published_qualification_compiled_cm,
 )
 from tools.run_compiled_cm_preflight import (
     ESCAPE_DISTANCE_UNITS,
@@ -269,6 +270,21 @@ def _run(
     )
 
 
+def _replay(paths: dict[str, object]):
+    return validate_published_qualification_compiled_cm(
+        declaration_path=paths["declaration_path"],
+        compile_report_path=paths["compile_path"],
+        compiled_root=paths["compiled"], cm_oracle=paths["oracle"],
+        evidence_root=paths["evidence"], report_path=paths["report"],
+        implementation_provider=lambda _root: dict(IMPLEMENTATION),
+        gate_loader=lambda _root: paths["gate"],
+        preflight_implementation_provider=lambda _root: {
+            "schema": "fixture-preflight-implementation-v1",
+            "source_closure_sha256": "fe" * 32,
+        },
+    )
+
+
 def test_emits_all_real_map_results_and_preserves_retryable_failures(
     tmp_path: Path,
 ) -> None:
@@ -359,3 +375,35 @@ def test_partial_or_final_compile_population_is_not_silently_wrapped(
         _run(paths)
     assert not paths["evidence"].exists()
     assert not paths["report"].exists()
+
+
+def test_consumer_replays_every_raw_evidence_document(tmp_path: Path) -> None:
+    paths = _fixture(tmp_path)
+    _run(paths)
+    report, raw, digest, passed = _replay(paths)
+    assert report["pass_count"] == len(passed) == 28
+    assert digest == _sha256(raw)
+
+
+@pytest.mark.parametrize("mutation", ("evidence", "extra", "compiled", "compile"))
+def test_consumer_rejects_forged_or_drifted_predecessor(
+    tmp_path: Path, mutation: str,
+) -> None:
+    paths = _fixture(tmp_path)
+    _run(paths)
+    if mutation == "evidence":
+        target = sorted(paths["evidence"].iterdir())[4]
+        value = json.loads(target.read_text())
+        value["passed"] = False
+        target.write_bytes(canonical_bytes(value))
+    elif mutation == "extra":
+        (paths["evidence"] / "extra.evidence.json").write_bytes(b"{}\n")
+    elif mutation == "compiled":
+        map_id = paths["declaration"]["maps"][6]["map"]
+        (paths["compiled"] / f"{map_id}.bsp").write_bytes(b"drift\n")
+    else:
+        value = json.loads(paths["compile_path"].read_text())
+        value["pass_count"] = 27
+        paths["compile_path"].write_bytes(canonical_bytes(value))
+    with pytest.raises(QualificationCompiledCmError):
+        _replay(paths)

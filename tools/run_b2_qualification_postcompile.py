@@ -49,6 +49,10 @@ from tools.run_b2_qualification_compile import (  # noqa: E402
     _validate_declaration,
     _validate_implementation,
 )
+from tools.run_b2_qualification_compiled_cm import (  # noqa: E402
+    QualificationCompiledCmError,
+    validate_published_qualification_compiled_cm,
+)
 from tools.run_generator_cohort import canonical_bytes  # noqa: E402
 
 
@@ -57,6 +61,13 @@ CLAIMS_SUFFIXES = (*MATERIALIZED_SUFFIXES, ".generator-claims.json")
 MATERIALIZED_FILE_COUNT = 196
 CLAIMS_FILE_COUNT = 224
 DEFAULT_TIMEOUT_SECONDS = 900
+PINNED_PYTHON = Path("/home/raymond/miniconda3/bin/python")
+PINNED_PYTHON_SHA256 = "b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4"
+PINNED_PYTHON_VERSION = [3, 11, 4]
+PINNED_ZSTANDARD_VERSION = "0.19.0"
+PINNED_ZSTANDARD_INIT_SHA256 = "8a65cd4ab44112e1433a097daee7ce8600047995f3289f13d758bb001c06a553"
+PINNED_ZSTANDARD_BACKEND_SHA256 = "40ece7fa91097e53ee4785cef01baae3f220f8dc891e20d94d4e07a1d77c9120"
+RUNTIME_PREFLIGHT_TIMEOUT_SECONDS = 300
 
 
 class QualificationPostcompileError(RuntimeError):
@@ -111,6 +122,51 @@ def _fresh_outputs(inputs: Sequence[Path], outputs: Sequence[Path]) -> None:
         for right in all_paths[index + 1:]
     ):
         raise QualificationPostcompileError("input/output paths must be disjoint")
+
+
+def _sparse_records(
+    declaration: Mapping[str, Any], root: Path, suffixes: Sequence[str],
+    eligible: set[str],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    declared = {str(row["map"]) for row in declaration["maps"]}
+    if not eligible.issubset(declared):
+        raise QualificationPostcompileError("sparse membership contains undeclared maps")
+    expected = {f"{map_id}{suffix}" for map_id in eligible for suffix in suffixes}
+    if root.is_symlink() or not root.is_dir():
+        raise QualificationPostcompileError(
+            f"sparse stage root is absent or a symlink: {root}"
+        )
+    actual: set[str] = set()
+    for path in root.iterdir():
+        if path.is_symlink() or not path.is_file():
+            raise QualificationPostcompileError(
+                f"sparse stage contains non-regular entry: {path.name}"
+            )
+        actual.add(path.name)
+    if actual != expected:
+        raise QualificationPostcompileError(
+            "sparse stage membership differs; "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+    return {
+        map_id: {
+            suffix: _file_record(root / f"{map_id}{suffix}")
+            for suffix in suffixes
+        }
+        for map_id in sorted(eligible)
+    }
+
+
+def _selected_records(
+    root: Path, suffixes: Sequence[str], eligible: set[str],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    return {
+        map_id: {
+            suffix: _file_record(root / f"{map_id}{suffix}")
+            for suffix in suffixes
+        }
+        for map_id in sorted(eligible)
+    }
 
 
 def _validate_prior_stage(
@@ -188,6 +244,68 @@ def _validate_prior_stage(
     return report, raw, _sha256(raw), passed
 
 
+def _validate_materialization_prior(
+    *, report_path: Path, upstream_report_path: Path,
+    declaration: Mapping[str, Any], declaration_sha256: str,
+    implementation: Mapping[str, Any],
+    materialized_records: Mapping[str, Mapping[str, Mapping[str, Any]]],
+) -> tuple[dict[str, Any], bytes, str, set[str]]:
+    upstream, upstream_raw, _upstream_sha, upstream_passed = _validate_prior_stage(
+        upstream_report_path, "compiled-cm-preflight", declaration,
+        declaration_sha256, implementation,
+    )
+    report, raw, digest, passed = _validate_prior_stage(
+        report_path, "materialization", declaration, declaration_sha256,
+        implementation,
+    )
+    if report["input_report_sha256"] != _sha256(upstream_raw):
+        raise QualificationPostcompileError(
+            "materialization input report hash does not bind supplied compiled-CM report"
+        )
+    expected_criteria = {
+        "prior-stage-passed", "real-authority-materialization",
+        "materialized-membership", "input-stability", "pinned-python-runtime",
+    }
+    for declared, upstream_row, row in zip(
+        declaration["maps"], upstream["maps"], report["maps"]
+    ):
+        map_id = str(declared["map"])
+        prior_passed = map_id in upstream_passed
+        has_artifacts = map_id in materialized_records
+        if (
+            set(row["criteria"]) != expected_criteria
+            or row["criteria"]["prior-stage-passed"] is not prior_passed
+            or upstream_row["passed"] is not prior_passed
+            or (map_id in passed) is not has_artifacts
+        ):
+            raise QualificationPostcompileError(
+                f"materialization eligibility differs for {map_id}"
+            )
+        if has_artifacts:
+            expected_digest = stage_evidence_sha256(
+                map_id, prior_passed, materialized_records[map_id]
+            )
+            if (
+                not prior_passed
+                or row["evidence_sha256"] != expected_digest
+                or not all(row["criteria"].values())
+                or row["failures"] != []
+                or row["passed"] is not True
+            ):
+                raise QualificationPostcompileError(
+                    f"materialization raw evidence differs for {map_id}"
+                )
+        elif row["passed"] is not False or not row["failures"]:
+            raise QualificationPostcompileError(
+                f"materialization failure evidence differs for {map_id}"
+            )
+    if report["pass_count"] != len(materialized_records):
+        raise QualificationPostcompileError(
+            "materialization pass count differs from sparse artifact root"
+        )
+    return report, raw, digest, passed
+
+
 def _authority_records(
     *, repo_root: Path, cm_oracle: Path, pmove_oracle: Path, hook_oracle: Path,
     fall_oracle: Path, hook_attestation: Path,
@@ -222,17 +340,133 @@ def _authority_records(
     return records
 
 
+def _run_runtime_probe(command: Sequence[str], *, cwd: Path) -> dict[str, Any]:
+    try:
+        completed = _run_process_group(
+            list(command), cwd=cwd, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False,
+            timeout=RUNTIME_PREFLIGHT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise QualificationPostcompileError(
+            f"pinned runtime preflight timed out: {' '.join(command)}"
+        ) from error
+    record = {
+        "command": list(command),
+        "returncode": completed.returncode,
+        "stdout_sha256": _sha256(completed.stdout),
+        "stderr_sha256": _sha256(completed.stderr),
+    }
+    if completed.returncode != 0:
+        raise QualificationPostcompileError(
+            f"pinned runtime preflight exited {completed.returncode}: "
+            f"{' '.join(command)}"
+        )
+    return {**record, "stdout": completed.stdout}
+
+
+def _validate_pinned_python_runtime(
+    python_runtime: Path, repo_root: Path,
+) -> dict[str, Any]:
+    runtime = python_runtime.expanduser().absolute()
+    if (
+        runtime != PINNED_PYTHON
+        or runtime.is_symlink()
+        or runtime.resolve(strict=False) != PINNED_PYTHON
+    ):
+        raise QualificationPostcompileError(
+            f"materialization requires pinned runtime {PINNED_PYTHON}"
+        )
+    executable = _file_record(runtime)
+    if not os.access(runtime, os.X_OK):
+        raise QualificationPostcompileError("pinned Python is not executable")
+    if executable["sha256"] != PINNED_PYTHON_SHA256:
+        raise QualificationPostcompileError("pinned Python executable digest differs")
+    identity_script = (
+        "import json,pathlib,sys,zstandard,zstandard.backend_c as backend;"
+        "print(json.dumps({'python_version':list(sys.version_info[:3]),"
+        "'zstandard_version':zstandard.__version__,"
+        "'zstandard_init':str(pathlib.Path(zstandard.__file__).resolve()),"
+        "'zstandard_backend':str(pathlib.Path(backend.__file__).resolve())},"
+        "sort_keys=True,separators=(',',':')))"
+    )
+    identity_probe = _run_runtime_probe(
+        [str(runtime), "-B", "-c", identity_script], cwd=repo_root
+    )
+    try:
+        identity = json.loads(identity_probe.pop("stdout"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise QualificationPostcompileError(
+            f"pinned runtime identity output is invalid: {error}"
+        ) from error
+    if (
+        not isinstance(identity, Mapping)
+        or set(identity) != {
+            "python_version", "zstandard_version", "zstandard_init",
+            "zstandard_backend",
+        }
+        or identity["python_version"] != PINNED_PYTHON_VERSION
+        or identity["zstandard_version"] != PINNED_ZSTANDARD_VERSION
+    ):
+        raise QualificationPostcompileError("pinned runtime identity differs")
+    init_record = _file_record(Path(identity["zstandard_init"]))
+    backend_record = _file_record(Path(identity["zstandard_backend"]))
+    if (
+        init_record["sha256"] != PINNED_ZSTANDARD_INIT_SHA256
+        or backend_record["sha256"] != PINNED_ZSTANDARD_BACKEND_SHA256
+    ):
+        raise QualificationPostcompileError("pinned zstandard module digest differs")
+    syntax = _run_runtime_probe(
+        [
+            str(runtime), "-B", str(repo_root / "tools/check_python_syntax_floor.py"),
+            "--root", str(repo_root),
+        ],
+        cwd=repo_root,
+    )
+    help_probe = _run_runtime_probe(
+        [
+            str(runtime), "-B", str(repo_root / "tools/materialize_hook_claims.py"),
+            "--help",
+        ],
+        cwd=repo_root,
+    )
+    import_probe = _run_runtime_probe(
+        [
+            str(runtime), "-B", "-c",
+            "import harness.atlas_analyzer; import tools.materialize_hook_claims",
+        ],
+        cwd=repo_root,
+    )
+    for probe in (syntax, help_probe, import_probe):
+        probe.pop("stdout")
+    return {
+        "python": executable,
+        "python_path": str(runtime),
+        "python_version": identity["python_version"],
+        "zstandard_version": identity["zstandard_version"],
+        "zstandard_init": {"path": identity["zstandard_init"], **init_record},
+        "zstandard_backend": {
+            "path": identity["zstandard_backend"], **backend_record,
+        },
+        "identity_probe": identity_probe,
+        "syntax_preflight": syntax,
+        "materializer_help_preflight": help_probe,
+        "materializer_import_preflight": import_probe,
+    }
+
+
 def _real_materialize_map(
     *, map_id: str, stage_root: Path, log_root: Path,
     compiled_files: Mapping[str, Mapping[str, Any]], authorities: Mapping[str, Any],
     cm_oracle: Path, pmove_oracle: Path, hook_oracle: Path, fall_oracle: Path,
-    hook_attestation: Path, timeout_seconds: int,
+    hook_attestation: Path, python_runtime: Path, timeout_seconds: int,
 ) -> None:
     materializer = ROOT / "tools/materialize_hook_claims.py"
     attestation = stage_root / f"{map_id}.hook-materialization.json"
     runtime_sidecar = stage_root / f"{map_id}.json"
     command = [
-        sys.executable, str(materializer), "--bsp", str(stage_root / f"{map_id}.bsp"),
+        str(python_runtime), "-B", str(materializer), "--bsp",
+        str(stage_root / f"{map_id}.bsp"),
         "--meta", str(stage_root / f"{map_id}.meta.json"),
         "--runtime-sidecar", str(runtime_sidecar), "--output-attestation",
         str(attestation), "--cm-oracle", str(cm_oracle), "--pmove-oracle",
@@ -281,7 +515,7 @@ def _stage_report(
     rows = []
     for declared in declaration["maps"]:
         map_id = str(declared["map"])
-        files = {} if records is None else records[map_id]
+        files = {} if records is None else records.get(map_id, {})
         prior = map_id in prior_passed
         criteria = {
             "prior-stage-passed": prior,
@@ -295,13 +529,21 @@ def _stage_report(
             ): records is not None,
             "input-stability": infrastructure.get("input-stability") is True,
         }
+        if stage == "materialization":
+            criteria["pinned-python-runtime"] = (
+                infrastructure.get("pinned-python-runtime") is True
+            )
         failures = list(map_failures.get(map_id, ()))
         if not prior:
             failures.append("prior stage did not pass this map")
         if records is None:
             failures.append(f"complete {stage} population was not published")
-        evidence = stage_evidence_sha256(map_id, prior, files) if records else _sha256(
-            canonical_bytes({"map": map_id, "stage": stage, "failures": failures})
+        evidence = (
+            stage_evidence_sha256(map_id, prior, files)
+            if map_id in (records or {})
+            else _sha256(canonical_bytes({
+                "map": map_id, "stage": stage, "failures": failures,
+            }))
         )
         passed = all(criteria.values()) and not failures
         rows.append({
@@ -340,24 +582,31 @@ def _publish_stage_and_report(
 
 
 def materialize_qualification(
-    *, declaration_path: Path, prior_report_path: Path, compiled_root: Path,
+    *, declaration_path: Path, prior_report_path: Path,
+    prior_evidence_root: Path, compile_report_path: Path, compiled_root: Path,
     staging_root: Path, materialized_root: Path, log_root: Path,
     report_path: Path, cm_oracle: Path, pmove_oracle: Path, hook_oracle: Path,
-    fall_oracle: Path, hook_attestation: Path,
+    fall_oracle: Path, hook_attestation: Path, python_runtime: Path,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS, repo_root: Path = ROOT,
     implementation_provider: Callable[[Path], dict[str, Any]] = _current_implementation,
     authority_provider: Callable[..., dict[str, Any]] = _authority_records,
     map_materializer: Callable[..., None] = _real_materialize_map,
+    compiled_cm_validator: Callable[..., tuple[
+        dict[str, Any], bytes, str, set[str]
+    ]] = validate_published_qualification_compiled_cm,
+    runtime_provider: Callable[[Path, Path], dict[str, Any]] = _validate_pinned_python_runtime,
 ) -> dict[str, Any]:
     paths = {
         name: _qualification_path(path, name)
         for name, path in {
             "declaration": declaration_path, "prior_report": prior_report_path,
+            "prior_evidence": prior_evidence_root,
+            "compile_report": compile_report_path,
             "compiled": compiled_root, "staging": staging_root,
             "materialized": materialized_root, "logs": log_root,
             "report": report_path, "cm": cm_oracle, "pmove": pmove_oracle,
             "hook": hook_oracle, "fall": fall_oracle,
-            "hook_attestation": hook_attestation,
+            "hook_attestation": hook_attestation, "python": python_runtime,
         }.items()
     }
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= 3600:
@@ -365,6 +614,7 @@ def materialize_qualification(
     _fresh_outputs(
         [
             paths["compiled"], paths["declaration"], paths["prior_report"],
+            paths["prior_evidence"], paths["compile_report"], paths["python"],
             paths["cm"], paths["pmove"], paths["hook"], paths["fall"],
             paths["hook_attestation"],
         ],
@@ -378,19 +628,30 @@ def materialize_qualification(
     declaration, declaration_raw, declaration_sha256 = _validate_declaration(
         paths["declaration"], implementation
     )
-    _, prior_raw, prior_sha256, prior_passed = _validate_prior_stage(
-        paths["prior_report"], "compiled-cm-preflight", declaration,
-        declaration_sha256, implementation,
+    try:
+        _, prior_raw, prior_sha256, prior_passed = compiled_cm_validator(
+            declaration_path=paths["declaration"],
+            compile_report_path=paths["compile_report"],
+            compiled_root=paths["compiled"], cm_oracle=paths["cm"],
+            evidence_root=paths["prior_evidence"],
+            report_path=paths["prior_report"], repo_root=repo_root,
+        )
+    except QualificationCompiledCmError as error:
+        raise QualificationPostcompileError(str(error)) from error
+    compiled_records = _selected_records(
+        paths["compiled"], COMPILED_SUFFIXES, prior_passed
     )
-    compiled_records = _flat_records(declaration, paths["compiled"], COMPILED_SUFFIXES)
     authorities = authority_provider(
         repo_root=repo_root, cm_oracle=paths["cm"], pmove_oracle=paths["pmove"],
         hook_oracle=paths["hook"], fall_oracle=paths["fall"],
         hook_attestation=paths["hook_attestation"],
     )
+    runtime_identity = runtime_provider(paths["python"], repo_root)
     paths["staging"].mkdir()
     paths["logs"].mkdir()
     for declared in declaration["maps"]:
+        if declared["map"] not in prior_passed:
+            continue
         for suffix in COMPILED_SUFFIXES:
             shutil.copyfile(
                 paths["compiled"] / f"{declared['map']}{suffix}",
@@ -399,6 +660,8 @@ def materialize_qualification(
     map_failures: dict[str, list[str]] = {}
     for declared in declaration["maps"]:
         map_id = str(declared["map"])
+        if map_id not in prior_passed:
+            continue
         try:
             map_materializer(
                 map_id=map_id, stage_root=paths["staging"],
@@ -407,37 +670,39 @@ def materialize_qualification(
                 pmove_oracle=paths["pmove"], hook_oracle=paths["hook"],
                 fall_oracle=paths["fall"],
                 hook_attestation=paths["hook_attestation"],
+                python_runtime=paths["python"],
                 timeout_seconds=timeout_seconds,
             )
         except Exception as error:
             map_failures[map_id] = [f"{type(error).__name__}: {error}"]
+            for suffix in MATERIALIZED_SUFFIXES:
+                (paths["staging"] / f"{map_id}{suffix}").unlink(missing_ok=True)
     records = None
     global_failures = []
-    if map_failures:
-        global_failures.extend(
-            f"{map_id}: {message}"
-            for map_id, failures in map_failures.items() for message in failures
+    succeeded = prior_passed - set(map_failures)
+    try:
+        records = _sparse_records(
+            declaration, paths["staging"], MATERIALIZED_SUFFIXES, succeeded
         )
-    else:
-        try:
-            records = _flat_records(
-                declaration, paths["staging"], MATERIALIZED_SUFFIXES
-            )
-            for map_id in compiled_records:
-                for suffix in COMPILED_SUFFIXES:
-                    if suffix != ".json" and records[map_id][suffix] != compiled_records[map_id][suffix]:
-                        raise QualificationPostcompileError(
-                            f"materializer changed immutable {map_id}{suffix}"
-                        )
-        except (QualificationCompileError, QualificationPostcompileError) as error:
-            global_failures.append(str(error))
-            records = None
+        for map_id in succeeded:
+            for suffix in COMPILED_SUFFIXES:
+                if (
+                    suffix != ".json"
+                    and records[map_id][suffix] != compiled_records[map_id][suffix]
+                ):
+                    raise QualificationPostcompileError(
+                        f"materializer changed immutable {map_id}{suffix}"
+                    )
+    except (QualificationCompileError, QualificationPostcompileError) as error:
+        global_failures.append(str(error))
+        records = None
     try:
         stable = (
             paths["declaration"].read_bytes() == declaration_raw
             and paths["prior_report"].read_bytes() == prior_raw
-            and _flat_records(declaration, paths["compiled"], COMPILED_SUFFIXES)
-            == compiled_records
+            and _selected_records(
+                paths["compiled"], COMPILED_SUFFIXES, prior_passed
+            ) == compiled_records
             and authority_provider(
                 repo_root=repo_root, cm_oracle=paths["cm"],
                 pmove_oracle=paths["pmove"], hook_oracle=paths["hook"],
@@ -446,6 +711,7 @@ def materialize_qualification(
             ) == authorities
             and _validate_implementation(implementation_provider(repo_root))
             == implementation
+            and runtime_provider(paths["python"], repo_root) == runtime_identity
         )
     except Exception as error:
         stable = False
@@ -456,9 +722,10 @@ def materialize_qualification(
             global_failures.append("input stability failed")
     published = records is not None and not global_failures
     infrastructure = {
-        "authority-bound": not map_failures,
+        "authority-bound": True,
         "materialized-membership": published,
-        "real-v4-materializer": not map_failures,
+        "real-v4-materializer": True,
+        "pinned-python-runtime": True,
         "exact-membership": published,
         "input-stability": stable,
         "exclusive-publication": published,
@@ -482,6 +749,7 @@ def materialize_qualification(
 
 def claims_qualification(
     *, declaration_path: Path, prior_report_path: Path,
+    upstream_report_path: Path,
     materialized_root: Path, staging_root: Path, claims_root: Path,
     report_path: Path, repo_root: Path = ROOT,
     implementation_provider: Callable[[Path], dict[str, Any]] = _current_implementation,
@@ -491,12 +759,16 @@ def claims_qualification(
         name: _qualification_path(path, name)
         for name, path in {
             "declaration": declaration_path, "prior_report": prior_report_path,
+            "upstream_report": upstream_report_path,
             "materialized": materialized_root, "staging": staging_root,
             "claims": claims_root, "report": report_path,
         }.items()
     }
     _fresh_outputs(
-        [paths["materialized"], paths["declaration"], paths["prior_report"]],
+        [
+            paths["materialized"], paths["declaration"], paths["prior_report"],
+            paths["upstream_report"],
+        ],
         [paths["staging"], paths["claims"], paths["report"]],
     )
     if paths["staging"].parent.stat().st_dev != paths["claims"].parent.stat().st_dev:
@@ -507,16 +779,27 @@ def claims_qualification(
     declaration, declaration_raw, declaration_sha256 = _validate_declaration(
         paths["declaration"], implementation
     )
-    _, prior_raw, prior_sha256, prior_passed = _validate_prior_stage(
+    _, preliminary_raw, preliminary_sha256, preliminary_passed = _validate_prior_stage(
         paths["prior_report"], "materialization", declaration,
         declaration_sha256, implementation,
     )
-    materialized_records = _flat_records(
-        declaration, paths["materialized"], MATERIALIZED_SUFFIXES
+    materialized_records = _sparse_records(
+        declaration, paths["materialized"], MATERIALIZED_SUFFIXES,
+        preliminary_passed,
     )
+    _, prior_raw, prior_sha256, prior_passed = _validate_materialization_prior(
+        report_path=paths["prior_report"],
+        upstream_report_path=paths["upstream_report"], declaration=declaration,
+        declaration_sha256=declaration_sha256, implementation=implementation,
+        materialized_records=materialized_records,
+    )
+    if prior_raw != preliminary_raw or prior_sha256 != preliminary_sha256:
+        raise QualificationPostcompileError("materialization report changed during validation")
     paths["staging"].mkdir()
     for declared in declaration["maps"]:
         map_id = str(declared["map"])
+        if map_id not in prior_passed:
+            continue
         for suffix in MATERIALIZED_SUFFIXES:
             shutil.copyfile(
                 paths["materialized"] / f"{map_id}{suffix}",
@@ -525,6 +808,8 @@ def claims_qualification(
     map_failures: dict[str, list[str]] = {}
     for declared in declaration["maps"]:
         map_id = str(declared["map"])
+        if map_id not in prior_passed:
+            continue
         try:
             payload = canonical_bytes(claim_builder(paths["staging"] / f"{map_id}.map"))
             _exclusive_write(
@@ -532,31 +817,31 @@ def claims_qualification(
             )
         except (ClaimValidationError, OSError, ValueError, KeyError, TypeError) as error:
             map_failures[map_id] = [f"{type(error).__name__}: {error}"]
+            for suffix in CLAIMS_SUFFIXES:
+                (paths["staging"] / f"{map_id}{suffix}").unlink(missing_ok=True)
     records = None
     global_failures = []
-    if map_failures:
-        global_failures.extend(
-            f"{map_id}: {message}"
-            for map_id, failures in map_failures.items() for message in failures
+    succeeded = prior_passed - set(map_failures)
+    try:
+        records = _sparse_records(
+            declaration, paths["staging"], CLAIMS_SUFFIXES, succeeded
         )
-    else:
-        try:
-            records = _flat_records(declaration, paths["staging"], CLAIMS_SUFFIXES)
-            for map_id in materialized_records:
-                for suffix in MATERIALIZED_SUFFIXES:
-                    if records[map_id][suffix] != materialized_records[map_id][suffix]:
-                        raise QualificationPostcompileError(
-                            f"claims changed immutable {map_id}{suffix}"
-                        )
-        except (QualificationCompileError, QualificationPostcompileError) as error:
-            global_failures.append(str(error))
-            records = None
+        for map_id in succeeded:
+            for suffix in MATERIALIZED_SUFFIXES:
+                if records[map_id][suffix] != materialized_records[map_id][suffix]:
+                    raise QualificationPostcompileError(
+                        f"claims changed immutable {map_id}{suffix}"
+                    )
+    except (QualificationCompileError, QualificationPostcompileError) as error:
+        global_failures.append(str(error))
+        records = None
     try:
         stable = (
             paths["declaration"].read_bytes() == declaration_raw
             and paths["prior_report"].read_bytes() == prior_raw
-            and _flat_records(
-                declaration, paths["materialized"], MATERIALIZED_SUFFIXES
+            and _sparse_records(
+                declaration, paths["materialized"], MATERIALIZED_SUFFIXES,
+                prior_passed,
             ) == materialized_records
             and _validate_implementation(implementation_provider(repo_root))
             == implementation
@@ -599,6 +884,8 @@ def _parser() -> argparse.ArgumentParser:
     materialize = subparsers.add_parser("materialize")
     materialize.add_argument("--declaration", type=Path, required=True)
     materialize.add_argument("--prior-report", type=Path, required=True)
+    materialize.add_argument("--prior-evidence-root", type=Path, required=True)
+    materialize.add_argument("--compile-report", type=Path, required=True)
     materialize.add_argument("--compiled-root", type=Path, required=True)
     materialize.add_argument("--staging-root", type=Path, required=True)
     materialize.add_argument("--materialized-root", type=Path, required=True)
@@ -609,10 +896,12 @@ def _parser() -> argparse.ArgumentParser:
     materialize.add_argument("--hook-oracle", type=Path, required=True)
     materialize.add_argument("--fall-oracle", type=Path, required=True)
     materialize.add_argument("--hook-attestation", type=Path, required=True)
+    materialize.add_argument("--python", type=Path, required=True)
     materialize.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     claims = subparsers.add_parser("claims")
     claims.add_argument("--declaration", type=Path, required=True)
     claims.add_argument("--prior-report", type=Path, required=True)
+    claims.add_argument("--upstream-report", type=Path, required=True)
     claims.add_argument("--materialized-root", type=Path, required=True)
     claims.add_argument("--staging-root", type=Path, required=True)
     claims.add_argument("--claims-root", type=Path, required=True)
@@ -627,18 +916,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             report = materialize_qualification(
                 declaration_path=args.declaration,
                 prior_report_path=args.prior_report,
+                prior_evidence_root=args.prior_evidence_root,
+                compile_report_path=args.compile_report,
                 compiled_root=args.compiled_root, staging_root=args.staging_root,
                 materialized_root=args.materialized_root, log_root=args.log_root,
                 report_path=args.report, cm_oracle=args.cm_oracle,
                 pmove_oracle=args.pmove_oracle, hook_oracle=args.hook_oracle,
                 fall_oracle=args.fall_oracle,
                 hook_attestation=args.hook_attestation,
+                python_runtime=args.python,
                 timeout_seconds=args.timeout_seconds,
             )
         else:
             report = claims_qualification(
                 declaration_path=args.declaration,
                 prior_report_path=args.prior_report,
+                upstream_report_path=args.upstream_report,
                 materialized_root=args.materialized_root,
                 staging_root=args.staging_root, claims_root=args.claims_root,
                 report_path=args.report,
