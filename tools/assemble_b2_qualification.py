@@ -742,6 +742,7 @@ def _validate_retained_stage_evidence(
     declaration: Mapping[str, Any], stage_documents: Mapping[str, Mapping[str, Any]],
     infrastructure_document: Mapping[str, Any], roots: Mapping[str, str],
     args: argparse.Namespace, repo_root: Path,
+    replay_implementation: Mapping[str, Any] | None = None,
 ) -> None:
     try:
         from tools.run_b2_qualification_source import (
@@ -763,11 +764,17 @@ def _validate_retained_stage_evidence(
         from tools.run_b2_qualification_infrastructure import (
             validate_infrastructure_evidence,
         )
+        implementation_provider = (
+            (lambda _root: dict(replay_implementation))
+            if replay_implementation is not None
+            else repository_binding
+        )
         _, _, _, source_passed = validate_published_qualification_source(
             declaration_path=args.declaration,
             source_root=Path(roots["source_root"]),
             cold_root=Path(roots["source_cold_root"]),
             report_path=args.source_report, repo_root=repo_root,
+            implementation_provider=implementation_provider,
         )
         _, _, _, compile_passed = validate_published_qualification_compile(
             declaration_path=args.declaration,
@@ -777,6 +784,7 @@ def _validate_retained_stage_evidence(
             evidence_root=Path(roots["compile_evidence_root"]),
             report_path=args.compile_report, q2tool=Path(roots["q2tool"]),
             basedir=Path(roots["basedir"]), repo_root=repo_root,
+            implementation_provider=implementation_provider,
         )
         _, _, _, cm_passed = validate_published_qualification_compiled_cm(
             declaration_path=args.declaration,
@@ -786,6 +794,7 @@ def _validate_retained_stage_evidence(
             evidence_root=Path(roots["compiled_cm_evidence_root"]),
             report_path=args.compiled_cm_preflight_report,
             repo_root=repo_root,
+            implementation_provider=implementation_provider,
         )
         postcompile = validate_published_qualification_postcompile(
             declaration_path=args.declaration,
@@ -804,6 +813,7 @@ def _validate_retained_stage_evidence(
             fall_oracle=Path(roots["fall_oracle"]),
             hook_attestation=Path(roots["hook_attestation"]),
             python_runtime=Path(roots["python_runtime"]), repo_root=repo_root,
+            implementation_provider=implementation_provider,
         )
         expected_passes = {
             stage: {
@@ -929,7 +939,7 @@ def assemble_qualification(
         _validate_retained_stage_evidence(
             declaration, stage_documents, infrastructure_document,
             retained_stage_evidence,
-            args, repo_root,
+            args, repo_root, replay_implementation,
         )
     raw_evidence = {
         "normative_documents": {
