@@ -7,8 +7,9 @@ stage on the WSL host whose hostname is exactly `DESKTOP-RTX2080`.
 
 The tool has two explicit modes:
 
-- `preflight` performs all local source and remote destination/toolchain checks
-  without creating a remote file or directory.
+- `preflight` locally builds and independently fetch-proves all three bundles,
+  then performs the remote destination/toolchain checks without creating a
+  remote file or directory.
 - `stage` repeats those checks, transfers committed Git objects, reconstructs
   and verifies the three repositories, then atomically publishes a previously
   nonexistent destination.
@@ -21,6 +22,14 @@ and tree values have no default. Every repository must be clean, including
 untracked files, and must contain no tracked symlink or submodule. The tool
 also binds the exact SHA-256 and size of the authoritative design and plan in
 the bot repository.
+
+Every source must also be a standalone Git object store. Shallow repositories,
+partial/promisor clones, replacement refs, and object alternates are rejected
+during `preflight`; their absence is sealed into the source snapshot and
+checked again after bundle assembly. This is required because Git can report a
+bundle from a shallow source as containing complete history even when a parent
+below the shallow boundary is absent. `git bundle verify` is therefore only a
+syntax/prerequisite check, never proof that the bundle is fetchable.
 
 The WSL Rust toolchain is fixed at:
 
@@ -49,6 +58,25 @@ git -C /path/to/repo rev-parse HEAD
 git -C /path/to/repo rev-parse 'HEAD^{tree}'
 ```
 
+Confirm that each source is non-shallow before preflight:
+
+```bash
+git -C /path/to/repo rev-parse --is-shallow-repository
+```
+
+If this prints `true`, explicitly hydrate that repository from an authoritative
+full-history remote, then confirm that the branch commit and tree above did not
+change and run `git fsck --strict --no-dangling`. For example, when the remote
+is known to contain the complete ancestry:
+
+```bash
+git -C /path/to/repo fetch --unshallow --no-tags origin
+```
+
+Hydration is an operator-controlled repository repair. The staging tool never
+fetches from a network remote, guesses a remote, rewrites history, or changes a
+source branch to make it eligible.
+
 Run the no-write check first. The complete invocation intentionally names all
 attested source identities:
 
@@ -68,9 +96,13 @@ python3 tools/stage_multires_wsl.py preflight \
 ```
 
 Only a green preflight should be repeated with `stage` in place of
-`preflight`. `stage` re-inspects the source triple after creating the bundles,
-so a branch, commit, tree, index, or untracked-file race fails before SSH
-transfer.
+`preflight`. Both modes re-inspect the source triple after creating the bundles,
+so a branch, commit, tree, index, untracked-file, or transport-eligibility race
+fails before SSH. Before opening SSH, every bundle is independently
+fetched into a newly initialized temporary repository, checked out at the
+attested branch/commit/tree, compared against both tracked-file closures, and
+validated with strict Git object checks. The WSL host repeats that same
+verification from another empty repository.
 
 ## Publication and failure semantics
 

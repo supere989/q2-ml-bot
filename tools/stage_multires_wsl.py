@@ -51,10 +51,45 @@ SSH_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 BRANCH_RE = re.compile(r"^(?![-/])(?!.*(?:\.\.|//|@\{|\\))[A-Za-z0-9._/-]+(?<![/.])$")
 MAX_TRANSFER_MEMBER_BYTES = 1 << 30
 MAX_TRANSFER_BYTES = 3 << 30
+MAX_FAILURE_DETAIL_CHARS = 512
+ELIGIBLE_TRANSPORT_STATE: dict[str, bool | int] = {
+    "shallow": False,
+    "partial_clone": False,
+    "replace_refs": 0,
+    "alternates": False,
+}
 
 
 class StagingError(RuntimeError):
     """A fail-closed staging validation or transport failure."""
+
+
+def _bounded_failure_detail(value: bytes | str) -> str:
+    if isinstance(value, bytes):
+        detail = value.decode("utf-8", "replace")
+    else:
+        detail = value
+    detail = " ".join(detail.split())
+    detail = re.sub(
+        r"(?i)[\"']?\bauthorization\b[\"']?\s*(?::|=)?\s*[\"']?"
+        r"\b(?:bearer|basic)\b\s+[^\s,;}\"']+",
+        "Authorization=<redacted>",
+        detail,
+    )
+    detail = re.sub(
+        r"(?i)[\"']?\b(github_token|access_token|api_key|token|password|"
+        r"secret|credential)\b[\"']?\s*(?:=|:)\s*[\"']?[^\s,;}\"']+",
+        lambda match: f"{match.group(1)}=<redacted>",
+        detail,
+    )
+    detail = re.sub(
+        r"([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@",
+        r"\1<redacted>@",
+        detail,
+    )
+    if not detail:
+        detail = "no stderr"
+    return detail[:MAX_FAILURE_DETAIL_CHARS]
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -110,8 +145,8 @@ def _run(
         check=False,
     )
     if completed.returncode != 0:
-        stderr = completed.stderr.decode("utf-8", "replace").strip()
-        raise StagingError(f"command failed ({argv[0]}): {stderr or 'no stderr'}")
+        stderr = _bounded_failure_detail(completed.stderr)
+        raise StagingError(f"command failed ({argv[0]}): {stderr}")
     return completed.stdout
 
 
@@ -253,6 +288,13 @@ def inspect_repository(
         raise StagingError(f"{name} is not a usable Git repository") from exc
     if actual_root != path:
         raise StagingError(f"{name} path is not its exact Git root: {path}")
+    transport_state = _repository_transport_state(path)
+    if transport_state != ELIGIBLE_TRANSPORT_STATE:
+        raise StagingError(
+            f"{name} source is not transport-eligible "
+            f"({_transport_state_summary(transport_state)}); hydrate or repair "
+            "the source repository explicitly before staging"
+        )
     branch = _git(path, "symbolic-ref", "--quiet", "--short", "HEAD").decode().strip()
     commit = _git(path, "rev-parse", "--verify", "HEAD^{commit}").decode().strip().lower()
     tree = _git(path, "rev-parse", "--verify", "HEAD^{tree}").decode().strip().lower()
@@ -277,6 +319,7 @@ def inspect_repository(
         "tracked_file_closure_sha256": closure_sha256,
         "tracked_content_closure_sha256": content_sha256,
         "tracked_content_bytes": content_bytes,
+        "transport_eligibility": dict(transport_state),
     }
 
 
@@ -393,6 +436,7 @@ def _validate_request(request: Mapping[str, Any]) -> None:
             "tracked_content_bytes"
         ] < 0:
             raise StagingError("invalid repository tracked-content byte count")
+        _require_transport_eligibility(repository.get("transport_eligibility"))
     documents = request.get("normative_documents")
     if not isinstance(documents, list) or [item.get("path") for item in documents] != list(
         NORMATIVE_DOCUMENTS
@@ -402,6 +446,21 @@ def _validate_request(request: Mapping[str, Any]) -> None:
         _require_sha256("normative document", item.get("sha256", ""))
     _require_sha256("rustc", request.get("rustc_sha256", ""))
     _require_sha256("cargo", request.get("cargo_sha256", ""))
+
+
+def _require_transport_eligibility(value: Any) -> None:
+    expected_keys = set(ELIGIBLE_TRANSPORT_STATE)
+    if type(value) is not dict or set(value) != expected_keys:
+        raise StagingError("repository transport eligibility key set is not sealed")
+    if (
+        type(value["shallow"]) is not bool
+        or type(value["partial_clone"]) is not bool
+        or type(value["replace_refs"]) is not int
+        or type(value["alternates"]) is not bool
+    ):
+        raise StagingError("repository transport eligibility types are not sealed")
+    if value != ELIGIBLE_TRANSPORT_STATE:
+        raise StagingError("repository transport eligibility values are not sealed")
 
 
 def _remote_preflight(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -509,12 +568,16 @@ def _verify_transfer_manifest(
 
 
 def _checkout_and_verify_repository(
-    incoming: Path, repositories_root: Path, source: Mapping[str, Any]
+    incoming: Path,
+    repositories_root: Path,
+    source: Mapping[str, Any],
+    *,
+    bundle_path: Path | None = None,
 ) -> dict[str, Any]:
     name = source["name"]
     destination = repositories_root / name
     destination.mkdir(mode=0o700)
-    bundle = incoming / f"bundles/{name}.bundle"
+    bundle = bundle_path or incoming / f"bundles/{name}.bundle"
     _run(("git", "init", "--quiet", str(destination)))
     _run(("git", "-C", str(destination), "bundle", "verify", str(bundle)))
     refspec = f"refs/heads/{source['branch']}:refs/heads/{source['branch']}"
@@ -717,10 +780,17 @@ class OpenSshTransport:
         try:
             response = json.loads(stdout)
         except json.JSONDecodeError as exc:
-            stderr = completed.stderr.decode("utf-8", "replace").strip()
-            raise StagingError(f"remote staging response was invalid: {stderr or stdout}") from exc
+            diagnostic = _bounded_failure_detail(
+                completed.stderr if completed.stderr.strip() else completed.stdout
+            )
+            raise StagingError(
+                f"remote staging response was invalid: {diagnostic}"
+            ) from exc
         if completed.returncode != 0 or not response.get("ok"):
-            raise StagingError(f"remote staging failed: {response.get('error', 'unknown error')}")
+            diagnostic = _bounded_failure_detail(
+                str(response.get("error", "unknown error"))
+            )
+            raise StagingError(f"remote staging failed: {diagnostic}")
         return response["result"]
 
 
@@ -750,20 +820,123 @@ class LocalRemoteTransport:
             socket.gethostname = original  # type: ignore[method-assign]
 
 
-def _bundle_repository(repo: Mapping[str, Any], bundle: Path) -> dict[str, Any]:
-    source_path = Path(repo["source_path"])
-    _run(
-        (
-            "git",
-            "-C",
-            str(source_path),
-            "bundle",
-            "create",
-            str(bundle),
-            f"refs/heads/{repo['branch']}",
+def _repository_transport_state(repo: Path) -> dict[str, bool | int]:
+    shallow = _git(repo, "rev-parse", "--is-shallow-repository").strip() == b"true"
+    config_entries: dict[str, str] = {}
+    for record in _git(repo, "config", "--null", "--list").split(b"\0"):
+        if not record:
+            continue
+        key, separator, value = record.partition(b"\n")
+        if not separator:
+            continue
+        config_entries[key.decode("utf-8", "replace").lower()] = value.decode(
+            "utf-8", "replace"
+        )
+    common_git_value = _git(repo, "rev-parse", "--git-common-dir").decode(
+        "utf-8", "replace"
+    ).strip()
+    common_git = Path(common_git_value)
+    if not common_git.is_absolute():
+        common_git = repo / common_git
+    promisor_packs = any((common_git / "objects" / "pack").glob("*.promisor"))
+    partial_clone = (
+        promisor_packs
+        or "extensions.partialclone" in config_entries
+        or any(
+            (
+                key.startswith("remote.")
+                and (
+                    key.endswith(".partialclonefilter")
+                    or (
+                        key.endswith(".promisor")
+                        and value.lower() in ("1", "true", "yes", "on")
+                    )
+                )
+            )
+            for key, value in config_entries.items()
         )
     )
-    _run(("git", "-C", str(source_path), "bundle", "verify", str(bundle)))
+    replace_refs = len(
+        [
+            line for line in _git(
+                repo, "for-each-ref", "--format=%(refname)", "refs/replace"
+            ).splitlines()
+            if line
+        ]
+    )
+    alternates_value = _git(
+        repo, "rev-parse", "--git-path", "objects/info/alternates"
+    ).decode("utf-8", "replace").strip()
+    alternates_path = Path(alternates_value)
+    if not alternates_path.is_absolute():
+        alternates_path = repo / alternates_path
+    alternates = os.path.lexists(alternates_path) or bool(
+        os.environ.get("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+    )
+    return {
+        "shallow": shallow,
+        "partial_clone": partial_clone,
+        "replace_refs": replace_refs,
+        "alternates": alternates,
+    }
+
+
+def _transport_state_summary(state: Mapping[str, bool | int]) -> str:
+    return ", ".join(
+        (
+            f"shallow={'true' if state['shallow'] else 'false'}",
+            f"partial_clone={'true' if state['partial_clone'] else 'false'}",
+            f"replace_refs={state['replace_refs']}",
+            f"alternates={'true' if state['alternates'] else 'false'}",
+        )
+    )
+
+
+def _prove_bundle_self_contained(
+    repo: Mapping[str, Any], bundle: Path
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="q2-multires-bundle-proof-") as temp_name:
+        root = Path(temp_name)
+        repositories = root / "repositories"
+        repositories.mkdir(mode=0o700)
+        _checkout_and_verify_repository(
+            root / "unused-incoming",
+            repositories,
+            repo,
+            bundle_path=bundle,
+        )
+
+
+def _bundle_repository(repo: Mapping[str, Any], bundle: Path) -> dict[str, Any]:
+    source_path = Path(repo["source_path"])
+    transport_state = _repository_transport_state(source_path)
+    try:
+        _run(
+            (
+                "git",
+                "-C",
+                str(source_path),
+                "bundle",
+                "create",
+                str(bundle),
+                f"refs/heads/{repo['branch']}",
+            )
+        )
+        # Source-context verification is syntax-only assurance: a shallow or
+        # otherwise incomplete source can satisfy prerequisites from its own
+        # object database.  The empty-repository fetch below is authoritative.
+        _run(("git", "-C", str(source_path), "bundle", "verify", str(bundle)))
+        _prove_bundle_self_contained(repo, bundle)
+    except (OSError, StagingError) as exc:
+        try:
+            bundle.unlink()
+        except FileNotFoundError:
+            pass
+        detail = _bounded_failure_detail(str(exc))
+        raise StagingError(
+            f"bundle is not self-contained for {repo['name']} "
+            f"({_transport_state_summary(transport_state)}): {detail}"
+        ) from exc
     digest, size = sha256_file(bundle)
     public_source = {
         key: value
@@ -875,8 +1048,6 @@ def execute(
         or dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         invocation_nonce=invocation_nonce or uuid.uuid4().hex,
     )
-    if mode == "preflight":
-        return transport.execute("preflight", request, None)
     with tempfile.TemporaryDirectory(prefix="q2-multires-transfer-") as temp_name:
         archive = Path(temp_name) / "source-triple.tar"
         build_transfer_archive(repositories, archive)
@@ -884,6 +1055,8 @@ def execute(
         # tree, index, or untracked-file change aborts before remote mutation.
         if inspect_sources(repository_specs) != repositories:
             raise StagingError("source triple changed while the transfer was being assembled")
+        if mode == "preflight":
+            return transport.execute("preflight", request, None)
         return transport.execute("stage", request, archive)
 
 
