@@ -329,6 +329,44 @@ def _flat_records(
     }
 
 
+def _sparse_compiled_records(
+    declaration: Mapping[str, Any], root: Path, passed: set[str],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    declared = {str(row["map"]) for row in declaration["maps"]}
+    if not passed.issubset(declared):
+        raise QualificationCompileError("sparse compile set contains undeclared maps")
+    expected = {
+        f"{row['map']}{suffix}"
+        for row in declaration["maps"] for suffix in SOURCE_SUFFIXES
+    } | {f"{map_id}.bsp" for map_id in passed}
+    if root.is_symlink() or not root.is_dir():
+        raise QualificationCompileError(
+            f"sparse compiled root is absent or a symlink: {root}"
+        )
+    actual: set[str] = set()
+    for path in root.iterdir():
+        if path.is_symlink() or not path.is_file():
+            raise QualificationCompileError(
+                f"sparse compiled root contains non-regular entry: {path.name}"
+            )
+        actual.add(path.name)
+    if actual != expected:
+        raise QualificationCompileError(
+            "sparse compiled membership differs; "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+    return {
+        str(row["map"]): {
+            suffix: _file_record(root / f"{row['map']}{suffix}")
+            for suffix in (
+                COMPILED_SUFFIXES
+                if row["map"] in passed else SOURCE_SUFFIXES
+            )
+        }
+        for row in declaration["maps"]
+    }
+
+
 def _source_evidence_sha256(map_id: str, files: Mapping[str, Any]) -> str:
     return _sha256(canonical_bytes({"map": map_id, "files": dict(files)}))
 
@@ -539,11 +577,11 @@ def _map_stage_row(
         "q2tool-exit-zero": result["exit_code"] == 0,
         "q2tool-not-timed-out": result["timed_out"] is False,
         "ibsp38-lightdata": result["bsp"] is not None,
-        "compiled-stage-published": published,
+        "compiled-stage-published": published and result["compile_passed"] is True,
     }
     failures = list(result["failures"])
     if not published:
-        failures.append("complete compiled population was not published")
+        failures.append("sparse compiled population was not published")
     evidence = {
         "schema": "q2-b2-qualification-compile-map-evidence-v1",
         "ordinal": result["ordinal"],
@@ -678,16 +716,27 @@ def compile_qualification(
                         declaration["maps"][ordinal], f"worker {type(error).__name__}: {error}"
                     )
         results = [results_by_ordinal[index] for index in range(28)]
-        failures = [
+        systemic_failures = [
             f"{result['map']}: {message}"
-            for result in results for message in result["failures"]
+            for result in results
+            if result["timed_out"] is True or result["invocation_error"] is not None
+            for message in result["failures"]
         ]
-        if failures:
-            compile_error = "; ".join(failures)
+        if systemic_failures:
+            compile_error = "; ".join(systemic_failures)
+        passed_maps = {
+            str(result["map"])
+            for result in results if result["compile_passed"] is True
+        }
         if compile_error is None:
+            for result in results:
+                if result["compile_passed"] is False:
+                    (paths["staging_root"] / f"{result['map']}.bsp").unlink(
+                        missing_ok=True
+                    )
             try:
-                compiled_records = _flat_records(
-                    declaration, paths["staging_root"], COMPILED_SUFFIXES
+                compiled_records = _sparse_compiled_records(
+                    declaration, paths["staging_root"], passed_maps
                 )
                 if any(
                     compiled_records[map_id][suffix]
@@ -744,24 +793,19 @@ def compile_qualification(
                 "implementation": initial_implementation,
                 "input_report_sha256": source_report_sha256,
                 "infrastructure_checks": {
-                    "real-q2tool": all(
-                        result["exit_code"] == 0 for result in results
-                    ),
+                    "real-q2tool": not systemic_failures,
                     "compiled-membership": published,
                     "bounded-parallel-workers": 1 <= jobs <= MAX_JOBS,
                     "input-stability": compile_error is None,
-                    "ibsp38-lightdata": all(
-                        result["bsp"] is not None for result in results
-                    ),
+                    "ibsp38-validation-complete": not systemic_failures,
                     "exclusive-publication": published,
                 },
                 "map_count": 28,
                 "pass_count": sum(row["passed"] is True for row in rows),
                 "maps": rows,
-                "failures": (
-                    [] if published
-                    else [compile_error or "compiled population not published"]
-                ),
+                "failures": [] if published else [
+                    compile_error or "sparse compiled population not published"
+                ],
             }
             payload = canonical_bytes(report)
             _exclusive_write(paths["report"], payload)

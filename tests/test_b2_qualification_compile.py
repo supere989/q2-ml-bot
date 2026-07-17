@@ -123,7 +123,8 @@ if map_path.stem == os.environ.get('Q2_FAKE_SLOW_MAP'):
     time.sleep(float(os.environ.get('Q2_FAKE_SLOW_SECONDS', '2')))
 else:
     time.sleep(float(os.environ.get('Q2_FAKE_DELAY', '0.01')))
-if map_path.stem == os.environ.get('Q2_FAKE_FAIL_MAP'):
+fail_maps = set(filter(None, os.environ.get('Q2_FAKE_FAIL_MAPS', '').split(',')))
+if map_path.stem == os.environ.get('Q2_FAKE_FAIL_MAP') or map_path.stem in fail_maps:
     raise SystemExit(23)
 shutil.copyfile(os.environ['Q2_FAKE_BSP'], map_path.with_suffix('.bsp'))
 if map_path.stem == os.environ.get('Q2_FAKE_EXTRA_MAP'):
@@ -287,20 +288,22 @@ def test_parallel_compile_publishes_in_declaration_order(
     assert not paths["staging"].exists()
 
 
-def test_one_q2tool_failure_never_publishes_partial_population(
+def test_one_q2tool_failure_publishes_honest_sparse_population(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths = _fixture(tmp_path, monkeypatch)
     failed = paths["declaration"]["maps"][6]["map"]
     monkeypatch.setenv("Q2_FAKE_FAIL_MAP", failed)
-    with pytest.raises(QualificationCompileError, match=failed):
-        _run(paths)
-    assert not paths["compiled"].exists()
-    assert paths["staging"].is_dir()
-    report = json.loads(paths["report"].read_text())
-    assert report["pass_count"] == 0
-    assert report["failures"]
-    assert all(row["passed"] is False for row in report["maps"])
+    report = _run(paths)
+    assert paths["compiled"].is_dir()
+    assert not paths["staging"].exists()
+    assert report["pass_count"] == 27
+    assert report["failures"] == []
+    failed_row = next(row for row in report["maps"] if row["map"] == failed)
+    assert failed_row["passed"] is False
+    assert failed_row["criteria"]["compiled-stage-published"] is False
+    assert not (paths["compiled"] / f"{failed}.bsp").exists()
+    assert len(list(paths["compiled"].iterdir())) == 28 * len(SOURCE_SUFFIXES) + 27
 
 
 def test_source_hash_drift_fails_closed(
@@ -314,6 +317,18 @@ def test_source_hash_drift_fails_closed(
     with pytest.raises(QualificationCompileError, match="input changed"):
         _run(paths)
     assert not paths["compiled"].exists()
+
+
+def test_twenty_of_twenty_eight_compile_results_remain_eligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    rejected = [row["map"] for row in paths["declaration"]["maps"][:8]]
+    monkeypatch.setenv("Q2_FAKE_FAIL_MAPS", ",".join(rejected))
+    report = _run(paths)
+    assert report["pass_count"] == 20
+    assert [row["map"] for row in report["maps"] if not row["passed"]] == rejected
+    assert len(list(paths["compiled"].iterdir())) == 28 * len(SOURCE_SUFFIXES) + 20
 
 
 def test_timeout_kills_process_group_and_prevents_publication(
