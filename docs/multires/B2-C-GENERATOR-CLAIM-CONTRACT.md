@@ -775,17 +775,67 @@ diagnostic, report, test, WSL, or producer-snapshot bytes may be retried,
 repaired, resumed, reused, copied forward, salvaged, substituted, or admitted.
 The alias may continue to name its immutable historical declaration, but the
 retirement registry rejects it before any producer or gate reads campaign
-evidence. No replacement is authorized until the test-runtime and
-publisher-ordering defects are corrected and a separately committed fresh declaration
-is eligible under the applicable qualification-successor rules.
+evidence. The replacement authorization below does not alter that terminal
+history or permit any 71443 byte to cross into a successor.
 
-The 71443 final gate treated the qualified implementation as an exact
-predecessor, not as the impossible same commit: qualification necessarily
-preceded the declaration. Its retained-evidence replay required that commit to
-be an ancestor, identical generator/routes/Atlas-analyzer authority fields,
-and exactly the frozen 71443 declaration/gate/test authorization paths in the
-Git delta. That historical authorization cannot admit a successor cohort or
-any 71443 byte.
+### Sole 71444 final-attempt authorization
+
+The test-runtime and publisher-ordering defects are corrected at the
+methodology boundary: all execution-runtime dependency probes are pre-source,
+and the sole final test publisher is ordered after generated promotion and
+Dyn. Fresh B1 gate SHA-256
+`eb99e08e5934d281556b0b6584ab23fe236adb8fce81f1cc7045229b368b9a25`
+and disposable qualification `b2q26_275d4fa_71623700` bind implementation
+commit `275d4fa646ccf2c64ba8628cd4aa8b21644fa90d`, tree
+`7bd808b2194a44b80dc64fb88c700209d4657e9a`, and unchanged generator,
+routes, and Atlas-analyzer authorities. The qualification is green 28/28 with
+zero failures; its canonical report SHA-256 is
+`09bd298d87739515d468f432219eefcad01e8586a87a71339f5121900a6f57c5`.
+It remains explicitly non-admissible and supplies no map, seed, stage,
+artifact, Dyn evidence, or passing subset to the final lane.
+
+Exactly one immutable/no-retry final producer attempt is authorized for
+`b2g26_final_71444`. The current canonical alias and immutable named
+`B2-GENERATED-COHORT-71444-DECLARATION.json` are byte-identical with SHA-256
+`da27e96b3fe8c3719a7ff1593e37b4ac768f53a36f38c877566af495a6b551bf`.
+They declare exactly 28 fresh rows: four per concrete style, in declaration
+order, using seed blocks 71444000..71444003 through 71444600..71444603. No
+71444 producer may run until this declaration-bearing commit is clean and
+every pre-source check below is green.
+
+The first source-generation invocation consumes the sole authorization.
+Any source or later-stage failure permanently retires 71444; there is no
+resume, repair, repeated invocation, replacement member, passing subset,
+salvage, or reuse under that declaration.
+
+The declaration-bearing 71444 producer commit must be a strict successor of
+qualified commit `275d4fa646ccf2c64ba8628cd4aa8b21644fa90d`. Gate replay
+must prove that ancestry, the exact qualified commit/tree and report binding,
+byte-identical generator/routes/Atlas-analyzer authority fields, and a complete
+Git delta equal to the frozen 71444 declaration/gate/schema/direct-test
+authorization path set. Any producer, analyzer, validator, physics,
+toolchain, or unrelated change rejects the qualification.
+
+Before source generation, the exact clean declaration-bearing snapshot must
+pass the no-write `/usr/bin/python3.10 -B` syntax-floor scan, the pinned
+`/home/raymond/miniconda3/bin/python3.11` materializer import/CLI preflights,
+a same-process `import pytest, zstandard` probe, and
+`python -m pytest --version`. These checks may run concurrently only when they
+are read-only and must all finish green before the one source invocation. The
+final producer lane itself is strictly sequential:
+source/source-static, real compilation, compiled-CM preflight,
+materialization/claims, full Atlas/cold rebuild, generated promotion, Dyn,
+the sole atomic test suite, then assembly. Tests never overlap compilation or
+any other final stage.
+
+The historical 71443 final gate treated the qualified implementation as an
+exact predecessor, not as the impossible same commit: qualification
+necessarily preceded the declaration. Its retained-evidence replay required
+that commit to be an ancestor, identical generator/routes/Atlas-analyzer
+authority fields, and exactly the frozen 71443 declaration/gate/test
+authorization paths in the Git delta. That retired authorization cannot admit
+71444 or any 71443 byte; the sole current successor relation is the 71444
+binding above.
 
 The interpreter boundary is now a pre-declaration authority, not a check to
 discover after compilation. The exact clean immediate-predecessor
@@ -826,11 +876,12 @@ check.
 
 ## Offline workflow
 
-There is no active final `COHORT_ID`. The alias names retired 71443 as
-historical authority and is not executable authorization. Commands must never
-name retired cohorts 71426 through 71443, and no retired or qualification
-population, report, Dyn evidence, compiled byte, or passing subset may be
-copied into a future final-cohort root.
+The active final `COHORT_ID` is `b2g26_final_71444`; declaration publication
+alone is not producer progress. Commands must never name retired cohorts 71426
+through 71443. No 71444 producer may run until all pre-source checks above are
+exact and green, and no retired or qualification population, report, Dyn
+evidence, compiled byte, or passing subset may be copied into the fresh 71444
+root.
 
 The declaration-aware compiler remains the required final-cohort shape.
 Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer

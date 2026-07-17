@@ -94,6 +94,20 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "zero executed tests",
         "publisher-ordering",
         "99c13db93a8dacb9fe24f181126b8c30203f4005fdd5e96fb0b9a165ba2168f9",
+        "b2q26_275d4fa_71623700",
+        "09bd298d87739515d468f432219eefcad01e8586a87a71339f5121900a6f57c5",
+        "eb99e08e5934d281556b0b6584ab23fe236adb8fce81f1cc7045229b368b9a25",
+        "275d4fa646ccf2c64ba8628cd4aa8b21644fa90d",
+        "7bd808b2194a44b80dc64fb88c700209d4657e9a",
+        "b2g26_final_71444",
+        "B2-GENERATED-COHORT-71444-DECLARATION.json",
+        "da27e96b3fe8c3719a7ff1593e37b4ac768f53a36f38c877566af495a6b551bf",
+        "71444000..71444003",
+        "71444600..71444603",
+        "Exactly one immutable/no-retry final producer attempt is authorized",
+        "The first source-generation invocation consumes the sole authorization",
+        "final producer lane itself is strictly sequential",
+        "Tests never overlap compilation",
         "qualification",
         "non-admissible",
         "fe4b86bbb0ab331dca4f7fd1418106c69ba4d4ea34b36774cb7e9259d27502bc",
@@ -111,6 +125,8 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert "b2g26_final_71442" in text
     assert "b2g26_final_71443" in text
     assert "Cohort 71443 is permanently retired" in text
+    assert "b2g26_final_71444" in text
+    assert "Exactly one immutable/no-retry final producer attempt" in text
     assert "future-only" not in text
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
