@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute the sole B2 Dyn producer from a retained exact-argv preflight."""
+"""Execute sole B2 Dyn from pre-source shape and artifact-origin authorities."""
 
 from __future__ import annotations
 
@@ -16,7 +16,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.preflight_b2_dyn_invocation import EXPECTED_STDOUT, SCHEMA  # noqa: E402
+from tools.bind_b2_dyn_origin import (  # noqa: E402
+    ARTIFACT_PREFLIGHT_STDOUT,
+    SCHEMA as ORIGIN_BINDING_SCHEMA,
+)
+from tools.preflight_b2_dyn_invocation import (  # noqa: E402
+    EXPECTED_STDOUT,
+    DynInvocationPreflightError,
+    argv_flag,
+    load_shape_preflight,
+)
 from tools.run_generator_cohort import (  # noqa: E402
     GeneratorCohortError,
     canonical_bytes,
@@ -45,90 +54,223 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _flag(argv: list[str], name: str) -> str:
-    if argv.count(name) != 1:
-        raise PreflightedDynError(f"preflighted producer argv must contain one {name}")
-    ordinal = argv.index(name)
-    if ordinal + 1 >= len(argv):
-        raise PreflightedDynError(f"preflighted producer argv lacks the {name} value")
-    return argv[ordinal + 1]
-
-
-def load_preflight(path: Path) -> dict[str, Any]:
+def load_origin_binding(path: Path) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
-        raise PreflightedDynError("Dyn argv preflight must be a regular file")
+        raise PreflightedDynError("Dyn origin binding must be a regular file")
     raw = path.read_bytes()
     try:
         report = json.loads(raw, object_pairs_hook=_reject_duplicates)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise PreflightedDynError(f"invalid Dyn argv preflight JSON: {exc}") from exc
+        raise PreflightedDynError(f"invalid Dyn origin-binding JSON: {exc}") from exc
     if not isinstance(report, dict) or raw != canonical_bytes(report):
-        raise PreflightedDynError("Dyn argv preflight is not canonical")
+        raise PreflightedDynError("Dyn origin binding is not canonical")
     expected_keys = {
         "schema",
         "passed",
+        "shape_preflight",
+        "declaration",
+        "promotion",
         "repository",
         "executable",
+        "artifacts",
+        "identity",
         "producer_argv",
-        "preflight_argv",
+        "parser_preflight_argv",
+        "artifact_preflight_argv",
         "producer_output_absent_before",
         "producer_output_absent_after",
-        "preflight_stdout_sha256",
-        "preflight_stderr_sha256",
+        "parser_preflight_stdout_sha256",
+        "parser_preflight_stderr_sha256",
+        "artifact_preflight_stdout_sha256",
+        "artifact_preflight_stderr_sha256",
     }
-    if set(report) != expected_keys or report["schema"] != SCHEMA:
-        raise PreflightedDynError("Dyn argv preflight schema or keys differ")
+    if set(report) != expected_keys or report["schema"] != ORIGIN_BINDING_SCHEMA:
+        raise PreflightedDynError("Dyn origin-binding schema or keys differ")
     if report["passed"] is not True:
-        raise PreflightedDynError("Dyn argv preflight is not green")
+        raise PreflightedDynError("Dyn origin binding is not green")
     if (
         report["producer_output_absent_before"] is not True
         or report["producer_output_absent_after"] is not True
     ):
-        raise PreflightedDynError("Dyn argv preflight did not preserve output absence")
+        raise PreflightedDynError("Dyn origin binding did not preserve output absence")
     producer_argv = report["producer_argv"]
-    preflight_argv = report["preflight_argv"]
+    parser_preflight_argv = report["parser_preflight_argv"]
+    artifact_preflight_argv = report["artifact_preflight_argv"]
     if (
         not isinstance(producer_argv, list)
         or not producer_argv
         or any(not isinstance(value, str) for value in producer_argv)
-        or preflight_argv != [*producer_argv, "--preflight-only", "true"]
+        or parser_preflight_argv
+        != [*producer_argv, "--preflight-only", "true"]
+        or artifact_preflight_argv
+        != [*producer_argv, "--verify-artifacts-only", "true"]
     ):
-        raise PreflightedDynError("Dyn preflight and producer argv differ")
+        raise PreflightedDynError("Dyn origin-bound parser and producer argv differ")
     if any(value.startswith("--expected-origin=") for value in producer_argv):
         raise PreflightedDynError("equals-glued Dyn origin is forbidden")
-    _flag(producer_argv, "--expected-origin")
+    argv_flag(producer_argv, "--expected-origin")
     path_values = [producer_argv[0]] + [
-        _flag(producer_argv, name)
+        argv_flag(producer_argv, name)
         for name in ("--repo-root", "--atlas", "--manifest", "--bsp", "--output")
     ]
     if any(not Path(value).is_absolute() for value in path_values):
-        raise PreflightedDynError("preflighted Dyn paths must all be absolute")
-    if report["preflight_stdout_sha256"] != hashlib.sha256(EXPECTED_STDOUT).hexdigest():
-        raise PreflightedDynError("Dyn argv preflight stdout digest differs")
-    if report["preflight_stderr_sha256"] != hashlib.sha256(b"").hexdigest():
-        raise PreflightedDynError("Dyn argv preflight stderr digest differs")
+        raise PreflightedDynError("origin-bound Dyn paths must all be absolute")
+    if report["parser_preflight_stdout_sha256"] != hashlib.sha256(EXPECTED_STDOUT).hexdigest():
+        raise PreflightedDynError("Dyn origin-binding stdout digest differs")
+    if report["parser_preflight_stderr_sha256"] != hashlib.sha256(b"").hexdigest():
+        raise PreflightedDynError("Dyn origin-binding stderr digest differs")
+    if report["artifact_preflight_stdout_sha256"] != hashlib.sha256(
+        ARTIFACT_PREFLIGHT_STDOUT
+    ).hexdigest():
+        raise PreflightedDynError("Dyn artifact-preflight stdout digest differs")
+    if report["artifact_preflight_stderr_sha256"] != hashlib.sha256(b"").hexdigest():
+        raise PreflightedDynError("Dyn artifact-preflight stderr digest differs")
     return report
 
 
-def execute(report: dict[str, Any]) -> Path:
-    producer_argv = list(report["producer_argv"])
-    executable = Path(producer_argv[0])
-    executable_record = report["executable"]
+# Compatibility name for callers that explicitly load the executable Phase-B
+# authority. Phase A is intentionally available only as load_shape_preflight.
+load_preflight = load_origin_binding
+
+
+def _record_matches(record: object, path: Path) -> bool:
+    return (
+        isinstance(record, dict)
+        and record.get("path") == str(path)
+        and not path.is_symlink()
+        and path.is_file()
+        and record.get("sha256") == _sha256(path)
+        and record.get("size_bytes") == path.stat().st_size
+    )
+
+
+def _bound_argv(shape_argv: list[str], origin_token: str) -> list[str]:
+    if any(value.startswith("--expected-origin") for value in shape_argv):
+        raise PreflightedDynError("pre-source Dyn argv contains an origin")
+    ordinal = shape_argv.index("--expected-analyzer-authority")
+    return [
+        *shape_argv[:ordinal],
+        "--expected-origin",
+        origin_token,
+        *shape_argv[ordinal:],
+    ]
+
+
+def execute(shape: dict[str, Any], binding: dict[str, Any]) -> Path:
+    shape_argv = list(shape["producer_argv_without_origin"])
+    producer_argv = list(binding["producer_argv"])
+    identity = binding.get("identity")
+    if not isinstance(identity, dict):
+        raise PreflightedDynError("Dyn origin-binding identity differs")
+    origin = identity.get("origin")
+    origin_token = identity.get("origin_token")
     if (
-        not isinstance(executable_record, dict)
-        or executable_record.get("path") != str(executable)
-        or executable.is_symlink()
-        or not executable.is_file()
-        or executable_record.get("sha256") != _sha256(executable)
-        or executable_record.get("size_bytes") != executable.stat().st_size
+        not isinstance(origin, list)
+        or len(origin) != 3
+        or any(not isinstance(axis, int) or isinstance(axis, bool) for axis in origin)
+        or not isinstance(origin_token, str)
+        or origin_token != ",".join(str(axis) for axis in origin)
+        or producer_argv != _bound_argv(shape_argv, origin_token)
     ):
-        raise PreflightedDynError("preflighted Dyn executable bytes differ")
-    repo_root = Path(_flag(producer_argv, "--repo-root"))
-    if repository_binding(repo_root) != report["repository"]:
-        raise PreflightedDynError("preflighted Dyn repository binding differs")
-    output = Path(_flag(producer_argv, "--output"))
+        raise PreflightedDynError("Dyn complete argv was not derived from both authorities")
+
+    shape_record = binding.get("shape_preflight")
+    shape_path = Path(shape_record.get("path", "")) if isinstance(shape_record, dict) else Path()
+    if not _record_matches(shape_record, shape_path):
+        raise PreflightedDynError("Dyn Phase-A report bytes differ")
+    declaration_record = binding.get("declaration")
+    declaration_path = (
+        Path(declaration_record.get("path", ""))
+        if isinstance(declaration_record, dict)
+        else Path()
+    )
+    if not _record_matches(declaration_record, declaration_path):
+        raise PreflightedDynError("Dyn active-declaration bytes differ")
+    promotion_record = binding.get("promotion")
+    promotion_path = (
+        Path(promotion_record.get("path", ""))
+        if isinstance(promotion_record, dict)
+        else Path()
+    )
+    if not _record_matches(promotion_record, promotion_path):
+        raise PreflightedDynError("Dyn generated-promotion bytes differ")
+    executable = Path(producer_argv[0])
+    if (
+        not _record_matches(binding.get("executable"), executable)
+        or binding.get("executable") != shape.get("executable")
+    ):
+        raise PreflightedDynError("origin-bound Dyn executable bytes differ")
+    repo_root = Path(argv_flag(producer_argv, "--repo-root"))
+    if (
+        binding.get("repository") != shape.get("repository")
+        or repository_binding(repo_root) != binding.get("repository")
+    ):
+        raise PreflightedDynError("origin-bound Dyn repository binding differs")
+    if declaration_path != (
+        repo_root / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+    ):
+        raise PreflightedDynError("Dyn active-declaration path differs")
+    output = Path(argv_flag(producer_argv, "--output"))
+    if promotion_path != output.parent / "reports/generated-promotion.json":
+        raise PreflightedDynError("Dyn generated-promotion path differs")
+
+    artifacts = binding.get("artifacts")
+    if not isinstance(artifacts, dict) or set(artifacts) != {
+        "atlas", "atlas_manifest", "analysis_manifest", "bsp"
+    }:
+        raise PreflightedDynError("Dyn origin-binding artifact records differ")
+    map_id = argv_flag(producer_argv, "--expected-map-id")
+    expected_paths = {
+        "atlas": Path(argv_flag(producer_argv, "--atlas")),
+        "atlas_manifest": Path(argv_flag(producer_argv, "--manifest")),
+        "analysis_manifest": Path(argv_flag(producer_argv, "--manifest")).parent
+        / f"{map_id}.analysis.manifest.json",
+        "bsp": Path(argv_flag(producer_argv, "--bsp")),
+    }
+    if any(
+        not _record_matches(artifacts[name], path)
+        for name, path in expected_paths.items()
+    ):
+        raise PreflightedDynError("origin-bound Dyn artifact bytes differ")
+    if (
+        identity.get("canonical_map_id") != map_id
+        or identity.get("analyzer_authority_sha256")
+        != argv_flag(producer_argv, "--expected-analyzer-authority")
+        or identity.get("atlas_sha256") != artifacts["atlas"].get("sha256")
+        or identity.get("atlas_manifest_sha256")
+        != artifacts["atlas_manifest"].get("sha256")
+        or identity.get("analysis_manifest_sha256")
+        != artifacts["analysis_manifest"].get("sha256")
+        or identity.get("bsp_sha256") != artifacts["bsp"].get("sha256")
+    ):
+        raise PreflightedDynError("Dyn origin-binding identity does not match artifacts")
+
     if output.exists() or output.is_symlink():
-        raise PreflightedDynError("preflighted Dyn output already exists")
+        raise PreflightedDynError("origin-bound Dyn output already exists")
+
+    artifact_preflight = subprocess.run(
+        binding["artifact_preflight_argv"],
+        cwd=repo_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if (
+        artifact_preflight.returncode != 0
+        or artifact_preflight.stdout != ARTIFACT_PREFLIGHT_STDOUT
+        or artifact_preflight.stderr != b""
+    ):
+        raise PreflightedDynError(
+            "final no-write Dyn artifact verification differs"
+        )
+    if output.exists() or output.is_symlink():
+        raise PreflightedDynError(
+            "final no-write Dyn artifact verification touched output"
+        )
+    if repository_binding(repo_root) != binding.get("repository"):
+        raise PreflightedDynError(
+            "repository changed during final no-write Dyn verification"
+        )
 
     completed = subprocess.run(
         producer_argv,
@@ -151,18 +293,28 @@ def execute(report: dict[str, Any]) -> Path:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--preflight-report", type=Path, required=True)
+    parser.add_argument("--shape-preflight-report", type=Path, required=True)
+    parser.add_argument("--origin-binding-report", type=Path, required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        report_path = execute(load_preflight(args.preflight_report))
+        shape = load_shape_preflight(args.shape_preflight_report)
+        binding = load_origin_binding(args.origin_binding_report)
+        if binding.get("shape_preflight", {}).get("path") != str(
+            args.shape_preflight_report
+        ):
+            raise PreflightedDynError(
+                "Dyn origin binding names a different Phase-A report"
+            )
+        report_path = execute(shape, binding)
         print(report_path)
         return 0
     except (
         PreflightedDynError,
+        DynInvocationPreflightError,
         GeneratorCohortError,
         OSError,
         subprocess.SubprocessError,

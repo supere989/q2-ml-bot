@@ -30,25 +30,37 @@ default nested `tools/q2-dyn-evidence/target` path is not admissible.
 Run on `DESKTOP-RTX2080` WSL with paths from the admitted current-authority
 campaign (the output directory must not already exist):
 
-Before final-cohort source generation, run
-`tools/preflight_b2_dyn_invocation.py` with the exact future producer values.
-It appends `--preflight-only true` to the same argv vector, requires the helper
-to return canonical schema `q2-b2-dyn-argv-preflight-v1`, proves that the
-negative origin is a separate value token, and refuses if either the future
-producer output or the exclusive preflight report already exists. The helper's
-preflight mode parses every producer argument and returns before reading the
-repository, Atlas, manifest, or BSP and before creating staging or output.
-The retained report binds the clean repository commit/tree, executable bytes,
-exact producer argv, and the absent output path. A failed final-lane CLI
-invocation is terminal; the preflight is the only authorized place to catch
-argv construction errors without consuming the cohort.
-The preflight report path must be absolute, fresh, and outside the repository
-so publishing it cannot dirty or advance the commit/tree it attests.
-A successor's sole Dyn action must use
-`tools/run_preflighted_b2_dyn.py --preflight-report REPORT`; that launcher
-rehashes the helper, replays the clean repository binding, rejects an existing
-output, and passes the retained `producer_argv` list directly to the operating
-system without shell reconstruction.
+Dyn authorization is two-phase because Atlas origin is derived from promoted
+map bounds and does not exist at declaration or pre-source time.
+
+Before final-cohort source generation, Phase A runs
+`tools/preflight_b2_dyn_invocation.py`. It deliberately accepts no origin
+argument. The exclusive canonical `q2-b2-dyn-argv-shape-preflight-v2` report
+binds the clean repository commit/tree, executable bytes, every knowable exact
+argv token and absolute future path, and absent output. The helper parses that
+origin-free vector only with `--preflight-only true`; execution without origin
+remains forbidden. Report publication is outside the repository and cannot
+dirty the snapshot it attests.
+
+Only after generated promotion, Phase B runs `tools/bind_b2_dyn_origin.py`.
+It accepts no operator origin. It reads the commit-bound current declaration,
+Phase-A report, canonical Atlas and analysis manifests, raw Atlas, BSP, and
+generated-promotion report; requires the declaration/cohort/map IDs,
+their map IDs, digests, analyzer authority, and origins to agree; derives the
+256-unit snapped origin from admitted `model0_mins`; and constructs the exact
+complete argv with separate `--expected-origin X,Y,Z` tokens. It then runs both
+the parser-only check and the Rust `--verify-artifacts-only true` path. The
+latter exercises repository source closures, manifest admission, raw Atlas
+decode/origin verification, and BSP identity before returning without staging
+or output. Phase B exclusively publishes
+`q2-b2-dyn-origin-binding-v1` and preserves output absence.
+
+The sole Dyn action must use both retained reports with
+`tools/run_preflighted_b2_dyn.py`. The launcher rehashes the Phase-A report,
+declaration, promotion report, helper, repository, Atlas, both manifests, and BSP; rebuilds
+the complete argv only from the two authorities; rejects an existing output;
+repeats the no-write Rust artifact verification; and passes the retained list
+directly to the operating system without a shell.
 
 ```sh
 python tools/preflight_b2_dyn_invocation.py \
@@ -58,17 +70,22 @@ python tools/preflight_b2_dyn_invocation.py \
   --manifest "$ATLAS_MANIFEST" \
   --bsp "$BSP" \
   --expected-map-id "$MAP_ID" \
-  --expected-origin "$ORIGIN_X,$ORIGIN_Y,$ORIGIN_Z" \
   --expected-analyzer-authority "$ANALYZER_AUTHORITY" \
   --expected-crate-commit "$(git rev-parse HEAD)" \
   --map-epoch "$MAP_EPOCH" \
   --environment-steps "$ENVIRONMENT_STEPS" \
   --samples 4000 \
   --output "$NEW_EVIDENCE_DIRECTORY" \
-  --report "$NEW_DYN_ARGV_PREFLIGHT_REPORT"
+  --report "$NEW_DYN_ARGV_SHAPE_PREFLIGHT_REPORT"
+
+python tools/bind_b2_dyn_origin.py \
+  --shape-preflight-report "$NEW_DYN_ARGV_SHAPE_PREFLIGHT_REPORT" \
+  --generated-promotion-report "$GENERATED_PROMOTION_REPORT" \
+  --report "$NEW_DYN_ORIGIN_BINDING_REPORT"
 
 python tools/run_preflighted_b2_dyn.py \
-  --preflight-report "$NEW_DYN_ARGV_PREFLIGHT_REPORT"
+  --shape-preflight-report "$NEW_DYN_ARGV_SHAPE_PREFLIGHT_REPORT" \
+  --origin-binding-report "$NEW_DYN_ORIGIN_BINDING_REPORT"
 ```
 
 The command atomically publishes exactly these files. Publication uses Linux

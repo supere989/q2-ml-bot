@@ -475,23 +475,11 @@ Cohort 71449 is permanently retired. None of its source, compiled,
 materialized, claims, analysis, promotion, report, log, build, WSL,
 authorization, or producer-snapshot bytes may be retried, resumed, reused,
 copied forward, salvaged, substituted, or admitted. The authority was cleared
-to `None` after that terminal failure. A successor required a Dyn CLI argv
-preflight that proves the separate-token `--expected-origin X,Y,Z` form (and
-refuses equals-glued flags) before any final Dyn invocation, a fresh green
-disposable qualification, and a separately committed immutable declaration
-before any producer could run. The corrected toolchain implements that
-boundary in `tools/preflight_b2_dyn_invocation.py` and the helper's
-`--preflight-only true` mode. The retained pre-source report must be canonical
-schema `q2-b2-dyn-argv-preflight-v1`, bind the clean activation commit/tree and
-exact helper bytes, retain the complete later producer argv with
-`--expected-origin` and its negative origin as separate tokens, and prove the
-future Dyn output remained absent before and after parsing.
-The sole later Dyn action must be
-`tools/run_preflighted_b2_dyn.py --preflight-report REPORT`; it rehashes the
-helper and clean repository binding and executes the retained `producer_argv`
-list directly, without a shell or manually reconstructed flags.
-The exclusive preflight report must be an absolute fresh path outside the
-repository so its publication cannot invalidate the clean commit/tree binding.
+to `None` after that terminal failure. The v1 pre-source argv preflight added
+for its successor correctly removed shell reconstruction and the equals-glued
+syntax, but 71451 later proved that v1 still sealed a guessed semantic origin
+before the Atlas existed. It is historical only and must not authorize another
+cohort.
 
 ### Retired 71450 final attempt
 
@@ -542,7 +530,7 @@ enforcement, a completely fresh green disposable qualification, and a
 separately committed immutable successor declaration. The historical 71450
 qualification and declaration cannot authorize that successor.
 
-### Active 71451 final cohort
+### Retired 71451 final attempt
 
 The stock-objective-admission-corrected implementation was qualified at
 commit/tree
@@ -559,22 +547,56 @@ The qualification remains `non_admissible: true` and
 `final_cohort_authorized: false`; it supplies no map, seed, stage, artifact,
 Dyn evidence, or passing subset to the final lane.
 
-`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71451`, immutable
+At activation, `ACTIVE_FINAL_AUTHORITY` pinned `b2g26_final_71451`, immutable
 declaration `B2-GENERATED-COHORT-71451-DECLARATION.json`, declaration
 SHA-256
 `e48e0ada7bcfa5a49bfdc6f69a70104daccf83b5c140e962b07305c9b6fac2bd`,
 and the exact eleven-path declaration/gate/schema/direct-test successor
-delta. The current alias is byte-identical and declares fresh, disjoint seed
-blocks 71451000..71451003 through 71451600..71451603. This activation
-authorizes exactly one fresh, strictly sequential, no-retry final producer
-lifecycle. It does not admit qualification artifacts, retired bytes, passing
-subsets, deployment, or training.
+delta. The current alias is byte-identical and declares seed blocks
+71451000..71451003 through 71451600..71451603. Those map IDs, seeds, and all
+produced bytes are now permanently retired.
 
-The declaration-bearing 71451 producer commit must be a strict successor of
+The sole lifecycle consumed source authorization and passed all eight
+source-through-generated-promotion stages for all 28 maps. The retained v1 Dyn
+argv report, SHA-256
+`5416114343fe5b5b53447361bbf306561a962424c29a323167166a237bf9ca74`,
+had guessed `[-512,-512,-512]`. The promoted representative
+`b2g26_open_71451000` instead admitted `grid.origin [-512,0,-512]`, exactly
+the 256-unit snap of `model0_mins [-321,191,-321]`. The sole Dyn execution
+decoded the promoted Atlas, rejected that mismatch at the independent origin
+fence, exited 65 before `StagingDirectory::create`, and published no output,
+report, snapshot, or staging directory. The test campaign, gate assembly,
+deployment, and training did not run.
+
+`B2-GENERATED-COHORT-71451-FAILURE.json` is the canonical terminal authority,
+SHA-256
+`83d11b7bafd6a669c67fd8ae4cf7b8e990d9e30bf0a448fb3424b604d34551d2`,
+with phase `dyn-artifact-origin-fence` and status
+`permanently-failed-dyn-expected-origin-mismatch`. `ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort. No 71451 byte may be retried,
+resumed, reused, copied forward, salvaged, substituted, or admitted.
+
+The successor prerequisite is a two-phase, fail-closed Dyn authority. Phase A
+runs pre-source and publishes canonical schema
+`q2-b2-dyn-argv-shape-preflight-v2`: it binds the clean commit/tree, helper
+bytes, every knowable absolute path and argument, and output absence, but it
+must omit `--expected-origin`. Phase B runs only after generated promotion,
+accepts no operator origin, derives the origin from the admitted Atlas and
+canonical manifests, binds the commit-bound current declaration, the
+generated-promotion report, and exact
+Atlas/manifest/BSP digests, then makes the Rust helper validate those artifacts
+through `--verify-artifacts-only true` without staging or output. It publishes
+exclusive schema `q2-b2-dyn-origin-binding-v1` containing the complete exact
+argv. The sole launcher requires both reports, rehashes every bound byte,
+repeats the Rust no-write artifact verification, and executes the retained
+argv list directly without a shell. A completely fresh
+disposable qualification and separately committed declaration are mandatory
+before a successor can become active.
+
+The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
-must prove ancestry, the exact qualified commit/tree and report binding,
-byte-identical stable authority fields, and a complete Git delta equal to the
-frozen 71451 declaration/gate/schema/direct-test authorization path set.
+proved ancestry, the exact qualified commit/tree and report binding,
+byte-identical stable authority fields, and the frozen 71451 activation delta.
+That relation is historical and cannot authorize a future cohort.
 
 The declaration-bearing 71449 producer commit was a strict successor of
 qualified commit `7c3463c28e8913e340d77f182e52752be3381999`. Its exact
@@ -672,11 +694,11 @@ while the infrastructure producer and materializer remain bound to the
 separate CPython 3.11.4 executable and zstandard module digests above. The
 syntax report must never be required to identify the execution runtime.
 
-The assembler rejects declarations for retired cohorts 71426 through 71450
-before reading campaign evidence. The immutable 71447, 71448, 71449, and
-71450 declarations are historical only. The active authority and schema both
-pin 71451 and the byte-identical alias/named declaration under
-`ACTIVE_FINAL_AUTHORITY`.
+The assembler rejects declarations for retired cohorts 71426 through 71451
+before reading campaign evidence. The immutable 71447, 71448, 71449, 71450,
+and 71451 declarations are historical only. No final cohort is active; the
+historical schema fields cannot supply authority while
+`ACTIVE_FINAL_AUTHORITY = None`.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -893,22 +915,19 @@ reuse of any retired cohort byte.
 
 ## Assembly template
 
-This template applies only to the active 71451 lifecycle and must not be run
-against any retired, qualification, 71449, or 71450 path. All values are exact
-paths. `OUT` must not exist and must be outside the implementation
-repository so publishing the gate cannot invalidate its own clean-tree
-authority. The authority and schema both pin 71451 and its declaration
-digest, and the current alias is byte-identical to the immutable 71451
-declaration.
+This template is disabled while `ACTIVE_FINAL_AUTHORITY = None`. Historical
+71451 field pins remain in the schema only until a freshly qualified successor
+updates them; neither the current alias nor the schema can infer executable
+authority. When reactivated, all values are exact paths, `OUT` must not exist,
+and both two-phase Dyn authority reports are mandatory.
 
 The qualified parent is commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`.
 Qualification `b2q26_a4500d2_71808000` passed all seven stages 28/28 and six
 infrastructure checks; its green non-admissible report SHA-256 is
 `a0b411d394e8c8a5fcea6e185cf364abf82578c262eece6e8cd892144c3b204c`.
-Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. This
-activation authorizes one no-retry final producer lifecycle and cannot admit
-qualification artifacts, passing subsets, retired bytes, deployment, or
-training.
+Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. That
+historical activation is consumed and cannot admit qualification artifacts,
+passing subsets, retired bytes, deployment, or training.
 
 ```sh
 python tools/assemble_b2_gate.py \
@@ -944,6 +963,7 @@ python tools/assemble_b2_gate.py \
   --stock-validation-dir "$STOCK_VALIDATION" \
   --dyn-evidence-executable "$DYN_EVIDENCE_EXECUTABLE" \
   --dyn-argv-preflight-report "$DYN_ARGV_PREFLIGHT_REPORT" \
+  --dyn-origin-binding-report "$DYN_ORIGIN_BINDING_REPORT" \
   --dyn-evidence-report "$DYN_EVIDENCE/b2-dyn-evidence.json" \
   --test-report "$TEST_EVIDENCE/b2-test-report.json" \
   --qualification-report "$QUALIFICATION_REPORT" \

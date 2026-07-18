@@ -87,6 +87,7 @@ RETIRED_COHORT_71447 = "b2g26_final_71447"
 RETIRED_COHORT_71448 = "b2g26_final_71448"
 RETIRED_COHORT_71449 = "b2g26_final_71449"
 RETIRED_COHORT_71450 = "b2g26_final_71450"
+RETIRED_COHORT_71451 = "b2g26_final_71451"
 EXPECTED_DESIGN_SHA256 = (
     "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
 )
@@ -186,7 +187,7 @@ RETIRED_71450_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
-ACTIVE_71451_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+RETIRED_71451_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
     "docs/multires/B2-GATE-ASSEMBLY.md",
     "docs/multires/B2-GENERATED-COHORT-71451-DECLARATION.json",
@@ -213,19 +214,12 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Explicit post-qualification activation. The current alias is never used to
-# infer this authority, and the qualification-successor delta must match this
-# fixed declaration-only path set exactly.
-ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
-    cohort_id="b2g26_final_71451",
-    declaration_sha256=(
-        "e48e0ada7bcfa5a49bfdc6f69a70104daccf83b5c140e962b07305c9b6fac2bd"
-    ),
-    immutable_declaration_path=(
-        "docs/multires/B2-GENERATED-COHORT-71451-DECLARATION.json"
-    ),
-    qualification_successor_paths=ACTIVE_71451_QUALIFICATION_SUCCESSOR_PATHS,
-)
+# Cohort 71451 consumed its source authorization and then failed its sole Dyn
+# origin fence before staging: the pre-source v1 argv report guessed an origin
+# that could only be derived from promoted Atlas bytes. A separately committed
+# post-correction, post-qualification successor is required before this may
+# become non-None again; the current alias remains historical only.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
 
 
 def _require_active_final_authority() -> ActiveFinalAuthority:
@@ -288,6 +282,7 @@ class B2GatePaths:
     stock_validation_dir: Path
     dyn_evidence_executable: Path
     dyn_argv_preflight_report: Path
+    dyn_origin_binding_report: Path
     dyn_evidence_report: Path
     test_report: Path
     qualification_report: Path
@@ -2370,6 +2365,7 @@ def _latency_distribution(value: object, label: str) -> Mapping[str, Any]:
 
 def _validate_dyn_argv_preflight(
     path: Path,
+    origin_binding_path: Path,
     implementation: Mapping[str, Any],
     authority: Mapping[str, Any],
     atlas: Mapping[str, Any],
@@ -2381,34 +2377,35 @@ def _validate_dyn_argv_preflight(
     except ValueError:
         pass
     else:
-        raise B2GateError("Dyn argv preflight report is inside the repository")
-    report = _mapping(_load_json(path), "Dyn argv preflight report")
+        raise B2GateError("Dyn argv shape-preflight report is inside the repository")
+    report = _mapping(_load_json(path), "Dyn argv shape-preflight report")
     _exact_keys(
         report,
         {
-            "schema", "passed", "repository", "executable", "producer_argv",
+            "schema", "passed", "repository", "executable",
+            "origin_binding_status", "producer_argv_without_origin",
             "preflight_argv", "producer_output_absent_before",
             "producer_output_absent_after", "preflight_stdout_sha256",
             "preflight_stderr_sha256",
         },
-        "Dyn argv preflight report",
+        "Dyn argv shape-preflight report",
     )
     _require(
-        report["schema"] == "q2-b2-dyn-argv-preflight-v1"
+        report["schema"] == "q2-b2-dyn-argv-shape-preflight-v2"
         and report["passed"] is True,
-        "Dyn argv preflight is not green",
+        "Dyn argv shape preflight is not green",
     )
     _require(
         report["repository"] == implementation,
-        "Dyn argv preflight repository binding differs",
+        "Dyn argv shape-preflight repository binding differs",
     )
     _file_evidence_matches(
         report["executable"],
         paths.dyn_evidence_executable,
-        "Dyn argv preflight executable",
+        "Dyn argv shape-preflight executable",
     )
     map_id = authority["canonical_map_id"]
-    expected_argv = [
+    expected_without_origin = [
         str(paths.dyn_evidence_executable),
         "--repo-root",
         str(paths.repo_root),
@@ -2420,8 +2417,6 @@ def _validate_dyn_argv_preflight(
         str(paths.claims_dir / f"{map_id}.bsp"),
         "--expected-map-id",
         map_id,
-        "--expected-origin",
-        ",".join(str(value) for value in atlas["origin"]),
         "--expected-analyzer-authority",
         authority["analyzer_authority_sha256"],
         "--expected-crate-commit",
@@ -2436,12 +2431,24 @@ def _validate_dyn_argv_preflight(
         str(paths.dyn_evidence_report.parent),
     ]
     _require(
-        report["producer_argv"] == expected_argv,
-        "Dyn producer argv differs from its pre-source preflight",
+        report["origin_binding_status"] == "deferred-until-promoted-artifact",
+        "Dyn origin was not deferred pre-source",
     )
     _require(
-        report["preflight_argv"] == [*expected_argv, "--preflight-only", "true"],
-        "Dyn parser-preflight argv differs",
+        report["producer_argv_without_origin"] == expected_without_origin,
+        "Dyn origin-free argv differs from its pre-source preflight",
+    )
+    _require(
+        not any(
+            isinstance(value, str) and value.startswith("--expected-origin")
+            for value in report["producer_argv_without_origin"]
+        ),
+        "Dyn pre-source argv contains a concrete origin",
+    )
+    _require(
+        report["preflight_argv"]
+        == [*expected_without_origin, "--preflight-only", "true"],
+        "Dyn shape parser-preflight argv differs",
     )
     _require(
         report["producer_output_absent_before"] is True
@@ -2449,14 +2456,165 @@ def _validate_dyn_argv_preflight(
         "Dyn argv preflight did not preserve output absence",
     )
     expected_stdout = canonical_bytes(
-        {"passed": True, "schema": "q2-b2-dyn-argv-preflight-v1"}
+        {"passed": True, "schema": "q2-b2-dyn-argv-shape-preflight-v2"}
     )
     _require(
         report["preflight_stdout_sha256"] == _sha256_bytes(expected_stdout)
         and report["preflight_stderr_sha256"] == _sha256_bytes(b""),
-        "Dyn argv preflight output digest differs",
+        "Dyn argv shape-preflight output digest differs",
     )
-    return _file_record(path)
+
+    try:
+        origin_binding_path.resolve().relative_to(paths.repo_root.resolve())
+    except ValueError:
+        pass
+    else:
+        raise B2GateError("Dyn origin-binding report is inside the repository")
+    binding = _mapping(_load_json(origin_binding_path), "Dyn origin-binding report")
+    _exact_keys(
+        binding,
+        {
+            "schema", "passed", "shape_preflight", "declaration", "promotion",
+            "repository", "executable", "artifacts", "identity", "producer_argv",
+            "parser_preflight_argv", "artifact_preflight_argv",
+            "producer_output_absent_before", "producer_output_absent_after",
+            "parser_preflight_stdout_sha256", "parser_preflight_stderr_sha256",
+            "artifact_preflight_stdout_sha256", "artifact_preflight_stderr_sha256",
+        },
+        "Dyn origin-binding report",
+    )
+    _require(
+        binding["schema"] == "q2-b2-dyn-origin-binding-v1"
+        and binding["passed"] is True,
+        "Dyn origin binding is not green",
+    )
+    _require(
+        binding["repository"] == implementation,
+        "Dyn origin-binding repository differs",
+    )
+    _file_evidence_matches(
+        binding["shape_preflight"], path, "Dyn bound shape-preflight"
+    )
+    _require(
+        _mapping(binding["shape_preflight"], "Dyn bound shape-preflight")["path"]
+        == str(path),
+        "Dyn origin binding names a different shape-preflight path",
+    )
+    _file_evidence_matches(
+        binding["declaration"],
+        paths.declaration,
+        "Dyn bound active declaration",
+    )
+    _require(
+        _mapping(binding["declaration"], "Dyn bound active declaration")["path"]
+        == str(paths.declaration),
+        "Dyn origin binding names a different declaration path",
+    )
+    _file_evidence_matches(
+        binding["promotion"],
+        paths.generated_validation_report,
+        "Dyn bound generated promotion",
+    )
+    _require(
+        _mapping(binding["promotion"], "Dyn bound generated promotion")["path"]
+        == str(paths.generated_validation_report),
+        "Dyn origin binding names a different generated promotion path",
+    )
+    _file_evidence_matches(
+        binding["executable"],
+        paths.dyn_evidence_executable,
+        "Dyn origin-binding executable",
+    )
+    _require(
+        binding["executable"] == report["executable"],
+        "Dyn executable changed between Phase A and Phase B",
+    )
+
+    artifact_paths = {
+        "atlas": paths.analysis_dir / f"{map_id}.atlas.bin",
+        "atlas_manifest": paths.analysis_dir / f"{map_id}.atlas.manifest.json",
+        "analysis_manifest": paths.analysis_dir / f"{map_id}.analysis.manifest.json",
+        "bsp": paths.claims_dir / f"{map_id}.bsp",
+    }
+    artifacts = _mapping(binding["artifacts"], "Dyn bound artifacts")
+    _exact_keys(artifacts, set(artifact_paths), "Dyn bound artifacts")
+    for name, artifact_path in artifact_paths.items():
+        _file_evidence_matches(
+            artifacts[name], artifact_path, f"Dyn bound {name} artifact"
+        )
+        _require(
+            _mapping(artifacts[name], f"Dyn bound {name} artifact")["path"]
+            == str(artifact_path),
+            f"Dyn bound {name} path differs",
+        )
+
+    origin = atlas["origin"]
+    origin_token = ",".join(str(value) for value in origin)
+    identity = _mapping(binding["identity"], "Dyn origin-binding identity")
+    _exact_keys(
+        identity,
+        {
+            "canonical_map_id", "origin", "origin_token",
+            "analyzer_authority_sha256", "atlas_sha256",
+            "atlas_manifest_sha256", "analysis_manifest_sha256", "bsp_sha256",
+        },
+        "Dyn origin-binding identity",
+    )
+    _require(
+        identity["canonical_map_id"] == map_id
+        and identity["origin"] == origin
+        and identity["origin_token"] == origin_token
+        and identity["analyzer_authority_sha256"]
+        == authority["analyzer_authority_sha256"]
+        and identity["atlas_sha256"] == _file_sha256(artifact_paths["atlas"])
+        and identity["atlas_manifest_sha256"]
+        == _file_sha256(artifact_paths["atlas_manifest"])
+        and identity["analysis_manifest_sha256"]
+        == _file_sha256(artifact_paths["analysis_manifest"])
+        and identity["bsp_sha256"] == _file_sha256(artifact_paths["bsp"]),
+        "Dyn artifact-derived origin identity differs",
+    )
+    origin_ordinal = expected_without_origin.index("--expected-analyzer-authority")
+    expected_complete = [
+        *expected_without_origin[:origin_ordinal],
+        "--expected-origin",
+        origin_token,
+        *expected_without_origin[origin_ordinal:],
+    ]
+    _require(
+        binding["producer_argv"] == expected_complete,
+        "Dyn origin-bound producer argv differs",
+    )
+    _require(
+        binding["parser_preflight_argv"]
+        == [*expected_complete, "--preflight-only", "true"],
+        "Dyn origin-bound parser preflight differs",
+    )
+    _require(
+        binding["artifact_preflight_argv"]
+        == [*expected_complete, "--verify-artifacts-only", "true"],
+        "Dyn artifact preflight argv differs",
+    )
+    _require(
+        binding["producer_output_absent_before"] is True
+        and binding["producer_output_absent_after"] is True,
+        "Dyn origin binding did not preserve output absence",
+    )
+    artifact_stdout = canonical_bytes(
+        {"passed": True, "schema": "q2-b2-dyn-artifact-preflight-v1"}
+    )
+    _require(
+        binding["parser_preflight_stdout_sha256"] == _sha256_bytes(expected_stdout)
+        and binding["parser_preflight_stderr_sha256"] == _sha256_bytes(b"")
+        and binding["artifact_preflight_stdout_sha256"]
+        == _sha256_bytes(artifact_stdout)
+        and binding["artifact_preflight_stderr_sha256"] == _sha256_bytes(b""),
+        "Dyn Phase-B no-write preflight output digest differs",
+    )
+    return {
+        "shape_preflight": _file_record(path),
+        "origin_binding": _file_record(origin_binding_path),
+    }
 
 
 def _validate_dyn_evidence(
@@ -2759,6 +2917,7 @@ def _validate_dyn_evidence(
     }
     argv_preflight = _validate_dyn_argv_preflight(
         paths.dyn_argv_preflight_report,
+        paths.dyn_origin_binding_report,
         implementation,
         authority,
         atlas,
@@ -3097,6 +3256,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--stock-validation-dir", type=Path, required=True)
     parser.add_argument("--dyn-evidence-executable", type=Path, required=True)
     parser.add_argument("--dyn-argv-preflight-report", type=Path, required=True)
+    parser.add_argument("--dyn-origin-binding-report", type=Path, required=True)
     parser.add_argument("--dyn-evidence-report", type=Path, required=True)
     parser.add_argument("--test-report", type=Path, required=True)
     parser.add_argument("--qualification-report", type=Path, required=True)

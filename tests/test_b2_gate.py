@@ -20,7 +20,6 @@ from harness.hook_claims_v4 import (
 import tools.assemble_b2_gate as b2_gate
 import tools.run_b2_test_suite as b2_test_suite
 from tools.assemble_b2_gate import (
-    ACTIVE_71451_QUALIFICATION_SUCCESSOR_PATHS,
     ACTIVE_FINAL_AUTHORITY,
     ActiveFinalAuthority,
     B2GateError,
@@ -31,11 +30,13 @@ from tools.assemble_b2_gate import (
     RETIRED_71448_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_71449_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_71450_QUALIFICATION_SUCCESSOR_PATHS,
+    RETIRED_71451_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_COHORT_71446,
     RETIRED_COHORT_71447,
     RETIRED_COHORT_71448,
     RETIRED_COHORT_71449,
     RETIRED_COHORT_71450,
+    RETIRED_COHORT_71451,
     assemble_gate,
     _exact_directory_files,
     _decode_dyn_snapshot,
@@ -96,7 +97,7 @@ def _paths(tmp_path: Path) -> B2GatePaths:
         fall_oracle=dummy,
         hook_attestation=dummy,
         atlas_verifier=dummy,
-        declaration=dummy,
+        declaration=ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
         source_dir=dummy,
         source_cold_dir=dummy,
         source_freeze_report=dummy,
@@ -110,7 +111,7 @@ def _paths(tmp_path: Path) -> B2GatePaths:
         claims_prepare_report=dummy,
         analysis_dir=tmp_path / "analysis",
         generated_build_report=dummy,
-        generated_validation_report=dummy,
+        generated_validation_report=tmp_path / "generated-promotion.json",
         stock_provenance=dummy,
         stock_inventory=dummy,
         stock_bsp_dir=dummy,
@@ -118,6 +119,7 @@ def _paths(tmp_path: Path) -> B2GatePaths:
         stock_validation_dir=dummy,
         dyn_evidence_executable=tmp_path / "q2-dyn-evidence",
         dyn_argv_preflight_report=tmp_path / "dyn-argv-preflight.json",
+        dyn_origin_binding_report=tmp_path / "dyn-origin-binding.json",
         dyn_evidence_report=tmp_path / "dyn/b2-dyn-evidence.json",
         test_report=dummy,
         qualification_report=dummy,
@@ -688,7 +690,7 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
         },
     }
     paths.dyn_evidence_report.write_bytes(canonical_bytes(report))
-    producer_argv = [
+    producer_argv_without_origin = [
         str(paths.dyn_evidence_executable),
         "--repo-root",
         str(paths.repo_root),
@@ -700,8 +702,6 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
         str(paths.claims_dir / f"{map_id}.bsp"),
         "--expected-map-id",
         map_id,
-        "--expected-origin",
-        "0,0,0",
         "--expected-analyzer-authority",
         SHA,
         "--expected-crate-commit",
@@ -718,15 +718,16 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
     paths.dyn_argv_preflight_report.write_bytes(
         canonical_bytes(
             {
-                "schema": "q2-b2-dyn-argv-preflight-v1",
+                "schema": "q2-b2-dyn-argv-shape-preflight-v2",
                 "passed": True,
                 "repository": _implementation(),
                 "executable": _file_evidence(
                     str(paths.dyn_evidence_executable), executable
                 ),
-                "producer_argv": producer_argv,
+                "origin_binding_status": "deferred-until-promoted-artifact",
+                "producer_argv_without_origin": producer_argv_without_origin,
                 "preflight_argv": [
-                    *producer_argv,
+                    *producer_argv_without_origin,
                     "--preflight-only",
                     "true",
                 ],
@@ -736,11 +737,101 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
                     canonical_bytes(
                         {
                             "passed": True,
-                            "schema": "q2-b2-dyn-argv-preflight-v1",
+                            "schema": "q2-b2-dyn-argv-shape-preflight-v2",
                         }
                     )
                 ),
                 "preflight_stderr_sha256": _sha256(b""),
+            }
+        )
+    )
+    paths.generated_validation_report.write_bytes(
+        canonical_bytes({"fixture": "generated-promotion"})
+    )
+    origin_ordinal = producer_argv_without_origin.index(
+        "--expected-analyzer-authority"
+    )
+    producer_argv = [
+        *producer_argv_without_origin[:origin_ordinal],
+        "--expected-origin",
+        "0,0,0",
+        *producer_argv_without_origin[origin_ordinal:],
+    ]
+    artifact_paths = {
+        "atlas": atlas_path,
+        "atlas_manifest": atlas_manifest_path,
+        "analysis_manifest": (
+            paths.analysis_dir / f"{map_id}.analysis.manifest.json"
+        ),
+        "bsp": paths.claims_dir / f"{map_id}.bsp",
+    }
+    paths.dyn_origin_binding_report.write_bytes(
+        canonical_bytes(
+            {
+                "schema": "q2-b2-dyn-origin-binding-v1",
+                "passed": True,
+                "shape_preflight": _file_evidence(
+                    str(paths.dyn_argv_preflight_report),
+                    paths.dyn_argv_preflight_report.read_bytes(),
+                ),
+                "promotion": _file_evidence(
+                    str(paths.generated_validation_report),
+                    paths.generated_validation_report.read_bytes(),
+                ),
+                "declaration": _file_evidence(
+                    str(paths.declaration), paths.declaration.read_bytes()
+                ),
+                "repository": _implementation(),
+                "executable": _file_evidence(
+                    str(paths.dyn_evidence_executable), executable
+                ),
+                "artifacts": {
+                    name: _file_evidence(str(path), path.read_bytes())
+                    for name, path in artifact_paths.items()
+                },
+                "identity": {
+                    "canonical_map_id": map_id,
+                    "origin": [0, 0, 0],
+                    "origin_token": "0,0,0",
+                    "analyzer_authority_sha256": SHA,
+                    "atlas_sha256": _sha256(atlas_bytes),
+                    "atlas_manifest_sha256": _sha256(atlas_manifest_bytes),
+                    "analysis_manifest_sha256": _sha256(
+                        artifact_paths["analysis_manifest"].read_bytes()
+                    ),
+                    "bsp_sha256": _sha256(bsp),
+                },
+                "producer_argv": producer_argv,
+                "parser_preflight_argv": [
+                    *producer_argv,
+                    "--preflight-only",
+                    "true",
+                ],
+                "artifact_preflight_argv": [
+                    *producer_argv,
+                    "--verify-artifacts-only",
+                    "true",
+                ],
+                "producer_output_absent_before": True,
+                "producer_output_absent_after": True,
+                "parser_preflight_stdout_sha256": _sha256(
+                    canonical_bytes(
+                        {
+                            "passed": True,
+                            "schema": "q2-b2-dyn-argv-shape-preflight-v2",
+                        }
+                    )
+                ),
+                "parser_preflight_stderr_sha256": _sha256(b""),
+                "artifact_preflight_stdout_sha256": _sha256(
+                    canonical_bytes(
+                        {
+                            "passed": True,
+                            "schema": "q2-b2-dyn-artifact-preflight-v1",
+                        }
+                    )
+                ),
+                "artifact_preflight_stderr_sha256": _sha256(b""),
             }
         )
     )
@@ -768,6 +859,7 @@ def test_retired_71446_identity_remains_readable_and_cli_is_explicit() -> None:
     assert "--source-dir" in options
     assert "--stock-analysis-dir" in options
     assert "--dyn-evidence-report" in options
+    assert "--dyn-origin-binding-report" in options
     assert "--compiled-cm-preflight-report" in options
     assert "--qualification-report" in options
     assert "--glob" not in options
@@ -830,6 +922,10 @@ def test_retired_71446_identity_remains_readable_and_cli_is_explicit() -> None:
             ROOT / "docs/multires/B2-GENERATED-COHORT-71450-DECLARATION.json",
             "71450",
         ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71451-DECLARATION.json",
+            "71451",
+        ),
     ],
 )
 def test_gate_refuses_retired_declaration_before_evidence(
@@ -839,19 +935,14 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_active_final_71451_authority_is_exact_and_explicit() -> None:
-    authority = _require_active_final_authority()
-    assert authority is ACTIVE_FINAL_AUTHORITY
-    assert authority.cohort_id == "b2g26_final_71451"
-    assert authority.declaration_sha256 == (
-        "e48e0ada7bcfa5a49bfdc6f69a70104daccf83b5c140e962b07305c9b6fac2bd"
-    )
-    assert authority.immutable_declaration_path == (
-        "docs/multires/B2-GENERATED-COHORT-71451-DECLARATION.json"
-    )
+def test_71451_is_retired_and_no_final_authority_is_active() -> None:
+    assert ACTIVE_FINAL_AUTHORITY is None
+    with pytest.raises(B2GateError, match="no active final cohort"):
+        _require_active_final_authority()
+    assert RETIRED_COHORT_71451 == "b2g26_final_71451"
     assert (
-        authority.qualification_successor_paths
-        == ACTIVE_71451_QUALIFICATION_SUCCESSOR_PATHS
+        "docs/multires/B2-GENERATED-COHORT-71451-DECLARATION.json"
+        in RETIRED_71451_QUALIFICATION_SUCCESSOR_PATHS
     )
     assert RETIRED_COHORT_71450 == "b2g26_final_71450"
     assert (
@@ -875,12 +966,11 @@ def test_active_final_71451_authority_is_exact_and_explicit() -> None:
     )
 
 
-def test_gate_accepts_only_explicit_active_71451_declaration() -> None:
-    declaration, digest = _validate_declaration(
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
-    assert declaration["cohort_id"] == "b2g26_final_71451"
-    assert digest == ACTIVE_FINAL_AUTHORITY.declaration_sha256
+def test_current_alias_is_historical_and_cannot_authorize_71451() -> None:
+    with pytest.raises(B2GateError, match="71451.*permanently retired"):
+        _validate_declaration(
+            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+        )
 
 
 def test_retired_71446_qualification_delta_remains_historically_readable(
@@ -1281,6 +1371,19 @@ def test_canonical_dyn_fixture_binds_atlas_and_rejects_stale_authority(
         )
 
 
+def test_dyn_gate_rejects_rebound_or_guessed_phase_b_origin(tmp_path: Path) -> None:
+    paths, declaration, _report = _write_dyn_fixture(tmp_path)
+    binding = json.loads(paths.dyn_origin_binding_report.read_bytes())
+    binding["identity"]["origin"] = [-512, -512, -512]
+    binding["identity"]["origin_token"] = "-512,-512,-512"
+    paths.dyn_origin_binding_report.write_bytes(canonical_bytes(binding))
+
+    with pytest.raises(B2GateError, match="artifact-derived origin identity"):
+        _validate_dyn_evidence(
+            paths.dyn_evidence_report, _implementation(), declaration, paths
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -1485,6 +1588,9 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert gate_schema["properties"]["toolchain_qualification"][
         "$ref"
     ] == "#/$defs/toolchain_qualification"
+    assert gate_schema["properties"]["dyn_evidence"]["properties"][
+        "argv_preflight"
+    ]["required"] == ["shape_preflight", "origin_binding"]
     assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
         "non_admissible"
     ]["const"] is True
@@ -1494,7 +1600,7 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
         "implementation_successor"
     ]["properties"]["changed_paths"]["minItems"] == len(
-        ACTIVE_71451_QUALIFICATION_SUCCESSOR_PATHS
+        RETIRED_71451_QUALIFICATION_SUCCESSOR_PATHS
     )
     assert gate_schema["$defs"]["compiled_cm_preflight_stage"]["properties"][
         "pass_count"

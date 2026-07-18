@@ -43,13 +43,14 @@ type AppResult<T> = Result<T, String>;
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Arguments {
     preflight_only: bool,
+    verify_artifacts_only: bool,
     repo_root: PathBuf,
     atlas: PathBuf,
     manifest: PathBuf,
     bsp: PathBuf,
     output: PathBuf,
     expected_map_id: String,
-    expected_origin: [i64; 3],
+    expected_origin: Option<[i64; 3]>,
     expected_analyzer_authority: String,
     expected_crate_commit: String,
     map_epoch: u64,
@@ -320,11 +321,12 @@ fn usage() -> &'static str {
     "usage: q2-dyn-evidence \
   --repo-root Q2_ML_BOT_CHECKOUT \
   --atlas RAW_ATLAS.bin --manifest CANONICAL_ATLAS_MANIFEST.json --bsp MAP.bsp \
-  --expected-map-id MAP --expected-origin X,Y,Z \
+  --expected-map-id MAP [--expected-origin X,Y,Z] \
   --expected-analyzer-authority SHA256 --expected-crate-commit GIT_COMMIT \
   --map-epoch N --environment-steps N --output NEW_DIRECTORY [--samples N] \
-  [--preflight-only true]\n\
-The binary must be compiled with Q2_LATTICE_CRATE_COMMIT set to the same full Git commit."
+  [--preflight-only true | --verify-artifacts-only true]\n\
+The binary must be compiled with Q2_LATTICE_CRATE_COMMIT set to the same full Git commit.\n\
+--expected-origin is required for execution and may be deferred only with --preflight-only true."
 }
 
 fn parse_arguments(arguments: &[OsString]) -> AppResult<Arguments> {
@@ -341,6 +343,7 @@ fn parse_arguments(arguments: &[OsString]) -> AppResult<Arguments> {
     let mut environment_steps = None;
     let mut samples = DEFAULT_SAMPLES;
     let mut preflight_only = false;
+    let mut verify_artifacts_only = false;
     let mut index = 1;
     while index < arguments.len() {
         let flag = arguments[index]
@@ -407,6 +410,16 @@ fn parse_arguments(arguments: &[OsString]) -> AppResult<Arguments> {
                 }
                 preflight_only = true;
             }
+            "--verify-artifacts-only" => {
+                let parsed = utf8_value(&value, flag)?;
+                if parsed != "true" {
+                    return Err("--verify-artifacts-only accepts only the literal true".to_owned());
+                }
+                if verify_artifacts_only {
+                    return Err("duplicate --verify-artifacts-only".to_owned());
+                }
+                verify_artifacts_only = true;
+            }
             _ => return Err(format!("unknown flag {flag}\n{}", usage())),
         }
         index += 2;
@@ -414,15 +427,24 @@ fn parse_arguments(arguments: &[OsString]) -> AppResult<Arguments> {
     if samples < MIN_SAMPLES {
         return Err(format!("--samples must be at least {MIN_SAMPLES}"));
     }
+    if preflight_only && verify_artifacts_only {
+        return Err(
+            "--preflight-only and --verify-artifacts-only are mutually exclusive".to_owned(),
+        );
+    }
+    if !preflight_only && expected_origin.is_none() {
+        return Err("missing required --expected-origin".to_owned());
+    }
     Ok(Arguments {
         preflight_only,
+        verify_artifacts_only,
         repo_root: required(repo_root, "--repo-root")?,
         atlas: required(atlas, "--atlas")?,
         manifest: required(manifest, "--manifest")?,
         bsp: required(bsp, "--bsp")?,
         output: required(output, "--output")?,
         expected_map_id: required(expected_map_id, "--expected-map-id")?,
-        expected_origin: required(expected_origin, "--expected-origin")?,
+        expected_origin,
         expected_analyzer_authority: required(
             expected_analyzer_authority,
             "--expected-analyzer-authority",
@@ -1136,6 +1158,9 @@ fn validate_embedded_commit<'a>(
 }
 
 fn execute(arguments: Arguments) -> AppResult<(PathBuf, bool)> {
+    let expected_origin = arguments
+        .expected_origin
+        .ok_or_else(|| "missing required --expected-origin for execution".to_owned())?;
     let embedded_commit = validate_embedded_commit(BUILD_COMMIT, &arguments.expected_crate_commit)?;
     let repo_root = fs::canonicalize(&arguments.repo_root).map_err(|error| {
         format!(
@@ -1204,10 +1229,10 @@ fn execute(arguments: Arguments) -> AppResult<(PathBuf, bool)> {
     let artifact = manifest
         .decode_and_verify_atlas_artifact(&artifact_name, &atlas_bytes, &atlas_limits)
         .map_err(|error| error.to_string())?;
-    if artifact.origin.0 != arguments.expected_origin {
+    if artifact.origin.0 != expected_origin {
         return Err(format!(
             "Atlas origin {:?} != expected {:?}",
-            artifact.origin.0, arguments.expected_origin
+            artifact.origin.0, expected_origin
         ));
     }
     let bsp_maximum = usize::try_from(manifest.bsp.size_bytes)
@@ -1218,11 +1243,14 @@ fn execute(arguments: Arguments) -> AppResult<(PathBuf, bool)> {
     {
         return Err("supplied BSP bytes do not match the admitted manifest identity".to_owned());
     }
+    if arguments.verify_artifacts_only {
+        return Ok((PathBuf::new(), true));
+    }
 
     let fence = DynFence {
         atlas_sha256: parse_digest(&sha256_hex(&atlas_bytes), "Atlas SHA-256")?,
         map_sha256: parse_digest(&manifest.bsp.sha256, "BSP SHA-256")?,
-        origin: AtlasOrigin(arguments.expected_origin),
+        origin: AtlasOrigin(expected_origin),
         map_epoch: arguments.map_epoch,
     };
     fence.validate().map_err(|error| error.to_string())?;
@@ -1381,10 +1409,14 @@ fn main() {
             eprintln!("q2-dyn-evidence: {error}");
             std::process::exit(64);
         }
-        println!("{{\"passed\":true,\"schema\":\"q2-b2-dyn-argv-preflight-v1\"}}");
+        println!("{{\"passed\":true,\"schema\":\"q2-b2-dyn-argv-shape-preflight-v2\"}}");
         return;
     }
+    let verify_artifacts_only = arguments.verify_artifacts_only;
     match execute(arguments) {
+        Ok((_path, true)) if verify_artifacts_only => {
+            println!("{{\"passed\":true,\"schema\":\"q2-b2-dyn-artifact-preflight-v1\"}}");
+        }
         Ok((path, true)) => println!("{}", path.display()),
         Ok((path, false)) => {
             eprintln!(
@@ -1447,7 +1479,7 @@ mod tests {
     fn cli_requires_explicit_authority_origin_epoch_and_minimum_samples() {
         let parsed = parse_arguments(&complete_arguments()).unwrap();
         assert!(!parsed.preflight_only);
-        assert_eq!(parsed.expected_origin, [-256, 0, 512]);
+        assert_eq!(parsed.expected_origin, Some([-256, 0, 512]));
         assert_eq!(parsed.map_epoch, 17);
         assert_eq!(parsed.samples, MIN_SAMPLES);
 
@@ -1466,7 +1498,7 @@ mod tests {
         arguments.extend(["--preflight-only".into(), "true".into()]);
         let parsed = parse_arguments(&arguments).unwrap();
         assert!(parsed.preflight_only);
-        assert_eq!(parsed.expected_origin, [-256, 0, 512]);
+        assert_eq!(parsed.expected_origin, Some([-256, 0, 512]));
 
         let ordinal = arguments
             .iter()
@@ -1478,6 +1510,54 @@ mod tests {
             parse_arguments(&arguments)
                 .unwrap_err()
                 .contains("unknown flag --expected-origin=-256,0,512")
+        );
+    }
+
+    #[test]
+    fn cli_preflight_allows_artifact_origin_to_remain_deferred() {
+        let mut arguments = complete_arguments();
+        let ordinal = arguments
+            .iter()
+            .position(|value| value == "--expected-origin")
+            .unwrap();
+        arguments.drain(ordinal..=ordinal + 1);
+        arguments.extend(["--preflight-only".into(), "true".into()]);
+
+        let parsed = parse_arguments(&arguments).unwrap();
+        assert!(parsed.preflight_only);
+        assert_eq!(parsed.expected_origin, None);
+        assert!(
+            execute(parsed)
+                .unwrap_err()
+                .contains("missing required --expected-origin for execution")
+        );
+    }
+
+    #[test]
+    fn cli_artifact_preflight_requires_origin_and_is_mutually_exclusive() {
+        let mut arguments = complete_arguments();
+        arguments.extend(["--verify-artifacts-only".into(), "true".into()]);
+        let parsed = parse_arguments(&arguments).unwrap();
+        assert!(parsed.verify_artifacts_only);
+        assert_eq!(parsed.expected_origin, Some([-256, 0, 512]));
+
+        let mut missing_origin = arguments.clone();
+        let ordinal = missing_origin
+            .iter()
+            .position(|value| value == "--expected-origin")
+            .unwrap();
+        missing_origin.drain(ordinal..=ordinal + 1);
+        assert!(
+            parse_arguments(&missing_origin)
+                .unwrap_err()
+                .contains("missing required --expected-origin")
+        );
+
+        arguments.extend(["--preflight-only".into(), "true".into()]);
+        assert!(
+            parse_arguments(&arguments)
+                .unwrap_err()
+                .contains("mutually exclusive")
         );
     }
 

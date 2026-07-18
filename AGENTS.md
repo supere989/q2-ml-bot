@@ -81,6 +81,20 @@ passing component tests or an isolated staging checkout cannot. The old
 in-process public ONNX runtime is retired and has no operational selector or
 rollback role.
 
+**Current B2 authority (updated 2026-07-18):** final cohort 71451 is
+permanently retired after its sole Dyn execution rejected a pre-source guessed
+Atlas origin (`[-512,-512,-512]`) against promoted `grid.origin
+[-512,0,-512]` and exited before staging. Source authorization was consumed;
+no retry or artifact reuse is allowed. `ACTIVE_FINAL_AUTHORITY = None`, so no
+gate, deployment, trainer, or TensorBoard may start. A successor must first
+commit and freshly qualify the two-phase Dyn contract: pre-source
+`q2-b2-dyn-argv-shape-preflight-v2` forbids a concrete origin; post-promotion
+`q2-b2-dyn-origin-binding-v1` derives it only from admitted artifacts and must
+pass the Rust no-write `--verify-artifacts-only true` path. The sole launcher
+requires both reports and rehashes the declaration, promotion report,
+executable, repository, Atlas, both manifests, and BSP, then repeats the Rust
+no-write artifact verification before execution.
+
 ## Training Topology
 
 Training runs on the Windows RTX 2080 box (DESKTOP-RTX2080), inside WSL.

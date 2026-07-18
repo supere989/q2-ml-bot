@@ -83,6 +83,9 @@ FAILURE_71449 = (
 FAILURE_71450 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71450-FAILURE.json"
 )
+FAILURE_71451 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71451-FAILURE.json"
+)
 RETIRED_DECLARATIONS = (
     NAMED_71438,
     NAMED_71439,
@@ -97,6 +100,7 @@ RETIRED_DECLARATIONS = (
     NAMED_71448,
     NAMED_71449,
     NAMED_71450,
+    NAMED_71451,
 )
 
 
@@ -363,7 +367,7 @@ def test_named_71450_is_retired() -> None:
         )
 
 
-def test_current_alias_and_named_71451_are_active_and_unretired() -> None:
+def test_current_alias_and_named_71451_are_historical_and_retired() -> None:
     current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
 
     assert current["cohort_id"] == "b2g26_final_71451"
@@ -371,9 +375,43 @@ def test_current_alias_and_named_71451_are_active_and_unretired() -> None:
     assert current_sha256 == (
         "e48e0ada7bcfa5a49bfdc6f69a70104daccf83b5c140e962b07305c9b6fac2bd"
     )
-    registry.require_unretired_declaration(
-        CURRENT_ALIAS, current, current_sha256
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71451.*permanently retired"
+    ):
+        registry.require_unretired_declaration(
+            CURRENT_ALIAS, current, current_sha256
+        )
+
+
+def test_71451_terminal_failure_authority_is_canonical_and_exact() -> None:
+    payload = FAILURE_71451.read_bytes()
+    authority = json.loads(payload)
+
+    assert payload == cohort.canonical_bytes(authority)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "83d11b7bafd6a669c67fd8ae4cf7b8e990d9e30bf0a448fb3424b604d34551d2"
     )
+    assert authority["schema"] == registry.FAILURE_SCHEMA
+    assert authority["status"] == (
+        "permanently-failed-dyn-expected-origin-mismatch"
+    )
+    assert authority["cohort_id"] == "b2g26_final_71451"
+    assert authority["failure"]["phase"] == "dyn-artifact-origin-fence"
+    dyn = authority["evidence"]["dyn"]
+    assert dyn["attempted"] is True
+    assert dyn["passed"] is False
+    assert dyn["exit_code"] == 65
+    assert dyn["expected_origin"] == [-512, -512, -512]
+    assert dyn["admitted_artifacts"]["grid_origin"] == [-512, 0, -512]
+    assert dyn["origin_fence_rejected"] is True
+    assert dyn["staging_created"] is False
+    assert dyn["output_directory_exists"] is False
+    assert dyn["report_published"] is False
+    assert dyn["snapshots_published"] is False
+    assert authority["evidence"]["source_authorization"]["consumed"] is True
+    assert authority["failure"]["publication_contract"]["gate_run"] is False
+    assert authority["failure"]["publication_contract"]["training_run"] is False
+    assert authority["admission"]["retry_under_same_declaration_allowed"] is False
 
 
 def test_71450_terminal_failure_authority_is_canonical_and_exact() -> None:

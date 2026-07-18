@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tools import run_generator_cohort as cohort
+from tools import retired_cohort_registry as registry
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -193,7 +194,7 @@ def static_pass(map_path: Path) -> dict[str, object]:
     return {"map": map_path.stem, "static_ok": True}
 
 
-def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> None:
+def test_historical_71451_alias_is_canonical_balanced_and_retired() -> None:
     declaration, digest = cohort.load_declaration(AUTHORITATIVE_DECLARATION)
     declaration_bytes = AUTHORITATIVE_DECLARATION.read_bytes()
     assert declaration_bytes == DECLARATION_71451.read_bytes()
@@ -255,6 +256,12 @@ def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> Non
     assert {row["map"] for row in declaration["maps"]}.isdisjoint(
         row["map"] for row in historical_rows
     )
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71451.*permanently retired"
+    ):
+        registry.require_unretired_declaration(
+            AUTHORITATIVE_DECLARATION, declaration, digest
+        )
 
 
 def test_generate_publishes_only_a_complete_double_built_source_freeze(
