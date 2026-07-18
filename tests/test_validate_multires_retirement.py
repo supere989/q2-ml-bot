@@ -281,6 +281,10 @@ def _refresh_checkpoint(fixture: dict) -> None:
     _json(fixture["checkpoint_attestation"], fixture["checkpoint_manifest"])
     _refresh(fixture, "checkpoint")
     _refresh(fixture, "checkpoint_attestation")
+    fixture["cold_document"]["inputs"]["trainer_checkpoint"]["sha256"] = (
+        _sha(fixture["checkpoint"])
+    )
+    _json(fixture["cold"], fixture["cold_document"])
 
 
 @pytest.mark.skipif(torch is None, reason="real weights-only loader requires PyTorch")

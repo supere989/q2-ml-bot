@@ -47,6 +47,9 @@ from train.multires_one_run import (
     preflight,
 )
 import train.multires_one_run as one_run_module
+from tools.qualify_network_client_frame_barrier import (
+    _validate_execution_evidence as _real_validate_execution_evidence,
+)
 from train.multires_service import (
     MultiresServiceError,
     _owned_process_tree,
@@ -595,6 +598,11 @@ def test_service_is_fail_closed_until_executable_barrier_and_wrapper_is_exact(
     tmp_path, monkeypatch
 ):
     args = materialize(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        one_run_module,
+        "_validate_execution_evidence",
+        _real_validate_execution_evidence,
+    )
     evidence = tmp_path / "evidence"
     evidence.mkdir()
     one_run_config = json.loads(
@@ -655,7 +663,10 @@ def test_service_is_fail_closed_until_executable_barrier_and_wrapper_is_exact(
         ):
             service_preflight(args.runtime_root)
     else:
-        with pytest.raises(OneRunError, match="handwritten capability assertions"):
+        with pytest.raises(
+            OneRunError,
+            match="network frame-barrier execution evidence differs",
+        ):
             service_preflight(args.runtime_root)
 
     wrapper = (Path(__file__).parents[1] / "tools" / "train_service.sh").read_text()

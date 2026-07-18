@@ -77,7 +77,15 @@ def rust_extension():
         ["cargo", "build", "-p", "q2-lattice", "--features", "python"],
         cwd=ROOT,
     )
-    candidates = sorted((ROOT / "target" / "debug").glob("*q2_lattice_rs*.so"))
+    cargo_target_value = os.environ.get("CARGO_TARGET_DIR")
+    cargo_target = (
+        Path(cargo_target_value).resolve()
+        if cargo_target_value
+        else ROOT / "target"
+    )
+    candidates = sorted(
+        (cargo_target / "debug").glob("*q2_lattice_rs*.so")
+    )
     if len(candidates) != 1:
         pytest.fail(f"expected one built q2_lattice_rs extension, found {candidates!r}")
     path = candidates[0].resolve()
