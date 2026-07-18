@@ -44,6 +44,7 @@ CURRICULUM_STAGE_NAMES = {
     4: "hook-assisted-recovery-controlled-drops",
     5: "pickups-guide-dropout",
     6: "generated-map-combat",
+    7: "full-guide-off-ablation",
 }
 
 _SHA256_CHARS = frozenset("0123456789abcdef")
@@ -158,6 +159,15 @@ class SanitizedCausalMetricsAccumulator:
             raise MultiresTrainingCoreError(
                 "causal metrics client/public identity differs"
             )
+        required_public = {
+            "action_debug_movement", "movement_speed", "true_view_pitch_deg",
+            "guide_dropped", "guide_classes", "global_guide_drop",
+        }
+        missing_public = sorted(required_public - set(info))
+        if missing_public:
+            raise MultiresTrainingCoreError(
+                f"causal metrics public transition omits {missing_public!r}"
+            )
 
         forward_command = 0.0
         backward_command = 0.0
@@ -257,6 +267,14 @@ class SanitizedCausalMetricsAccumulator:
     def observe_runtime_snapshot(self, **public_runtime_metrics: Any) -> None:
         """Add the public Atlas/Dyn resident-query snapshot to this window."""
         self._reject_private(public_runtime_metrics, "public_runtime_metrics")
+        if (
+            public_runtime_metrics.get("atlas_loaded") is not True
+            or public_runtime_metrics.get("atlas_hash_match") is not True
+            or public_runtime_metrics.get("thermal_checkpoint_fields") != 0
+        ):
+            raise MultiresTrainingCoreError(
+                "primary runtime snapshot violates Atlas/thermal admission"
+            )
         self.metrics.observe_runtime_snapshot(**public_runtime_metrics)
 
 
@@ -421,7 +439,7 @@ class CurriculumStage:
         predecessor_stage_sha256: str | None = None,
     ) -> "CurriculumStage":
         if type(stage_id) is not int or stage_id not in CURRICULUM_STAGE_NAMES:
-            raise MultiresTrainingCoreError("curriculum stage must be an integer 1..6")
+            raise MultiresTrainingCoreError("curriculum stage must be an integer 1..7")
         if not isinstance(configuration, Mapping) or not configuration:
             raise MultiresTrainingCoreError(
                 "curriculum stage requires a nonempty immutable configuration"
@@ -436,6 +454,39 @@ class CurriculumStage:
                 "curriculum stage >1 requires the predecessor stage digest"
             )
         normalized = _normalize_json(configuration, "stage.configuration")
+        if stage_id == 7:
+            required = {
+                "guide_mode", "matched_seed_guide_on_reference",
+                "maximum_task_success_degradation_fraction",
+                "minimum_accepted_transitions", "gate_predicates",
+                "matched_seed", "task_success_metric_path",
+                "global_dropout_metric_path", "neutral_baseline_task_success",
+            }
+            if not required <= set(normalized):
+                raise MultiresTrainingCoreError(
+                    "curriculum stage 7 lacks the guide-dependence contract"
+                )
+            degradation = normalized[
+                "maximum_task_success_degradation_fraction"
+            ]
+            if (
+                normalized["guide_mode"] != "off"
+                or not isinstance(
+                    normalized["matched_seed_guide_on_reference"], Mapping
+                )
+                or not normalized["matched_seed_guide_on_reference"]
+                or isinstance(degradation, bool)
+                or not isinstance(degradation, (int, float))
+                or not math.isfinite(float(degradation))
+                or not 0.0 <= float(degradation) <= 0.15
+                or type(normalized["minimum_accepted_transitions"]) is not int
+                or normalized["minimum_accepted_transitions"] < 1
+                or not isinstance(normalized["gate_predicates"], list)
+                or not normalized["gate_predicates"]
+            ):
+                raise MultiresTrainingCoreError(
+                    "curriculum stage 7 guide-off configuration is invalid"
+                )
         envelope = {
             "schema": CURRICULUM_STAGE_SCHEMA,
             "stage_id": stage_id,
@@ -489,10 +540,13 @@ def create_curriculum_gate_evidence(
     *,
     decision: str,
     runtime_manifest_sha256: str,
+    atlas_catalog_sha256: str,
     lineage_root_sha256: str,
     accepted_transitions: int,
     policy_updates: int,
     optimizer_steps: int,
+    completed_stage: Mapping[str, Any] | None = None,
+    evaluator: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Seal an explicit evaluator decision; this performs no promotion."""
     stage.validate()
@@ -500,6 +554,8 @@ def create_curriculum_gate_evidence(
         raise MultiresTrainingCoreError("curriculum gate decision is invalid")
     if not _valid_sha256(runtime_manifest_sha256):
         raise MultiresTrainingCoreError("curriculum gate runtime digest is invalid")
+    if not _valid_sha256(atlas_catalog_sha256):
+        raise MultiresTrainingCoreError("curriculum gate Atlas catalog digest is invalid")
     if not _valid_sha256(lineage_root_sha256):
         raise MultiresTrainingCoreError("curriculum gate lineage digest is invalid")
     if any(
@@ -513,6 +569,30 @@ def create_curriculum_gate_evidence(
         raise MultiresTrainingCoreError(
             "a passed curriculum gate requires positive training evidence"
         )
+    artifacts: dict[str, Any] | None = None
+    if completed_stage is not None or evaluator is not None:
+        if not isinstance(completed_stage, Mapping) or not isinstance(
+            evaluator, Mapping
+        ):
+            raise MultiresTrainingCoreError(
+                "curriculum gate completion/evaluator evidence must be paired"
+            )
+        artifacts = _normalize_json(
+            {
+                "completed_stage": completed_stage,
+                "evaluator": evaluator,
+            },
+            "curriculum gate artifacts",
+        )
+        for label, record in artifacts.items():
+            if not isinstance(record, Mapping) or set(record) != {
+                "path", "sha256"
+            } or not isinstance(record["path"], str) or not record["path"] or (
+                not _valid_sha256(record["sha256"])
+            ):
+                raise MultiresTrainingCoreError(
+                    f"curriculum gate {label} artifact record is invalid"
+                )
     return _seal_evidence({
         "schema": CURRICULUM_GATE_SCHEMA,
         "decision": decision,
@@ -520,10 +600,12 @@ def create_curriculum_gate_evidence(
         "stage_name": stage.stage_name,
         "stage_configuration_sha256": stage.configuration_sha256,
         "runtime_manifest_sha256": runtime_manifest_sha256,
+        "atlas_catalog_sha256": atlas_catalog_sha256,
         "lineage_root_sha256": lineage_root_sha256,
         "accepted_transitions": accepted_transitions,
         "policy_updates": policy_updates,
         "optimizer_steps": optimizer_steps,
+        "artifacts": artifacts,
         "automatic_promotion": False,
     })
 
@@ -533,6 +615,7 @@ def validate_predecessor_gate(
     evidence: Mapping[str, Any] | None,
     *,
     runtime_manifest_sha256: str,
+    atlas_catalog_sha256: str,
     lineage_root_sha256: str | None,
 ) -> dict[str, Any] | None:
     stage.validate()
@@ -559,6 +642,7 @@ def validate_predecessor_gate(
         "stage_name": CURRICULUM_STAGE_NAMES[stage.stage_id - 1],
         "stage_configuration_sha256": stage.predecessor_stage_sha256,
         "runtime_manifest_sha256": runtime_manifest_sha256,
+        "atlas_catalog_sha256": atlas_catalog_sha256,
         "lineage_root_sha256": lineage_root_sha256,
         "automatic_promotion": False,
     }
@@ -582,6 +666,23 @@ def validate_predecessor_gate(
             ),
             "positive counters",
         )
+    artifacts = gate.get("artifacts")
+    if artifacts is not None:
+        if not isinstance(artifacts, Mapping) or set(artifacts) != {
+            "completed_stage", "evaluator"
+        }:
+            mismatches["artifacts"] = (artifacts, "exact artifact records")
+        else:
+            for label, record in artifacts.items():
+                if (
+                    not isinstance(record, Mapping)
+                    or set(record) != {"path", "sha256"}
+                    or not isinstance(record.get("path"), str)
+                    or not _valid_sha256(record.get("sha256"))
+                ):
+                    mismatches[f"artifacts.{label}"] = (
+                        record, "path and SHA-256",
+                    )
     if mismatches:
         raise MultiresTrainingCoreError(
             f"predecessor curriculum gate differs: {mismatches!r}"
@@ -635,6 +736,7 @@ def progress_from_season_report(
     *,
     runtime_manifest_sha256: str,
     atlas_sha256: str,
+    atlas_catalog_sha256: str,
     lineage_root_sha256: str,
 ) -> TrainingProgress:
     """Recover counters only from the exact current report/checkpoint identity."""
@@ -648,6 +750,7 @@ def progress_from_season_report(
         "stage_configuration_sha256": stage.configuration_sha256,
         "runtime_manifest_sha256": runtime_manifest_sha256,
         "atlas_sha256": atlas_sha256,
+        "atlas_catalog_sha256": atlas_catalog_sha256,
         "lineage_root_sha256": lineage_root_sha256,
     }
     mismatches = {
@@ -684,7 +787,7 @@ def progress_from_season_report(
         )
     for name, wanted in (
         ("runtime_manifest_sha256", runtime_manifest_sha256),
-        ("atlas_sha256", atlas_sha256),
+        ("atlas_catalog_sha256", atlas_catalog_sha256),
         ("lineage_root_sha256", lineage_root_sha256),
     ):
         if manifest.get(name) != wanted:
@@ -727,6 +830,7 @@ class MultiresContinuousTrainingCore:
         causal_metrics: CausalMetricsSnapshotter,
         predecessor_gate: Mapping[str, Any] | None = None,
         progress: TrainingProgress = TrainingProgress(),
+        require_runtime_telemetry: bool = False,
     ):
         if not callable(getattr(trainer, "train_update", None)):
             raise TypeError("training core requires a MultiresLiveTrainer")
@@ -745,12 +849,13 @@ class MultiresContinuousTrainingCore:
         runtime_manifest_sha256 = getattr(
             runtime, "runtime_manifest_sha256", None
         )
-        atlas_sha256 = getattr(runtime, "atlas_sha256", None)
+        atlas_sha256 = getattr(runtime_owner, "active_atlas_sha256", None)
+        atlas_catalog_sha256 = getattr(runtime_owner, "atlas_catalog_sha256", None)
         if not _valid_sha256(runtime_manifest_sha256) or not _valid_sha256(
             atlas_sha256
-        ):
+        ) or not _valid_sha256(atlas_catalog_sha256):
             raise MultiresTrainingCoreError(
-                "training core requires attested runtime and Atlas digests"
+                "training core requires attested runtime, active Atlas, and catalog digests"
             )
         root = Path(output_root).expanduser()
         if not root.is_absolute():
@@ -771,6 +876,7 @@ class MultiresContinuousTrainingCore:
             stage,
             predecessor_gate,
             runtime_manifest_sha256=runtime_manifest_sha256,
+            atlas_catalog_sha256=str(atlas_catalog_sha256),
             lineage_root_sha256=runtime_lineage,
         )
         if validated_gate is not None:
@@ -792,17 +898,51 @@ class MultiresContinuousTrainingCore:
                     "existing season report requires explicit resume progress"
                 )
             decoded = json.loads(current_report.read_text(encoding="utf-8"))
-            restored = progress_from_season_report(
-                decoded,
-                stage,
-                runtime_manifest_sha256=runtime_manifest_sha256,
-                atlas_sha256=atlas_sha256,
-                lineage_root_sha256=str(runtime_lineage),
-            )
-            if restored != progress:
-                raise MultiresTrainingCoreError(
-                    "explicit progress differs from current season report"
+            if validated_gate is not None and decoded.get("stage_id") == (
+                stage.stage_id - 1
+            ):
+                artifacts = validated_gate.get("artifacts")
+                completed = (
+                    artifacts.get("completed_stage")
+                    if isinstance(artifacts, Mapping) else None
                 )
+                if (
+                    not isinstance(completed, Mapping)
+                    or Path(str(completed.get("path"))).resolve()
+                    != current_report.resolve()
+                    or _file_sha256(current_report) != completed.get("sha256")
+                ):
+                    raise MultiresTrainingCoreError(
+                        "stage-advance report is not the gate-bound completed stage"
+                    )
+                sealed = _validate_sealed_evidence(
+                    decoded, schema=SEASON_REPORT_SCHEMA,
+                    label="completed predecessor season report",
+                )
+                counters = sealed.get("counters")
+                if not isinstance(counters, Mapping) or any(
+                    counters.get(name) != validated_gate[name]
+                    for name in (
+                        "accepted_transitions", "policy_updates",
+                        "optimizer_steps",
+                    )
+                ):
+                    raise MultiresTrainingCoreError(
+                        "completed predecessor report counters differ from gate"
+                    )
+            else:
+                restored = progress_from_season_report(
+                    decoded,
+                    stage,
+                    runtime_manifest_sha256=runtime_manifest_sha256,
+                    atlas_sha256=atlas_sha256,
+                    atlas_catalog_sha256=str(atlas_catalog_sha256),
+                    lineage_root_sha256=str(runtime_lineage),
+                )
+                if restored != progress:
+                    raise MultiresTrainingCoreError(
+                        "explicit progress differs from current season report"
+                    )
 
         self.trainer = trainer
         self.output_root = root
@@ -811,17 +951,25 @@ class MultiresContinuousTrainingCore:
         self.causal_metrics = causal_metrics
         self.runtime_manifest_sha256 = str(runtime_manifest_sha256)
         self.atlas_sha256 = str(atlas_sha256)
+        self.atlas_catalog_sha256 = str(atlas_catalog_sha256)
         self.accepted_transitions = progress.accepted_transitions
         self.policy_updates = progress.policy_updates
         self.optimizer_steps = progress.optimizer_steps
         self.next_policy_version = progress.next_policy_version
         self._lineage_root_sha256 = runtime_lineage
         self._failed = False
+        self.require_runtime_telemetry = bool(require_runtime_telemetry)
         initial_metrics = self._causal_snapshot(
             policy_end_version=self.next_policy_version
         )
         self._causal_metric_transitions = int(
             initial_metrics["accepted_transitions"]
+        )
+        initial_atlas_metrics = initial_metrics.get("atlas", {})
+        if not isinstance(initial_atlas_metrics, Mapping):
+            raise MultiresTrainingCoreError("causal Atlas metrics are malformed")
+        self._runtime_metric_snapshots = int(
+            initial_atlas_metrics.get("runtime_snapshots", 0)
         )
         initial_network_metrics = self._network_metrics_snapshot()
         self._network_metric_transitions = int(
@@ -863,7 +1011,7 @@ class MultiresContinuousTrainingCore:
             value = dict(manifest)
         else:
             fields = (
-                "training_step", "lineage_root_sha256", "atlas_sha256",
+                "training_step", "lineage_root_sha256", "atlas_catalog_sha256",
                 "runtime_manifest_sha256",
             )
             value = {name: getattr(manifest, name, None) for name in fields}
@@ -953,6 +1101,59 @@ class MultiresContinuousTrainingCore:
                 )
             result[tag] = int(raw) if type(raw) is int else number
         return result
+
+    def _observe_runtime_snapshots(
+        self, update: Any, accepted_transitions: int
+    ) -> None:
+        snapshots = getattr(update, "runtime_snapshots", None)
+        if snapshots is None:
+            if self.require_runtime_telemetry:
+                raise MultiresTrainingCoreError(
+                    "primary live update lacks Atlas/Dyn runtime telemetry"
+                )
+            return
+        if not isinstance(snapshots, tuple):
+            raise MultiresTrainingCoreError("Atlas/Dyn runtime telemetry is malformed")
+        collector = getattr(self.trainer, "collector", None)
+        batch = getattr(collector, "batch", None)
+        client_count = len(getattr(batch, "envs", ()))
+        if client_count < 1 or accepted_transitions % client_count:
+            raise MultiresTrainingCoreError(
+                "accepted transition count is not divisible by runtime clients"
+            )
+        expected = accepted_transitions // client_count
+        if len(snapshots) != expected:
+            raise MultiresTrainingCoreError(
+                "Atlas/Dyn runtime snapshot count differs from admitted rounds: "
+                f"{len(snapshots)} != {expected}"
+            )
+        already_admitted = getattr(update, "runtime_snapshots_admitted", False)
+        if type(already_admitted) is not bool:
+            raise MultiresTrainingCoreError(
+                "Atlas/Dyn runtime admission marker is malformed"
+            )
+        if already_admitted:
+            return
+        if self.require_runtime_telemetry:
+            raise MultiresTrainingCoreError(
+                "primary Atlas/Dyn runtime telemetry was not admitted before PPO"
+            )
+        observe = getattr(self.causal_metrics, "observe_runtime_snapshot", None)
+        if not callable(observe):
+            raise MultiresTrainingCoreError(
+                "causal metrics lacks Atlas/Dyn runtime snapshot admission"
+            )
+        for snapshot in snapshots:
+            if not isinstance(snapshot, Mapping):
+                raise MultiresTrainingCoreError(
+                    "Atlas/Dyn runtime snapshot record is malformed"
+                )
+            try:
+                observe(**dict(snapshot))
+            except Exception as error:
+                raise MultiresTrainingCoreError(
+                    "Atlas/Dyn runtime snapshot was rejected"
+                ) from error
 
     @staticmethod
     def _numeric_metric_tags(
@@ -1046,6 +1247,7 @@ class MultiresContinuousTrainingCore:
             ppo_metrics, optimizer_steps_this_update = self._ppo_metrics(
                 getattr(update, "ppo_metrics", None)
             )
+            self._observe_runtime_snapshots(update, accepted_this_update)
             causal_metrics = self._causal_snapshot(
                 policy_end_version=policy_version + 1
             )
@@ -1059,6 +1261,29 @@ class MultiresContinuousTrainingCore:
                 raise MultiresTrainingCoreError(
                     "causal-metrics transition delta differs from admitted rollout: "
                     f"{causal_metric_transitions} != {expected_metric_transitions}"
+                )
+            causal_atlas_metrics = causal_metrics.get("atlas", {})
+            if not isinstance(causal_atlas_metrics, Mapping):
+                raise MultiresTrainingCoreError("causal Atlas metrics are malformed")
+            runtime_metric_snapshots = int(
+                causal_atlas_metrics.get("runtime_snapshots", 0)
+            )
+            collector = getattr(self.trainer, "collector", None)
+            batch = getattr(collector, "batch", None)
+            runtime_client_count = len(getattr(batch, "envs", ()))
+            expected_runtime_snapshots = (
+                self._runtime_metric_snapshots
+                + accepted_this_update // runtime_client_count
+                if runtime_client_count > 0
+                and accepted_this_update % runtime_client_count == 0
+                else -1
+            )
+            if self.require_runtime_telemetry and (
+                runtime_metric_snapshots != expected_runtime_snapshots
+            ):
+                raise MultiresTrainingCoreError(
+                    "runtime-metrics delta differs from admitted lockstep rounds: "
+                    f"{runtime_metric_snapshots} != {expected_runtime_snapshots}"
                 )
             causal_metrics_sha256 = _sha256_json(causal_metrics)
             network_metrics = self._network_metrics_snapshot()
@@ -1103,7 +1328,7 @@ class MultiresContinuousTrainingCore:
             lineage_root = manifest_mapping.get("lineage_root_sha256")
             expected_manifest = {
                 "training_step": cumulative_transitions,
-                "atlas_sha256": self.atlas_sha256,
+                "atlas_catalog_sha256": self.atlas_catalog_sha256,
                 "runtime_manifest_sha256": self.runtime_manifest_sha256,
             }
             mismatches = {
@@ -1165,6 +1390,7 @@ class MultiresContinuousTrainingCore:
                 "boundary_rounds": boundary_rounds,
                 "runtime_manifest_sha256": self.runtime_manifest_sha256,
                 "atlas_sha256": self.atlas_sha256,
+                "atlas_catalog_sha256": self.atlas_catalog_sha256,
                 "private_causal_payload_serialized": False,
                 "causal_metrics_window_sha256": causal_metrics_sha256,
                 "causal_metrics_window": causal_metrics,
@@ -1195,6 +1421,7 @@ class MultiresContinuousTrainingCore:
                 "lineage_root_sha256": lineage_root,
                 "runtime_manifest_sha256": self.runtime_manifest_sha256,
                 "atlas_sha256": self.atlas_sha256,
+                "atlas_catalog_sha256": self.atlas_catalog_sha256,
                 "promotion_claim": False,
                 "causal_metrics_window_sha256": causal_metrics_sha256,
                 "network_metrics_window_sha256": network_metrics_sha256,
@@ -1215,6 +1442,7 @@ class MultiresContinuousTrainingCore:
                 "stage_configuration_sha256": self.stage.configuration_sha256,
                 "runtime_manifest_sha256": self.runtime_manifest_sha256,
                 "atlas_sha256": self.atlas_sha256,
+                "atlas_catalog_sha256": self.atlas_catalog_sha256,
                 "lineage_root_sha256": lineage_root,
                 "counters": {
                     "accepted_transitions": cumulative_transitions,
@@ -1260,6 +1488,7 @@ class MultiresContinuousTrainingCore:
             self.next_policy_version = policy_version + 1
             self._lineage_root_sha256 = str(lineage_root)
             self._causal_metric_transitions = causal_metric_transitions
+            self._runtime_metric_snapshots = runtime_metric_snapshots
             self._network_metric_transitions = network_metric_transitions
             return season
         except Exception:

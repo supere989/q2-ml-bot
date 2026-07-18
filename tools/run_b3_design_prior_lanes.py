@@ -121,6 +121,8 @@ def _preflight_configuration(
     work_root: Path,
     output_lane: Path,
     q2tool: Path,
+    packer: Path,
+    verifier: Path,
     basedir: Path,
     cm_oracle: Path,
     pmove_oracle: Path,
@@ -162,6 +164,12 @@ def _preflight_configuration(
     _require_regular(plan_path, "frozen campaign plan")
     _require_regular(q2tool, "q2tool", executable=True)
     for path, label in (
+        (packer, "Atlas packer"), (verifier, "Atlas verifier"),
+    ):
+        if not path.is_absolute():
+            raise B3LaneError(f"{label} must be an absolute path")
+        _require_regular(path, label, executable=True)
+    for path, label in (
         (cm_oracle, "collision oracle"), (pmove_oracle, "Pmove oracle"),
         (hook_oracle, "hook oracle"), (fall_oracle, "fall oracle"),
     ):
@@ -182,8 +190,9 @@ def _preflight_configuration(
     if not output_lane.parent.is_dir() or output_lane.parent.is_symlink():
         raise B3LaneError("lane output parent must be an existing non-symlink directory")
     protected_inputs = (
-        plan_path, q2tool, basedir, cm_oracle, pmove_oracle, hook_oracle,
-        fall_oracle, hook_attestation, b1_gate, client_root, lithium_root,
+        plan_path, q2tool, packer, verifier, basedir, cm_oracle, pmove_oracle,
+        hook_oracle, fall_oracle, hook_attestation, b1_gate, client_root,
+        lithium_root,
     )
     if any(_overlaps(work_root, path) or _overlaps(output_lane, path) for path in protected_inputs):
         raise B3LaneError("lane outputs overlap an authoritative input path")
@@ -308,6 +317,8 @@ def run_lane(
     work_root: Path,
     output_lane: Path,
     q2tool: Path,
+    packer: Path,
+    verifier: Path,
     basedir: Path,
     cm_oracle: Path,
     pmove_oracle: Path,
@@ -327,7 +338,8 @@ def run_lane(
         raise B3LaneError("B3 lane orchestration requires the canonical repository root")
     _preflight_configuration(
         plan_path=plan_path, work_root=work_root, output_lane=output_lane,
-        q2tool=q2tool, basedir=basedir, cm_oracle=cm_oracle,
+        q2tool=q2tool, packer=packer, verifier=verifier, basedir=basedir,
+        cm_oracle=cm_oracle,
         pmove_oracle=pmove_oracle, hook_oracle=hook_oracle,
         fall_oracle=fall_oracle, hook_attestation=hook_attestation,
         b1_gate=b1_gate, client_root=client_root, lithium_root=lithium_root,
@@ -404,7 +416,7 @@ def run_lane(
             declaration_path, claims_dir, analysis_dir, work_root / "atlas-diagnostics",
             atlas_report_path, repo_root=repo_root, client_root=client_root,
             lithium_root=lithium_root, hook_attestation=hook_attestation,
-            fall_oracle=fall_oracle,
+            fall_oracle=fall_oracle, packer=packer, verifier=verifier,
         )
         _require_stage(atlas_report, "Atlas construction")
         validation = validate_claim_campaign(declaration_path, claims_dir, analysis_dir, b1_gate)
@@ -455,7 +467,9 @@ def run_lane(
         "evidence_kind": "measured-compiled-atlas", "synthetic_claims": False,
         "implementation": expected_implementation,
         "authorities": {
-            "q2tool": _file_record(q2tool), "cm_oracle": _file_record(cm_oracle),
+            "q2tool": _file_record(q2tool), "packer": _file_record(packer),
+            "verifier": _file_record(verifier),
+            "cm_oracle": _file_record(cm_oracle),
             "pmove_oracle": _file_record(pmove_oracle),
             "hook_oracle": _file_record(hook_oracle),
             "fall_oracle": _file_record(fall_oracle),
@@ -476,6 +490,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--output-lane", type=Path, required=True)
     parser.add_argument("--q2tool", type=Path, required=True)
+    parser.add_argument("--packer", type=Path, required=True)
+    parser.add_argument("--verifier", type=Path, required=True)
     parser.add_argument("--basedir", type=Path, required=True)
     parser.add_argument("--cm-oracle", type=Path, required=True)
     parser.add_argument("--pmove-oracle", type=Path, required=True)
@@ -501,6 +517,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = run_lane(
             plan_path=args.plan, lane=args.lane, work_root=args.work_root,
             output_lane=args.output_lane, q2tool=args.q2tool, basedir=args.basedir,
+            packer=args.packer, verifier=args.verifier,
             cm_oracle=args.cm_oracle, pmove_oracle=args.pmove_oracle,
             hook_oracle=args.hook_oracle, fall_oracle=args.fall_oracle,
             hook_attestation=args.hook_attestation, b1_gate=args.b1_gate,

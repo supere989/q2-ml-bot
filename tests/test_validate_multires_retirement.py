@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 import zipfile
 
 import pytest
@@ -21,6 +22,11 @@ from harness.multires_contract import (
     POSTURE_CLASSES,
 )
 from harness.multires_lineage import save_attested_checkpoint
+from harness.atlas_catalog import (
+    ATLAS_MAP_SPEC_SCHEMA,
+    author_catalog,
+    canonical_bytes as catalog_canonical_bytes,
+)
 from harness.multires_runtime import (
     B4_ACTION_MAGIC,
     B4_CAUSAL_MAGIC,
@@ -35,10 +41,13 @@ from harness.multires_runtime import (
 from harness.multires_training_config import MultiresTrainingConfiguration
 from tools.validate_multires_retirement import (
     COLD_START_SCHEMA,
+    PRE_B6_COLD_START_SCHEMA,
+    PRE_B6_REPORT_SCHEMA,
     RetirementValidationError,
     validate_retirement,
 )
 import tools.validate_multires_retirement as retirement_module
+import train.multires_one_run as one_run_module
 
 if torch is not None:
     from models.multires_policy import MultiresQ2BotPolicy
@@ -56,6 +65,83 @@ def _sha(path: Path) -> str:
 def _json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+
+
+def _catalog_fixture(runtime: Path, bundle: Path):
+    map_name = "retirement_fixture"
+    bsp = runtime / f"{map_name}.bsp"
+    atlas = runtime / f"{map_name}.atlas.bin"
+    objectives = runtime / f"{map_name}.objectives.json"
+    atlas_manifest = runtime / f"{map_name}.atlas.manifest.json"
+    extension_path = runtime / "q2_lattice_rs.so"
+    bsp.write_bytes(b"IBSP-retirement-fixture")
+    atlas.write_bytes(b"ATLAS-retirement-fixture")
+    objectives.write_text(json.dumps({
+        "map_name": map_name,
+        "atlas_sha256": _sha(atlas),
+    }, sort_keys=True), encoding="utf-8")
+    atlas_manifest.write_text(json.dumps({
+        "grid": {"origin": [0, 0, 0]},
+        "bsp": {
+            "canonical_map_id": map_name,
+            "sha256": _sha(bsp),
+            "size_bytes": bsp.stat().st_size,
+        },
+        "artifacts": {f"{map_name}.atlas.bin": {
+            "sha256_uncompressed": _sha(atlas),
+            "uncompressed_size": atlas.stat().st_size,
+        }},
+    }, sort_keys=True), encoding="utf-8")
+    _json(bundle, {
+        "bundle_version": 3,
+        "artifact_state": "admitted",
+        "name": map_name,
+        "files": {f"{map_name}.bsp": _sha(bsp)},
+        "analysis_files": {
+            f"{map_name}.atlas.manifest.json": _sha(atlas_manifest),
+            f"{map_name}.objectives.json": _sha(objectives),
+        },
+    })
+    extension_path.write_bytes(b"test-only-catalog-extension-authority")
+
+    class Runtime:
+        @staticmethod
+        def empty(atlas_sha, map_sha, origin, epoch, client, count, steps):
+            return SimpleNamespace(
+                atlas_sha256=atlas_sha,
+                map_sha256=map_sha,
+                origin=tuple(origin),
+                map_epoch=epoch,
+                client_id=client,
+                client_count=count,
+                environment_steps=steps,
+                client_life_epoch=0,
+                server_frame=0,
+                last_event_id=0,
+                accepted_event_count=0,
+                cell_count=0,
+            )
+
+    extension = SimpleNamespace(
+        __file__=str(extension_path.resolve()), DynRuntime=Runtime
+    )
+    catalog = runtime / "atlas-catalog.json"
+    document = author_catalog(
+        [{
+            "schema": ATLAS_MAP_SPEC_SCHEMA,
+            "map_name": map_name,
+            "bsp": str(bsp.resolve()),
+            "atlas": str(atlas.resolve()),
+            "atlas_manifest": str(atlas_manifest.resolve()),
+            "bundle_manifest": str(bundle.resolve()),
+            "objectives": str(objectives.resolve()),
+        }],
+        catalog_path=catalog,
+        rust_extension_path=extension_path,
+        extension_module=extension,
+    )
+    catalog.write_bytes(catalog_canonical_bytes(document) + b"\n")
+    return catalog, document["atlas_catalog_sha256"], extension
 
 
 def _fixture(tmp_path: Path) -> dict:
@@ -84,7 +170,12 @@ def _fixture(tmp_path: Path) -> dict:
     )
     training = runtime / "training.json"
     training.write_text(training_configuration.to_json(), encoding="utf-8")
-    atlas_digest = hashlib.sha256(b"raw-atlas").hexdigest()
+    bundle = runtime / "map.bundle.json"
+    catalog, atlas_catalog_digest, extension_module = _catalog_fixture(
+        runtime, bundle
+    )
+    catalog_document = json.loads(catalog.read_text(encoding="utf-8"))
+    atlas_digest = catalog_document["maps"][0]["atlas_sha256"]
     checkpoint = roots["checkpoint_root"] / "fresh-step-zero.pt"
     if torch is not None:
         torch.manual_seed(23)
@@ -95,7 +186,7 @@ def _fixture(tmp_path: Path) -> dict:
         manifest = save_attested_checkpoint(
             checkpoint,
             policy,
-            atlas_sha256=atlas_digest,
+            atlas_catalog_sha256=atlas_catalog_digest,
             runtime_manifest_sha256=runtime_digest,
             training_config=training_configuration,
             initialization="random",
@@ -106,7 +197,7 @@ def _fixture(tmp_path: Path) -> dict:
         with zipfile.ZipFile(checkpoint, "w") as archive:
             archive.writestr("unavailable/data.pkl", b"torch unavailable fixture")
         manifest = type("Manifest", (), {
-            "checkpoint_format": "q2-multires-attested-checkpoint-v1",
+            "checkpoint_format": "q2-multires-attested-checkpoint-v2",
             "policy_generation": "multires-atlas-policy-v1",
             "architecture": "models.multires_policy.MultiresQ2BotPolicy",
             "initialization": "random", "training_step": 0,
@@ -126,6 +217,7 @@ def _fixture(tmp_path: Path) -> dict:
         "posture_classes": manifest.posture_classes,
         "optimizer_state": "fresh-empty",
         "normalization_state": "fresh-empty",
+        "atlas_catalog_sha256": atlas_catalog_digest,
     }
     _json(checkpoint_attestation, checkpoint_manifest)
     evidence = runtime / "runtime-evidence.json"
@@ -151,8 +243,6 @@ def _fixture(tmp_path: Path) -> dict:
         "causal_packet_bytes": B4_CAUSAL_PACKET_BYTES,
         "runtime_manifest_sha256": runtime_digest,
     })
-    bundle = runtime / "map.bundle.json"
-    _json(bundle, {"bundle_version": 3, "artifact_state": "admitted"})
     dyn = runtime / "client-00.q2lat"
     dyn.write_bytes(b"Q2LAT002" + b"fresh-dyn-fixture")
     selector = runtime / "service-selector.sh"
@@ -165,6 +255,23 @@ def _fixture(tmp_path: Path) -> dict:
         "schema": "q2-multires-primary-training-runtime-v1",
         "proof_module": "train.multires_one_run",
         "trainer_module": "train.multires_primary",
+        "atlas_catalog": {"path": str(catalog), "sha256": _sha(catalog)},
+        "atlas_catalog_sha256": atlas_catalog_digest,
+        "checkpoint": {
+            "mode": "fresh-step-zero", "path": str(checkpoint),
+            "sha256": _sha(checkpoint),
+            "lineage_root_sha256": getattr(
+                manifest, "lineage_root_sha256", "cd" * 32
+            ),
+        },
+    })
+    integration_envelope = runtime / "integration-envelope.json"
+    _json(integration_envelope, {
+        "schema": "multires-integration-evidence-v1", "evidence": {}
+    })
+    integration_report = runtime / "integration-report.json"
+    _json(integration_report, {
+        "schema": "multires-integration-report-v1", "overall": "pass"
     })
 
     manifest_digest = _sha(MANIFEST)
@@ -173,6 +280,7 @@ def _fixture(tmp_path: Path) -> dict:
         "schema": COLD_START_SCHEMA,
         "retirement_manifest_sha256": manifest_digest,
         "runtime_manifest_sha256": runtime_digest,
+        "atlas_catalog_sha256": atlas_catalog_digest,
         "optimizer": optimizer_configuration,
         "selectors": {
             "service_module": "train.multires_service",
@@ -205,6 +313,7 @@ def _fixture(tmp_path: Path) -> dict:
                 "path": str(training), "sha256": _sha(training)
             },
             "bundle_manifest": {"path": str(bundle), "sha256": _sha(bundle)},
+            "atlas_catalog": {"path": str(catalog), "sha256": _sha(catalog)},
             "dyn_snapshots": [{"path": str(dyn), "sha256": _sha(dyn)}],
             "training_runtime": {
                 "path": str(training_runtime), "sha256": _sha(training_runtime),
@@ -213,6 +322,17 @@ def _fixture(tmp_path: Path) -> dict:
                 "path": str(checkpoint), "sha256": _sha(checkpoint),
             },
             "trainer_current_season": None,
+            "integration_envelope": {
+                "path": str(integration_envelope),
+                "sha256": _sha(integration_envelope),
+            },
+            "integration_report": {
+                "path": str(integration_report),
+                "sha256": _sha(integration_report),
+            },
+            "integration_bot_source": {
+                "commit": "a" * 40, "tree": "b" * 40,
+            },
         },
     }
     _json(cold, document)
@@ -228,7 +348,12 @@ def _fixture(tmp_path: Path) -> dict:
         "evidence": evidence,
         "training": training,
         "bundle": bundle,
+        "catalog": catalog,
+        "atlas_catalog_digest": atlas_catalog_digest,
+        "extension_module": extension_module,
         "training_runtime": training_runtime,
+        "integration_envelope": integration_envelope,
+        "integration_report": integration_report,
         "dyn": dyn,
         "manifest": MANIFEST,
         "manifest_digest": manifest_digest,
@@ -245,17 +370,19 @@ def _validate(fixture: dict, **overrides):
         "service_selector_files": [fixture["selector"]],
     }
     arguments.update(overrides)
-    if not bypass_checkpoint:
-        return validate_retirement(**arguments)
-    # Preserve coverage of all non-checkpoint retirement predicates on a
-    # minimal unit host. Dedicated real-envelope tests above/below are skipped
-    # rather than substituting this bypass as checkpoint evidence.
-    original = retirement_module._load_checkpoint
-    retirement_module._load_checkpoint = lambda *args, **kwargs: None
+    original_checkpoint_loader = retirement_module._load_checkpoint
+    original_extension_loader = one_run_module._load_extension
+    if bypass_checkpoint:
+        # Preserve coverage of all non-checkpoint retirement predicates on a
+        # minimal unit host. Dedicated real-envelope tests above/below are skipped
+        # rather than substituting this bypass as checkpoint evidence.
+        retirement_module._load_checkpoint = lambda *args, **kwargs: None
+    one_run_module._load_extension = lambda _path: fixture["extension_module"]
     try:
         return validate_retirement(**arguments)
     finally:
-        retirement_module._load_checkpoint = original
+        retirement_module._load_checkpoint = original_checkpoint_loader
+        one_run_module._load_extension = original_extension_loader
 
 
 def _refresh(fixture: dict, key: str) -> None:
@@ -283,6 +410,12 @@ def _refresh_checkpoint(fixture: dict) -> None:
     _refresh(fixture, "checkpoint_attestation")
     fixture["cold_document"]["inputs"]["trainer_checkpoint"]["sha256"] = (
         _sha(fixture["checkpoint"])
+    )
+    training_runtime = json.loads(fixture["training_runtime"].read_text())
+    training_runtime["checkpoint"]["sha256"] = _sha(fixture["checkpoint"])
+    _json(fixture["training_runtime"], training_runtime)
+    fixture["cold_document"]["inputs"]["training_runtime"]["sha256"] = _sha(
+        fixture["training_runtime"]
     )
     _json(fixture["cold"], fixture["cold_document"])
 
@@ -346,6 +479,33 @@ def test_manifest_digest_canonicality_and_placeholder_are_fail_closed(tmp_path):
         _validate(fixture)
 
 
+def test_explicit_pre_b6_mode_has_distinct_schema_and_cannot_enter_service_mode(tmp_path):
+    fixture = _fixture(tmp_path)
+    document = fixture["cold_document"]
+    document["schema"] = PRE_B6_COLD_START_SCHEMA
+    document["inputs"] = {
+        name: document["inputs"][name]
+        for name in (
+            "checkpoint", "checkpoint_attestation", "runtime_evidence",
+            "training_manifest", "bundle_manifest", "atlas_catalog",
+            "dyn_snapshots",
+        )
+    }
+    _json(fixture["cold"], document)
+    report = _validate(fixture, mode="pre-b6")
+    assert report["schema"] == PRE_B6_REPORT_SCHEMA
+    assert report["mode"] == "pre-b6"
+    assert report["read_only"] is True
+
+    with pytest.raises(RetirementValidationError, match="schema"):
+        _validate(fixture)
+
+    document["schema"] = COLD_START_SCHEMA
+    _json(fixture["cold"], document)
+    with pytest.raises(RetirementValidationError, match="schema"):
+        _validate(fixture, mode="pre-b6")
+
+
 @pytest.mark.parametrize(
     "field,value,label",
     [
@@ -375,7 +535,10 @@ def test_legacy_dyn_bundle_and_optimizer_sidecar_fail(tmp_path):
     fixture = _fixture(tmp_path / "bundle")
     _json(fixture["bundle"], {"bundle_version": 2, "artifact_state": "admitted"})
     _refresh(fixture, "bundle")
-    with pytest.raises(RetirementValidationError, match="bundle-v3|bundle_version"):
+    with pytest.raises(
+        RetirementValidationError,
+        match="bundle-v3|bundle_version|bundle_manifest record digest",
+    ):
         _validate(fixture)
 
     fixture = _fixture(tmp_path / "optimizer")

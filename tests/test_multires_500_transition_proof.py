@@ -11,9 +11,15 @@ import subprocess
 import sys
 import textwrap
 import time
+from types import SimpleNamespace
 
 import pytest
 
+from harness.atlas_catalog import (
+    ATLAS_MAP_SPEC_SCHEMA,
+    author_catalog,
+    canonical_bytes as atlas_catalog_canonical_bytes,
+)
 from harness.multires_contract import (
     ACTION_DIM,
     DYN,
@@ -101,9 +107,32 @@ except ImportError:
     MultiresQ2BotPolicy = None
 
 
+def _fake_extension_module(path: Path):
+    class Runtime:
+        @staticmethod
+        def empty(atlas, map_sha, origin, epoch, client, count, steps):
+            return SimpleNamespace(
+                atlas_sha256=atlas,
+                map_sha256=map_sha,
+                origin=tuple(origin),
+                map_epoch=epoch,
+                client_id=client,
+                client_count=count,
+                environment_steps=steps,
+                client_life_epoch=0,
+                server_frame=0,
+                last_event_id=0,
+                accepted_event_count=0,
+                cell_count=0,
+            )
+
+    return SimpleNamespace(__file__=str(Path(path).resolve()), DynRuntime=Runtime)
+
+
 @pytest.fixture(autouse=True)
 def _checkpoint_loader_without_local_torch(monkeypatch):
     """Keep non-checkpoint outer-gate tests runnable in minimal CI images."""
+    monkeypatch.setattr(proof_module, "_load_rust_extension", _fake_extension_module)
     if torch is None:
         monkeypatch.setattr(
             proof_module,
@@ -502,6 +531,7 @@ FAKE_TRAINER_SCRIPT = textwrap.dedent(
         p.add_argument("--bundle_manifest", required=True)
         p.add_argument("--objectives", required=True)
         p.add_argument("--atlas_bin", required=True)
+        p.add_argument("--atlas_catalog", required=True)
         p.add_argument("--checkpoint", required=True)
         p.add_argument("--training_manifest", required=True)
         p.add_argument("--runtime_evidence", required=True)
@@ -512,6 +542,7 @@ FAKE_TRAINER_SCRIPT = textwrap.dedent(
         p.add_argument("--out", required=True)
         p.add_argument("--launch_id", required=True)
         p.add_argument("--expected_atlas_sha256", required=True)
+        p.add_argument("--expected_atlas_catalog_sha256", required=True)
         p.add_argument("--expected_runtime_manifest_sha256", required=True)
         return p.parse_args(argv)
 
@@ -766,6 +797,7 @@ FAKE_TRAINER_SCRIPT = textwrap.dedent(
             "bundle_manifest": str(Path(args.bundle_manifest).resolve()),
             "objectives": str(Path(args.objectives).resolve()),
             "atlas_bin": str(Path(args.atlas_bin).resolve()),
+            "atlas_catalog": str(Path(args.atlas_catalog).resolve()),
             "checkpoint": str(Path(args.checkpoint).resolve()),
             "training_manifest": str(Path(args.training_manifest).resolve()),
             "runtime_evidence": str(Path(args.runtime_evidence).resolve()),
@@ -776,6 +808,7 @@ FAKE_TRAINER_SCRIPT = textwrap.dedent(
             "out": str(Path(args.out).resolve()),
             "launch_id": str(args.launch_id),
             "expected_atlas_sha256": str(args.expected_atlas_sha256),
+            "expected_atlas_catalog_sha256": str(args.expected_atlas_catalog_sha256),
             "expected_runtime_manifest_sha256": str(args.expected_runtime_manifest_sha256),
         }
         if mode == "ignore_seed":
@@ -891,6 +924,7 @@ FAKE_TRAINER_SCRIPT = textwrap.dedent(
             "map_name": str(args.map_name),
             "map_epoch": int(args.map_epoch),
             "atlas_sha256": atlas_sha,
+            "atlas_catalog_sha256": str(args.expected_atlas_catalog_sha256),
             "runtime_manifest_sha256": runtime_sha,
             "objective_identity_sha256": objective_identity,
             "training_manifest_sha256": training_sha,
@@ -899,7 +933,7 @@ FAKE_TRAINER_SCRIPT = textwrap.dedent(
             "qm3c_causal_magic": int(runtime_ev.get("causal_magic", 0)),
             "client_wire_version": int(runtime_ev.get("client_wire_version", 0)),
             "policy_generation": "multires-atlas-policy-v1",
-            "checkpoint_format": "q2-multires-attested-checkpoint-v1",
+            "checkpoint_format": "q2-multires-attested-checkpoint-v2",
             "checkpoint_training_step": 0,
             "partial_admissions": 1 if mode == "partial" else 0,
             "stale_admissions": 1 if mode == "stale" else 0,
@@ -913,6 +947,10 @@ FAKE_TRAINER_SCRIPT = textwrap.dedent(
         }
         if mode == "mixed_atlas":
             payload["atlas_sha256"] = hashlib.sha256(atlas_sha.encode() + b"x").hexdigest()
+        if mode == "mixed_catalog":
+            payload["atlas_catalog_sha256"] = hashlib.sha256(
+                args.expected_atlas_catalog_sha256.encode() + b"x"
+            ).hexdigest()
         if mode == "no_process_ids":
             payload["process_ids"] = []
         if mode == "missing_process_records":
@@ -977,24 +1015,77 @@ def _materialize_production_tree(
     atlas_bin.write_bytes(atlas_bytes)
     atlas_sha256 = hashlib.sha256(atlas_bytes).hexdigest()
 
+    bsp = root / "mlstage_0001.bsp"
+    bsp.write_bytes(b"IBSP-MLSTAGE-0001")
+    bsp_sha256 = hashlib.sha256(bsp.read_bytes()).hexdigest()
+
+    atlas_manifest = root / "mlstage_0001.atlas.manifest.json"
+    atlas_manifest.write_text(json.dumps({
+        "grid": {"origin": [0, 0, 0]},
+        "bsp": {
+            "canonical_map_id": "mlstage_0001",
+            "sha256": bsp_sha256,
+            "size_bytes": bsp.stat().st_size,
+        },
+        "artifacts": {
+            "mlstage_0001.atlas.bin": {
+                "sha256_uncompressed": atlas_sha256,
+                "uncompressed_size": atlas_bin.stat().st_size,
+            }
+        },
+    }, sort_keys=True), encoding="utf-8")
+
+    objectives = root / "mlstage_0001.objectives.json"
+    objectives.write_text(json.dumps({
+        "map_name": "mlstage_0001",
+        "atlas_sha256": atlas_sha256,
+        "objective_identity_sha256": OBJECTIVE,
+        "objectives": [{"class": "health", "id": 1}],
+    }, sort_keys=True), encoding="utf-8")
+
     bundle_manifest = root / "mlstage_0001.bundle.manifest.json"
     bundle_manifest.write_text(json.dumps({
         "bundle_version": 3,
         "artifact_state": "admitted",
         "name": "mlstage_0001",
         "atlas_sha256": atlas_sha256,
-        "files": {},
-        "analysis_files": {},
-        "file_sizes": {},
-        "analysis_file_sizes": {},
+        "files": {"mlstage_0001.bsp": bsp_sha256},
+        "analysis_files": {
+            "mlstage_0001.atlas.manifest.json": hashlib.sha256(
+                atlas_manifest.read_bytes()
+            ).hexdigest(),
+            "mlstage_0001.objectives.json": hashlib.sha256(
+                objectives.read_bytes()
+            ).hexdigest(),
+        },
+        "file_sizes": {"mlstage_0001.bsp": bsp.stat().st_size},
+        "analysis_file_sizes": {
+            "mlstage_0001.atlas.manifest.json": atlas_manifest.stat().st_size,
+            "mlstage_0001.objectives.json": objectives.stat().st_size,
+        },
     }, sort_keys=True), encoding="utf-8")
 
-    objectives = root / "mlstage_0001.objectives.json"
-    objectives.write_text(json.dumps({
-        "map_name": "mlstage_0001",
-        "objective_identity_sha256": OBJECTIVE,
-        "objectives": [{"class": "health", "id": 1}],
-    }, sort_keys=True), encoding="utf-8")
+    rust_extension = root / "q2_lattice_rs.so"
+    rust_extension.write_bytes(b"proof-catalog-bound-rust-extension")
+    atlas_catalog = root / "atlas_catalog.json"
+    catalog_document = author_catalog(
+        [{
+            "schema": ATLAS_MAP_SPEC_SCHEMA,
+            "map_name": "mlstage_0001",
+            "bsp": str(bsp.resolve()),
+            "atlas": str(atlas_bin.resolve()),
+            "atlas_manifest": str(atlas_manifest.resolve()),
+            "bundle_manifest": str(bundle_manifest.resolve()),
+            "objectives": str(objectives.resolve()),
+        }],
+        catalog_path=atlas_catalog.resolve(),
+        rust_extension_path=rust_extension.resolve(),
+        extension_module=_fake_extension_module(rust_extension),
+    )
+    atlas_catalog.write_bytes(
+        atlas_catalog_canonical_bytes(catalog_document) + b"\n"
+    )
+    atlas_catalog_sha256 = catalog_document["atlas_catalog_sha256"]
 
     training_manifest = root / "training_manifest.json"
     training_configuration = MultiresTrainingConfiguration.create(
@@ -1025,7 +1116,7 @@ def _materialize_production_tree(
         save_attested_checkpoint(
             checkpoint,
             checkpoint_policy,
-            atlas_sha256=atlas_sha256,
+            atlas_catalog_sha256=atlas_catalog_sha256,
             runtime_manifest_sha256=evidence["runtime_manifest_sha256"],
             training_config=training_configuration,
             initialization="random",
@@ -1060,6 +1151,8 @@ def _materialize_production_tree(
         bundle_manifest=bundle_manifest.resolve(),
         objectives=objectives.resolve(),
         atlas_bin=atlas_bin.resolve(),
+        atlas_catalog=atlas_catalog.resolve(),
+        expected_atlas_catalog_sha256=atlas_catalog_sha256,
         checkpoint=checkpoint.resolve(),
         training_manifest=training_manifest.resolve(),
         runtime_evidence=runtime_evidence.resolve(),
@@ -1103,7 +1196,18 @@ def test_production_admission_accepts_admitted_bundle_and_b4_qm3c(tmp_path):
     assert admission.checkpoint_training_step == 0
     assert len(admission.checkpoint_lineage_root_sha256) == 64
     assert len(admission.atlas_sha256) == 64
+    assert admission.atlas_catalog_sha256 == config.expected_atlas_catalog_sha256
+    assert admission.atlas_catalog_sha256 != admission.atlas_sha256
     assert admission.trainer_argv_prefix[0] == str(config.trainer_executable)
+
+
+def test_production_rejects_catalog_content_digest_lie(tmp_path):
+    config = _materialize_production_tree(tmp_path / "catalog-digest-lie")
+    config.expected_atlas_catalog_sha256 = hashlib.sha256(
+        b"different-catalog-content"
+    ).hexdigest()
+    with pytest.raises(Multires500ProofError, match="catalog content seal"):
+        admit_production_config(config)
 
 
 def test_production_rejects_training_manifest_digest_lie(tmp_path):
@@ -1213,6 +1317,7 @@ def test_build_one_run_argv_handshake(tmp_path):
         "--bundle_manifest",
         "--objectives",
         "--atlas_bin",
+        "--atlas_catalog",
         "--checkpoint",
         "--training_manifest",
         "--runtime_evidence",
@@ -1223,6 +1328,7 @@ def test_build_one_run_argv_handshake(tmp_path):
         "--out",
         "--launch_id",
         "--expected_atlas_sha256",
+        "--expected_atlas_catalog_sha256",
         "--expected_runtime_manifest_sha256",
     ):
         assert flag in argv
@@ -1250,6 +1356,8 @@ def test_production_pass_with_fake_executable_subprocess(tmp_path):
     assert report["rust_provider_schema"] == RUST_PROVIDER_SCHEMA
     assert report["one_run_schema"] == ONE_RUN_SCHEMA
     assert report["one_run_protocol_version"] == ONE_RUN_PROTOCOL_VERSION
+    assert report["atlas_sha256"] != report["atlas_catalog_sha256"]
+    assert report["atlas_catalog_sha256"] == config.expected_atlas_catalog_sha256
     _check_deterministic_transitions(report["verifier_evidence"], context={})
     assert config.out_path is not None and config.out_path.is_file()
     # Three per-launch artifacts from identical stack protocol.
@@ -1428,6 +1536,20 @@ def test_production_rejects_mixed_atlas_digest_from_trainer(tmp_path):
     os.environ["FAKE_TRAINER_MODE"] = "mixed_atlas"
     try:
         with pytest.raises(Multires500ProofError, match="atlas_sha256 digests differ"):
+            run_proof(config)
+    finally:
+        if old is None:
+            os.environ.pop("FAKE_TRAINER_MODE", None)
+        else:
+            os.environ["FAKE_TRAINER_MODE"] = old
+
+
+def test_production_rejects_mixed_catalog_digest_from_trainer(tmp_path):
+    config = _materialize_production_tree(tmp_path / "mix-catalog")
+    old = os.environ.get("FAKE_TRAINER_MODE")
+    os.environ["FAKE_TRAINER_MODE"] = "mixed_catalog"
+    try:
+        with pytest.raises(Multires500ProofError, match="atlas_catalog_sha256"):
             run_proof(config)
     finally:
         if old is None:

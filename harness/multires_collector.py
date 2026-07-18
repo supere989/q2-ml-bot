@@ -168,6 +168,65 @@ TransitionObserver = Callable[
 ]
 
 
+@dataclass(frozen=True)
+class PolicyObservationBatch:
+    """Transformed policy vectors plus exact public transform telemetry."""
+
+    observations: np.ndarray
+    transition_info: tuple[Mapping[str, Any], ...]
+
+
+_TRANSFORM_TELEMETRY_KEYS = frozenset({
+    "client_id", "server_frame", "guide_dropped", "guide_classes",
+    "global_guide_drop",
+})
+
+
+def _observation_transform_result(
+    value: Any,
+    source_infos: Sequence[Mapping[str, Any]],
+    client_count: int,
+) -> tuple[np.ndarray, tuple[Mapping[str, Any], ...] | None]:
+    """Validate optional public transform telemetry without widening policy input."""
+    if not isinstance(value, PolicyObservationBatch):
+        return _validate_observations(value, client_count), None
+    observations = _validate_observations(value.observations, client_count)
+    if len(value.transition_info) != client_count:
+        raise CollectorAdmissionError(
+            "policy transform telemetry cardinality differs from clients"
+        )
+    projected = []
+    for index, (raw, source) in enumerate(zip(value.transition_info, source_infos)):
+        if not isinstance(raw, Mapping) or set(raw) != _TRANSFORM_TELEMETRY_KEYS:
+            raise CollectorAdmissionError(
+                f"policy transform telemetry {index} fields differ"
+            )
+        detached = dict(_detached_public_info(raw))
+        if (
+            detached["client_id"] != source["client_id"]
+            or detached["server_frame"] != source["server_frame"]
+        ):
+            raise CollectorAdmissionError(
+                f"policy transform telemetry {index} identity differs"
+            )
+        dropped = detached["guide_dropped"]
+        classes = detached["guide_classes"]
+        if (
+            not isinstance(dropped, (tuple, list))
+            or len(dropped) != 4
+            or any(type(item) is not bool for item in dropped)
+            or not isinstance(classes, (tuple, list))
+            or len(classes) != 4
+            or any(item is not None and type(item) is not int for item in classes)
+            or type(detached["global_guide_drop"]) is not bool
+        ):
+            raise CollectorAdmissionError(
+                f"policy transform telemetry {index} guide audit is malformed"
+            )
+        projected.append(MappingProxyType(detached))
+    return observations, tuple(projected)
+
+
 def _detached_public_info(info: Mapping[str, Any]) -> Mapping[str, Any]:
     """Return an observer-only copy with no private causal object reachable."""
     private_types = (CausalTelemetry, PrivateSpatialRewardEvidence)
@@ -417,11 +476,11 @@ class MultiresSynchronousCollector:
 
         while len(observation_steps) < self.config.transitions_per_client:
             policy_infos = _policy_info_projection(current_infos)
-            policy_observations = self.observation_transform(
+            transformed = self.observation_transform(
                 current_raw.copy(), policy_infos, policy_version
             )
-            policy_observations = _validate_observations(
-                policy_observations, client_count
+            policy_observations, transform_telemetry = _observation_transform_result(
+                transformed, policy_infos, client_count
             )
             decision = self.policy.act(
                 policy_observations, state, reset_mask.copy()
@@ -487,6 +546,20 @@ class MultiresSynchronousCollector:
                     raise CollectorAdmissionError(
                         "batch fire request differs from sampled policy action"
                     )
+                if transform_telemetry is not None:
+                    audit = transform_telemetry[index]
+                    if audit["client_id"] != info.get("client_id"):
+                        raise CollectorAdmissionError(
+                            "policy transform/result client identity differs"
+                        )
+                    for name in (
+                        "guide_dropped", "guide_classes", "global_guide_drop"
+                    ):
+                        if name in info:
+                            raise CollectorAdmissionError(
+                                f"batch result pre-populated transform field {name}"
+                            )
+                        info[name] = copy.deepcopy(audit[name])
                 effective_fire = info.get("effective_action_fire")
                 suppressed = info.get("fire_gate_suppressed") is True
                 if suppressed:
@@ -566,11 +639,13 @@ class MultiresSynchronousCollector:
             state = decision.next_state
             reset_mask = terminals.copy()
 
-        final_observations = self.observation_transform(
+        final_transformed = self.observation_transform(
             current_raw.copy(), _policy_info_projection(current_infos),
             policy_version,
         )
-        final_observations = _validate_observations(final_observations, client_count)
+        final_observations, _final_telemetry = _observation_transform_result(
+            final_transformed, _policy_info_projection(current_infos), client_count
+        )
         bootstrap = np.asarray(
             self.policy.values(final_observations, state, reset_mask.copy()),
             dtype=np.float32,

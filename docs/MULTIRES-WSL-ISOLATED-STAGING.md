@@ -138,4 +138,7 @@ The timestamp is isolated under `informational`; it does not affect
 
 This stage is source provenance for later clean builds and isolated B6 tests.
 It is not a B6 gate, a trainer admission, or permission to mutate a live
-runtime.
+runtime. The source staged here must remain the exact clean bot commit/tree
+frozen through B3-B6; final trainer/TensorBoard admission is a separate v2
+envelope/report gate defined in
+[`multires/PRIMARY-TRAINER-ADMISSION.md`](multires/PRIMARY-TRAINER-ADMISSION.md).

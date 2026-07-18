@@ -216,6 +216,28 @@ fn q2lat002_canonical_snapshot_round_trips_exactly() {
 }
 
 #[test]
+fn empty_runtime_is_fresh_for_each_revisited_map_epoch() {
+    let limits = DynLimits::default();
+    let generated_first = DynRuntime::new_empty(fence(3), 2, 4, 0, &limits).unwrap();
+    let stock = DynRuntime::new_empty(fence(4), 2, 4, 0, &limits).unwrap();
+    let generated_revisit = DynRuntime::new_empty(fence(5), 2, 4, 0, &limits).unwrap();
+
+    for (runtime, epoch) in [(&generated_first, 3), (&stock, 4), (&generated_revisit, 5)] {
+        assert_eq!(runtime.state().fence(), fence(epoch));
+        assert_eq!(runtime.state().environment_steps(), 0);
+        assert_eq!(runtime.client_life_epoch(), 0);
+        assert_eq!(runtime.server_frame(), 0);
+        assert_eq!(runtime.last_event_id(), 0);
+        assert_eq!(runtime.accepted_event_count(), 0);
+        assert_eq!(runtime.state().l2_len() + runtime.state().l3_len(), 0);
+    }
+    assert_ne!(
+        generated_first.snapshot_sha256(),
+        generated_revisit.snapshot_sha256()
+    );
+}
+
+#[test]
 fn q2lat002_runtime_is_exact_dyn24_and_rejects_mixed_identity() {
     let limits = DynLimits::default();
     let binding = fence(17);

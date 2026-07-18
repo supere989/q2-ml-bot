@@ -293,6 +293,7 @@ class GuideDropoutResult:
     guides: np.ndarray
     dropped_candidates: tuple[bool, ...]
     global_drop: bool
+    candidate_classes: tuple[Optional[int], ...]
 
 
 def _dropout_sample(seed_material: Mapping[str, object], label: str) -> float:
@@ -326,10 +327,12 @@ def apply_seeded_guide_dropout(
     }
     global_drop = _dropout_sample(material, "global") < config.global_probability
     dropped: list[bool] = []
+    classes: list[Optional[int]] = []
     for candidate in range(GUIDE_CANDIDATES):
         row = result[candidate]
         class_bits = row[7:15]
         class_index = int(np.argmax(class_bits)) if float(class_bits.max()) > 0.0 else -1
+        classes.append(class_index if class_index >= 0 else None)
         class_probability = (
             config.class_probabilities[class_index] if class_index >= 0 else 0.0
         )
@@ -344,4 +347,5 @@ def apply_seeded_guide_dropout(
         guides=result.reshape(-1),
         dropped_candidates=tuple(dropped),
         global_drop=bool(global_drop),
+        candidate_classes=tuple(classes),
     )

@@ -781,9 +781,9 @@ def _check_wsl_b6_campaign(
         context, "retirement_manifest_sha256", retirement_sha256, "B6 campaign"
     )
     for name in (
-        "runtime_manifest", "checkpoint", "training_manifest", "objectives",
-        "bundle_manifest", "atlas", "atlas_manifest", "b2_gate", "b3_gate",
-        "b4_evidence", "b5_gate",
+        "runtime_evidence", "runtime_manifest", "checkpoint",
+        "training_manifest", "objectives", "bundle_manifest", "atlas",
+        "atlas_manifest", "b2_gate", "b3_gate", "b4_evidence", "b5_gate",
         "lineage_evidence", "retirement_evidence",
     ):
         record = _require(bindings, name)

@@ -34,6 +34,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from harness.multires_contract import DYN, POLICY_GENERATION  # noqa: E402
+from harness.atlas_catalog import (  # noqa: E402
+    AtlasCatalog,
+    AtlasCatalogError,
+    AtlasCatalogMap,
+    load_atlas_catalog,
+)
 from harness.causal_protocol import CAUSAL_TELEMETRY_SIZE  # noqa: E402
 from harness.client_protocol import (  # noqa: E402
     CLIENT_TELEMETRY_HEADER_SIZE,
@@ -383,7 +389,7 @@ def _training_configuration(
 def _validate_step_zero_checkpoint(
     checkpoint: Path,
     *,
-    atlas_sha256: str,
+    atlas_catalog_sha256: str,
     runtime_manifest_sha256: str,
     training_configuration: MultiresTrainingConfiguration,
     optimizer_configuration: Mapping[str, Any],
@@ -406,7 +412,7 @@ def _validate_step_zero_checkpoint(
         manifest = load_attested_checkpoint(
             checkpoint,
             policy,
-            expected_atlas_sha256=atlas_sha256,
+            expected_atlas_catalog_sha256=atlas_catalog_sha256,
             expected_runtime_manifest_sha256=runtime_manifest_sha256,
             expected_training_config=training_configuration,
             optimizer=optimizer,
@@ -446,6 +452,8 @@ class OneRunAdmission:
     objectives: Path
     atlas_bin: Path
     dyn_snapshots: tuple[Path, ...]
+    atlas_catalog: AtlasCatalog
+    selected_catalog_map: AtlasCatalogMap
     rust_extension: Path
     retirement_manifest_sha256: str
     network_barrier_execution_evidence_sha256: str
@@ -462,8 +470,9 @@ def preflight(args: argparse.Namespace) -> OneRunAdmission:
     campaign_mode = str(getattr(args, "campaign_mode", DETERMINISM_MODE))
     if campaign_mode not in (DETERMINISM_MODE, B6_CAMPAIGN_MODE):
         raise OneRunError("campaign_mode is not an admitted no-update mode")
-    if not _valid_sha256(args.expected_atlas_sha256) or not _valid_sha256(
-        args.expected_runtime_manifest_sha256
+    if (
+        not _valid_sha256(args.expected_atlas_sha256)
+        or not _valid_sha256(args.expected_runtime_manifest_sha256)
     ):
         raise OneRunError("expected Atlas/runtime digests must be non-placeholder SHA-256")
 
@@ -486,8 +495,8 @@ def preflight(args: argparse.Namespace) -> OneRunAdmission:
     if set(config) != required_config or config.get("schema") != RUNTIME_CONFIG_SCHEMA:
         raise OneRunError("runtime configuration fields/schema differ")
     client_count = config["client_count"]
-    if type(client_count) is not int or not 1 <= client_count <= 64:
-        raise OneRunError("runtime client_count is invalid")
+    if type(client_count) is not int or client_count != 4:
+        raise OneRunError("runtime requires the exact four-client Atlas cohort")
     if args.transition_count % client_count:
         raise OneRunError(
             "transition_count must divide exactly across all configured clients"
@@ -751,9 +760,38 @@ def preflight(args: argparse.Namespace) -> OneRunAdmission:
         raise OneRunError("telemetry token environment is missing or malformed")
     if checkpoint.stat().st_size <= 0:
         raise OneRunError("checkpoint is empty")
+    catalog_digest = getattr(args, "expected_atlas_catalog_sha256", None)
+    catalog_path = getattr(args, "atlas_catalog", None)
+    if not _valid_sha256(catalog_digest) or catalog_path is None:
+        raise OneRunError(
+            "exact Atlas catalog path/content digest is required"
+        )
+    try:
+        extension = _load_extension(rust_extension)
+        atlas_catalog = load_atlas_catalog(
+            Path(catalog_path), expected_sha256=str(catalog_digest),
+            extension_module=extension,
+        )
+    except (AtlasCatalogError, OSError, ValueError, ImportError) as error:
+        raise OneRunError(f"Atlas catalog admission failed: {error}") from error
+    selected_catalog_map = atlas_catalog.by_name().get(str(args.map_name))
+    if selected_catalog_map is None:
+        raise OneRunError("requested map is absent from the exact Atlas catalog")
+    if (
+        atlas_catalog.rust_extension != rust_extension
+        or selected_catalog_map.bundle_manifest != bundle_manifest
+        or selected_catalog_map.objectives != objectives
+        or selected_catalog_map.atlas != atlas_bin
+        or selected_catalog_map.atlas_manifest != atlas_manifest_path
+        or selected_catalog_map.bsp != bundle_bsp
+        or selected_catalog_map.atlas_sha256 != args.expected_atlas_sha256
+    ):
+        raise OneRunError(
+            "one-run map/BSP/Atlas/objective/Rust tuple differs from the exact catalog"
+        )
     _validate_step_zero_checkpoint(
         checkpoint,
-        atlas_sha256=args.expected_atlas_sha256,
+        atlas_catalog_sha256=str(catalog_digest),
         runtime_manifest_sha256=verified.digest,
         training_configuration=training_configuration,
         optimizer_configuration=optimizer,
@@ -776,6 +814,8 @@ def preflight(args: argparse.Namespace) -> OneRunAdmission:
         objectives=objectives,
         atlas_bin=atlas_bin,
         dyn_snapshots=dyn_snapshots,
+        atlas_catalog=atlas_catalog,
+        selected_catalog_map=selected_catalog_map,
         rust_extension=rust_extension,
         retirement_manifest_sha256=retirement_sha256,
         network_barrier_execution_evidence_sha256=barrier_execution_sha256,
@@ -994,10 +1034,7 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
     from harness.multires_collector import CollectorConfig
     from harness.multires_reward import CausalRewardConfig
     from harness.multires_contract import GuideDropoutConfig
-    from harness.rust_multires_provider import (
-        RustAtlasProviderFactory,
-        RustMapArtifacts,
-    )
+    from harness.rust_multires_provider import RustAtlasProviderFactory
     from train.multires_live import MultiresLiveTrainer
     from train.multires_ppo import MultiresPPOConfig
     from train.multires_runtime import MultiresTrainerRuntime
@@ -1031,6 +1068,8 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
         Path(args.checkpoint),
         admission.runtime_evidence,
         expected_atlas_sha256=args.expected_atlas_sha256,
+        active_atlas_sha256=args.expected_atlas_sha256,
+        expected_atlas_catalog_sha256=args.expected_atlas_catalog_sha256,
         device=device,
         optimizer_factory=optimizer_factory,
         reward_config=reward_config,
@@ -1062,23 +1101,10 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
     optimizer_step_wrapped = False
 
     extension = _load_extension(admission.rust_extension)
-    artifacts = RustMapArtifacts(
-        bundle_manifest_path=admission.bundle_manifest,
-        uncompressed_atlas_path=admission.atlas_bin,
-        dyn_snapshot_path=admission.dyn_snapshots[0],
-        expected_atlas_sha256=args.expected_atlas_sha256,
-    )
     factories = [
         RustAtlasProviderFactory(
             extension_module=extension,
-            artifacts_by_map={
-                args.map_name: RustMapArtifacts(
-                    bundle_manifest_path=artifacts.bundle_manifest_path,
-                    uncompressed_atlas_path=artifacts.uncompressed_atlas_path,
-                    dyn_snapshot_path=admission.dyn_snapshots[index],
-                    expected_atlas_sha256=artifacts.expected_atlas_sha256,
-                )
-            },
+            artifacts_by_map=admission.atlas_catalog.provider_artifacts_for_client(index),
             runtime_manifest_sha256=admission.runtime_manifest_sha256,
             bound_client_id=f"{config['client_id_prefix']}-{index:02d}",
             rust_client_id=index,
@@ -1258,6 +1284,7 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "training_manifest": str(Path(args.training_manifest).resolve()),
         "runtime_evidence": str(Path(args.runtime_evidence).resolve()),
+        "atlas_catalog": str(admission.atlas_catalog.path),
         "transition_count": args.transition_count,
         "policy_version": args.policy_version,
         "map_epoch": args.map_epoch,
@@ -1265,6 +1292,7 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
         "out": str(Path(args.out).resolve()),
         "launch_id": args.launch_id,
         "expected_atlas_sha256": args.expected_atlas_sha256,
+        "expected_atlas_catalog_sha256": args.expected_atlas_catalog_sha256,
         "expected_runtime_manifest_sha256": args.expected_runtime_manifest_sha256,
         "campaign_mode": str(getattr(args, "campaign_mode", DETERMINISM_MODE)),
     }
@@ -1287,6 +1315,8 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
         "policy_generation": POLICY_GENERATION,
         "checkpoint_format": CHECKPOINT_FORMAT,
         "atlas_sha256": args.expected_atlas_sha256,
+        "atlas_catalog_sha256": admission.atlas_catalog.atlas_catalog_sha256,
+        "atlas_catalog_file_sha256": admission.atlas_catalog.file_sha256,
         "runtime_manifest_sha256": admission.runtime_manifest_sha256,
         "objective_identity_sha256": admission.objective_identity_sha256,
         "training_manifest_sha256": admission.training_manifest_sha256,
@@ -1402,6 +1432,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--training_manifest", type=Path, required=True)
     parser.add_argument("--runtime_evidence", type=Path, required=True)
+    parser.add_argument("--atlas_catalog", type=Path, required=True)
     parser.add_argument("--transition_count", type=int, required=True)
     parser.add_argument("--policy_version", type=int, required=True)
     parser.add_argument("--map_epoch", type=int, required=True)
@@ -1409,6 +1440,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--launch_id", required=True)
     parser.add_argument("--expected_atlas_sha256", required=True)
+    parser.add_argument("--expected_atlas_catalog_sha256", required=True)
     parser.add_argument("--expected_runtime_manifest_sha256", required=True)
     parser.add_argument(
         "--campaign_mode",

@@ -95,7 +95,12 @@ non-admissible. `ACTIVE_FINAL_AUTHORITY` now pins only fresh disjoint cohort
 and the exact twelve-path qualified-successor delta. Its first source attempt
 consumes its sole authorization. Gate assembly, deployment, trainer, and
 TensorBoard remain forbidden until that one-shot final cohort and every B2-B6
-cutover gate pass.
+cutover gate pass. Even a green B6 aggregate is not a launch selector:
+`train.multires_service` requires the v2 immutable integration envelope/report
+and cold-start bindings in `docs/multires/PRIMARY-TRAINER-ADMISSION.md`, reruns
+the complete verifier before runtime-state mutation and again before process
+creation, and requires the current clean bot commit/tree to equal the source
+frozen through B3-B6.
 
 ## Training Topology
 
@@ -173,7 +178,10 @@ backup/visibility only, not a compute migration.
   **no `.git` directory**; GitHub/local canonical changes must be copied there
   deliberately and checksum-verified. Do not assume `git pull` works in that
   Python tree, and do not rsync it blindly over its gitignored checkpoints,
-  runs, maps, or machine-local diagnostics.
+  runs, maps, or machine-local diagnostics. This mirror cannot host the new
+  primary trainer: `train.multires_service` v2 requires its module root to be
+  the exact clean Git worktree recorded through B3-B6. Launch the admitted
+  service from the staged exact-source checkout, not from `~/q2-ml-bot`.
 - Trainer runs in tmux session `q2_ppo`; log at `/tmp/q2_train.log.ppo`.
 - TensorBoard on port 6006 (`http://100.86.206.50:6006` direct, the
   Windows portproxy at `http://100.104.16.95:6006`, or `http://127.0.0.1:6006`

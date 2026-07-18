@@ -67,7 +67,7 @@ def test_action_metadata_records_the_distribution_used_for_fire_replay():
 
 
 def test_checkpoint_loader_rejects_raw_legacy_state_and_accepts_attested(tmp_path):
-    atlas = "a" * 64
+    catalog = "a" * 64
     runtime = "b" * 64
     source = MultiresQ2BotPolicy()
     source_optimizer = torch.optim.Adam(source.parameters(), lr=1e-4)
@@ -75,7 +75,7 @@ def test_checkpoint_loader_rejects_raw_legacy_state_and_accepts_attested(tmp_pat
     manifest = save_attested_checkpoint(
         attested,
         source,
-        atlas_sha256=atlas,
+        atlas_catalog_sha256=catalog,
         runtime_manifest_sha256=runtime,
         training_config=TRAINING_CONFIG,
         initialization="random",
@@ -87,7 +87,7 @@ def test_checkpoint_loader_rejects_raw_legacy_state_and_accepts_attested(tmp_pat
     loaded = load_attested_checkpoint(
         attested,
         target,
-        expected_atlas_sha256=atlas,
+        expected_atlas_catalog_sha256=catalog,
         expected_runtime_manifest_sha256=runtime,
         expected_training_config=TRAINING_CONFIG,
         optimizer=target_optimizer,
@@ -106,7 +106,7 @@ def test_checkpoint_loader_rejects_raw_legacy_state_and_accepts_attested(tmp_pat
         load_attested_checkpoint(
             legacy,
             legacy_target,
-            expected_atlas_sha256=atlas,
+            expected_atlas_catalog_sha256=catalog,
             expected_runtime_manifest_sha256=runtime,
             expected_training_config=TRAINING_CONFIG,
             optimizer=legacy_optimizer,

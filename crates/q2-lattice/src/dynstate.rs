@@ -1128,6 +1128,7 @@ pub struct DynRuntimeQuery {
 pub struct DynRuntime {
     state: DynState,
     snapshot_sha256: String,
+    snapshot_bytes_len: usize,
     client_life_epoch: u64,
     server_frame: u64,
     last_event_id: u64,
@@ -1137,6 +1138,28 @@ pub struct DynRuntime {
 }
 
 impl DynRuntime {
+    pub fn new_empty(
+        fence: DynFence,
+        client_id: u32,
+        client_count: u32,
+        environment_steps: u64,
+        limits: &DynLimits,
+    ) -> DynResult<Self> {
+        let state = DynState::new(fence, client_id, client_count, environment_steps, limits)?;
+        let snapshot = encode_snapshot(&state, limits)?;
+        Ok(Self {
+            state,
+            snapshot_sha256: format!("{:x}", Sha256::digest(&snapshot)),
+            snapshot_bytes_len: snapshot.len(),
+            client_life_epoch: 0,
+            server_frame: 0,
+            last_event_id: 0,
+            life_event_count: 0,
+            accepted_event_count: 0,
+            limits: limits.clone(),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn from_snapshot(
         snapshot: &[u8],
@@ -1167,6 +1190,7 @@ impl DynRuntime {
         Ok(Self {
             state,
             snapshot_sha256: format!("{:x}", Sha256::digest(snapshot)),
+            snapshot_bytes_len: snapshot.len(),
             client_life_epoch: 0,
             server_frame: 0,
             last_event_id: 0,
@@ -1255,6 +1279,7 @@ impl DynRuntime {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect(),
+            snapshot_bytes_len: snapshot.len(),
             client_life_epoch: header.client_life_epoch,
             server_frame: header.server_frame,
             last_event_id: header.last_event_id,
@@ -1270,6 +1295,10 @@ impl DynRuntime {
 
     pub fn snapshot_sha256(&self) -> &str {
         &self.snapshot_sha256
+    }
+
+    pub fn snapshot_bytes_len(&self) -> usize {
+        self.snapshot_bytes_len
     }
 
     pub fn client_life_epoch(&self) -> u64 {
@@ -1481,6 +1510,7 @@ impl DynRuntime {
 
         self.state = next;
         self.snapshot_sha256 = format!("{:x}", Sha256::digest(&next_snapshot));
+        self.snapshot_bytes_len = next_snapshot.len();
         self.client_life_epoch = batch.client_life_epoch;
         self.server_frame = batch.server_frame;
         self.last_event_id = previous_event_id.unwrap_or(baseline_event_id);

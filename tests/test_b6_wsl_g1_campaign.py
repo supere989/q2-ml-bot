@@ -57,6 +57,103 @@ def _bindings() -> dict:
     }
 
 
+def test_b6_schema_freezes_exact_binding_inventory():
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1]
+         / "schemas/q2-multires-b6-wsl-g1-v1.schema.json").read_text(
+             encoding="utf-8"
+         )
+    )
+    bindings = schema["properties"]["bindings"]
+    expected = {
+        "b2_authority", "b2_gate", "b3_gate", "b3_gate_sha256",
+        "b4_evidence", "b4_evidence_sha256", "b5_gate", "b5_gate_sha256",
+        "runtime_evidence", "runtime_manifest",
+        "runtime_manifest_identity_sha256", "checkpoint", "training_manifest",
+        "training_config_sha256", "objectives", "objective_identity_sha256",
+        "bundle_manifest", "atlas", "atlas_sha256", "atlas_manifest",
+        "network_barrier_execution_evidence_sha256", "retirement_manifest",
+        "lineage_evidence", "retirement_evidence", "hook_necessity_runtime",
+        "rust_extension",
+    }
+    assert bindings["additionalProperties"] is False
+    assert set(bindings["required"]) == expected
+    assert set(bindings["properties"]) == expected
+
+
+def test_runtime_files_cross_bind_compact_evidence_and_full_manifest(
+    tmp_path, monkeypatch,
+):
+    compact = tmp_path / "b4-wire-generation.json"
+    compact.write_text('{"kind":"compact"}', encoding="utf-8")
+    full = tmp_path / "runtime-manifest.json"
+    full.write_text('{"kind":"full"}', encoding="utf-8")
+    identity = _digest("runtime-semantic")
+    full_record = b6.file_record(full)
+    b4 = {"runtime_manifest": {
+        "name": "runtime-manifest",
+        "sha256": full_record["sha256"],
+        "size": full_record["bytes"],
+        "manifest_sha256": identity,
+    }}
+    b5 = {"runtime_manifest_identity_sha256": identity}
+    monkeypatch.setattr(
+        b6, "validate_b5_runtime_input",
+        lambda path, atlas: identity,
+    )
+    monkeypatch.setattr(
+        b6, "verify_runtime_manifest",
+        lambda value: SimpleNamespace(valid=True, digest=identity),
+    )
+
+    result = b6._validate_runtime_files(
+        b4=b4,
+        b5=b5,
+        runtime_evidence_path=compact,
+        runtime_manifest_path=full,
+        atlas_sha256=_digest("atlas"),
+    )
+
+    assert result["compact_record"] == b6.file_record(compact)
+    assert result["full_record"] == full_record
+    assert result["manifest_sha256"] == identity
+
+
+def test_runtime_files_reject_semantic_identity_mismatch(tmp_path, monkeypatch):
+    compact = tmp_path / "b4-wire-generation.json"
+    compact.write_text('{"kind":"compact"}', encoding="utf-8")
+    full = tmp_path / "runtime-manifest.json"
+    full.write_text('{"kind":"full"}', encoding="utf-8")
+    compact_identity = _digest("compact-runtime")
+    full_identity = _digest("full-runtime")
+    full_record = b6.file_record(full)
+    monkeypatch.setattr(
+        b6, "validate_b5_runtime_input",
+        lambda path, atlas: compact_identity,
+    )
+    monkeypatch.setattr(
+        b6, "verify_runtime_manifest",
+        lambda value: SimpleNamespace(valid=True, digest=full_identity),
+    )
+
+    with pytest.raises(
+        b6.B6CampaignError,
+        match="compact runtime evidence/full runtime manifest identity differs",
+    ):
+        b6._validate_runtime_files(
+            b4={"runtime_manifest": {
+                "name": "runtime-manifest",
+                "sha256": full_record["sha256"],
+                "size": full_record["bytes"],
+                "manifest_sha256": full_identity,
+            }},
+            b5={"runtime_manifest_identity_sha256": compact_identity},
+            runtime_evidence_path=compact,
+            runtime_manifest_path=full,
+            atlas_sha256=_digest("atlas"),
+        )
+
+
 def _one_run(count: int = 8) -> dict:
     atlas = _digest("atlas")
     runtime = _digest("runtime")

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "q2-multires-atlas-catalog-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "domain", "map_count", "rust_extension", "dyn_creation", "maps", "atlas_catalog_sha256"],
+  "properties": {
+    "schema": {"const": "q2-multires-atlas-catalog-v1"},
+    "domain": {"const": "q2-multires-atlas-catalog-content-v1"},
+    "map_count": {"type": "integer", "minimum": 1},
+    "rust_extension": {"$ref": "#/$defs/artifact"},
+    "dyn_creation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "snapshot_schema", "client_count", "environment_steps", "thermal_checkpoint_fields"],
+      "properties": {
+        "mode": {"const": "rust-empty-per-map-epoch-v1"},
+        "snapshot_schema": {"const": "Q2LAT002"},
+        "client_count": {"const": 4},
+        "environment_steps": {"const": 0},
+        "thermal_checkpoint_fields": {"const": 0}
+      }
+    },
+    "atlas_catalog_sha256": {"$ref": "#/$defs/sha256"},
+    "maps": {
+      "type": "array", "minItems": 1, "items": {"$ref": "#/$defs/map"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*\\.\\.)[A-Za-z0-9_./-]+$"}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "map": {
+      "type": "object", "additionalProperties": false,
+      "required": ["map_name", "bsp", "atlas", "atlas_sha256", "atlas_manifest", "bundle_manifest", "objectives"],
+      "properties": {
+        "map_name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,63}$"},
+        "bsp": {"$ref": "#/$defs/artifact"},
+        "atlas": {"$ref": "#/$defs/artifact"},
+        "atlas_sha256": {"$ref": "#/$defs/sha256"},
+        "atlas_manifest": {"$ref": "#/$defs/artifact"},
+        "bundle_manifest": {"$ref": "#/$defs/artifact"},
+        "objectives": {"$ref": "#/$defs/artifact"}
+      }
+    }
+  }
+}

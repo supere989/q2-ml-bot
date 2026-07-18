@@ -68,6 +68,7 @@ from tools.run_multires_pretraining_validation import (
     canonical_bytes as b5_canonical_bytes,
     canonical_sha256 as b5_canonical_sha256,
     report_sha256 as b5_report_sha256,
+    validate_runtime_input as validate_b5_runtime_input,
     validate_campaign_evidence as validate_b5_campaign_evidence,
     validate_campaign_set as validate_b5_campaign_set,
     validate_proof as validate_b5_proof,
@@ -427,41 +428,103 @@ def _validate_b5(
     return dict(value)
 
 
+def _validate_runtime_files(
+    *, b4: Mapping[str, Any], b5: Mapping[str, Any],
+    runtime_evidence_path: Path, runtime_manifest_path: Path,
+    atlas_sha256: str,
+) -> dict[str, Any]:
+    """Cross-bind B5's compact evidence to B4's full sealed manifest."""
+    _require(
+        runtime_evidence_path.resolve() != runtime_manifest_path.resolve(),
+        "compact runtime evidence and full runtime manifest must be distinct files",
+    )
+    compact_record = file_record(runtime_evidence_path)
+    try:
+        compact_runtime_identity = validate_b5_runtime_input(
+            runtime_evidence_path, atlas_sha256
+        )
+    except PretrainingValidationError as error:
+        raise B6CampaignError(
+            f"compact B4 runtime evidence is inadmissible: {error}"
+        ) from error
+    full_record = file_record(runtime_manifest_path)
+    manifest = load_json(
+        runtime_manifest_path, "runtime manifest", manifest_style=True
+    )
+    verified = verify_runtime_manifest(manifest)
+    _require(
+        verified.valid and _SHA.fullmatch(verified.digest) is not None,
+        "runtime manifest is not sealed",
+    )
+    _require(
+        compact_runtime_identity == verified.digest,
+        "compact runtime evidence/full runtime manifest identity differs",
+    )
+    _require(
+        b5.get("runtime_manifest_identity_sha256") == verified.digest,
+        "B5 runtime semantic identity differs",
+    )
+    b4_manifest = _mapping(b4.get("runtime_manifest"), "B4 runtime manifest")
+    _require(
+        b4_manifest.get("sha256") == full_record["sha256"]
+        and b4_manifest.get("size") == full_record["bytes"]
+        and b4_manifest.get("manifest_sha256") == verified.digest,
+        "B4 runtime manifest binding differs",
+    )
+    return {
+        "compact_record": compact_record,
+        "full_record": full_record,
+        "manifest": manifest,
+        "manifest_sha256": verified.digest,
+    }
+
+
 def _validate_bindings(
-    *, b4: Mapping[str, Any], b5: Mapping[str, Any], runtime_manifest_path: Path,
+    *, b4: Mapping[str, Any], b5: Mapping[str, Any],
+    runtime_evidence_path: Path, runtime_manifest_path: Path,
     checkpoint_path: Path, training_manifest_path: Path,
     objectives_path: Path, bundle_path: Path, atlas_path: Path,
     atlas_manifest_path: Path, b3_gate_path: Path, retirement_path: Path,
     b2_gate_path: Path, b4_evidence_path: Path, repo_root: Path,
 ) -> dict[str, Any]:
-    paths = {
+    # Preserve B5's historical ``runtime_manifest`` binding name.  At that
+    # boundary it deliberately denotes the compact B4 wire-generation
+    # evidence consumed by ``validate_runtime_evidence``.  B6 additionally
+    # needs the full sealed runtime manifest consumed by one-run.  They are
+    # distinct immutable files and must converge on one semantic manifest
+    # digest; neither file can stand in for the other.
+    b5_paths = {
         "b3_gate": b3_gate_path,
         "b4_evidence": b4_evidence_path,
-        "runtime_manifest": runtime_manifest_path,
+        "runtime_manifest": runtime_evidence_path,
         "checkpoint": checkpoint_path,
         "training_manifest": training_manifest_path,
         "bundle_manifest": bundle_path,
         "objectives": objectives_path,
         "atlas": atlas_path,
     }
-    current = {name: file_record(path) for name, path in paths.items()}
+    current = {name: file_record(path) for name, path in b5_paths.items()}
     b5_bindings = _mapping(b5.get("runtime_bindings"), "B5 runtime bindings")
     for name, record in current.items():
         _require(b5_bindings.get(name) == record, f"B5 {name} binding differs")
-    _require(set(b5_bindings) == set(paths), "B5 runtime binding inventory differs")
-    manifest = load_json(
-        runtime_manifest_path, "runtime manifest", manifest_style=True
+    _require(
+        set(b5_bindings) == set(b5_paths),
+        "B5 runtime binding inventory differs",
     )
-    verified = verify_runtime_manifest(manifest)
-    _require(verified.valid and _SHA.fullmatch(verified.digest) is not None,
-             "runtime manifest is not sealed")
-    _require(b5.get("runtime_manifest_identity_sha256") == verified.digest,
-             "B5 runtime semantic identity differs")
-    b4_manifest = _mapping(b4.get("runtime_manifest"), "B4 runtime manifest")
-    _require(b4_manifest.get("sha256") == current["runtime_manifest"]["sha256"]
-             and b4_manifest.get("size") == current["runtime_manifest"]["bytes"]
-             and b4_manifest.get("manifest_sha256") == verified.digest,
-             "B4 runtime manifest binding differs")
+    runtime_files = _validate_runtime_files(
+        b4=b4,
+        b5=b5,
+        runtime_evidence_path=runtime_evidence_path,
+        runtime_manifest_path=runtime_manifest_path,
+        atlas_sha256=current["atlas"]["sha256"],
+    )
+    _require(
+        current["runtime_manifest"] == runtime_files["compact_record"],
+        "B5 compact runtime evidence binding changed during validation",
+    )
+    full_runtime_record = runtime_files["full_record"]
+    manifest = runtime_files["manifest"]
+    runtime_manifest_sha256 = runtime_files["manifest_sha256"]
 
     retirement_record = file_record(retirement_path)
     retirement = load_json(retirement_path, "retirement manifest")
@@ -633,13 +696,19 @@ def _validate_bindings(
     _require(b5.get("source") == b4_sources["bot"],
              "B5/B4 bot source closure differs")
     return {
-        **current,
+        **{
+            name: record
+            for name, record in current.items()
+            if name != "runtime_manifest"
+        },
+        "runtime_evidence": current["runtime_manifest"],
+        "runtime_manifest": full_runtime_record,
         "objectives": objectives_record,
         "atlas_manifest": atlas_manifest_record,
         "b3_gate": b3_gate_record,
         "b3_gate_sha256": b3_gate["gate_sha256"],
         "retirement_manifest": retirement_record,
-        "runtime_manifest_identity_sha256": verified.digest,
+        "runtime_manifest_identity_sha256": runtime_manifest_sha256,
         "training_config_sha256": training_configuration.sha256,
         "objective_identity_sha256": objective_identity,
         "network_barrier_execution_evidence_sha256": network_barrier_execution,
@@ -1316,7 +1385,8 @@ def assemble_campaign(
     controller_ledger_path: Path, controller_plan_path: Path,
     public_pre_path: Path, public_post_path: Path, b2_gate_path: Path,
     b4_evidence_path: Path, b5_gate_path: Path, lineage_evidence_path: Path,
-    retirement_evidence_path: Path, runtime_manifest_path: Path,
+    retirement_evidence_path: Path, runtime_evidence_path: Path,
+    runtime_manifest_path: Path,
     checkpoint_path: Path, bundle_manifest_path: Path,
     training_manifest_path: Path, objectives_path: Path, atlas_path: Path,
     atlas_manifest_path: Path, b3_gate_path: Path,
@@ -1349,7 +1419,8 @@ def assemble_campaign(
         objective_identity_sha256=objective_identity_preflight,
     )
     bindings = _validate_bindings(
-        b4=b4, b5=b5, runtime_manifest_path=runtime_manifest_path,
+        b4=b4, b5=b5, runtime_evidence_path=runtime_evidence_path,
+        runtime_manifest_path=runtime_manifest_path,
         checkpoint_path=checkpoint_path, training_manifest_path=training_manifest_path,
         objectives_path=objectives_path, bundle_path=bundle_manifest_path,
         atlas_path=atlas_path, atlas_manifest_path=atlas_manifest_path,
@@ -1563,7 +1634,8 @@ def _parser() -> argparse.ArgumentParser:
         "controller_plan",
         "public_pre", "public_post", "b2_gate",
         "b4_evidence", "b5_gate", "lineage_evidence", "retirement_evidence",
-        "runtime_manifest", "checkpoint", "training_manifest", "objectives",
+        "runtime_evidence", "runtime_manifest", "checkpoint",
+        "training_manifest", "objectives",
         "bundle_manifest", "atlas", "atlas_manifest", "b3_gate",
         "retirement_manifest", "output",
     ):
@@ -1585,6 +1657,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             b4_evidence_path=args.b4_evidence, b5_gate_path=args.b5_gate,
             lineage_evidence_path=args.lineage_evidence,
             retirement_evidence_path=args.retirement_evidence,
+            runtime_evidence_path=args.runtime_evidence,
             runtime_manifest_path=args.runtime_manifest,
             checkpoint_path=args.checkpoint,
             training_manifest_path=args.training_manifest,

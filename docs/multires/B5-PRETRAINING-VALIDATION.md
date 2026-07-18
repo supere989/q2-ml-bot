@@ -137,6 +137,9 @@ names the admitted compact B4 runtime-evidence JSON:
 the producer validates its complete multires protocol contract and records both
 the exact file hash and its `runtime_manifest_sha256` semantic identity. The
 work directory and report must not already exist.
+This compact file is `B4/b4-wire-generation.json`; it is not the full sealed
+runtime manifest. B6 carries both files independently and requires their
+semantic runtime identities to agree.
 Both producer outputs and the final gate output must be outside the source
 worktree so evidence creation cannot invalidate the clean-source identity it
 claims.
@@ -146,7 +149,7 @@ python tools/run_multires_pretraining_validation.py \
   --repo-root /absolute/q2-ml-bot \
   --b3-gate /absolute/B3-GATE.json \
   --b4-evidence /absolute/B4/B4-EVIDENCE.json \
-  --runtime-manifest /absolute/runtime-manifest.json \
+  --runtime-manifest /absolute/B4/b4-wire-generation.json \
   --checkpoint /absolute/checkpoint.pt \
   --training-manifest /absolute/training-manifest.json \
   --bundle-manifest /absolute/bundle-v3.json \
@@ -181,7 +184,7 @@ python tools/assemble_b5_gate.py \
   --proof-report /absolute/b5-pretraining/proof-500.json \
   --b3-gate /absolute/B3-GATE.json \
   --b4-evidence /absolute/B4/B4-EVIDENCE.json \
-  --runtime-manifest /absolute/runtime-manifest.json \
+  --runtime-manifest /absolute/B4/b4-wire-generation.json \
   --checkpoint /absolute/checkpoint.pt \
   --training-manifest /absolute/training-manifest.json \
   --bundle-manifest /absolute/bundle-v3.json \
@@ -206,3 +209,32 @@ B5 records the B3 file in its immutable bindings and carries the validated
 chain into the final gate. Therefore B5 cannot start from an orphan B4 green
 label, cannot substitute a different B3 after validation, and cannot produce a
 green report while B2 has no active final cohort.
+
+## Pre-B6 retirement validation (non-service artifact)
+
+B5 cannot require the final `q2-multires-cold-start-v2` declaration: v2 binds
+the final B6 aggregate and integration verification, neither of which exists
+at the B5 boundary. Use the explicit evidence-only mode instead:
+
+```sh
+python3 tools/validate_multires_retirement.py \
+  --mode pre-b6 \
+  --manifest /absolute/M4-RUNTIME-RETIREMENT.json \
+  --expected-manifest-sha256 <sha256> \
+  --cold-start /absolute/pre-b6-cold-start.json \
+  --operational-root /absolute/isolated-runtime \
+  --service-selector /absolute/isolated-runtime/service-selector
+```
+
+That declaration has schema `q2-multires-pre-b6-cold-start-v1` and contains
+only the fresh checkpoint/attestation, B4 runtime evidence, training manifest,
+bundle manifest, and Dyn snapshots. Its report schema is
+`q2-multires-pre-b6-retirement-validation-v1` and records `mode: pre-b6`.
+It proves retirement and fresh step-zero selection for B5/B6 evidence; it is
+never a live-service admission artifact.
+
+Omitting `--mode` selects `service`, which accepts only
+`q2-multires-cold-start-v2`. The v2 path additionally requires the B6/final
+integration envelope and report, clean bot source identity, primary runtime,
+and trainer checkpoint. `train.multires_service` invokes only that default
+service path, so a pre-B6 declaration cannot enter the live selector.

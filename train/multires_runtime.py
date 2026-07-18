@@ -20,6 +20,7 @@ from harness.multires_contract import (
     OBS_DIM,
     GuideDropoutConfig,
     GuideDropoutIdentity,
+    GuideDropoutResult,
     apply_seeded_guide_dropout,
     pack_policy_vector,
 )
@@ -43,6 +44,18 @@ from models.multires_policy import MultiresQ2BotPolicy
 from .multires_ppo import MultiresPPOConfig
 
 
+_SHA256_CHARS = frozenset("0123456789abcdef")
+
+
+def _valid_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value != "0" * 64
+        and len(value) == 64
+        and all(character in _SHA256_CHARS for character in value)
+    )
+
+
 @dataclass
 class MultiresTrainerRuntime:
     policy: MultiresQ2BotPolicy
@@ -52,6 +65,9 @@ class MultiresTrainerRuntime:
     ppo_config: MultiresPPOConfig
     training_config: MultiresTrainingConfiguration
     initialization: str
+    atlas_catalog_sha256: str
+    qualification_atlas_sha256: str
+    active_atlas_sha256: str
     lineage_root_sha256: Optional[str] = None
     reward_reducers: dict[str, CausalRewardReducer] = field(default_factory=dict)
 
@@ -61,6 +77,8 @@ class MultiresTrainerRuntime:
         runtime_evidence: Mapping[str, Any],
         *,
         expected_atlas_sha256: str,
+        active_atlas_sha256: str,
+        expected_atlas_catalog_sha256: str,
         seed: int,
         device: torch.device = torch.device("cpu"),
         initialization: str = "random",
@@ -78,6 +96,10 @@ class MultiresTrainerRuntime:
         runtime = validate_runtime_evidence(
             runtime_evidence, expected_atlas_sha256=expected_atlas_sha256
         )
+        if not _valid_sha256(active_atlas_sha256) or not _valid_sha256(
+            expected_atlas_catalog_sha256
+        ):
+            raise ValueError("fresh runtime requires active Atlas and catalog SHA-256")
         reward_config.validate()
         guide_dropout.validate()
         ppo_config.validate()
@@ -98,6 +120,9 @@ class MultiresTrainerRuntime:
             ppo_config=ppo_config,
             training_config=training_config,
             initialization=initialization,
+            atlas_catalog_sha256=expected_atlas_catalog_sha256,
+            qualification_atlas_sha256=expected_atlas_sha256,
+            active_atlas_sha256=active_atlas_sha256,
         )
 
     @classmethod
@@ -107,6 +132,8 @@ class MultiresTrainerRuntime:
         runtime_evidence: Mapping[str, Any],
         *,
         expected_atlas_sha256: str,
+        active_atlas_sha256: str,
+        expected_atlas_catalog_sha256: str,
         device: torch.device = torch.device("cpu"),
         optimizer_factory: Callable[[Any], Any],
         reward_config: CausalRewardConfig = CausalRewardConfig(),
@@ -119,6 +146,10 @@ class MultiresTrainerRuntime:
         runtime = validate_runtime_evidence(
             runtime_evidence, expected_atlas_sha256=expected_atlas_sha256
         )
+        if not _valid_sha256(active_atlas_sha256) or not _valid_sha256(
+            expected_atlas_catalog_sha256
+        ):
+            raise ValueError("resume runtime requires active Atlas and catalog SHA-256")
         reward_config.validate()
         guide_dropout.validate()
         ppo_config.validate()
@@ -132,7 +163,7 @@ class MultiresTrainerRuntime:
         manifest = load_attested_checkpoint(
             checkpoint,
             policy,
-            expected_atlas_sha256=runtime.atlas_sha256,
+            expected_atlas_catalog_sha256=expected_atlas_catalog_sha256,
             expected_runtime_manifest_sha256=runtime.runtime_manifest_sha256,
             expected_training_config=training_config,
             optimizer=optimizer,
@@ -147,6 +178,9 @@ class MultiresTrainerRuntime:
             ppo_config=ppo_config,
             training_config=training_config,
             initialization=manifest.initialization,
+            atlas_catalog_sha256=expected_atlas_catalog_sha256,
+            qualification_atlas_sha256=expected_atlas_sha256,
+            active_atlas_sha256=active_atlas_sha256,
             lineage_root_sha256=manifest.lineage_root_sha256,
         )
         return restored, optimizer, manifest
@@ -182,17 +216,40 @@ class MultiresTrainerRuntime:
         training: bool = True,
     ) -> tuple[np.ndarray, tuple[bool, ...]]:
         """Apply advisory dropout without rebuilding already-attested blocks."""
+        result, dropout = self.prepare_policy_vector_with_dropout(
+            vector, dropout_identity=dropout_identity, training=training
+        )
+        return result, dropout.dropped_candidates
+
+    def prepare_policy_vector_with_dropout(
+        self,
+        vector: Sequence[float],
+        *,
+        dropout_identity: GuideDropoutIdentity,
+        training: bool = True,
+    ) -> tuple[np.ndarray, GuideDropoutResult]:
+        """Return policy bytes plus the exact public advisory-dropout audit."""
         result = np.asarray(vector, dtype=np.float32)
         if result.shape != (OBS_DIM,) or not np.isfinite(result).all():
             raise ValueError(f"policy vector must be finite shape ({OBS_DIM},)")
         result = result.copy()
-        if not training:
-            return result, (False, False, False, False)
         dropout = apply_seeded_guide_dropout(
-            result[GUIDES.slice], dropout_identity, self.guide_dropout
+            result[GUIDES.slice],
+            dropout_identity,
+            self.guide_dropout if training else GuideDropoutConfig(
+                global_probability=0.0,
+                class_probabilities=(0.0,) * 8,
+            ),
         )
+        if not training:
+            dropout = GuideDropoutResult(
+                guides=dropout.guides,
+                dropped_candidates=(False, False, False, False),
+                global_drop=False,
+                candidate_classes=dropout.candidate_classes,
+            )
         result[GUIDES.slice] = dropout.guides
-        return result, dropout.dropped_candidates
+        return result, dropout
 
     def reward(
         self, client_id: str, frame: CausalRewardFrame
@@ -222,7 +279,7 @@ class MultiresTrainerRuntime:
         manifest = save_attested_checkpoint(
             path,
             self.policy,
-            atlas_sha256=self.runtime.atlas_sha256,
+            atlas_catalog_sha256=self.atlas_catalog_sha256,
             runtime_manifest_sha256=self.runtime.runtime_manifest_sha256,
             training_config=self.training_config,
             initialization=self.initialization,

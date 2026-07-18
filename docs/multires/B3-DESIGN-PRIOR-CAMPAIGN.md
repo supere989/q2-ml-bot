@@ -73,8 +73,14 @@ overlap before creating its work root. The compiled-CM timeout is finite in
 `(0,60]`; the rejected historical value `3600` cannot reach the filesystem. It
 then runs source freeze/static validation, q2tool, compiled-CM, materialization,
 claims, Atlas, and promotion validation in that order. The output binds all
-eight stage reports and all seven executable or evidence authorities. There is
-no remote, resume, subset, replacement, or runtime-install mode.
+eight stage reports and all nine executable or evidence authorities. The Atlas
+packer and verifier are required, preflighted non-symlink executable files,
+supplied by absolute path, passed explicitly into Atlas construction, and
+recorded separately in the lane manifest. Relative paths are rejected before
+the lane work root exists so the child snapshot working directory cannot
+rebind an authority. An ambient Cargo build inside the immutable implementation snapshot
+is not an admitted substitute. There is no remote, resume, subset, replacement,
+or runtime-install mode.
 
 Example workflow:
 
@@ -85,7 +91,15 @@ python tools/run_b3_design_prior_campaign.py prepare \
   --output /artifact/b3-prior-plan.json
 
 # Run each declared generator -> static -> q2tool -> Atlas lane offline with
-# tools/run_b3_design_prior_lanes.py and exact B1 authority paths.
+# tools/run_b3_design_prior_lanes.py, exact B1 authority paths, and binaries
+# built from the same clean repository identity, for example:
+cargo build --locked --release -p q2-lattice --bins \
+  --target-dir /artifact/b3-toolbuild
+
+python tools/run_b3_design_prior_lanes.py \
+  ... \
+  --packer /artifact/b3-toolbuild/release/q2-atlas-pack \
+  --verifier /artifact/b3-toolbuild/release/q2-atlas-verify
 
 python tools/run_b3_design_prior_campaign.py evaluate \
   --plan /artifact/b3-prior-plan.json \

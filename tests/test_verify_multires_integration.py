@@ -192,7 +192,8 @@ def _b6_evidence() -> dict:
         "bindings": {
             **{
                 name: record(name) for name in (
-                    "runtime_manifest", "training_manifest", "objectives",
+                    "runtime_evidence", "runtime_manifest",
+                    "training_manifest", "objectives",
                     "bundle_manifest", "atlas", "atlas_manifest", "b2_gate",
                     "b3_gate", "b4_evidence", "b5_gate", "lineage_evidence",
                     "retirement_evidence",

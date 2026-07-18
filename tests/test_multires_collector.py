@@ -15,6 +15,7 @@ from harness.multires_collector import (
     CollectorAdmissionError,
     CollectorConfig,
     MultiresSynchronousCollector,
+    PolicyObservationBatch,
     PolicyDecision,
 )
 from harness.multires_contract import OBS_DIM
@@ -355,6 +356,64 @@ def test_transition_observer_receives_only_detached_post_admission_facts():
         for step in rollout.infos
         for info in step
     )
+
+
+def test_policy_transform_guide_audit_is_identity_fenced_and_published():
+    events = []
+
+    def transform(observations, infos, _version):
+        return PolicyObservationBatch(
+            observations=observations,
+            transition_info=tuple({
+                "client_id": info["client_id"],
+                "server_frame": info["server_frame"],
+                "guide_dropped": (True, False, False, False),
+                "guide_classes": (0, 1, None, None),
+                "global_guide_drop": False,
+            } for info in infos),
+        )
+
+    collector = MultiresSynchronousCollector(
+        FakeBatch(boundary_first=False), FakePolicy(),
+        observation_transform=transform,
+        reward_function=lambda _client, _frame: CausalRewardResult(
+            reward=0.0, metrics={}
+        ),
+        transition_observer=lambda *_args: events.append(_args[-1]),
+        config=CollectorConfig(transitions_per_client=1),
+    )
+    rollout = collector.collect(policy_version=4)
+    assert len(events) == 2
+    assert all(info["guide_dropped"] == (True, False, False, False)
+               for info in events)
+    assert all(info["guide_classes"] == (0, 1, None, None) for info in events)
+    assert all(step["global_guide_drop"] is False for step in rollout.infos[0])
+
+
+def test_policy_transform_rejects_teacher_or_unbound_telemetry_fields():
+    def transform(observations, infos, _version):
+        return PolicyObservationBatch(
+            observations=observations,
+            transition_info=tuple({
+                "client_id": info["client_id"],
+                "server_frame": info["server_frame"],
+                "guide_dropped": (False,) * 4,
+                "guide_classes": (None,) * 4,
+                "global_guide_drop": False,
+                "teacher_action": 7,
+            } for info in infos),
+        )
+
+    collector = MultiresSynchronousCollector(
+        FakeBatch(boundary_first=False), FakePolicy(),
+        observation_transform=transform,
+        reward_function=lambda _client, _frame: CausalRewardResult(
+            reward=0.0, metrics={}
+        ),
+        config=CollectorConfig(transitions_per_client=1),
+    )
+    with pytest.raises(CollectorAdmissionError, match="fields differ"):
+        collector.collect(policy_version=4)
 
 
 def test_transition_observer_is_withheld_until_entire_round_admits():

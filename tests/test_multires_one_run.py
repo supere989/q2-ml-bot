@@ -36,6 +36,12 @@ from harness.multires_runtime import (
 )
 from harness.multires_training_config import MultiresTrainingConfiguration
 from harness.multires_lineage import save_attested_checkpoint
+from harness.atlas_catalog import (
+    ATLAS_MAP_SPEC_SCHEMA,
+    author_catalog,
+    canonical_bytes as catalog_bytes,
+    load_atlas_catalog,
+)
 from harness.runtime_attestation import MANIFEST_SCHEMA, semantic_digest
 from harness.multires_reward import CausalRewardConfig
 from harness.multires_contract import GuideDropoutConfig
@@ -69,7 +75,14 @@ from train.multires_service import (
 )
 import train.multires_service as service_module
 from train.multires_train import CurriculumStage
-from train.multires_primary import PrimaryTrainingError, admit_primary_training
+from train.multires_primary import (
+    PRIMARY_ATTEMPT_FIELDS,
+    PRIMARY_TERMINAL_FIELDS,
+    PrimaryTrainingError,
+    _write_attempt_evidence,
+    _write_terminal_evidence,
+    admit_primary_training,
+)
 
 if torch is not None:
     from models.multires_policy import MultiresQ2BotPolicy
@@ -127,9 +140,18 @@ def materialize(tmp_path: Path, monkeypatch) -> SimpleNamespace:
     atlas = bundle / f"{name}.atlas.bin"
     atlas.write_bytes(b"atlas")
     atlas_sha = sha(atlas)
+    objectives.write_text(json.dumps({
+        "schema": "q2-atlas-objectives-v1",
+        "atlas_sha256": atlas_sha,
+        "canonical_map_id": name,
+        "origin": [0, 0, 0],
+        "objectives": [],
+    }, sort_keys=True), encoding="utf-8")
     atlas_manifest = bundle / f"{name}.atlas.manifest.json"
     atlas_manifest.write_text(json.dumps({
         "grid": {"origin": [0, 0, 0]},
+        "bsp": {"canonical_map_id": name, "sha256": sha(bsp),
+                "size_bytes": bsp.stat().st_size},
         "artifacts": {f"{name}.atlas.bin": {
             "sha256_uncompressed": atlas_sha,
             "uncompressed_size": atlas.stat().st_size,
@@ -140,8 +162,43 @@ def materialize(tmp_path: Path, monkeypatch) -> SimpleNamespace:
         "bundle_version": 3,
         "artifact_state": "admitted",
         "name": name,
-        "analysis_files": {objectives.name: sha(objectives)},
+        "files": {bsp.name: sha(bsp)},
+        "analysis_files": {
+            objectives.name: sha(objectives),
+            atlas_manifest.name: sha(atlas_manifest),
+        },
     }, sort_keys=True), encoding="utf-8")
+
+    class FakeDynRuntime:
+        @staticmethod
+        def empty(atlas_id, map_id, origin, epoch, client_id, count, steps):
+            return SimpleNamespace(
+                atlas_sha256=atlas_id, map_sha256=map_id,
+                origin=tuple(origin), map_epoch=epoch, client_id=client_id,
+                client_count=count, environment_steps=steps,
+                client_life_epoch=0, server_frame=0, last_event_id=0,
+                accepted_event_count=0, cell_count=0,
+            )
+
+    fake_extension = SimpleNamespace(
+        __file__=str(extension.resolve()), DynRuntime=FakeDynRuntime,
+    )
+    monkeypatch.setattr(one_run_module, "_load_extension", lambda _path: fake_extension)
+    atlas_catalog = root / "atlas-catalog.json"
+    catalog_document = author_catalog(
+        [{
+            "schema": ATLAS_MAP_SPEC_SCHEMA, "map_name": name,
+            "bsp": str(bsp.resolve()), "atlas": str(atlas.resolve()),
+            "atlas_manifest": str(atlas_manifest.resolve()),
+            "bundle_manifest": str(bundle_manifest.resolve()),
+            "objectives": str(objectives.resolve()),
+        }],
+        catalog_path=atlas_catalog,
+        rust_extension_path=extension,
+        extension_module=fake_extension,
+    )
+    atlas_catalog.write_bytes(catalog_bytes(catalog_document) + b"\n")
+    atlas_catalog_sha = catalog_document["atlas_catalog_sha256"]
 
     training = MultiresTrainingConfiguration.create(
         reward=CausalRewardConfig(),
@@ -316,7 +373,7 @@ def materialize(tmp_path: Path, monkeypatch) -> SimpleNamespace:
         checkpoint_manifest = save_attested_checkpoint(
             checkpoint,
             checkpoint_policy,
-            atlas_sha256=atlas_sha,
+            atlas_catalog_sha256=atlas_catalog_sha,
             runtime_manifest_sha256=runtime_digest,
             training_config=training,
             initialization="random",
@@ -348,6 +405,7 @@ def materialize(tmp_path: Path, monkeypatch) -> SimpleNamespace:
         "observation_dim": checkpoint_manifest.observation_dim,
         "action_dim": checkpoint_manifest.action_dim,
         "posture_classes": checkpoint_manifest.posture_classes,
+        "atlas_catalog_sha256": atlas_catalog_sha,
         "optimizer_state": "fresh-empty",
         "normalization_state": "fresh-empty",
     }, sort_keys=True), encoding="utf-8")
@@ -359,6 +417,8 @@ def materialize(tmp_path: Path, monkeypatch) -> SimpleNamespace:
     primary_training.write_text(json.dumps({
         "schema": "q2-multires-primary-training-runtime-v1",
         "runtime_manifest_sha256": runtime_digest,
+        "atlas_catalog": {"path": str(atlas_catalog), "sha256": sha(atlas_catalog)},
+        "atlas_catalog_sha256": atlas_catalog_sha,
         "network_barrier_execution_evidence_sha256": execution[
             "execution_evidence_sha256"
         ],
@@ -397,11 +457,106 @@ def materialize(tmp_path: Path, monkeypatch) -> SimpleNamespace:
             "current_season_report": None,
         },
     }, sort_keys=True), encoding="utf-8")
+
+    # The service consumes only an exact precomputed report that byte-matches
+    # a fresh invocation of the final B2-B6 integration verifier.  Most tests
+    # in this module exercise service ownership rather than the verifier's
+    # nine gate algorithms, so use a sealed synthetic result while preserving
+    # the real service-side identity and file-binding checks.
+    integration_root = root / "integration"
+    integration_root.mkdir()
+    integration_bot_source = {"commit": "a" * 40, "tree": "b" * 40}
+    monkeypatch.setattr(
+        service_module,
+        "_current_bot_source_identity",
+        lambda: {**integration_bot_source, "clean": True},
+    )
+    integration_paths = {}
+    for gate in service_module.INTEGRATION_GATE_ORDER:
+        path = integration_root / f"{gate}.json"
+        payload = {}
+        if gate == "bundle_v3_atlas":
+            payload = {"atlas_sha256": atlas_sha}
+        elif gate == "lineage_attestation":
+            payload = {
+                "atlas_sha256": atlas_sha,
+                "runtime_manifest_sha256": runtime_digest,
+            }
+        elif gate == "legacy_selector_deactivation":
+            payload = {"retirement_manifest_sha256": sha(retirement)}
+        elif gate == "wsl_b6_campaign":
+            bound_paths = {
+                "runtime_evidence": runtime_evidence,
+                "runtime_manifest": runtime / "runtime-manifest.json",
+                "checkpoint": checkpoint,
+                "training_manifest": training_manifest,
+                "objectives": objectives,
+                "bundle_manifest": bundle_manifest,
+                "atlas": atlas,
+                "retirement_manifest": retirement,
+            }
+            payload = {
+                "source_repositories": {
+                    "bot": {**integration_bot_source, "clean": True}
+                },
+                "bindings": {
+                    **{
+                        key: {
+                            "bytes": value.stat().st_size,
+                            "sha256": sha(value),
+                        }
+                        for key, value in bound_paths.items()
+                    },
+                    "atlas_sha256": atlas_sha,
+                    "runtime_manifest_identity_sha256": runtime_digest,
+                },
+            }
+        path.write_bytes(_canonical(payload) + b"\n")
+        integration_paths[gate] = path.name
+    integration_envelope = integration_root / "envelope.json"
+    integration_envelope.write_bytes(_canonical({
+        "schema": service_module.INTEGRATION_ENVELOPE_SCHEMA,
+        "evidence": integration_paths,
+    }) + b"\n")
+    integration_body = {
+        "schema": service_module.INTEGRATION_REPORT_SCHEMA,
+        "tool": "verify_multires_integration",
+        "policy_generation": POLICY_GENERATION,
+        "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
+        "envelope_sha256": sha(integration_envelope),
+        "gates": [
+            {
+                "rank": rank,
+                "gate": gate,
+                "status": "pass",
+                "evidence_sha256": sha(integration_root / integration_paths[gate]),
+                "reasons": [],
+            }
+            for rank, gate in enumerate(
+                service_module.INTEGRATION_GATE_ORDER, start=1
+            )
+        ],
+        "failed_gates": [],
+        "overall": "pass",
+    }
+    integration_report_value = {
+        **integration_body,
+        "report_sha256": hashlib.sha256(_canonical(integration_body)).hexdigest(),
+    }
+    integration_report = integration_root / "report.json"
+    integration_report.write_bytes(_canonical(integration_report_value) + b"\n")
+    frozen_integration_report = json.loads(json.dumps(integration_report_value))
+    monkeypatch.setattr(
+        service_module,
+        "run_integration_gates",
+        lambda _path: json.loads(json.dumps(frozen_integration_report)),
+    )
     cold_start = runtime / "cold-start.json"
     cold_start.write_text(json.dumps({
-        "schema": "q2-multires-cold-start-v1",
+        "schema": "q2-multires-cold-start-v2",
         "retirement_manifest_sha256": sha(retirement),
         "runtime_manifest_sha256": runtime_digest,
+        "atlas_catalog_sha256": atlas_catalog_sha,
         "optimizer": optimizer,
         "selectors": {
             "service_module": "train.multires_service",
@@ -438,6 +593,9 @@ def materialize(tmp_path: Path, monkeypatch) -> SimpleNamespace:
             "bundle_manifest": {
                 "path": str(bundle_manifest), "sha256": sha(bundle_manifest),
             },
+            "atlas_catalog": {
+                "path": str(atlas_catalog), "sha256": sha(atlas_catalog),
+            },
             "dyn_snapshots": [
                 {"path": value, "sha256": sha(Path(value))} for value in dyn
             ],
@@ -448,6 +606,15 @@ def materialize(tmp_path: Path, monkeypatch) -> SimpleNamespace:
                 "path": str(checkpoint), "sha256": sha(checkpoint),
             },
             "trainer_current_season": None,
+            "integration_envelope": {
+                "path": str(integration_envelope),
+                "sha256": sha(integration_envelope),
+            },
+            "integration_report": {
+                "path": str(integration_report),
+                "sha256": sha(integration_report),
+            },
+            "integration_bot_source": integration_bot_source,
         },
     }, sort_keys=True), encoding="utf-8")
     config = {
@@ -476,13 +643,48 @@ def materialize(tmp_path: Path, monkeypatch) -> SimpleNamespace:
         runtime_root=runtime, bundle_manifest=bundle_manifest,
         objectives=objectives, atlas_bin=atlas, checkpoint=checkpoint,
         training_manifest=training_manifest, runtime_evidence=runtime_evidence,
+        atlas_catalog=atlas_catalog,
         transition_count=500, policy_version=2, map_epoch=0, map_name=name,
         out=root / "out.json", launch_id="same-a",
         expected_atlas_sha256=atlas_sha,
+        expected_atlas_catalog_sha256=atlas_catalog_sha,
         expected_runtime_manifest_sha256=runtime_digest,
         retirement_manifest=retirement, retirement_cold_start=cold_start,
         primary_training=primary_training,
+        integration_envelope=integration_envelope,
+        integration_report=integration_report,
+        integration_bot_source=integration_bot_source,
     )
+
+
+def _integration_guard_config(args: SimpleNamespace) -> dict:
+    return {
+        "retirement_manifest_sha256": sha(args.retirement_manifest),
+        "runtime_manifest_sha256": args.expected_runtime_manifest_sha256,
+        "retirement_manifest": str(args.retirement_manifest),
+        "proof": {
+            "runtime_evidence": str(args.runtime_evidence),
+            "checkpoint": str(args.checkpoint),
+            "training_manifest": str(args.training_manifest),
+            "objectives": str(args.objectives),
+            "bundle_manifest": str(args.bundle_manifest),
+            "atlas_bin": str(args.atlas_bin),
+            "atlas_catalog": str(args.atlas_catalog),
+            "expected_atlas_sha256": args.expected_atlas_sha256,
+            "expected_atlas_catalog_sha256": args.expected_atlas_catalog_sha256,
+        },
+        "integration_admission": {
+            "envelope": {
+                "path": str(args.integration_envelope),
+                "sha256": sha(args.integration_envelope),
+            },
+            "report": {
+                "path": str(args.integration_report),
+                "sha256": sha(args.integration_report),
+            },
+            "bot_source": dict(args.integration_bot_source),
+        },
+    }
 
 
 def test_preflight_checks_exact_total_then_admits_executable_barrier(
@@ -610,7 +812,7 @@ def test_service_is_fail_closed_until_executable_barrier_and_wrapper_is_exact(
     )
     retirement = Path(one_run_config["retirement_manifest"])
     service = {
-        "schema": "q2-multires-service-v1",
+        "schema": "q2-multires-service-v2",
         "retirement_manifest_sha256": sha(retirement),
         "runtime_manifest_sha256": args.expected_runtime_manifest_sha256,
         "retirement_manifest": str(args.retirement_manifest),
@@ -635,10 +837,12 @@ def test_service_is_fail_closed_until_executable_barrier_and_wrapper_is_exact(
             "bundle_manifest": str(args.bundle_manifest),
             "objectives": str(args.objectives),
             "atlas_bin": str(args.atlas_bin),
+            "atlas_catalog": str(args.atlas_catalog),
             "checkpoint": str(args.checkpoint),
             "training_manifest": str(args.training_manifest),
             "runtime_evidence": str(args.runtime_evidence),
             "expected_atlas_sha256": args.expected_atlas_sha256,
+            "expected_atlas_catalog_sha256": args.expected_atlas_catalog_sha256,
             "expected_runtime_manifest_sha256": (
                 args.expected_runtime_manifest_sha256
             ),
@@ -646,6 +850,17 @@ def test_service_is_fail_closed_until_executable_barrier_and_wrapper_is_exact(
         "training_runtime": {
             "path": str(args.primary_training),
             "sha256": sha(args.primary_training),
+        },
+        "integration_admission": {
+            "envelope": {
+                "path": str(args.integration_envelope),
+                "sha256": sha(args.integration_envelope),
+            },
+            "report": {
+                "path": str(args.integration_report),
+                "sha256": sha(args.integration_report),
+            },
+            "bot_source": dict(args.integration_bot_source),
         },
         "evidence_dir": str(evidence),
         "log_path": str(args.runtime_root / "multires-service.log"),
@@ -693,7 +908,7 @@ def test_service_preflight_exposes_primary_and_tb_watches_only_cold_root(
     )
     retirement = Path(one_run_config["retirement_manifest"])
     service = {
-        "schema": "q2-multires-service-v1",
+        "schema": "q2-multires-service-v2",
         "retirement_manifest_sha256": sha(retirement),
         "runtime_manifest_sha256": args.expected_runtime_manifest_sha256,
         "retirement_manifest": str(args.retirement_manifest),
@@ -713,14 +928,27 @@ def test_service_preflight_exposes_primary_and_tb_watches_only_cold_root(
             "client_binary": str(args.client_binary),
             "bundle_manifest": str(args.bundle_manifest),
             "objectives": str(args.objectives), "atlas_bin": str(args.atlas_bin),
+            "atlas_catalog": str(args.atlas_catalog),
             "checkpoint": str(args.checkpoint),
             "training_manifest": str(args.training_manifest),
             "runtime_evidence": str(args.runtime_evidence),
             "expected_atlas_sha256": args.expected_atlas_sha256,
+            "expected_atlas_catalog_sha256": args.expected_atlas_catalog_sha256,
             "expected_runtime_manifest_sha256": args.expected_runtime_manifest_sha256,
         },
         "training_runtime": {
             "path": str(args.primary_training), "sha256": sha(args.primary_training),
+        },
+        "integration_admission": {
+            "envelope": {
+                "path": str(args.integration_envelope),
+                "sha256": sha(args.integration_envelope),
+            },
+            "report": {
+                "path": str(args.integration_report),
+                "sha256": sha(args.integration_report),
+            },
+            "bot_source": dict(args.integration_bot_source),
         },
         "evidence_dir": str(evidence),
         "log_path": str(args.runtime_root / "multires-service.log"),
@@ -746,6 +974,13 @@ def test_service_preflight_exposes_primary_and_tb_watches_only_cold_root(
     )
 
     def admitted_one_run(namespace):
+        catalog = load_atlas_catalog(
+            args.atlas_catalog,
+            expected_sha256=args.expected_atlas_catalog_sha256,
+            extension_module=one_run_module._load_extension(
+                Path(one_run_config["rust_extension"])
+            ),
+        )
         return SimpleNamespace(
             args=namespace,
             runtime_root=args.runtime_root,
@@ -767,6 +1002,7 @@ def test_service_preflight_exposes_primary_and_tb_watches_only_cold_root(
             atlas_bin=args.atlas_bin,
             dyn_snapshots=tuple(Path(value) for value in one_run_config["dyn_snapshots"]),
             rust_extension=Path(one_run_config["rust_extension"]),
+            atlas_catalog=catalog,
         )
 
     monkeypatch.setattr(service_module, "one_run_preflight", admitted_one_run)
@@ -814,6 +1050,339 @@ def test_service_preflight_exposes_primary_and_tb_watches_only_cold_root(
         )
 
 
+def test_service_v1_b4_era_config_is_rejected_before_runtime_state(
+    tmp_path, monkeypatch
+):
+    args = materialize(tmp_path, monkeypatch)
+    legacy = {
+        "schema": "q2-multires-service-v1",
+        "runtime_manifest_sha256": args.expected_runtime_manifest_sha256,
+    }
+    (args.runtime_root / "multires-service.json").write_text(
+        json.dumps(legacy), encoding="utf-8"
+    )
+    with pytest.raises(
+        MultiresServiceError, match="service configuration fields/schema differ"
+    ):
+        service_preflight(args.runtime_root)
+    assert not (args.runtime_root / "multires-service.lock").exists()
+    assert not _state_path(args.runtime_root).exists()
+
+
+def test_integration_report_rehash_cannot_rebind_stale_verification(
+    tmp_path, monkeypatch
+):
+    args = materialize(tmp_path, monkeypatch)
+    config = _integration_guard_config(args)
+    cold = json.loads(args.retirement_cold_start.read_text(encoding="utf-8"))
+    args.integration_report.write_bytes(args.integration_report.read_bytes() + b"\n")
+    rebound_sha = sha(args.integration_report)
+    config["integration_admission"]["report"]["sha256"] = rebound_sha
+    cold["inputs"]["integration_report"]["sha256"] = rebound_sha
+    with pytest.raises(
+        MultiresServiceError,
+        match="report bytes differ from fresh verification",
+    ):
+        service_module._verify_integration_admission(
+            runtime_root=args.runtime_root,
+            config=config,
+            cold_inputs=cold["inputs"],
+            retirement_manifest=args.retirement_manifest,
+        )
+
+
+def test_integration_missing_report_is_rejected(tmp_path, monkeypatch):
+    args = materialize(tmp_path, monkeypatch)
+    config = _integration_guard_config(args)
+    cold = json.loads(args.retirement_cold_start.read_text(encoding="utf-8"))
+    args.integration_report.unlink()
+    with pytest.raises(
+        MultiresServiceError,
+        match="precomputed integration report must be an absolute non-symlink file",
+    ):
+        service_module._verify_integration_admission(
+            runtime_root=args.runtime_root,
+            config=config,
+            cold_inputs=cold["inputs"],
+            retirement_manifest=args.retirement_manifest,
+        )
+
+
+def test_integration_stale_report_digest_is_rejected(tmp_path, monkeypatch):
+    args = materialize(tmp_path, monkeypatch)
+    config = _integration_guard_config(args)
+    cold = json.loads(args.retirement_cold_start.read_text(encoding="utf-8"))
+    args.integration_report.write_bytes(args.integration_report.read_bytes() + b"\n")
+    with pytest.raises(
+        MultiresServiceError,
+        match="precomputed integration report byte digest differs",
+    ):
+        service_module._verify_integration_admission(
+            runtime_root=args.runtime_root,
+            config=config,
+            cold_inputs=cold["inputs"],
+            retirement_manifest=args.retirement_manifest,
+        )
+
+
+def test_integration_b6_exact_file_binding_rejects_changed_atlas(
+    tmp_path, monkeypatch
+):
+    args = materialize(tmp_path, monkeypatch)
+    config = _integration_guard_config(args)
+    cold = json.loads(args.retirement_cold_start.read_text(encoding="utf-8"))
+    args.atlas_bin.write_bytes(b"changed-after-b6")
+    with pytest.raises(
+        MultiresServiceError,
+        match="B6 atlas binding differs from service input",
+    ):
+        service_module._verify_integration_admission(
+            runtime_root=args.runtime_root,
+            config=config,
+            cold_inputs=cold["inputs"],
+            retirement_manifest=args.retirement_manifest,
+        )
+
+
+def test_integration_rejects_dirty_or_drifted_live_bot_source(
+    tmp_path, monkeypatch
+):
+    args = materialize(tmp_path, monkeypatch)
+    config = _integration_guard_config(args)
+    cold = json.loads(args.retirement_cold_start.read_text(encoding="utf-8"))
+    monkeypatch.setattr(
+        service_module,
+        "_current_bot_source_identity",
+        lambda: {
+            **args.integration_bot_source,
+            "tree": "c" * 40,
+            "clean": True,
+        },
+    )
+    with pytest.raises(
+        MultiresServiceError,
+        match="runtime/Atlas/retirement/source identities differ",
+    ):
+        service_module._verify_integration_admission(
+            runtime_root=args.runtime_root,
+            config=config,
+            cold_inputs=cold["inputs"],
+            retirement_manifest=args.retirement_manifest,
+        )
+
+
+def test_current_bot_source_requires_exact_clean_git_worktree(
+    tmp_path, monkeypatch
+):
+    repo = (tmp_path / "bot-source").resolve()
+    repo.mkdir()
+    monkeypatch.setattr(service_module, "ROOT", repo)
+    with pytest.raises(
+        MultiresServiceError, match="exact bot Git worktree root"
+    ):
+        service_module._current_bot_source_identity()
+
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Test"], check=True
+    )
+    source = repo / "source.py"
+    source.write_text("frozen = True\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "source.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "freeze"],
+        check=True,
+        capture_output=True,
+    )
+    identity = service_module._current_bot_source_identity()
+    assert identity["clean"] is True
+    assert len(identity["commit"]) == 40
+    assert len(identity["tree"]) == 40
+
+    source.write_text("frozen = False\n", encoding="utf-8")
+    with pytest.raises(MultiresServiceError, match="dirty or unreadable"):
+        service_module._current_bot_source_identity()
+
+
+def test_start_and_tensorboard_cannot_spawn_before_integration_revalidation(
+    tmp_path, monkeypatch
+):
+    runtime = (tmp_path / "runtime").resolve()
+    runtime.mkdir()
+    popen_called = False
+
+    def forbidden_popen(*_args, **_kwargs):
+        nonlocal popen_called
+        popen_called = True
+        raise AssertionError("Popen reached before integration admission")
+
+    def reject(_admission):
+        raise MultiresServiceError("fresh integration verification rejected")
+
+    monkeypatch.setattr(service_module, "_revalidate_service_integration", reject)
+    monkeypatch.setattr(service_module.subprocess, "Popen", forbidden_popen)
+    with pytest.raises(
+        MultiresServiceError, match="fresh integration verification rejected"
+    ):
+        start_service(SimpleNamespace(runtime_root=runtime))
+    assert popen_called is False
+    assert not (runtime / "multires-service.lock").exists()
+    assert not _state_path(runtime).exists()
+    assert not (runtime / "multires-service.log").exists()
+
+
+def test_tensorboard_cannot_spawn_before_child_admission(
+    tmp_path, monkeypatch
+):
+    runtime = (tmp_path / "runtime").resolve()
+    run = (tmp_path / "run").resolve()
+    runtime.mkdir()
+    (run / "tensorboard").mkdir(parents=True)
+    (run / "season").mkdir(parents=True)
+    admission = SimpleNamespace(
+        runtime_root=runtime,
+        trainer_command=(sys.executable, "-c", "import time; time.sleep(60)"),
+        tensorboard_command=(sys.executable, "-c", "import time; time.sleep(60)"),
+        log_path=runtime / "multires-service.log",
+        one_run=SimpleNamespace(runtime_manifest_sha256="e" * 64),
+        current_run_root=run,
+        tensorboard_root=run / "tensorboard",
+        current_season_report=run / "season/current.json",
+        child_inventory=runtime / "multires-primary-children.json",
+        terminal_evidence=runtime / "multires-primary-terminal.json",
+        launch_config=tmp_path / "multires_one_run_primary-trainer.cfg",
+        shutdown_grace_seconds=5.0,
+    )
+    monkeypatch.setattr(
+        service_module, "_revalidate_service_integration", lambda _value: None
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_wait_for_primary_admission",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            MultiresServiceError("child admission rejected")
+        ),
+    )
+    real_popen = subprocess.Popen
+    commands = []
+
+    def tracked_popen(*args, **kwargs):
+        commands.append(tuple(args[0]))
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(service_module.subprocess, "Popen", tracked_popen)
+    with pytest.raises(MultiresServiceError, match="child admission rejected"):
+        start_service(admission)
+    assert commands == [admission.trainer_command]
+    assert not _state_path(runtime).exists()
+    assert not (runtime / "multires-service.lock").exists()
+
+
+def test_child_admission_attempt_is_exactly_bound_before_observability(tmp_path):
+    runtime = (tmp_path / "runtime").resolve()
+    current = (tmp_path / "run").resolve()
+    checkpoint_root = current / "checkpoints"
+    tensorboard_root = current / "tensorboard"
+    rollout_root = current / "evidence/rollouts"
+    update_root = current / "evidence/updates"
+    season_root = current / "season"
+    for directory in (
+        runtime, checkpoint_root, tensorboard_root, rollout_root,
+        update_root, season_root,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    checkpoint = checkpoint_root / "step-zero.pt"
+    checkpoint.write_bytes(b"step-zero")
+    catalog_sha256 = "d" * 64
+    admission = SimpleNamespace(
+        runtime_root=runtime,
+        one_run=SimpleNamespace(
+            runtime_manifest_sha256="a" * 64,
+            atlas_catalog=SimpleNamespace(
+                atlas_catalog_sha256=catalog_sha256,
+            ),
+        ),
+        primary=SimpleNamespace(
+            config_sha256="b" * 64,
+            checkpoint_mode="fresh-step-zero",
+            checkpoint=checkpoint,
+            checkpoint_root=checkpoint_root,
+            rollout_root=rollout_root,
+            update_root=update_root,
+        ),
+        current_run_root=current,
+        tensorboard_root=tensorboard_root,
+        current_season_report=season_root / "current.json",
+    )
+    selector_token = "c" * 64
+    token_sha256 = hashlib.sha256(selector_token.encode("ascii")).hexdigest()
+    trainer = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+    )
+    try:
+        record = _process_record(service_module.PRIMARY_ROLE, trainer)
+        attempt_path = runtime / service_module.PRIMARY_ATTEMPT_NAME
+        producer = SimpleNamespace(
+            service=SimpleNamespace(one_run=admission.one_run),
+            config_sha256=admission.primary.config_sha256,
+            checkpoint_mode=admission.primary.checkpoint_mode,
+            checkpoint=checkpoint,
+            current_run_root=current,
+            checkpoint_root=checkpoint_root,
+            tensorboard_root=tensorboard_root,
+            rollout_root=rollout_root,
+            update_root=update_root,
+            season_report_root=season_root,
+        )
+        owner = {**record, "role": service_module.PRIMARY_TRAINER_MODULE}
+        attempt = _write_attempt_evidence(
+            attempt_path,
+            producer,
+            owner=owner,
+            selector_token_sha256=token_sha256,
+        )
+        assert set(attempt) == PRIMARY_ATTEMPT_FIELDS
+        admitted = service_module._wait_for_primary_admission(
+            admission, trainer, record, selector_token, timeout_seconds=0.5
+        )
+        assert admitted["evidence_sha256"] == attempt["evidence_sha256"]
+
+        attempt_path.unlink()
+        mismatched_catalog = "e" * 64
+        mismatched_producer = SimpleNamespace(
+            **{
+                **producer.__dict__,
+                "service": SimpleNamespace(one_run=SimpleNamespace(
+                    runtime_manifest_sha256=admission.one_run.runtime_manifest_sha256,
+                    atlas_catalog=SimpleNamespace(
+                        atlas_catalog_sha256=mismatched_catalog,
+                    ),
+                )),
+            }
+        )
+        _write_attempt_evidence(
+            attempt_path,
+            mismatched_producer,
+            owner=owner,
+            selector_token_sha256=token_sha256,
+        )
+        with pytest.raises(
+            MultiresServiceError,
+            match="primary child admission attempt fields/bindings differ",
+        ):
+            service_module._wait_for_primary_admission(
+                admission, trainer, record, selector_token, timeout_seconds=0.5
+            )
+    finally:
+        trainer.terminate()
+        trainer.wait(timeout=5)
+
+
 def test_service_cli_rejects_removed_run_alias(tmp_path):
     with pytest.raises(SystemExit):
         service_parse_args(["--runtime_root", str(tmp_path), "run"])
@@ -843,6 +1412,7 @@ def test_service_stop_terminates_nested_owned_process_sessions(tmp_path):
         _state_path(runtime),
         [record],
         runtime_manifest_sha256="a" * 64,
+        atlas_catalog_sha256="b" * 64,
         current_run_root=run,
         tensorboard_root=run / "tensorboard",
         current_season_report=run / "season" / "current.json",
@@ -896,6 +1466,7 @@ def test_service_health_requires_live_primary_and_optimizer_update_evidence(tmp_
         _write_state(
             _state_path(runtime), [record],
             runtime_manifest_sha256="b" * 64,
+            atlas_catalog_sha256="d" * 64,
             current_run_root=run,
             tensorboard_root=run / "tensorboard",
             current_season_report=run / "season/current.json",
@@ -921,6 +1492,7 @@ def test_service_health_requires_live_primary_and_optimizer_update_evidence(tmp_
             "schema": "q2-multires-current-season-v1",
             "health": "training-active",
             "runtime_manifest_sha256": "b" * 64,
+            "atlas_catalog_sha256": "d" * 64,
             "lineage_root_sha256": "c" * 64,
             "counters": {
                 "accepted_transitions": 512, "policy_updates": 1,
@@ -931,6 +1503,7 @@ def test_service_health_requires_live_primary_and_optimizer_update_evidence(tmp_
             "checkpoint_manifest": {
                 "training_step": 512,
                 "runtime_manifest_sha256": "b" * 64,
+                "atlas_catalog_sha256": "d" * 64,
             },
         }
         season["evidence_sha256"] = hashlib.sha256(json.dumps(
@@ -966,27 +1539,44 @@ def test_service_health_requires_live_primary_and_optimizer_update_evidence(tmp_
         assert crashed["health"] == "crashed"
         assert crashed["terminal_completion_evidence"] is False
 
-        terminal = {
-            "schema": "q2-multires-primary-terminal-v1",
-            "status": "completed",
-            "runtime_manifest_sha256": "b" * 64,
-            "lineage_root_sha256": "c" * 64,
-            "accepted_transitions": 512,
-            "policy_updates": 1,
-            "optimizer_steps": 4,
-            "next_policy_version": 1,
-            "current_season_report": str(run / "season/current.json"),
-            "current_season_sha256": sha(run / "season/current.json"),
-            "checkpoint": str(checkpoint),
-            "checkpoint_sha256": sha(checkpoint),
-        }
-        terminal["evidence_sha256"] = hashlib.sha256(json.dumps(
-            terminal, sort_keys=True, separators=(",", ":"), allow_nan=False
-        ).encode()).hexdigest()
-        terminal_evidence.write_text(json.dumps(terminal), encoding="utf-8")
+        summary = SimpleNamespace(
+            current_season_report=run / "season/current.json",
+            lineage_root_sha256="c" * 64,
+            accepted_transitions=512,
+            policy_updates=1,
+            optimizer_steps=4,
+            next_policy_version=1,
+        )
+        terminal_producer = SimpleNamespace(
+            service=SimpleNamespace(one_run=SimpleNamespace(
+                runtime_manifest_sha256="b" * 64,
+                atlas_catalog=SimpleNamespace(atlas_catalog_sha256="d" * 64),
+            )),
+            current_run_root=run,
+            checkpoint_root=run / "checkpoints",
+        )
+        terminal = _write_terminal_evidence(
+            terminal_evidence, terminal_producer, summary
+        )
+        assert set(terminal) == PRIMARY_TERMINAL_FIELDS
         completed = service_status(runtime)
         assert completed["health"] == "completed"
         assert completed["terminal_completion_evidence"] is True
+
+        mismatched_terminal_producer = SimpleNamespace(
+            service=SimpleNamespace(one_run=SimpleNamespace(
+                runtime_manifest_sha256="b" * 64,
+                atlas_catalog=SimpleNamespace(atlas_catalog_sha256="e" * 64),
+            )),
+            current_run_root=run,
+            checkpoint_root=run / "checkpoints",
+        )
+        _write_terminal_evidence(
+            terminal_evidence, mismatched_terminal_producer, summary
+        )
+        mismatched = service_status(runtime)
+        assert mismatched["health"] == "crashed"
+        assert mismatched["terminal_completion_evidence"] is False
     finally:
         if process.poll() is None:
             process.terminate()
@@ -1033,7 +1623,9 @@ def test_runtime_lease_is_exclusive_until_explicit_release(tmp_path):
     assert not (runtime / "multires-service.lock").exists()
 
 
-def test_supervised_start_owns_primary_session_lease_and_stop(tmp_path):
+def test_supervised_start_owns_primary_session_lease_and_stop(
+    tmp_path, monkeypatch
+):
     runtime = (tmp_path / "runtime").resolve()
     run = (tmp_path / "run").resolve()
     runtime.mkdir()
@@ -1046,7 +1638,10 @@ def test_supervised_start_owns_primary_session_lease_and_stop(tmp_path):
         ),
         tensorboard_command=None,
         log_path=runtime / "multires-service.log",
-        one_run=SimpleNamespace(runtime_manifest_sha256="e" * 64),
+        one_run=SimpleNamespace(
+            runtime_manifest_sha256="e" * 64,
+            atlas_catalog=SimpleNamespace(atlas_catalog_sha256="d" * 64),
+        ),
         current_run_root=run,
         tensorboard_root=run / "tensorboard",
         current_season_report=run / "season/current.json",
@@ -1054,6 +1649,14 @@ def test_supervised_start_owns_primary_session_lease_and_stop(tmp_path):
         terminal_evidence=runtime / "multires-primary-terminal.json",
         launch_config=tmp_path / "multires_one_run_primary-trainer.cfg",
         shutdown_grace_seconds=30.0,
+    )
+    monkeypatch.setattr(
+        service_module, "_revalidate_service_integration", lambda _value: None
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_wait_for_primary_admission",
+        lambda *_args, **_kwargs: {"evidence_sha256": "f" * 64},
     )
     started = start_service(admission)
     assert started["started"] is True
@@ -1082,7 +1685,7 @@ def test_zero_update_fresh_attempt_reconciliation_is_exact_and_fail_closed(
     update_root = Path(lineage["update_root"])
     season = Path(lineage["season_report_root"]) / "current.json"
     service_config = {
-        "schema": "q2-multires-service-v1",
+        "schema": "q2-multires-service-v2",
         "runtime_manifest_sha256": args.expected_runtime_manifest_sha256,
         "retirement_cold_start": str(args.retirement_cold_start),
         "training_runtime": {
@@ -1102,27 +1705,52 @@ def test_zero_update_fresh_attempt_reconciliation_is_exact_and_fail_closed(
     dead.terminate()
     dead.wait(timeout=5)
     selector_digest = "f" * 64
-    suffix = f".attempt-{selector_digest[:16]}"
-    attempt = {
-        "schema": "q2-multires-primary-attempt-v1",
-        "runtime_manifest_sha256": args.expected_runtime_manifest_sha256,
-        "training_runtime_sha256": sha(args.primary_training),
-        "checkpoint_mode": "fresh-step-zero",
-        "selected_checkpoint": str(args.checkpoint),
-        "selected_checkpoint_sha256": sha(args.checkpoint),
-        "current_run_root": str(run),
-        "checkpoint_root": str(checkpoint_root),
-        "tensorboard_root": str(tensorboard_root),
-        "rollout_root": str(rollout_root),
-        "update_root": str(update_root),
-        "current_season_report": str(season),
-        "owner": owner,
-        "selector_token_sha256": selector_digest,
-        "tensorboard_filename_suffix": suffix,
-    }
-    attempt["evidence_sha256"] = hashlib.sha256(_canonical(attempt)).hexdigest()
     attempt_path = runtime / "multires-primary-attempt.json"
-    attempt_path.write_text(json.dumps(attempt), encoding="utf-8")
+    producer = SimpleNamespace(
+        service=SimpleNamespace(one_run=SimpleNamespace(
+            runtime_manifest_sha256=args.expected_runtime_manifest_sha256,
+            atlas_catalog=SimpleNamespace(
+                atlas_catalog_sha256=args.expected_atlas_catalog_sha256,
+            ),
+        )),
+        config_sha256=sha(args.primary_training),
+        checkpoint_mode="fresh-step-zero",
+        checkpoint=args.checkpoint,
+        current_run_root=run,
+        checkpoint_root=checkpoint_root,
+        tensorboard_root=tensorboard_root,
+        rollout_root=rollout_root,
+        update_root=update_root,
+        season_report_root=season.parent,
+    )
+    wrong_producer = SimpleNamespace(
+        **{
+            **producer.__dict__,
+            "service": SimpleNamespace(one_run=SimpleNamespace(
+                runtime_manifest_sha256=args.expected_runtime_manifest_sha256,
+                atlas_catalog=SimpleNamespace(atlas_catalog_sha256="e" * 64),
+            )),
+        }
+    )
+    _write_attempt_evidence(
+        attempt_path,
+        wrong_producer,
+        owner=owner,
+        selector_token_sha256=selector_digest,
+    )
+    with pytest.raises(
+        MultiresServiceError, match="Atlas catalog differs from training runtime"
+    ):
+        _reconcile_zero_update_attempt(runtime)
+    attempt_path.unlink()
+    attempt = _write_attempt_evidence(
+        attempt_path,
+        producer,
+        owner=owner,
+        selector_token_sha256=selector_digest,
+    )
+    assert set(attempt) == PRIMARY_ATTEMPT_FIELDS
+    suffix = str(attempt["tensorboard_filename_suffix"])
     pending = checkpoint_root / (
         f".checkpoint-000000000512-{owner['pid']}.pending"
     )
@@ -1183,6 +1811,7 @@ def test_stop_after_trainer_crash_kills_inherited_group_and_removes_token_cfg(
     _write_state(
         _state_path(runtime), [root_record],
         runtime_manifest_sha256="d" * 64,
+        atlas_catalog_sha256="e" * 64,
         current_run_root=run,
         tensorboard_root=run / "tensorboard",
         current_season_report=run / "season/current.json",

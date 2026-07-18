@@ -1,4 +1,5 @@
 import struct
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -37,7 +38,9 @@ class Observation:
         self.action_debug[1] = 1
         self.action_debug[8] = 1
         self.self_state = np.zeros(10, dtype=np.float32)
+        self.self_state[3:5] = (120.0, 160.0)
         self.self_state[6] = 100.0
+        self.pitch = -7.5
         self.is_terminal = False
         self.terminal_reason = 0
         self.actual_ducked = False
@@ -176,7 +179,7 @@ def test_multires_selection_never_constructs_or_rewards_through_legacy(monkeypat
         observation=Observation(),
         causal=causal(),
     )
-    initial, _info = env.initial_result(sample, vector=True)
+    initial, initial_info = env.initial_result(sample, vector=True)
     transition, reward, _terminated, _truncated, info = env.transition_result(
         sample, vector=True
     )
@@ -185,6 +188,8 @@ def test_multires_selection_never_constructs_or_rewards_through_legacy(monkeypat
     assert "reward_base" not in info and "spatial_bonus" not in info
     assert PRIVATE_CAUSAL_INFO_KEY in info
     assert PRIVATE_SPATIAL_REWARD_INFO_KEY in info
+    assert initial_info["movement_speed"] == info["movement_speed"] == 200.0
+    assert initial_info["true_view_pitch_deg"] == info["true_view_pitch_deg"] == -7.5
     env.close()
     assert provider.closed
     assert provider.close_calls == 1
@@ -254,6 +259,75 @@ def test_episode_reset_reuses_cached_vector_without_mutating_provider_again():
     assert np.array_equal(reset, initial)
     assert provider.samples == 1
     env.close()
+
+
+def _runtime_record(client_id, *, frame=20):
+    return {
+        "client_id": client_id,
+        "map_name": "q2dm1",
+        "map_epoch": 4,
+        "server_frame": frame,
+        "atlas_loaded": True,
+        "atlas_hash_match": True,
+        "atlas_resident_bytes": 2048,
+        "atlas_build_peak_rss_bytes": 4096,
+        "atlas_cell_count": 12,
+        "atlas_chunk_count": 2,
+        "atlas_deserialize_ms": 0.25,
+        "query_timings_us": {
+            "dyn_query_us": 1.0,
+            "atlas_lookup_us": 2.0,
+            "recovery_query_us": 3.0,
+            "guide_query_us": 4.0,
+        },
+        "dyn_cell_count": 5,
+        "live_thermal_tracks": 1,
+        "expired_thermal_tracks": 0,
+        "dyn_snapshot_bytes": 512,
+        "thermal_checkpoint_fields": 0,
+    }
+
+
+def _runtime_batch(records):
+    batch = object.__new__(Q2NetworkClientBatch)
+    batch.envs = tuple(
+        SimpleNamespace(
+            client_id=client_id,
+            drain_multires_runtime_snapshots=lambda record=record: (record,),
+        )
+        for client_id, record in records
+    )
+    return batch
+
+
+def test_runtime_batch_preserves_exact_public_source_identity():
+    records = [
+        ("client-a", _runtime_record("client-a")),
+        ("client-b", _runtime_record("client-b")),
+    ]
+    snapshot, = _runtime_batch(records).drain_multires_runtime_snapshots()
+    assert snapshot["source_identity"] == {
+        "client_id": ("client-a", "client-b"),
+        "map_name": ("q2dm1", "q2dm1"),
+        "map_epoch": (4, 4),
+        "server_frame": (20, 20),
+    }
+    assert snapshot["dyn_cell_count"] == 10
+    assert snapshot["query_timings_us"]["dyn_query_us"] == 2.0
+
+
+@pytest.mark.parametrize("bad_value", [0.9, -0.5, "1", True])
+def test_runtime_batch_rejects_malformed_thermal_checkpoint_counter(bad_value):
+    record = _runtime_record("client-a")
+    record["thermal_checkpoint_fields"] = bad_value
+    with pytest.raises(RuntimeError, match="counters differ"):
+        _runtime_batch([("client-a", record)]).drain_multires_runtime_snapshots()
+
+
+def test_runtime_batch_rejects_rebound_client_identity():
+    record = _runtime_record("client-b")
+    with pytest.raises(RuntimeError, match="client/map identity differs"):
+        _runtime_batch([("client-a", record)]).drain_multires_runtime_snapshots()
 
 
 def test_stalled_boundary_polls_reuse_projection_until_new_telemetry_once():

@@ -1661,6 +1661,131 @@ class Q2NetworkClientBatch:
             fire_gate_suppressions=self._fire_gate_suppressions,
         )
 
+    def drain_multires_runtime_snapshots(self) -> tuple[dict, ...]:
+        """Combine each lockstep frame into one four-client runtime sample."""
+        per_client = [env.drain_multires_runtime_snapshots() for env in self.envs]
+        lengths = {len(records) for records in per_client}
+        if len(lengths) != 1:
+            raise RuntimeError("multires runtime telemetry is not client-lockstep")
+        count = lengths.pop()
+        static_equal = (
+            "atlas_loaded", "atlas_hash_match", "atlas_resident_bytes",
+            "atlas_build_peak_rss_bytes", "atlas_cell_count",
+            "atlas_chunk_count",
+        )
+        timing_names = (
+            "dyn_query_us", "atlas_lookup_us", "recovery_query_us",
+            "guide_query_us",
+        )
+        identity_names = ("client_id", "map_name", "map_epoch", "server_frame")
+        boolean_names = ("atlas_loaded", "atlas_hash_match")
+        integer_names = (
+            "map_epoch", "server_frame", "atlas_resident_bytes",
+            "atlas_build_peak_rss_bytes", "atlas_cell_count",
+            "atlas_chunk_count", "dyn_cell_count", "live_thermal_tracks",
+            "expired_thermal_tracks", "dyn_snapshot_bytes",
+            "thermal_checkpoint_fields",
+        )
+        required_names = set(
+            identity_names + boolean_names + integer_names[2:]
+            + ("atlas_deserialize_ms", "query_timings_us")
+        )
+
+        def validate_record(record, env):
+            if not isinstance(record, dict) or set(record) != required_names:
+                raise RuntimeError(
+                    "multires runtime telemetry fields differ"
+                )
+            if (
+                type(record["client_id"]) is not str
+                or not record["client_id"]
+                or record["client_id"] != env.client_id
+                or type(record["map_name"]) is not str
+                or not record["map_name"]
+            ):
+                raise RuntimeError(
+                    "multires runtime telemetry client/map identity differs"
+                )
+            if any(type(record[name]) is not bool for name in boolean_names):
+                raise RuntimeError("multires runtime telemetry booleans differ")
+            if any(
+                type(record[name]) is not int or record[name] < 0
+                for name in integer_names
+            ):
+                raise RuntimeError("multires runtime telemetry counters differ")
+            deserialize = record["atlas_deserialize_ms"]
+            if (
+                type(deserialize) not in (int, float)
+                or not math.isfinite(float(deserialize))
+                or deserialize < 0
+            ):
+                raise RuntimeError(
+                    "multires runtime telemetry deserialize time differs"
+                )
+            timings = record["query_timings_us"]
+            if not isinstance(timings, dict) or set(timings) != set(timing_names):
+                raise RuntimeError("multires runtime telemetry timings differ")
+            if any(
+                type(timings[name]) not in (int, float)
+                or not math.isfinite(float(timings[name]))
+                or timings[name] < 0
+                for name in timing_names
+            ):
+                raise RuntimeError("multires runtime telemetry timings differ")
+            return record
+
+        combined = []
+        for frame_index in range(count):
+            records = [
+                validate_record(items[frame_index], env)
+                for env, items in zip(self.envs, per_client)
+            ]
+            for name in static_equal:
+                if len({record.get(name) for record in records}) != 1:
+                    raise RuntimeError(
+                        f"multires runtime telemetry differs across clients: {name}"
+                    )
+            try:
+                timings = {
+                    name: sum(
+                        float(record["query_timings_us"][name])
+                        for record in records
+                    )
+                    for name in timing_names
+                }
+                combined.append({
+                    "source_identity": {
+                        name: tuple(record[name] for record in records)
+                        for name in identity_names
+                    },
+                    **{name: records[0][name] for name in static_equal},
+                    "atlas_deserialize_ms": max(
+                        float(record["atlas_deserialize_ms"])
+                        for record in records
+                    ),
+                    "query_timings_us": timings,
+                    "dyn_cell_count": sum(
+                        record["dyn_cell_count"] for record in records
+                    ),
+                    "live_thermal_tracks": sum(
+                        record["live_thermal_tracks"] for record in records
+                    ),
+                    "expired_thermal_tracks": sum(
+                        record["expired_thermal_tracks"] for record in records
+                    ),
+                    "dyn_snapshot_bytes": sum(
+                        record["dyn_snapshot_bytes"] for record in records
+                    ),
+                    "thermal_checkpoint_fields": sum(
+                        record["thermal_checkpoint_fields"] for record in records
+                    ),
+                })
+            except (KeyError, TypeError, ValueError) as error:
+                raise RuntimeError(
+                    "multires runtime telemetry fields differ"
+                ) from error
+        return tuple(combined)
+
     def close(self):
         with self._round_lock:
             if self._closed:

@@ -255,6 +255,7 @@ def test_thermal_evidence_uses_stable_identity_and_world_geometry(tmp_path):
     assert world_point == pytest.approx((100.0, 0.0, 22.0))
     assert heat == pytest.approx(0.75)
     assert observed_tick == 10
+    assert src.public_thermal_metrics() == (1, 0)
 
 
 def test_thermal_expires_after_five_ticks(tmp_path):
@@ -268,6 +269,20 @@ def test_thermal_expires_after_five_ticks(tmp_path):
         telemetry(frame=10 + THERMAL_TTL_TICKS + 1), map_epoch=4
     )
     assert expired.thermal is None
+    assert src.public_thermal_metrics() == (0, 1)
+
+
+def test_expired_thermal_count_rolls_back_with_rejected_stage(tmp_path):
+    src = source(tmp_path)
+    src.sample(telemetry(frame=10, enemy={"edict": 7}), map_epoch=4)
+    staged = src.stage(
+        telemetry(frame=10 + THERMAL_TTL_TICKS + 1),
+        map_epoch=4,
+        emit_dyn_events=True,
+    )
+    assert src.public_thermal_metrics() == (0, 1)
+    staged.rollback()
+    assert src.public_thermal_metrics() == (1, 0)
 
 
 def test_thermal_without_stable_debug_identity_is_not_evidence(tmp_path):

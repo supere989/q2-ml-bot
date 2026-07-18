@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import time
 from typing import Any, Mapping, Protocol, Sequence
 
 import numpy as np
@@ -66,8 +67,8 @@ class RustMapArtifacts:
 
     bundle_manifest_path: Path
     uncompressed_atlas_path: Path
-    dyn_snapshot_path: Path
     expected_atlas_sha256: str
+    dyn_snapshot_path: Path | None = None
     environment_steps_base: int = 0
     dyn_checkpoint_path: Path | None = None
     dyn_checkpoint_sha256: str = ""
@@ -203,12 +204,11 @@ class RustAtlasSpatialProvider:
         rust_client_id: int,
         map_sha256: str,
         atlas_origin: tuple[int, int, int],
+        atlas_runtime_metadata: Mapping[str, int | float],
     ):
         if atlas_runtime is None or dyn_runtime is None:
             raise RustSpatialProviderError("Rust AtlasRuntime and DynRuntime are required")
-        for name in (
-            "recovery_features_with_evidence", "guide_features",
-        ):
+        for name in ("advisory_spatial_features_with_evidence",):
             if not callable(getattr(atlas_runtime, name, None)):
                 raise RustSpatialProviderError(f"AtlasRuntime lacks {name}()")
         for name in ("commit_frame",):
@@ -244,6 +244,15 @@ class RustAtlasSpatialProvider:
         self.rust_client_id = int(rust_client_id)
         self.map_sha256 = str(map_sha256)
         self.atlas_origin = tuple(int(value) for value in atlas_origin)
+        required_metadata = {
+            "atlas_build_peak_rss_bytes", "atlas_cell_count",
+            "atlas_chunk_count", "atlas_deserialize_ms",
+        }
+        if set(atlas_runtime_metadata) != required_metadata:
+            raise RustSpatialProviderError("Atlas runtime metadata fields differ")
+        self._atlas_runtime_metadata = dict(atlas_runtime_metadata)
+        self._runtime_query_timings: list[dict[str, Any]] = []
+        self._reported_expired_thermal_tracks = 0
         self._closed = False
 
     @classmethod
@@ -253,7 +262,7 @@ class RustAtlasSpatialProvider:
         extension_module: Any,
         bundle_manifest_path: Path,
         uncompressed_atlas_path: Path,
-        dyn_snapshot_path: Path,
+        dyn_snapshot_path: Path | None,
         input_source: SpatialQueryInputSource,
         expected_atlas_sha256: str,
         runtime_manifest_sha256: str,
@@ -359,15 +368,16 @@ class RustAtlasSpatialProvider:
         atlas_manifest_path = directory / f"{map_name}.atlas.manifest.json"
         objectives_path = directory / f"{map_name}.objectives.json"
         atlas_source = Path(uncompressed_atlas_path)
-        dyn_source = Path(dyn_snapshot_path)
-        if atlas_source.is_symlink() or dyn_source.is_symlink():
+        dyn_source = None if dyn_snapshot_path is None else Path(dyn_snapshot_path)
+        if atlas_source.is_symlink() or (
+            dyn_source is not None and dyn_source.is_symlink()
+        ):
             raise RustSpatialProviderError("Atlas/Dyn artifact symlinks are rejected")
         atlas_path = atlas_source.resolve()
-        dyn_path = dyn_source.resolve()
+        dyn_path = None if dyn_source is None else dyn_source.resolve()
         for path, label in (
             (bsp_path, "BSP"), (atlas_manifest_path, "Atlas manifest"),
             (objectives_path, "objectives"), (atlas_path, "uncompressed Atlas"),
-            (dyn_path, "Q2LAT002 Dyn snapshot"),
         ):
             if path.is_symlink() or not path.is_file():
                 raise RustSpatialProviderError(f"{label} artifact is missing")
@@ -403,6 +413,7 @@ class RustAtlasSpatialProvider:
             raise RustSpatialProviderError(
                 "Atlas manifest raw-Atlas/BSP identity differs from admitted artifacts"
             )
+        atlas_started = time.perf_counter_ns()
         atlas_runtime = extension_module.AtlasRuntime(
             atlas_manifest_path.read_bytes(),
             f"{map_name}.atlas.bin",
@@ -413,13 +424,34 @@ class RustAtlasSpatialProvider:
             map_name,
             int(map_epoch),
         )
+        atlas_deserialize_ms = (time.perf_counter_ns() - atlas_started) / 1_000_000.0
+        counts = atlas_manifest.get("counts")
+        if not isinstance(counts, dict) or set(counts) != {
+            "l0_chunks", "l1_nodes", "l1_edges", "l2_cells", "l3_cells"
+        }:
+            raise RustSpatialProviderError("Atlas manifest counts differ")
+        build_peak_rss = atlas_manifest.get("build_peak_rss_bytes")
+        if type(build_peak_rss) is not int or build_peak_rss < 0:
+            raise RustSpatialProviderError("Atlas manifest build RSS is invalid")
         map_sha256 = hashlib.sha256(bsp_bytes).hexdigest()
         if dyn_checkpoint_path is None:
-            dyn_runtime = extension_module.DynRuntime(
-                dyn_path.read_bytes(), expected_atlas_sha256, map_sha256,
-                list(atlas_origin), int(map_epoch), int(rust_client_id),
-                int(client_count), int(environment_steps),
-            )
+            if dyn_path is None:
+                empty = getattr(extension_module.DynRuntime, "empty", None)
+                if not callable(empty):
+                    raise RustSpatialProviderError(
+                        "q2_lattice_rs lacks fresh empty Dyn creation"
+                    )
+                dyn_runtime = empty(
+                    expected_atlas_sha256, map_sha256, list(atlas_origin),
+                    int(map_epoch), int(rust_client_id), int(client_count),
+                    int(environment_steps),
+                )
+            else:
+                dyn_runtime = extension_module.DynRuntime(
+                    dyn_path.read_bytes(), expected_atlas_sha256, map_sha256,
+                    list(atlas_origin), int(map_epoch), int(rust_client_id),
+                    int(client_count), int(environment_steps),
+                )
         else:
             checkpoint = Path(dyn_checkpoint_path)
             if checkpoint.is_symlink() or not checkpoint.is_file():
@@ -444,6 +476,14 @@ class RustAtlasSpatialProvider:
             rust_client_id=rust_client_id,
             map_sha256=map_sha256,
             atlas_origin=atlas_origin,
+            atlas_runtime_metadata={
+                "atlas_build_peak_rss_bytes": build_peak_rss,
+                "atlas_cell_count": int(
+                    counts["l1_nodes"] + counts["l2_cells"] + counts["l3_cells"]
+                ),
+                "atlas_chunk_count": int(counts["l0_chunks"]),
+                "atlas_deserialize_ms": float(atlas_deserialize_ms),
+            },
         )
 
     def _validate_dyn_report(
@@ -586,29 +626,38 @@ class RustAtlasSpatialProvider:
             # before Dyn's clone-and-commit boundary.  Nothing after the Rust
             # call can reject ordinary output without an extension contract
             # violation.
-            recovery_raw, raw_evidence = (
-                self.atlas_runtime.recovery_features_with_evidence(
+            advisory_raw, raw_evidence, atlas_timing = (
+                self.atlas_runtime.advisory_spatial_features_with_evidence(
                     position,
                     yaw,
                     self.map_epoch,
                     self.rust_client_id,
                     query.client_epoch,
                     telemetry.server_frame,
+                    list(query.objective_beliefs),
                     list(query.blocked_nodes),
                     list(query.dynamic_penalties),
                     list(query.enabled_mover_blockers),
                     query.time_to_impact_seconds,
                 )
             )
-            guides_raw = self.atlas_runtime.guide_features(
-                position,
-                yaw,
-                self.map_epoch,
-                list(query.objective_beliefs),
-            )
-            recovery = _exact_array(recovery_raw, (16,), "Recovery16")
-            guides = _exact_array(guides_raw, (60,), "Guide60").reshape(4, 15)
+            advisory = _exact_array(advisory_raw, (76,), "Recovery16+Guide60")
+            recovery = advisory[:16]
+            guides = advisory[16:].reshape(4, 15)
             private = self._private_evidence(raw_evidence, telemetry)
+            try:
+                timing = {
+                    name: float(atlas_timing[name])
+                    for name in (
+                        "atlas_lookup_us", "recovery_query_us", "guide_query_us"
+                    )
+                }
+            except (KeyError, TypeError, ValueError) as error:
+                raise RustSpatialProviderError(
+                    "Rust Atlas query timing fields differ"
+                ) from error
+            if any(not math.isfinite(value) or value < 0.0 for value in timing.values()):
+                raise RustSpatialProviderError("Rust Atlas query timing is invalid")
             provisional = SpatialProviderFrame(
                 schema=SPATIAL_PROVIDER_SCHEMA,
                 feature_schema_sha256=FEATURE_SCHEMA_SHA256,
@@ -641,6 +690,7 @@ class RustAtlasSpatialProvider:
                     "Dyn runtime/query environment-step CAS differs before commit"
                 )
 
+            dyn_started = time.perf_counter_ns()
             committed = self.dyn_runtime.commit_frame(
                 self.expected_atlas_sha256,
                 self.map_sha256,
@@ -657,6 +707,7 @@ class RustAtlasSpatialProvider:
                 query.survivability,
                 query.thermal,
             )
+            dyn_query_us = (time.perf_counter_ns() - dyn_started) / 1000.0
             if not isinstance(committed, tuple) or len(committed) != 3:
                 raise RustSpatialProviderError("Rust Dyn commit result is malformed")
             report, dyn_raw, nearest_death_score = committed
@@ -680,11 +731,79 @@ class RustAtlasSpatialProvider:
                 private_reward_evidence=provisional.private_reward_evidence,
             )
             stage.commit()
+            if not episode_projection:
+                thermal_metrics = getattr(
+                    self.input_source, "public_thermal_metrics", None
+                )
+                if not callable(thermal_metrics):
+                    raise RustSpatialProviderError(
+                        "query source lacks public thermal metrics"
+                    )
+                live_tracks, expired_total = thermal_metrics()
+                if (
+                    type(live_tracks) is not int or live_tracks < 0
+                    or type(expired_total) is not int
+                    or expired_total < self._reported_expired_thermal_tracks
+                ):
+                    raise RustSpatialProviderError("public thermal metrics are invalid")
+                expired_delta = (
+                    expired_total - self._reported_expired_thermal_tracks
+                )
+                self._reported_expired_thermal_tracks = expired_total
+                dyn_cell_count = getattr(self.dyn_runtime, "cell_count", None)
+                dyn_snapshot_bytes = getattr(self.dyn_runtime, "snapshot_size", None)
+                if (
+                    type(dyn_cell_count) is not int or dyn_cell_count < 0
+                    or type(dyn_snapshot_bytes) is not int
+                    or dyn_snapshot_bytes < 0
+                ):
+                    raise RustSpatialProviderError(
+                        "Dyn runtime telemetry counters are invalid"
+                    )
+                self._runtime_query_timings.append({
+                    "client_id": telemetry.client_id,
+                    "map_name": telemetry.map_name,
+                    "map_epoch": self.map_epoch,
+                    "server_frame": telemetry.server_frame,
+                    "query_timings_us": {
+                        "dyn_query_us": float(dyn_query_us),
+                        **timing,
+                    },
+                    "dyn_cell_count": dyn_cell_count,
+                    "live_thermal_tracks": live_tracks,
+                    "expired_thermal_tracks": expired_delta,
+                    "dyn_snapshot_bytes": dyn_snapshot_bytes,
+                })
             return frame
         except Exception:
             if getattr(stage, "_active", True):
                 stage.rollback()
             raise
+
+    def drain_runtime_snapshots(self) -> tuple[dict[str, Any], ...]:
+        """Drain accepted-frame Atlas/Dyn measurements from public facts only."""
+        if self._closed:
+            raise RustSpatialProviderError("Rust spatial provider is closed")
+        timings, self._runtime_query_timings = self._runtime_query_timings, []
+        if not timings:
+            return ()
+        common = {
+            "atlas_loaded": True,
+            "atlas_hash_match": (
+                getattr(self.atlas_runtime, "atlas_sha256", None)
+                == self.expected_atlas_sha256
+            ),
+            "atlas_resident_bytes": int(self.atlas_runtime.resident_bytes),
+            **self._atlas_runtime_metadata,
+            "thermal_checkpoint_fields": 0,
+        }
+        return tuple(
+            {
+                **common,
+                **record,
+            }
+            for record in timings
+        )
 
     def close(self) -> None:
         self._closed = True

@@ -300,6 +300,7 @@ class OwnObservationQuerySource:
         self._last_server_frame: int | None = None
         self._last_life_epoch: int | None = None
         self._thermal_tracks: dict[int, _ThermalTrack] = {}
+        self._expired_thermal_tracks = 0
         self._dps_self = 0.0
         self._dps_enemy = 0.0
         # target_id -> last L2 64-unit cell an opportunity event was emitted at.
@@ -356,6 +357,7 @@ class OwnObservationQuerySource:
             self._last_server_frame,
             self._last_life_epoch,
             dict(self._thermal_tracks),
+            self._expired_thermal_tracks,
             self._dps_self,
             self._dps_enemy,
             dict(self._opportunity_cells),
@@ -371,6 +373,7 @@ class OwnObservationQuerySource:
             self._last_server_frame,
             self._last_life_epoch,
             thermal_tracks,
+            self._expired_thermal_tracks,
             self._dps_self,
             self._dps_enemy,
             opportunity_cells,
@@ -604,6 +607,11 @@ class OwnObservationQuerySource:
                 raise QuerySourceError("thermal evidence is future-dated")
             if tick - track.observed_tick > THERMAL_TTL_TICKS:
                 del self._thermal_tracks[target_id]
+                self._expired_thermal_tracks += 1
+
+    def public_thermal_metrics(self) -> tuple[int, int]:
+        """Return counts derived only from own public visible-target evidence."""
+        return len(self._thermal_tracks), self._expired_thermal_tracks
 
     def _strongest_thermal(
         self, tick: int

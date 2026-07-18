@@ -20,8 +20,10 @@ if str(ROOT) not in sys.path:
 
 
 RETIREMENT_SCHEMA = "q2-multires-runtime-retirement-v1"
-COLD_START_SCHEMA = "q2-multires-cold-start-v1"
+COLD_START_SCHEMA = "q2-multires-cold-start-v2"
+PRE_B6_COLD_START_SCHEMA = "q2-multires-pre-b6-cold-start-v1"
 REPORT_SCHEMA = "q2-multires-retirement-validation-v1"
+PRE_B6_REPORT_SCHEMA = "q2-multires-pre-b6-retirement-validation-v1"
 CHECKPOINT_ATTESTATION_SCHEMA = "q2-multires-cold-checkpoint-v1"
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -38,7 +40,7 @@ _TEXT_SUFFIXES = frozenset(
 )
 
 _ACTIVE_RUNTIME = {
-    "checkpoint_format": "q2-multires-attested-checkpoint-v1",
+    "checkpoint_format": "q2-multires-attested-checkpoint-v2",
     "client_builder": "harness.client_batch.build_network_client_batch",
     "client_wire_version": 8,
     "collector": "harness.multires_collector.MultiresSynchronousCollector",
@@ -355,6 +357,73 @@ def _artifact_record(
     return path, str(value["sha256"])
 
 
+def _admit_same_lineage_checkpoint_history(
+    *, run_paths: Mapping[str, Path], runtime_manifest_sha256: str,
+    atlas_catalog_sha256: str, lineage_root_sha256: str,
+) -> set[Path]:
+    """Admit only checkpoints proven by sealed current-lineage update evidence."""
+    admitted: set[Path] = set()
+    update_root = run_paths["update_root"]
+    current_root = run_paths["current_run_root"]
+    checkpoint_root = run_paths["checkpoint_root"]
+    for update_path in sorted(update_root.glob("*.json")):
+        if update_path.is_symlink() or not update_path.is_file():
+            raise RetirementValidationError(
+                "update evidence root contains a non-regular entry"
+            )
+        update = _load_json(update_path, "same-lineage update evidence")
+        unsigned = dict(update)
+        seal = unsigned.pop("evidence_sha256", None)
+        if (
+            update.get("schema") != "q2-multires-update-evidence-v1"
+            or not _valid_digest(seal)
+            or hashlib.sha256(
+                json.dumps(
+                    unsigned, sort_keys=True, separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest() != seal
+            or update.get("runtime_manifest_sha256")
+            != runtime_manifest_sha256
+            or update.get("atlas_catalog_sha256") != atlas_catalog_sha256
+            or update.get("lineage_root_sha256") != lineage_root_sha256
+            or update.get("promotion_claim") is not False
+        ):
+            raise RetirementValidationError(
+                "same-lineage update evidence identity/seal differs"
+            )
+        checkpoint_value = update.get("checkpoint")
+        if not isinstance(checkpoint_value, str) or not checkpoint_value:
+            raise RetirementValidationError(
+                "same-lineage update evidence lacks checkpoint selection"
+            )
+        checkpoint = (current_root / checkpoint_value).resolve()
+        if (
+            not _is_within(checkpoint, checkpoint_root)
+            or checkpoint.is_symlink()
+            or not checkpoint.is_file()
+            or update.get("checkpoint_sha256") != _sha256(checkpoint)
+        ):
+            raise RetirementValidationError(
+                "same-lineage update checkpoint bytes/path differ"
+            )
+        manifest = update.get("checkpoint_manifest")
+        if (
+            not isinstance(manifest, Mapping)
+            or manifest.get("runtime_manifest_sha256")
+            != runtime_manifest_sha256
+            or manifest.get("atlas_catalog_sha256") != atlas_catalog_sha256
+            or manifest.get("lineage_root_sha256") != lineage_root_sha256
+            or manifest.get("training_step")
+            != update.get("cumulative_accepted_transitions")
+        ):
+            raise RetirementValidationError(
+                "same-lineage update checkpoint manifest differs"
+            )
+        admitted.add(checkpoint)
+    return admitted
+
+
 def _load_checkpoint(
     path: Path,
     attestation_path: Path,
@@ -363,6 +432,7 @@ def _load_checkpoint(
     runtime_evidence: Mapping[str, Any],
     training_manifest_path: Path,
     optimizer_configuration: Mapping[str, Any],
+    atlas_catalog_sha256: str,
 ) -> None:
     """Load the real weights-only envelope; sidecars are corroboration only."""
     attestation = _load_json(attestation_path, "checkpoint attestation")
@@ -370,6 +440,7 @@ def _load_checkpoint(
         "schema", "checkpoint_sha256", "checkpoint_format", "policy_generation",
         "architecture", "initialization", "training_step", "observation_dim",
         "action_dim", "posture_classes", "optimizer_state", "normalization_state",
+        "atlas_catalog_sha256",
     }
     if set(attestation) != expected_fields:
         raise RetirementValidationError("checkpoint attestation fields differ")
@@ -384,6 +455,7 @@ def _load_checkpoint(
         or attestation["observation_dim"] != 298
         or attestation["action_dim"] != 8
         or attestation["posture_classes"] != 3
+        or attestation["atlas_catalog_sha256"] != atlas_catalog_sha256
         or attestation["optimizer_state"] != "fresh-empty"
         or attestation["normalization_state"] != "fresh-empty"
     ):
@@ -428,7 +500,7 @@ def _load_checkpoint(
         manifest = load_attested_checkpoint(
             path,
             policy,
-            expected_atlas_sha256=validated_runtime.atlas_sha256,
+            expected_atlas_catalog_sha256=atlas_catalog_sha256,
             expected_runtime_manifest_sha256=(
                 validated_runtime.runtime_manifest_sha256
             ),
@@ -471,19 +543,25 @@ def _cold_start(
     active: Mapping[str, Any],
     operational_roots: Sequence[Path],
     historical_roots: Sequence[Path],
+    mode: str,
 ) -> tuple[dict[str, Any], set[Path]]:
     cold_path = _absolute_path(path, "cold-start declaration", kind="file")
     cold = _load_json(cold_path, "cold-start declaration")
     required = {
         "schema", "retirement_manifest_sha256", "runtime_manifest_sha256",
-        "selectors", "lineage", "optimizer", "inputs",
+        "atlas_catalog_sha256", "selectors", "lineage", "optimizer", "inputs",
     }
-    if set(cold) != required or cold.get("schema") != COLD_START_SCHEMA:
+    expected_schema = (
+        PRE_B6_COLD_START_SCHEMA if mode == "pre-b6" else COLD_START_SCHEMA
+    )
+    if set(cold) != required or cold.get("schema") != expected_schema:
         raise RetirementValidationError("cold-start declaration fields/schema differ")
     if cold["retirement_manifest_sha256"] != manifest_sha256:
         raise RetirementValidationError("cold-start retirement digest differs")
     if not _valid_digest(cold["runtime_manifest_sha256"]):
         raise RetirementValidationError("cold-start runtime digest is invalid")
+    if not _valid_digest(cold["atlas_catalog_sha256"]):
+        raise RetirementValidationError("cold-start Atlas catalog digest is invalid")
     selector_keys = {
         "service_module", "proof_module", "trainer_module", "client_builder", "collector",
         "policy_class", "provider_class", "rust_dyn_call",
@@ -528,12 +606,36 @@ def _cold_start(
         raise RetirementValidationError("fresh run subroots are not distinct children")
 
     inputs = cold["inputs"]
-    if not isinstance(inputs, dict) or set(inputs) != {
+    base_input_names = {
         "checkpoint", "checkpoint_attestation", "runtime_evidence",
-        "training_manifest", "bundle_manifest", "dyn_snapshots",
+        "training_manifest", "bundle_manifest", "atlas_catalog", "dyn_snapshots",
+    }
+    service_input_names = {
         "training_runtime", "trainer_checkpoint", "trainer_current_season",
-    }:
+        "integration_envelope", "integration_report", "integration_bot_source",
+    }
+    expected_input_names = base_input_names | (
+        set() if mode == "pre-b6" else service_input_names
+    )
+    if not isinstance(inputs, dict) or set(inputs) != expected_input_names:
         raise RetirementValidationError("cold-start input fields differ")
+    if mode != "pre-b6":
+        integration_bot_source = inputs["integration_bot_source"]
+        if (
+            not isinstance(integration_bot_source, dict)
+            or set(integration_bot_source) != {"commit", "tree"}
+            or any(
+                not isinstance(integration_bot_source.get(name), str)
+                or re.fullmatch(
+                    r"(?:[0-9a-f]{40}|[0-9a-f]{64})",
+                    integration_bot_source[name],
+                ) is None
+                for name in ("commit", "tree")
+            )
+        ):
+            raise RetirementValidationError(
+                "cold-start integration bot source differs"
+            )
     checkpoint, _ = _artifact_record(
         inputs["checkpoint"], "checkpoint", operational_roots=operational_roots
     )
@@ -553,26 +655,103 @@ def _cold_start(
     bundle_manifest, _ = _artifact_record(
         inputs["bundle_manifest"], "bundle manifest", operational_roots=operational_roots
     )
-    training_runtime, _ = _artifact_record(
-        inputs["training_runtime"], "primary training runtime",
-        operational_roots=operational_roots,
+    atlas_catalog_path, _ = _artifact_record(
+        inputs["atlas_catalog"], "Atlas catalog", operational_roots=operational_roots
     )
-    trainer_checkpoint, _ = _artifact_record(
-        inputs["trainer_checkpoint"], "primary trainer checkpoint",
-        operational_roots=operational_roots,
-    )
-    trainer_current_season = None
-    if inputs["trainer_current_season"] is not None:
+    try:
+        from harness.atlas_catalog import load_atlas_catalog
+        from train.multires_one_run import _load_extension
+
+        catalog_document = _load_json(atlas_catalog_path, "Atlas catalog")
+        extension_record = catalog_document.get("rust_extension")
+        if not isinstance(extension_record, Mapping):
+            raise RetirementValidationError(
+                "Atlas catalog Rust extension record is missing"
+            )
+        extension_relative = Path(str(extension_record.get("path", "")))
+        if extension_relative.is_absolute() or ".." in extension_relative.parts:
+            raise RetirementValidationError(
+                "Atlas catalog Rust extension path is not portable"
+            )
+        extension_path = _absolute_path(
+            atlas_catalog_path.parent / extension_relative,
+            "Atlas catalog Rust extension", kind="file",
+        )
+        _require_within(
+            extension_path, operational_roots, "Atlas catalog Rust extension"
+        )
+        atlas_catalog = load_atlas_catalog(
+            atlas_catalog_path,
+            expected_sha256=str(cold["atlas_catalog_sha256"]),
+            extension_module=_load_extension(extension_path),
+        )
+    except RetirementValidationError:
+        raise
+    except (ImportError, OSError, TypeError, ValueError, RuntimeError) as error:
+        raise RetirementValidationError(
+            f"Atlas catalog admission failed: {error}"
+        ) from error
+    integration_envelope = integration_report = training_runtime = None
+    trainer_checkpoint = trainer_current_season = None
+    if mode != "pre-b6":
+        integration_envelope, _ = _artifact_record(
+            inputs["integration_envelope"], "integration evidence envelope",
+            operational_roots=operational_roots,
+        )
+        integration_report, _ = _artifact_record(
+            inputs["integration_report"], "precomputed integration report",
+            operational_roots=operational_roots,
+        )
+        training_runtime, _ = _artifact_record(
+            inputs["training_runtime"], "primary training runtime",
+            operational_roots=operational_roots,
+        )
+        trainer_checkpoint, _ = _artifact_record(
+            inputs["trainer_checkpoint"], "primary trainer checkpoint",
+            operational_roots=operational_roots,
+        )
+    if mode != "pre-b6" and inputs["trainer_current_season"] is not None:
         trainer_current_season, _ = _artifact_record(
             inputs["trainer_current_season"], "primary trainer current season",
             operational_roots=operational_roots,
         )
-    if not _is_within(checkpoint, run_paths["checkpoint_root"]):
-        raise RetirementValidationError("checkpoint is outside the fresh checkpoint root")
-    if not _is_within(trainer_checkpoint, run_paths["checkpoint_root"]):
+    if trainer_checkpoint is not None and not _is_within(
+        trainer_checkpoint, run_paths["checkpoint_root"]
+    ):
         raise RetirementValidationError(
             "primary trainer checkpoint is outside the declared checkpoint root"
         )
+    if trainer_checkpoint is not None:
+        training_runtime_document = _load_json(
+            training_runtime, "primary training runtime"
+        )
+        trainer_selector = training_runtime_document.get("checkpoint")
+        if (
+            training_runtime_document.get("schema")
+            != "q2-multires-primary-training-runtime-v1"
+            or training_runtime_document.get("atlas_catalog_sha256")
+            != cold["atlas_catalog_sha256"]
+            or training_runtime_document.get("atlas_catalog")
+            != inputs["atlas_catalog"]
+            or not isinstance(trainer_selector, Mapping)
+            or Path(str(trainer_selector.get("path"))).resolve()
+            != trainer_checkpoint
+            or trainer_selector.get("sha256") != _sha256(trainer_checkpoint)
+            or trainer_selector.get("mode") not in {
+                "fresh-step-zero", "same-lineage-resume",
+                "same-lineage-stage-advance",
+            }
+        ):
+            raise RetirementValidationError(
+                "primary training runtime/checkpoint selector differs"
+            )
+        if (
+            trainer_selector["mode"] == "fresh-step-zero"
+            and _sha256(trainer_checkpoint) != _sha256(checkpoint)
+        ):
+            raise RetirementValidationError(
+                "fresh primary checkpoint bytes differ from the attested source checkpoint"
+            )
     if trainer_current_season is not None and (
         trainer_current_season != run_paths["season_report_root"] / "current.json"
     ):
@@ -590,9 +769,25 @@ def _cold_start(
     ]
     selected = {
         checkpoint, checkpoint_attestation, runtime_evidence, training_manifest,
-        bundle_manifest, training_runtime, trainer_checkpoint,
+        bundle_manifest, atlas_catalog_path, atlas_catalog.rust_extension,
         *dyn_paths,
     }
+    catalog_artifacts = {atlas_catalog.rust_extension}
+    for catalog_map in atlas_catalog.maps:
+        catalog_artifacts.update({
+            catalog_map.bsp, catalog_map.atlas, catalog_map.atlas_manifest,
+            catalog_map.bundle_manifest, catalog_map.objectives,
+        })
+    for catalog_artifact in catalog_artifacts:
+        _require_within(
+            catalog_artifact, operational_roots, "Atlas catalog artifact"
+        )
+    selected.update(catalog_artifacts)
+    if mode != "pre-b6":
+        selected.update({
+            integration_envelope, integration_report,
+            training_runtime, trainer_checkpoint,
+        })
     if trainer_current_season is not None:
         selected.add(trainer_current_season)
     if any(
@@ -620,6 +815,21 @@ def _cold_start(
     }
     if mismatches:
         raise RetirementValidationError(f"runtime evidence is not B4/QM3C: {mismatches}")
+    if mode != "pre-b6" and trainer_checkpoint is not None:
+        trainer_runtime = _load_json(training_runtime, "primary training runtime")
+        trainer_lineage = trainer_runtime.get("checkpoint", {}).get(
+            "lineage_root_sha256"
+        )
+        if not _valid_digest(trainer_lineage):
+            raise RetirementValidationError(
+                "primary training runtime lineage digest is invalid"
+            )
+        selected.update(_admit_same_lineage_checkpoint_history(
+            run_paths=run_paths,
+            runtime_manifest_sha256=str(cold["runtime_manifest_sha256"]),
+            atlas_catalog_sha256=str(cold["atlas_catalog_sha256"]),
+            lineage_root_sha256=str(trainer_lineage),
+        ))
     bundle = _load_json(bundle_manifest, "bundle manifest")
     if bundle.get("bundle_version") != 3 or bundle.get("artifact_state") != "admitted":
         raise RetirementValidationError("map input is not admitted bundle-v3")
@@ -634,6 +844,7 @@ def _cold_start(
         runtime_evidence=evidence,
         training_manifest_path=training_manifest,
         optimizer_configuration=cold["optimizer"],
+        atlas_catalog_sha256=str(cold["atlas_catalog_sha256"]),
     )
     return cold, selected
 
@@ -645,8 +856,11 @@ def validate_retirement(
     cold_start_path: Path,
     operational_roots: Sequence[Path],
     service_selector_files: Sequence[Path],
+    mode: str = "service",
 ) -> dict[str, Any]:
     """Validate selection without deleting, moving, writing, or importing services."""
+    if mode not in ("service", "pre-b6"):
+        raise RetirementValidationError("retirement validation mode is invalid")
     manifest, manifest_sha256 = _manifest(manifest_path, expected_manifest_sha256)
     historical = _historical_roots(manifest)
     if not operational_roots:
@@ -686,12 +900,14 @@ def validate_retirement(
         active=manifest["active_runtime"],
         operational_roots=roots,
         historical_roots=historical,
+        mode=mode,
     )
     files_checked = _scan_operational_roots(
         roots, tokens=tokens, admitted_files=selected
     )
     return {
-        "schema": REPORT_SCHEMA,
+        "schema": PRE_B6_REPORT_SCHEMA if mode == "pre-b6" else REPORT_SCHEMA,
+        "mode": mode,
         "status": "pass",
         "manifest_sha256": manifest_sha256,
         "cold_start_sha256": hashlib.sha256(_canonical_bytes(cold)).hexdigest(),
@@ -711,6 +927,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cold-start", type=Path, required=True)
     parser.add_argument("--operational-root", type=Path, action="append", required=True)
     parser.add_argument("--service-selector", type=Path, action="append", required=True)
+    parser.add_argument(
+        "--mode", choices=("service", "pre-b6"), default="service",
+        help="service is the cold-start-v2 live selector; pre-b6 is evidence-only",
+    )
     return parser
 
 
@@ -723,6 +943,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             cold_start_path=args.cold_start,
             operational_roots=args.operational_root,
             service_selector_files=args.service_selector,
+            mode=args.mode,
         )
     except RetirementValidationError as error:
         print(f"retirement validation failed: {error}", file=sys.stderr)

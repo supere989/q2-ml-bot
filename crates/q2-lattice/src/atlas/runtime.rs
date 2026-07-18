@@ -6,8 +6,8 @@ use super::guide::{GUIDE_FEATURE_NAMES, GUIDE_FEATURE_WIDTH, GuideFeatureBlock};
 use super::objective::{AtlasObjectives, OBJECTIVE_MEDIA_TYPE, ObjectiveBelief, ObjectiveGuide};
 use super::recovery::{
     HazardComponentField, HookNecessityEvidence, RECOVERY_FEATURE_NAMES, RECOVERY_FEATURE_WIDTH,
-    RecoveryFeatureBlock, RecoveryOverlay, RecoveryQuery, evaluate_hook_necessity,
-    recovery_features_at, resolve_recovery_node, validate_static_costs,
+    RecoveryEvidence, RecoveryFeatureBlock, RecoveryOverlay, RecoveryQuery,
+    evaluate_hook_necessity, recovery_features_at, resolve_recovery_node, validate_static_costs,
     validate_static_hazard_clearances,
 };
 use super::{
@@ -30,6 +30,7 @@ pub struct AtlasQueryTiming {
 pub struct TimedAdvisoryFeatures {
     pub values: [f32; ADVISORY_SPATIAL_WIDTH],
     pub timing: AtlasQueryTiming,
+    pub recovery_evidence: RecoveryEvidence,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -389,7 +390,11 @@ impl AtlasRuntime {
             total_ns: elapsed_ns(total_started),
         };
         self.counters.record(timing);
-        Ok(TimedAdvisoryFeatures { values, timing })
+        Ok(TimedAdvisoryFeatures {
+            values,
+            timing,
+            recovery_evidence: recovery_block.evidence,
+        })
     }
 
     fn check_epoch(&self, expected_map_epoch: u64) -> AtlasResult<()> {

@@ -577,6 +577,18 @@ def test_actual_extension_four_clients_ingest_query_and_isolate_dyn(
         np.array_equal(frame.spatial.dyn, baseline[index + 1].spatial.dyn)
         for index, frame in enumerate(unchanged)
     )
+    for provider in providers:
+        snapshots = provider.drain_runtime_snapshots()
+        assert len(snapshots) == 2
+        assert all(sample["atlas_loaded"] is True for sample in snapshots)
+        assert all(sample["atlas_hash_match"] is True for sample in snapshots)
+        assert all(sample["atlas_cell_count"] > 0 for sample in snapshots)
+        assert all(sample["atlas_chunk_count"] > 0 for sample in snapshots)
+        assert all(sample["dyn_snapshot_bytes"] > 0 for sample in snapshots)
+        assert all(sample["thermal_checkpoint_fields"] == 0 for sample in snapshots)
+        assert all(set(sample["query_timings_us"]) == {
+            "dyn_query_us", "atlas_lookup_us", "recovery_query_us", "guide_query_us"
+        } for sample in snapshots)
 
 
 def test_concrete_factory_binds_artifacts_and_rotates_real_extension(
@@ -889,11 +901,13 @@ def test_provider_rolls_back_staged_source_and_retries_same_frame_identically(
         def __getattr__(self, name):
             return getattr(self.inner, name)
 
-        def guide_features(self, *args, **kwargs):
+        def advisory_spatial_features_with_evidence(self, *args, **kwargs):
             if self.fail:
                 self.fail = False
                 raise RuntimeError("qualification failure after source stage")
-            return self.inner.guide_features(*args, **kwargs)
+            return self.inner.advisory_spatial_features_with_evidence(
+                *args, **kwargs
+            )
 
     failed.atlas_runtime = FailGuideOnce(failed.atlas_runtime)
     before_dyn = _dyn_runtime_state(failed.dyn_runtime)

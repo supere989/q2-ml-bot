@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:q2-ml:q2-multires-b9-reconstruction-manifest-v1",
+  "title": "Immutable B9 cold-restart reconstruction manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "reconstruction_id", "b8_gate_sha256",
+    "runtime_manifest_sha256", "atlas_catalog_sha256",
+    "lineage_root_sha256", "artifacts", "complete", "manifest_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "q2-multires-b9-reconstruction-manifest-v1"},
+    "reconstruction_id": {"type": "string", "minLength": 1},
+    "b8_gate_sha256": {"$ref": "#/$defs/sha256"},
+    "runtime_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "atlas_catalog_sha256": {"$ref": "#/$defs/sha256"},
+    "lineage_root_sha256": {"$ref": "#/$defs/sha256"},
+    "artifacts": {
+      "type": "object",
+      "minProperties": 20,
+      "maxProperties": 20,
+      "additionalProperties": {"$ref": "#/$defs/artifact"}
+    },
+    "complete": {"const": true},
+    "manifest_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

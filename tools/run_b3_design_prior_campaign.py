@@ -744,8 +744,8 @@ def _validate_lane(
     _exact_keys(
         authorities,
         {
-            "q2tool", "cm_oracle", "pmove_oracle", "hook_oracle",
-            "fall_oracle", "hook_attestation", "b1_gate",
+            "q2tool", "packer", "verifier", "cm_oracle", "pmove_oracle",
+            "hook_oracle", "fall_oracle", "hook_attestation", "b1_gate",
         },
         f"{lane_name} authorities",
     )

@@ -379,6 +379,12 @@ mod python {
     use pyo3::types::{PyBytes, PyDict};
     use std::collections::{BTreeMap, BTreeSet};
 
+    type AdvisoryEvidence<'py> = (
+        Bound<'py, PyArray1<f32>>,
+        Bound<'py, PyDict>,
+        Bound<'py, PyDict>,
+    );
+
     fn packed_rows(cells: PyReadonlyArray2<'_, f32>) -> PyResult<Vec<PackedCell>> {
         let view = cells.as_array();
         if view.shape().len() != 2 || view.shape()[1] != PACKED_CELL_WIDTH {
@@ -445,6 +451,34 @@ mod python {
 
     #[pymethods]
     impl PyDynRuntime {
+        #[staticmethod]
+        #[allow(clippy::too_many_arguments)]
+        fn empty(
+            atlas_sha256: &str,
+            map_sha256: &str,
+            origin: [i64; 3],
+            map_epoch: u64,
+            client_id: u32,
+            client_count: u32,
+            environment_steps: u64,
+        ) -> PyResult<Self> {
+            let fence = DynFence {
+                atlas_sha256: digest_from_hex(atlas_sha256, "Atlas SHA-256")?,
+                map_sha256: digest_from_hex(map_sha256, "map SHA-256")?,
+                origin: AtlasOrigin(origin),
+                map_epoch,
+            };
+            let inner = DynRuntime::new_empty(
+                fence,
+                client_id,
+                client_count,
+                environment_steps,
+                &DynLimits::default(),
+            )
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            Ok(Self { inner })
+        }
+
         #[new]
         #[allow(clippy::too_many_arguments)]
         fn new(
@@ -569,6 +603,21 @@ mod python {
         #[getter]
         fn accepted_event_count(&self) -> u64 {
             self.inner.accepted_event_count()
+        }
+
+        #[getter]
+        fn cell_count(&self) -> usize {
+            self.inner.state().l2_len() + self.inner.state().l3_len()
+        }
+
+        #[getter]
+        fn resident_bytes(&self) -> usize {
+            self.inner.state().resident_bytes_estimate()
+        }
+
+        #[getter]
+        fn snapshot_size(&self) -> usize {
+            self.inner.snapshot_bytes_len()
         }
 
         #[getter]
@@ -1120,6 +1169,90 @@ mod python {
                 })
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
             Ok(PyArray1::from_slice(py, &values))
+        }
+
+        #[pyo3(signature = (
+            position,
+            yaw_degrees,
+            map_epoch,
+            client_id,
+            client_epoch,
+            server_frame,
+            beliefs,
+            blocked_nodes=Vec::new(),
+            dynamic_penalties=Vec::new(),
+            enabled_mover_blockers=Vec::new(),
+            time_to_impact_seconds=None
+        ))]
+        #[allow(clippy::too_many_arguments)]
+        fn advisory_spatial_features_with_evidence<'py>(
+            &self,
+            py: Python<'py>,
+            position: [f64; 3],
+            yaw_degrees: f32,
+            map_epoch: u64,
+            client_id: u32,
+            client_epoch: u64,
+            server_frame: u64,
+            beliefs: Vec<(u32, f32)>,
+            blocked_nodes: Vec<[i32; 3]>,
+            dynamic_penalties: Vec<([i32; 3], u32)>,
+            enabled_mover_blockers: Vec<u32>,
+            time_to_impact_seconds: Option<f32>,
+        ) -> PyResult<AdvisoryEvidence<'py>> {
+            if client_epoch == 0 {
+                return Err(PyValueError::new_err(
+                    "recovery evidence client_epoch must be nonzero",
+                ));
+            }
+            let beliefs = objective_beliefs(beliefs);
+            let overlay =
+                recovery_overlay(blocked_nodes, dynamic_penalties, enabled_mover_blockers);
+            let block = py
+                .detach(|| {
+                    self.inner.advisory_spatial_features_timed(
+                        map_epoch,
+                        RecoveryQuery {
+                            world_position: position,
+                            yaw_degrees,
+                            overlay: &overlay,
+                            time_to_impact_seconds,
+                        },
+                        &beliefs,
+                    )
+                })
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            let raw = block.recovery_evidence;
+            let evidence = PyDict::new(py);
+            evidence.set_item("schema", RECOVERY_EVIDENCE_SCHEMA)?;
+            evidence.set_item("atlas_sha256", self.inner.atlas_sha256())?;
+            evidence.set_item("map_epoch", self.inner.map_epoch())?;
+            evidence.set_item("client_id", client_id)?;
+            evidence.set_item("client_epoch", client_epoch)?;
+            evidence.set_item("server_frame", server_frame)?;
+            evidence.set_item("l1_index", [raw.l1_index.x, raw.l1_index.y, raw.l1_index.z])?;
+            evidence.set_item("cost_to_safety_q8", raw.cost_to_safety_q8)?;
+            evidence.set_item("signed_safe_clearance_q8", raw.signed_safe_clearance_q8)?;
+            evidence.set_item("hazard_types", raw.hazard_types)?;
+            evidence.set_item("hazard_severity", raw.hazard_severity)?;
+            evidence.set_item("atlas_region_id", raw.atlas_region_id)?;
+            evidence.set_item("hazard_component_id", raw.hazard_component_id)?;
+            evidence.set_item(
+                "hazard_component_epoch",
+                raw.hazard_component_epoch(self.inner.map_epoch()),
+            )?;
+            evidence.set_item("confidence", raw.confidence)?;
+            let timing = PyDict::new(py);
+            timing.set_item(
+                "atlas_lookup_us",
+                block.timing.atlas_lookup_ns as f64 / 1000.0,
+            )?;
+            timing.set_item(
+                "recovery_query_us",
+                block.timing.recovery_ns as f64 / 1000.0,
+            )?;
+            timing.set_item("guide_query_us", block.timing.guide_ns as f64 / 1000.0)?;
+            Ok((PyArray1::from_slice(py, &block.values), evidence, timing))
         }
     }
 

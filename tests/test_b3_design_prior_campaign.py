@@ -142,8 +142,8 @@ def _lane(
         "authorities": {
             name: {"bytes": index + 1, "sha256": _sha(f"{lane}-authority-{name}")}
             for index, name in enumerate((
-                "q2tool", "cm_oracle", "pmove_oracle", "hook_oracle",
-                "fall_oracle", "hook_attestation", "b1_gate",
+                "q2tool", "packer", "verifier", "cm_oracle", "pmove_oracle",
+                "hook_oracle", "fall_oracle", "hook_attestation", "b1_gate",
             ))
         },
         "pipeline": {

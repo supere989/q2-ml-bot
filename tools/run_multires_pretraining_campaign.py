@@ -232,6 +232,7 @@ def _one_run_namespace(args: argparse.Namespace, *, atlas_sha256: str,
         checkpoint=args.checkpoint,
         training_manifest=args.training_manifest,
         runtime_evidence=args.runtime_manifest,
+        atlas_catalog=args.atlas_catalog,
         transition_count=args.transition_count,
         policy_version=POLICY_VERSION,
         map_epoch=MAP_EPOCH,
@@ -239,6 +240,7 @@ def _one_run_namespace(args: argparse.Namespace, *, atlas_sha256: str,
         out=args.output,
         launch_id=f"b5-{args.campaign}-{args.seed}",
         expected_atlas_sha256=atlas_sha256,
+        expected_atlas_catalog_sha256=args.expected_atlas_catalog_sha256,
         expected_runtime_manifest_sha256=runtime_sha256,
         campaign_mode=DETERMINISM_MODE,
     )
@@ -287,6 +289,10 @@ def build_context(args: argparse.Namespace) -> CampaignContext:
         admission.args.checkpoint,
         admission.runtime_evidence,
         expected_atlas_sha256=admission.args.expected_atlas_sha256,
+        active_atlas_sha256=admission.args.expected_atlas_sha256,
+        expected_atlas_catalog_sha256=(
+            admission.args.expected_atlas_catalog_sha256
+        ),
         device=torch.device("cpu"),
         optimizer_factory=optimizer_factory,
         reward_config=reward_config,
@@ -762,6 +768,7 @@ def run_campaign(args: argparse.Namespace) -> dict[str, Any]:
         "training_manifest": _file(args.training_manifest, "training manifest"),
         "bundle_manifest": _file(args.bundle_manifest, "bundle manifest"),
         "atlas": _file(args.atlas_bin, "Atlas"),
+        "atlas_catalog": _file(args.atlas_catalog, "Atlas catalog"),
         "q2ded": _file(args.q2ded, "q2ded", executable=True),
         "client_binary": _file(args.client_binary, "client binary", executable=True),
         "objectives": _file(args.objectives, "objectives"),
@@ -810,6 +817,8 @@ def run_campaign(args: argparse.Namespace) -> dict[str, Any]:
             "training_manifest_sha256": before["training_manifest"],
             "bundle_manifest_sha256": before["bundle_manifest"],
             "atlas_sha256": before["atlas"],
+            "atlas_catalog_file_sha256": before["atlas_catalog"],
+            "atlas_catalog_sha256": args.expected_atlas_catalog_sha256,
             "objective_identity_sha256": (
                 context.admission.objective_identity_sha256
             ),
@@ -854,6 +863,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--training-manifest", type=Path, required=True)
     parser.add_argument("--bundle-manifest", type=Path, required=True)
     parser.add_argument("--atlas-bin", type=Path, required=True)
+    parser.add_argument("--atlas-catalog", type=Path, required=True)
+    parser.add_argument("--expected-atlas-catalog-sha256", required=True)
     parser.add_argument("--q2ded", type=Path, required=True)
     parser.add_argument("--client-binary", type=Path, required=True)
     parser.add_argument("--runtime-root", type=Path, required=True)

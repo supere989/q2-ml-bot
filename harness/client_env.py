@@ -461,6 +461,12 @@ class Q2NetworkClientEnv:
     @staticmethod
     def _base_info(current: ClientTelemetry) -> dict:
         obs = current.observation
+        velocity = np.asarray(obs.self_state[3:6], dtype=np.float64)
+        if velocity.shape != (3,) or not np.isfinite(velocity).all():
+            raise RuntimeError("public own velocity is not finite xyz")
+        pitch = float(obs.pitch)
+        if not np.isfinite(pitch):
+            raise RuntimeError("public true-view pitch is not finite")
         return {
             "client_id": current.client_id,
             "client_slot": current.client_slot,
@@ -505,6 +511,10 @@ class Q2NetworkClientEnv:
             "action_debug_flags": int(obs.action_debug[ActionDebugIndex.FLAGS]),
             "standing_blocked": bool(obs.standing_blocked),
             "damage_dealt": float(obs.reward_damage_dealt),
+            # Both values are ordinary own-state facts already present in the
+            # public ml_obs_t.  No causal/teacher field is consulted.
+            "movement_speed": float(np.linalg.norm(velocity[:2])),
+            "true_view_pitch_deg": pitch,
         }
 
     @staticmethod
@@ -782,6 +792,19 @@ class Q2NetworkClientEnv:
         if self._last_policy_vector is None:
             raise RuntimeError("latest policy vector is unavailable")
         return self._last_policy_vector.copy()
+
+    def drain_multires_runtime_snapshots(self) -> tuple[dict, ...]:
+        """Drain public Atlas/Dyn telemetry from the active admitted provider."""
+        provider = self._multires_spatial_provider
+        drain = getattr(provider, "drain_runtime_snapshots", None)
+        if provider is None or not callable(drain):
+            raise RuntimeError("active multires provider lacks runtime telemetry")
+        value = drain()
+        if not isinstance(value, tuple) or any(
+            not isinstance(item, dict) for item in value
+        ):
+            raise RuntimeError("multires provider runtime telemetry is malformed")
+        return value
 
     def step(self, action: Action):
         dispatch = self.dispatch_action(action)

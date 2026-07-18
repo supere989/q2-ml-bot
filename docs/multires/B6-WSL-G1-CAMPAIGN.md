@@ -116,9 +116,14 @@ an operational template, not an instruction to launch automatically.
    the summary. Also supply the one-run, signed public probes, controller
    plan/ledger, B2/B3/B4/B5 evidence,
    lineage/retirement evidence, and every exact runtime artifact requested by
-   `--help`. The assembler independently rederives the invocation/hash chain
-   and monotonic order. Then place that aggregate in the `wsl_b6_campaign`
-   slot of `tools/verify_multires_integration.py`.
+   `--help`. In particular, `--runtime-evidence` is the compact
+   `B4/b4-wire-generation.json` already bound by B5, while
+   `--runtime-manifest` is the full sealed runtime manifest already bound by
+   B4 and loaded by one-run. The assembler requires both byte identities and
+   requires their semantic `runtime_manifest_sha256` values to agree. It then
+   independently rederives the invocation/hash chain and monotonic order.
+   Place that aggregate in the `wsl_b6_campaign` slot of
+   `tools/verify_multires_integration.py`.
 
 ## Green thresholds
 
@@ -148,4 +153,7 @@ an operational template, not an instruction to launch automatically.
 - Public pre/post state is identical and all scoped staging processes and real
   UDP binds are gone after teardown.
 
-No green B6 result authorizes primary-trainer cutover by itself.
+No green B6 result authorizes primary-trainer cutover by itself. The exact
+post-B6 envelope/report, cold-start bindings, source freeze, and two-pass
+trainer/TensorBoard launch gate are normative in
+[`PRIMARY-TRAINER-ADMISSION.md`](PRIMARY-TRAINER-ADMISSION.md).

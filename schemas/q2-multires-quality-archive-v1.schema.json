@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:q2-ml:q2-multires-quality-archive-v1",
+  "title": "Read-only B8/B9 evidence archive manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "archive_id", "archive_kind", "season_kind", "read_only", "files", "manifest_sha256"],
+  "properties": {
+    "schema": {"const": "q2-multires-quality-archive-v1"},
+    "archive_id": {"type": "string", "minLength": 1},
+    "archive_kind": {"enum": ["season", "shadow", "restart"]},
+    "season_kind": {"type": ["string", "null"], "enum": ["generated", "stock", null]},
+    "read_only": {"const": true},
+    "files": {
+      "type": "object", "minProperties": 21,
+      "additionalProperties": {"$ref": "#/$defs/file"}
+    },
+    "manifest_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

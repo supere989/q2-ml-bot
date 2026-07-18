@@ -17,6 +17,7 @@ from harness.multires_collector import (
     CollectedMultiresRollout,
     CollectorConfig,
     MultiresSynchronousCollector,
+    PolicyObservationBatch,
     PolicyDecision,
     TransitionObserver,
 )
@@ -127,6 +128,8 @@ def _tensor_batch(
 class MultiresTrainingUpdate:
     rollout: CollectedMultiresRollout
     ppo_metrics: Mapping[str, float | int]
+    runtime_snapshots: tuple[Mapping[str, Any], ...]
+    runtime_snapshots_admitted: bool
 
 
 class MultiresLiveTrainer:
@@ -142,6 +145,7 @@ class MultiresLiveTrainer:
         collector_config: CollectorConfig = CollectorConfig(),
         deterministic_collection: bool = False,
         transition_observer: TransitionObserver | None = None,
+        runtime_snapshot_observer: Any | None = None,
     ):
         if not runtime.runtime.runtime_manifest_sha256:
             raise ValueError("live multires trainer requires sealed runtime evidence")
@@ -160,6 +164,11 @@ class MultiresLiveTrainer:
             config=collector_config,
         )
         self.optimizer = optimizer
+        if runtime_snapshot_observer is not None and not callable(
+            runtime_snapshot_observer
+        ):
+            raise TypeError("runtime snapshot observer must be callable")
+        self.runtime_snapshot_observer = runtime_snapshot_observer
         self.ppo = MultiresPPOTrainer(
             runtime.policy, optimizer, runtime.ppo_config
         )
@@ -173,6 +182,7 @@ class MultiresLiveTrainer:
         if observations.shape != (len(infos), OBS_DIM):
             raise ValueError("live multires observation/info cardinality differs")
         transformed = np.empty_like(observations, dtype=np.float32)
+        telemetry = []
         for index, (vector, info) in enumerate(zip(observations, infos)):
             attestation = info.get(SPATIAL_ATTESTATION_INFO_KEY)
             if not isinstance(attestation, Mapping):
@@ -188,7 +198,7 @@ class MultiresLiveTrainer:
                     raise ValueError(
                         f"observation {name} differs from admitted runtime"
                     )
-            transformed[index], _dropped = self.runtime.prepare_policy_vector(
+            transformed[index], dropout = self.runtime.prepare_policy_vector_with_dropout(
                 vector,
                 dropout_identity=GuideDropoutIdentity(
                     map_name=str(info["map"]),
@@ -198,9 +208,95 @@ class MultiresLiveTrainer:
                 ),
                 training=True,
             )
-        return transformed
+            telemetry.append({
+                "client_id": str(info["client_id"]),
+                "server_frame": int(info["server_frame"]),
+                "guide_dropped": dropout.dropped_candidates,
+                "guide_classes": dropout.candidate_classes,
+                "global_guide_drop": dropout.global_drop,
+            })
+        return PolicyObservationBatch(
+            observations=transformed,
+            transition_info=tuple(telemetry),
+        )
+
+    def drain_runtime_snapshots(self) -> tuple[Mapping[str, Any], ...]:
+        drain = getattr(self.collector.batch, "drain_multires_runtime_snapshots", None)
+        if not callable(drain):
+            raise RuntimeError("live multires batch lacks runtime telemetry drain")
+        snapshots = drain()
+        if not isinstance(snapshots, tuple):
+            raise RuntimeError("live multires runtime telemetry is malformed")
+        return snapshots
 
     def train_update(self, *, policy_version: int) -> MultiresTrainingUpdate:
         rollout = self.collector.collect(policy_version=policy_version)
+        raw_runtime_snapshots = self.drain_runtime_snapshots()
+        client_count = int(rollout.valid.shape[0])
+        accepted = int(rollout.valid.sum())
+        if client_count < 1 or accepted % client_count:
+            raise RuntimeError("rollout/runtime client cardinality differs")
+        accepted_rounds = accepted // client_count
+        if len(raw_runtime_snapshots) != accepted_rounds:
+            raise RuntimeError(
+                "runtime telemetry count differs before PPO update"
+            )
+        infos = getattr(rollout, "infos", None)
+        if not isinstance(infos, tuple) or len(infos) != accepted_rounds:
+            raise RuntimeError("rollout runtime identity evidence is malformed")
+        runtime_snapshots = []
+        identity_names = ("client_id", "map_name", "map_epoch", "server_frame")
+        for round_index, (raw_snapshot, round_infos) in enumerate(
+            zip(raw_runtime_snapshots, infos)
+        ):
+            if not isinstance(raw_snapshot, Mapping):
+                raise RuntimeError("live multires runtime telemetry is malformed")
+            snapshot = dict(raw_snapshot)
+            source = snapshot.pop("source_identity", None)
+            if (
+                not isinstance(source, Mapping)
+                or set(source) != set(identity_names)
+                or any(
+                    not isinstance(source.get(name), tuple)
+                    or len(source[name]) != client_count
+                    for name in identity_names
+                )
+                or not isinstance(round_infos, tuple)
+                or len(round_infos) != client_count
+            ):
+                raise RuntimeError("runtime telemetry source identity is malformed")
+            expected = {
+                "client_id": tuple(info.get("client_id") for info in round_infos),
+                "map_name": tuple(info.get("map") for info in round_infos),
+                "map_epoch": tuple(
+                    (
+                        info.get(SPATIAL_ATTESTATION_INFO_KEY, {}).get("map_epoch")
+                        if isinstance(
+                            info.get(SPATIAL_ATTESTATION_INFO_KEY), Mapping
+                        ) else None
+                    )
+                    for info in round_infos
+                ),
+                "server_frame": tuple(
+                    info.get("server_frame") for info in round_infos
+                ),
+            }
+            actual = {name: tuple(source[name]) for name in identity_names}
+            if actual != expected:
+                raise RuntimeError(
+                    "runtime telemetry source differs from admitted rollout "
+                    f"round {round_index}"
+                )
+            runtime_snapshots.append(snapshot)
+        runtime_snapshots = tuple(runtime_snapshots)
+        admitted = self.runtime_snapshot_observer is not None
+        if admitted:
+            for snapshot in runtime_snapshots:
+                self.runtime_snapshot_observer(**dict(snapshot))
         metrics = self.ppo.update(_tensor_batch(rollout, device=self.device))
-        return MultiresTrainingUpdate(rollout=rollout, ppo_metrics=metrics)
+        return MultiresTrainingUpdate(
+            rollout=rollout,
+            ppo_metrics=metrics,
+            runtime_snapshots=runtime_snapshots,
+            runtime_snapshots_admitted=admitted,
+        )

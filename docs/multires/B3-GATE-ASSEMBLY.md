@@ -17,6 +17,11 @@ The component documents conform to
 `schemas/q2-b3-recovery-guide-evidence-v1.schema.json` and
 `schemas/q2-b3-bundle-evidence-v1.schema.json` respectively.
 
+The measured prior campaign accepts only lane manifests that bind the exact
+Atlas packer and verifier as separate file authorities. The lane producer must
+pass those preflighted binaries directly to Atlas construction; a default or
+ambient build in the immutable analysis snapshot is not admissible.
+
 The recovery/guide document must bind the current repository commit/tree and
 the assembler-recomputed recovery/guide source closure. It also records an
 exact regular `q2_lattice_rs` extension file, its bytes/SHA-256, repository

@@ -27,6 +27,9 @@ from train.multires_one_run import _state_sha256
 from train.multires_runtime import MultiresTrainerRuntime
 
 
+CATALOG = "c" * 64
+
+
 class _AtlasRuntime:
     def guide_features(self, position, yaw, map_epoch, beliefs):
         assert map_epoch == 1
@@ -52,6 +55,8 @@ def _context(paths: dict[str, Path], *, seed: int = 17) -> CampaignContext:
     runtime = MultiresTrainerRuntime.fresh(
         runtime_document,
         expected_atlas_sha256=atlas_sha256,
+        active_atlas_sha256=atlas_sha256,
+        expected_atlas_catalog_sha256=CATALOG,
         seed=seed,
         reward_config=CausalRewardConfig(),
     )
@@ -60,6 +65,7 @@ def _context(paths: dict[str, Path], *, seed: int = 17) -> CampaignContext:
         args=SimpleNamespace(
             map_name="test_arena",
             expected_atlas_sha256=atlas_sha256,
+            expected_atlas_catalog_sha256=CATALOG,
         ),
         atlas_sha256=atlas_sha256,
         runtime_manifest_sha256=runtime.runtime.runtime_manifest_sha256,
@@ -141,10 +147,12 @@ def test_run_campaign_derives_canonical_evidence_without_updates(
     q2ded = tmp_path / "q2ded"
     client = tmp_path / "q2-client"
     objectives = tmp_path / "objectives.json"
+    atlas_catalog = tmp_path / "atlas-catalog.json"
     for path in (q2ded, client):
         path.write_bytes(b"#!/bin/sh\nexit 0\n")
         path.chmod(0o755)
     objectives.write_text("{}\n", encoding="ascii")
+    atlas_catalog.write_text("{}\n", encoding="ascii")
     monkeypatch.setattr(campaign_tool, "_git_identity", lambda *_args: None)
     args = SimpleNamespace(
         protocol=CAMPAIGN_SCHEMA,
@@ -160,6 +168,8 @@ def test_run_campaign_derives_canonical_evidence_without_updates(
         training_manifest=paths["training_manifest"],
         bundle_manifest=paths["bundle_manifest"],
         atlas_bin=paths["atlas"],
+        atlas_catalog=atlas_catalog,
+        expected_atlas_catalog_sha256=CATALOG,
         q2ded=q2ded,
         client_binary=client,
         runtime_root=tmp_path,

@@ -19,6 +19,7 @@ from train.multires_train import CurriculumStage, MultiresContinuousTrainingCore
 ATLAS = "a" * 64
 RUNTIME = "b" * 64
 LINEAGE = "c" * 64
+CATALOG = "d" * 64
 
 
 class FakeMetrics:
@@ -69,6 +70,8 @@ class FakeCheckpointRuntime:
         self.runtime = SimpleNamespace(
             atlas_sha256=ATLAS, runtime_manifest_sha256=RUNTIME
         )
+        self.active_atlas_sha256 = ATLAS
+        self.atlas_catalog_sha256 = CATALOG
         self.lineage_root_sha256 = None
 
     def checkpoint(self, path, *, training_step, optimizer):
@@ -77,7 +80,7 @@ class FakeCheckpointRuntime:
         return {
             "training_step": training_step,
             "lineage_root_sha256": LINEAGE,
-            "atlas_sha256": ATLAS,
+            "atlas_catalog_sha256": CATALOG,
             "runtime_manifest_sha256": RUNTIME,
         }
 
@@ -274,6 +277,20 @@ def test_same_lineage_resume_uses_only_explicit_checkpoint_and_sealed_season(tmp
     )
     barrier = tmp_path / "barrier.json"
     barrier.write_text("{}")
+    catalog_file = tmp_path / "atlas-catalog.json"
+    catalog_file.write_bytes(b"catalog")
+    q2_root = tmp_path / "q2"
+    installed_bsp = q2_root / "lithium/maps/resume-fixture.bsp"
+    installed_bsp.parent.mkdir(parents=True)
+    installed_bsp.write_bytes(b"resume-bsp")
+    catalog_map = SimpleNamespace(
+        atlas_sha256=ATLAS, bsp=installed_bsp,
+    )
+    catalog = SimpleNamespace(
+        path=catalog_file.resolve(), file_sha256=hashlib.sha256(b"catalog").hexdigest(),
+        atlas_catalog_sha256=CATALOG,
+        by_name=lambda: {"resume-fixture": catalog_map},
+    )
     stage = CurriculumStage.create(1, {"map": "resume-fixture"})
     report = {
         "schema": "q2-multires-current-season-v1",
@@ -282,6 +299,7 @@ def test_same_lineage_resume_uses_only_explicit_checkpoint_and_sealed_season(tmp
         "stage_configuration_sha256": stage.configuration_sha256,
         "runtime_manifest_sha256": RUNTIME,
         "atlas_sha256": ATLAS,
+        "atlas_catalog_sha256": CATALOG,
         "lineage_root_sha256": LINEAGE,
         "counters": {
             "accepted_transitions": 4,
@@ -294,7 +312,7 @@ def test_same_lineage_resume_uses_only_explicit_checkpoint_and_sealed_season(tmp
         "checkpoint_manifest": {
             "training_step": 4,
             "runtime_manifest_sha256": RUNTIME,
-            "atlas_sha256": ATLAS,
+            "atlas_catalog_sha256": CATALOG,
             "lineage_root_sha256": LINEAGE,
         },
     }
@@ -307,8 +325,13 @@ def test_same_lineage_resume_uses_only_explicit_checkpoint_and_sealed_season(tmp
         "class": "torch.optim.Adam", "learning_rate": 1e-5, "kwargs": {}
     }
     config = {
-        "schema": "q2-multires-primary-training-runtime-v1",
-        "runtime_manifest_sha256": RUNTIME,
+            "schema": "q2-multires-primary-training-runtime-v1",
+            "runtime_manifest_sha256": RUNTIME,
+            "atlas_catalog": {
+                "path": str(catalog_file.resolve()),
+                "sha256": hashlib.sha256(b"catalog").hexdigest(),
+            },
+            "atlas_catalog_sha256": CATALOG,
         "network_barrier_execution_evidence_sha256": "e" * 64,
         "seed": 7, "game_seed": 8, "map_name": "resume-fixture", "map_epoch": 0,
         "collector": {
@@ -348,8 +371,11 @@ def test_same_lineage_resume_uses_only_explicit_checkpoint_and_sealed_season(tmp
             "network_barrier_qualification": str(barrier),
             "optimizer": optimizer,
             "client_timeout": 2.0,
-            "round_timeout": 2.0,
-        },
+                "round_timeout": 2.0,
+                "game": "lithium",
+            },
+            q2_root=q2_root.resolve(),
+            atlas_catalog=catalog,
         args=SimpleNamespace(
             map_name="resume-fixture",
             checkpoint=proof_checkpoint,
@@ -465,7 +491,7 @@ def test_real_primary_checkpoint_load_is_exact_lineage_when_torch_available(tmp_
     checkpoint = tmp_path / "selected.pt"
     saved = save_attested_checkpoint(
         checkpoint, policy,
-        atlas_sha256=ATLAS,
+        atlas_catalog_sha256=CATALOG,
         runtime_manifest_sha256=RUNTIME,
         training_config=training,
         initialization="random",
@@ -480,6 +506,8 @@ def test_real_primary_checkpoint_load_is_exact_lineage_when_torch_available(tmp_
         checkpoint,
         runtime_evidence,
         expected_atlas_sha256=ATLAS,
+        active_atlas_sha256=ATLAS,
+        expected_atlas_catalog_sha256=CATALOG,
         optimizer_factory=optimizer_factory,
         reward_config=reward,
         guide_dropout=dropout,

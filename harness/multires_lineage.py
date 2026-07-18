@@ -2,7 +2,9 @@
 
 Raw legacy state dictionaries are intentionally not recognized.  A resumable
 checkpoint must carry the exact 298-feature generation, categorical action
-cardinalities, model tensor schema, Atlas digest, and runtime-manifest digest.
+cardinalities, model tensor schema, immutable Atlas-catalog digest, and
+runtime-manifest digest.  Active per-map Atlas identity remains frame evidence;
+it is not the policy lineage identity.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from .multires_contract import (
 from .multires_training_config import MultiresTrainingConfiguration
 
 
-CHECKPOINT_FORMAT = "q2-multires-attested-checkpoint-v1"
+CHECKPOINT_FORMAT = "q2-multires-attested-checkpoint-v2"
 MODEL_ARCHITECTURE = "models.multires_policy.MultiresQ2BotPolicy"
 ALLOWED_INITIALIZATIONS = frozenset(("random", "new-schema-bc"))
 _SHA256_CHARS = frozenset("0123456789abcdef")
@@ -192,7 +194,7 @@ class MultiresCheckpointManifest:
     architecture: str
     state_schema_sha256: str
     optimizer_identity_sha256: str
-    atlas_sha256: str
+    atlas_catalog_sha256: str
     runtime_manifest_sha256: str
     training_config_json: str
     training_config_sha256: str
@@ -206,7 +208,7 @@ class MultiresCheckpointManifest:
         *,
         state_schema_sha256: str,
         optimizer_identity_sha256: str,
-        atlas_sha256: str,
+        atlas_catalog_sha256: str,
         runtime_manifest_sha256: str,
         training_config: MultiresTrainingConfiguration,
         initialization: str,
@@ -222,7 +224,7 @@ class MultiresCheckpointManifest:
         for name, digest in (
             ("state_schema_sha256", state_schema_sha256),
             ("optimizer_identity_sha256", optimizer_identity_sha256),
-            ("atlas_sha256", atlas_sha256),
+            ("atlas_catalog_sha256", atlas_catalog_sha256),
             ("runtime_manifest_sha256", runtime_manifest_sha256),
             ("training_config_sha256", training_config.sha256),
         ):
@@ -235,7 +237,7 @@ class MultiresCheckpointManifest:
                 "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
                 "state_schema_sha256": state_schema_sha256,
                 "optimizer_identity_sha256": optimizer_identity_sha256,
-                "atlas_sha256": atlas_sha256,
+                "atlas_catalog_sha256": atlas_catalog_sha256,
                 "runtime_manifest_sha256": runtime_manifest_sha256,
                 "training_config_sha256": training_config.sha256,
                 "initialization": initialization,
@@ -256,7 +258,7 @@ class MultiresCheckpointManifest:
             architecture=MODEL_ARCHITECTURE,
             state_schema_sha256=state_schema_sha256,
             optimizer_identity_sha256=optimizer_identity_sha256,
-            atlas_sha256=atlas_sha256,
+            atlas_catalog_sha256=atlas_catalog_sha256,
             runtime_manifest_sha256=runtime_manifest_sha256,
             training_config_json=training_config.to_json(),
             training_config_sha256=training_config.sha256,
@@ -296,7 +298,7 @@ class MultiresCheckpointManifest:
         *,
         expected_state_schema_sha256: str,
         expected_optimizer_identity_sha256: str,
-        expected_atlas_sha256: str,
+        expected_atlas_catalog_sha256: str,
         expected_runtime_manifest_sha256: str,
         expected_training_config: MultiresTrainingConfiguration,
         expected_lineage_root_sha256: Optional[str] = None,
@@ -315,7 +317,7 @@ class MultiresCheckpointManifest:
             "architecture": MODEL_ARCHITECTURE,
             "state_schema_sha256": expected_state_schema_sha256,
             "optimizer_identity_sha256": expected_optimizer_identity_sha256,
-            "atlas_sha256": expected_atlas_sha256,
+            "atlas_catalog_sha256": expected_atlas_catalog_sha256,
             "runtime_manifest_sha256": expected_runtime_manifest_sha256,
             "training_config_json": expected_training_config.to_json(),
             "training_config_sha256": expected_training_config.sha256,
@@ -341,7 +343,7 @@ class MultiresCheckpointManifest:
         for name in (
             "state_schema_sha256",
             "optimizer_identity_sha256",
-            "atlas_sha256",
+            "atlas_catalog_sha256",
             "runtime_manifest_sha256",
             "training_config_sha256",
             "lineage_root_sha256",
@@ -392,7 +394,7 @@ def save_attested_checkpoint(
     path: Path,
     policy: Any,
     *,
-    atlas_sha256: str,
+    atlas_catalog_sha256: str,
     runtime_manifest_sha256: str,
     training_config: MultiresTrainingConfiguration,
     initialization: str,
@@ -412,7 +414,7 @@ def save_attested_checkpoint(
     manifest = MultiresCheckpointManifest.create(
         state_schema_sha256=state_schema_sha256,
         optimizer_identity_sha256=optimizer_identity_sha256,
-        atlas_sha256=atlas_sha256,
+        atlas_catalog_sha256=atlas_catalog_sha256,
         runtime_manifest_sha256=runtime_manifest_sha256,
         training_config=training_config,
         initialization=initialization,
@@ -451,7 +453,7 @@ def load_attested_checkpoint(
     path: Path,
     policy: Any,
     *,
-    expected_atlas_sha256: str,
+    expected_atlas_catalog_sha256: str,
     expected_runtime_manifest_sha256: str,
     expected_training_config: MultiresTrainingConfiguration,
     optimizer: Any = None,
@@ -475,7 +477,7 @@ def load_attested_checkpoint(
             "legacy/raw checkpoint rejected: attested multires envelope required"
         )
     if envelope["checkpoint_format"] != CHECKPOINT_FORMAT:
-        raise LineageError("checkpoint envelope format is not multires v1")
+        raise LineageError("checkpoint envelope format is not multires v2")
     if not isinstance(envelope["manifest"], Mapping):
         raise LineageError("checkpoint manifest is missing")
     if not isinstance(envelope["policy_state"], Mapping):
@@ -500,7 +502,7 @@ def load_attested_checkpoint(
     manifest.validate(
         expected_state_schema_sha256=expected_schema,
         expected_optimizer_identity_sha256=expected_optimizer_identity,
-        expected_atlas_sha256=expected_atlas_sha256,
+        expected_atlas_catalog_sha256=expected_atlas_catalog_sha256,
         expected_runtime_manifest_sha256=expected_runtime_manifest_sha256,
         expected_training_config=expected_training_config,
         expected_lineage_root_sha256=expected_lineage_root_sha256,

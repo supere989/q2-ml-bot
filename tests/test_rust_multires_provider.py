@@ -24,6 +24,9 @@ class DynRuntime:
     client_id = 17
     map_sha256 = MAP_SHA
     origin = (0, 0, 0)
+    cell_count = 5
+    resident_bytes = 1024
+    snapshot_size = len(b"dyn-snapshot")
 
     def __init__(self):
         self.environment_steps = 99
@@ -83,16 +86,20 @@ class DynRuntime:
         )
         return report, block, 0.0
 
+    def snapshot_bytes(self):
+        return b"dyn-snapshot"
+
 
 class AtlasRuntime:
     atlas_sha256 = ATLAS
     map_epoch = 4
     map_id = "q2dm1"
+    resident_bytes = 2048
 
     def __init__(self, *, omit_component=False):
         self.omit_component = omit_component
 
-    def recovery_features_with_evidence(self, *args):
+    def advisory_spatial_features_with_evidence(self, *args):
         evidence = {
             "schema": RUST_RECOVERY_EVIDENCE_SCHEMA,
             "atlas_sha256": ATLAS,
@@ -112,11 +119,12 @@ class AtlasRuntime:
         }
         if self.omit_component:
             evidence.pop("hazard_component_id")
-        return np.arange(16, dtype=np.float32), evidence
-
-    def guide_features(self, *args):
-        assert args[-1] == [(10, 0.75)]
-        return np.arange(60, dtype=np.float32)
+        assert args[6] == [(10, 0.75)]
+        return np.arange(76, dtype=np.float32), evidence, {
+            "atlas_lookup_us": 1.0,
+            "recovery_query_us": 2.0,
+            "guide_query_us": 3.0,
+        }
 
 
 class Inputs:
@@ -146,6 +154,9 @@ class Inputs:
 
     def stage(self, telemetry, *, map_epoch, emit_dyn_events):
         return self.Stage(self.sample(telemetry, map_epoch=map_epoch))
+
+    def public_thermal_metrics(self):
+        return 1, 0
 
 
 def telemetry():
@@ -190,6 +201,12 @@ def provider(atlas=None):
         rust_client_id=17,
         map_sha256=MAP_SHA,
         atlas_origin=(0, 0, 0),
+        atlas_runtime_metadata={
+            "atlas_build_peak_rss_bytes": 4096,
+            "atlas_cell_count": 12,
+            "atlas_chunk_count": 2,
+            "atlas_deserialize_ms": 0.25,
+        },
     )
 
 
@@ -201,6 +218,26 @@ def test_real_rust_adapter_composes_exact_24_16_60_and_private_evidence():
     assert result.private_reward_evidence.hazard_component_id == 44
     assert result.private_reward_evidence.hazard_component_epoch == 4
     assert result.private_reward_evidence.atlas_region_id == 91
+    snapshots = provider().drain_runtime_snapshots()
+    assert snapshots == ()
+
+
+def test_real_runtime_snapshot_uses_accepted_public_provider_path():
+    runtime = provider()
+    runtime.sample(telemetry(), episode_projection=False)
+    snapshot, = runtime.drain_runtime_snapshots()
+    assert snapshot["client_id"] == "client-17"
+    assert snapshot["map_name"] == "q2dm1"
+    assert snapshot["map_epoch"] == 4
+    assert snapshot["server_frame"] == 10
+    assert snapshot["atlas_loaded"] is True
+    assert snapshot["atlas_hash_match"] is True
+    assert snapshot["dyn_cell_count"] == 5
+    assert snapshot["live_thermal_tracks"] == 1
+    assert snapshot["thermal_checkpoint_fields"] == 0
+    assert set(snapshot["query_timings_us"]) == {
+        "dyn_query_us", "atlas_lookup_us", "recovery_query_us", "guide_query_us"
+    }
 
 
 def test_real_rust_adapter_fails_closed_until_component_authority_is_present():

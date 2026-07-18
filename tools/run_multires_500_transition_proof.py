@@ -58,6 +58,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -73,6 +74,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from harness.atlas_catalog import (  # noqa: E402
+    ATLAS_CATALOG_DOMAIN,
+    ATLAS_CATALOG_SCHEMA,
+    AtlasCatalogError,
+    canonical_bytes as atlas_catalog_canonical_bytes,
+    load_atlas_catalog,
+)
 from harness.multires_admission import SPATIAL_PROVIDER_SCHEMA  # noqa: E402
 from harness.multires_contract import (  # noqa: E402
     ACTION_DIM,
@@ -225,6 +233,85 @@ def _load_json_object(path: Path, label: str) -> dict[str, Any]:
         raise Multires500ProofError(f"{label} must be a JSON object")
     _reject_placeholders(payload, label)
     return payload
+
+
+def _load_rust_extension(path: Path) -> Any:
+    """Load only the exact Rust authority sealed into an admitted catalog."""
+    sys.modules.pop("q2_lattice_rs", None)
+    spec = importlib.util.spec_from_file_location("q2_lattice_rs", path)
+    if spec is None or spec.loader is None:
+        raise Multires500ProofError(
+            "cannot load the Atlas catalog Rust Dyn authority"
+        )
+    try:
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except (ImportError, OSError, RuntimeError) as error:
+        raise Multires500ProofError(
+            f"cannot load the Atlas catalog Rust Dyn authority: {error}"
+        ) from error
+    return module
+
+
+def _admit_atlas_catalog(path: Path, expected_sha256: str):
+    """Seal the catalog before loading its exact native-code authority."""
+    document = _load_json_object(path, "atlas_catalog")
+    exact_fields = {
+        "schema", "domain", "map_count", "rust_extension", "dyn_creation",
+        "maps", "atlas_catalog_sha256",
+    }
+    if (
+        set(document) != exact_fields
+        or document.get("schema") != ATLAS_CATALOG_SCHEMA
+        or document.get("domain") != ATLAS_CATALOG_DOMAIN
+    ):
+        raise Multires500ProofError("Atlas catalog fields/schema/domain differ")
+    content = {
+        "domain": ATLAS_CATALOG_DOMAIN,
+        "rust_extension": document["rust_extension"],
+        "dyn_creation": document["dyn_creation"],
+        "maps": document["maps"],
+    }
+    semantic_sha256 = hashlib.sha256(
+        atlas_catalog_canonical_bytes(content)
+    ).hexdigest()
+    if (
+        document.get("atlas_catalog_sha256") != semantic_sha256
+        or expected_sha256 != semantic_sha256
+    ):
+        raise Multires500ProofError("Atlas catalog content seal differs")
+
+    rust_record = document.get("rust_extension")
+    if not isinstance(rust_record, Mapping) or set(rust_record) != {"path", "sha256"}:
+        raise Multires500ProofError("Atlas catalog Rust extension record is malformed")
+    relative = Path(str(rust_record["path"]))
+    if relative.is_absolute() or any(part in ("", ".", "..") for part in relative.parts):
+        raise Multires500ProofError(
+            "Atlas catalog Rust extension path is not portable catalog-relative"
+        )
+    rust_extension = _require_path(
+        path.parent.resolve() / relative, "Atlas catalog Rust extension"
+    )
+    try:
+        rust_extension.relative_to(path.parent.resolve())
+    except ValueError as error:
+        raise Multires500ProofError(
+            "Atlas catalog Rust extension path escapes the catalog root"
+        ) from error
+    if not _valid_sha256(rust_record["sha256"]) or _file_sha256(
+        rust_extension
+    ) != rust_record["sha256"]:
+        raise Multires500ProofError("Atlas catalog Rust extension digest differs")
+
+    extension_module = _load_rust_extension(rust_extension)
+    try:
+        return load_atlas_catalog(
+            path,
+            expected_sha256=expected_sha256,
+            extension_module=extension_module,
+        )
+    except (AtlasCatalogError, OSError, TypeError, ValueError) as error:
+        raise Multires500ProofError(f"Atlas catalog admission failed: {error}") from error
 
 
 def _file_sha256(path: Path) -> str:
@@ -1168,6 +1255,8 @@ class ProofConfig:
     bundle_manifest: Optional[Path] = None
     objectives: Optional[Path] = None
     atlas_bin: Optional[Path] = None
+    atlas_catalog: Optional[Path] = None
+    expected_atlas_catalog_sha256: Optional[str] = None
     checkpoint: Optional[Path] = None
     training_manifest: Optional[Path] = None
     runtime_evidence: Optional[Path] = None
@@ -1184,6 +1273,7 @@ class ProofConfig:
 @dataclass(frozen=True)
 class ProductionAdmission:
     atlas_sha256: str
+    atlas_catalog_sha256: str
     runtime_manifest_sha256: str
     objective_identity_sha256: str
     training_manifest_sha256: str
@@ -1209,6 +1299,7 @@ class ProductionAdmission:
     bundle_manifest: Path
     objectives: Path
     atlas_bin: Path
+    atlas_catalog: Path
     checkpoint: Path
     training_manifest: Path
     runtime_evidence: Path
@@ -1282,7 +1373,7 @@ def _configured_optimizer(runtime_root: Path) -> Mapping[str, Any]:
 def _validate_production_checkpoint(
     checkpoint: Path,
     *,
-    atlas_sha256: str,
+    atlas_catalog_sha256: str,
     runtime_manifest_sha256: str,
     training_configuration: MultiresTrainingConfiguration,
     optimizer_configuration: Mapping[str, Any],
@@ -1301,7 +1392,7 @@ def _validate_production_checkpoint(
         manifest = load_attested_checkpoint(
             checkpoint,
             policy,
-            expected_atlas_sha256=atlas_sha256,
+            expected_atlas_catalog_sha256=atlas_catalog_sha256,
             expected_runtime_manifest_sha256=runtime_manifest_sha256,
             expected_training_config=training_configuration,
             optimizer=optimizer,
@@ -1408,6 +1499,9 @@ def admit_production_config(config: ProofConfig) -> ProductionAdmission:
     bundle_manifest = _require_path(config.bundle_manifest, "bundle_manifest")
     objectives = _require_path(config.objectives, "objectives")
     atlas_bin = _require_path(config.atlas_bin, "atlas_bin")
+    atlas_catalog = _require_path(config.atlas_catalog, "atlas_catalog")
+    if not _valid_sha256(config.expected_atlas_catalog_sha256):
+        raise Multires500ProofError("Atlas catalog content digest is invalid")
     checkpoint = _require_path(config.checkpoint, "checkpoint")
     training_manifest = _require_path(config.training_manifest, "training_manifest")
     runtime_evidence_path = _require_path(config.runtime_evidence, "runtime_evidence")
@@ -1454,6 +1548,24 @@ def admit_production_config(config: ProofConfig) -> ProductionAdmission:
     if _file_sha256(atlas_bin) != atlas_sha256:
         raise Multires500ProofError("atlas_bin digest differs from admitted atlas_sha256")
 
+    atlas_catalog_admission = _admit_atlas_catalog(
+        atlas_catalog, str(config.expected_atlas_catalog_sha256)
+    )
+    selected_catalog_map = atlas_catalog_admission.by_name().get(str(map_name))
+    if selected_catalog_map is None:
+        raise Multires500ProofError(
+            f"active map {map_name!r} is not present in the admitted Atlas catalog"
+        )
+    if (
+        selected_catalog_map.atlas != atlas_bin
+        or selected_catalog_map.atlas_sha256 != atlas_sha256
+        or selected_catalog_map.bundle_manifest != bundle_manifest
+        or selected_catalog_map.objectives != objectives
+    ):
+        raise Multires500ProofError(
+            "active map Atlas/bundle/objective tuple differs from the admitted catalog"
+        )
+
     runtime_evidence = _load_json_object(runtime_evidence_path, "runtime_evidence")
     if int(runtime_evidence.get("client_wire_version", -1)) == LEGACY_CLIENT_WIRE_VERSION:
         raise Multires500ProofError("legacy client wire version is not admissible")
@@ -1491,7 +1603,7 @@ def admit_production_config(config: ProofConfig) -> ProductionAdmission:
         checkpoint_lineage_root_sha256,
     ) = _validate_production_checkpoint(
         checkpoint,
-        atlas_sha256=str(atlas_sha256),
+        atlas_catalog_sha256=atlas_catalog_admission.atlas_catalog_sha256,
         runtime_manifest_sha256=validated.runtime_manifest_sha256,
         training_configuration=training_configuration,
         optimizer_configuration=optimizer_configuration,
@@ -1499,6 +1611,7 @@ def admit_production_config(config: ProofConfig) -> ProductionAdmission:
 
     return ProductionAdmission(
         atlas_sha256=str(atlas_sha256),
+        atlas_catalog_sha256=atlas_catalog_admission.atlas_catalog_sha256,
         runtime_manifest_sha256=validated.runtime_manifest_sha256,
         objective_identity_sha256=str(objective_identity),
         training_manifest_sha256=str(training_manifest_sha256),
@@ -1524,6 +1637,7 @@ def admit_production_config(config: ProofConfig) -> ProductionAdmission:
         bundle_manifest=bundle_manifest,
         objectives=objectives,
         atlas_bin=atlas_bin,
+        atlas_catalog=atlas_catalog,
         checkpoint=checkpoint,
         training_manifest=training_manifest,
         runtime_evidence=runtime_evidence_path,
@@ -1654,6 +1768,7 @@ def build_one_run_argv(
         ("--bundle_manifest", str(admission.bundle_manifest)),
         ("--objectives", str(admission.objectives)),
         ("--atlas_bin", str(admission.atlas_bin)),
+        ("--atlas_catalog", str(admission.atlas_catalog)),
         ("--checkpoint", str(admission.checkpoint)),
         ("--training_manifest", str(admission.training_manifest)),
         ("--runtime_evidence", str(admission.runtime_evidence)),
@@ -1664,6 +1779,10 @@ def build_one_run_argv(
         ("--out", str(out_path)),
         ("--launch_id", str(request.launch_id)),
         ("--expected_atlas_sha256", str(admission.atlas_sha256)),
+        (
+            "--expected_atlas_catalog_sha256",
+            str(admission.atlas_catalog_sha256),
+        ),
         (
             "--expected_runtime_manifest_sha256",
             str(admission.runtime_manifest_sha256),
@@ -1690,6 +1809,7 @@ def expected_received_inputs(
         "bundle_manifest": str(admission.bundle_manifest),
         "objectives": str(admission.objectives),
         "atlas_bin": str(admission.atlas_bin),
+        "atlas_catalog": str(admission.atlas_catalog),
         "checkpoint": str(admission.checkpoint),
         "training_manifest": str(admission.training_manifest),
         "runtime_evidence": str(admission.runtime_evidence),
@@ -1700,6 +1820,7 @@ def expected_received_inputs(
         "out": str(out_path),
         "launch_id": str(request.launch_id),
         "expected_atlas_sha256": str(admission.atlas_sha256),
+        "expected_atlas_catalog_sha256": str(admission.atlas_catalog_sha256),
         "expected_runtime_manifest_sha256": str(admission.runtime_manifest_sha256),
     }
 
@@ -1769,6 +1890,7 @@ def parse_one_run_output(
 
     for key, expected in (
         ("atlas_sha256", admission.atlas_sha256),
+        ("atlas_catalog_sha256", admission.atlas_catalog_sha256),
         ("runtime_manifest_sha256", admission.runtime_manifest_sha256),
         ("objective_identity_sha256", admission.objective_identity_sha256),
         ("training_manifest_sha256", admission.training_manifest_sha256),
@@ -2726,6 +2848,7 @@ def run_proof(
         "legacy_modules_forbidden": list(FORBIDDEN_LEGACY_SELECTORS),
     }
     if admission is not None:
+        report["atlas_catalog_sha256"] = admission.atlas_catalog_sha256
         report["production_admission"] = {
             "bundle_version": admission.bundle_version,
             "artifact_state": admission.artifact_state,
@@ -2740,6 +2863,7 @@ def run_proof(
             "q2ded": str(admission.q2ded),
             "client_binary": str(admission.client_binary),
             "runtime_root": str(admission.runtime_root),
+            "atlas_catalog": str(admission.atlas_catalog),
             "trainer_argv_prefix": list(admission.trainer_argv_prefix),
             "evidence_dir": str(admission.evidence_dir),
         }
@@ -2833,6 +2957,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--bundle_manifest", type=Path, default=None)
     parser.add_argument("--objectives", type=Path, default=None)
     parser.add_argument("--atlas_bin", type=Path, default=None)
+    parser.add_argument("--atlas_catalog", type=Path, default=None)
+    parser.add_argument("--expected_atlas_catalog_sha256", default=None)
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--training_manifest", type=Path, default=None)
     parser.add_argument("--runtime_evidence", type=Path, default=None)
@@ -2890,6 +3016,8 @@ def config_from_args(args: argparse.Namespace) -> ProofConfig:
         bundle_manifest=args.bundle_manifest,
         objectives=args.objectives,
         atlas_bin=args.atlas_bin,
+        atlas_catalog=args.atlas_catalog,
+        expected_atlas_catalog_sha256=args.expected_atlas_catalog_sha256,
         checkpoint=args.checkpoint,
         training_manifest=args.training_manifest,
         runtime_evidence=args.runtime_evidence,

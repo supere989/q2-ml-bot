@@ -18,7 +18,68 @@
       "type": "object", "additionalProperties": {"type": "object"},
       "required": ["bot", "client", "game"]
     },
-    "bindings": {"type": "object", "minProperties": 20},
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "b2_authority", "b2_gate", "b3_gate", "b3_gate_sha256",
+        "b4_evidence", "b4_evidence_sha256", "b5_gate", "b5_gate_sha256",
+        "runtime_evidence", "runtime_manifest",
+        "runtime_manifest_identity_sha256", "checkpoint", "training_manifest",
+        "training_config_sha256", "objectives", "objective_identity_sha256",
+        "bundle_manifest", "atlas", "atlas_sha256", "atlas_manifest",
+        "network_barrier_execution_evidence_sha256", "retirement_manifest",
+        "lineage_evidence", "retirement_evidence", "hook_necessity_runtime",
+        "rust_extension"
+      ],
+      "properties": {
+        "b2_authority": {
+          "type": "object", "additionalProperties": false,
+          "required": ["cohort_id", "declaration_sha256"],
+          "properties": {
+            "cohort_id": {"type": "string", "minLength": 1},
+            "declaration_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "b2_gate": {"$ref": "#/$defs/file"},
+        "b3_gate": {"$ref": "#/$defs/file"},
+        "b3_gate_sha256": {"$ref": "#/$defs/sha256"},
+        "b4_evidence": {"$ref": "#/$defs/file"},
+        "b4_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "b5_gate": {"$ref": "#/$defs/file"},
+        "b5_gate_sha256": {"$ref": "#/$defs/sha256"},
+        "runtime_evidence": {"$ref": "#/$defs/file"},
+        "runtime_manifest": {"$ref": "#/$defs/file"},
+        "runtime_manifest_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "checkpoint": {"$ref": "#/$defs/file"},
+        "training_manifest": {"$ref": "#/$defs/file"},
+        "training_config_sha256": {"$ref": "#/$defs/sha256"},
+        "objectives": {"$ref": "#/$defs/file"},
+        "objective_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "bundle_manifest": {"$ref": "#/$defs/file"},
+        "atlas": {"$ref": "#/$defs/file"},
+        "atlas_sha256": {"$ref": "#/$defs/sha256"},
+        "atlas_manifest": {"$ref": "#/$defs/file"},
+        "network_barrier_execution_evidence_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "retirement_manifest": {"$ref": "#/$defs/file"},
+        "lineage_evidence": {"$ref": "#/$defs/file"},
+        "retirement_evidence": {"$ref": "#/$defs/file"},
+        "hook_necessity_runtime": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "hook_walk_budget_ticks", "game_tick_hz", "walk_speed_q8_per_second"
+          ],
+          "properties": {
+            "hook_walk_budget_ticks": {"const": 15},
+            "game_tick_hz": {"const": 10},
+            "walk_speed_q8_per_second": {"const": 76800}
+          }
+        },
+        "rust_extension": {"$ref": "#/$defs/rust_extension"}
+      }
+    },
     "raw_evidence": {
       "type": "object", "additionalProperties": false,
       "required": [
@@ -164,6 +225,24 @@
       "properties": {
         "bytes": {"type": "integer", "minimum": 1},
         "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "git": {
+      "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "rust_extension": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "path", "bytes", "sha256", "repository_tree",
+        "source_closure_sha256", "qualification_commands_sha256"
+      ],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "repository_tree": {"$ref": "#/$defs/git"},
+        "source_closure_sha256": {"$ref": "#/$defs/sha256"},
+        "qualification_commands_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
     "wsl_host": {

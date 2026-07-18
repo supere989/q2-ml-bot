@@ -39,9 +39,11 @@ from train.multires_primary import (  # noqa: E402
     PRIMARY_CHILD_INVENTORY_NAME,
     PRIMARY_CHILD_INVENTORY_SCHEMA,
     PRIMARY_ATTEMPT_NAME,
+    PRIMARY_ATTEMPT_FIELDS,
     PRIMARY_ATTEMPT_SCHEMA,
     PRIMARY_SELECTOR_TOKEN_ENV,
     PRIMARY_TERMINAL_NAME,
+    PRIMARY_TERMINAL_FIELDS,
     PRIMARY_TERMINAL_SCHEMA,
     PRIMARY_TRAINER_MODULE,
     PROOF_MODULE,
@@ -49,10 +51,17 @@ from train.multires_primary import (  # noqa: E402
     PrimaryTrainingError,
     admit_primary_training,
 )
+from tools.verify_multires_integration import (  # noqa: E402
+    ENVELOPE_SCHEMA as INTEGRATION_ENVELOPE_SCHEMA,
+    GATE_ORDER as INTEGRATION_GATE_ORDER,
+    REPORT_SCHEMA as INTEGRATION_REPORT_SCHEMA,
+    canonical_report_bytes as canonical_integration_report_bytes,
+    run_gates as run_integration_gates,
+)
 
 
-SERVICE_CONFIG_SCHEMA = "q2-multires-service-v1"
-SERVICE_PREFLIGHT_SCHEMA = "q2-multires-service-preflight-v1"
+SERVICE_CONFIG_SCHEMA = "q2-multires-service-v2"
+SERVICE_PREFLIGHT_SCHEMA = "q2-multires-service-preflight-v2"
 SERVICE_STATE_SCHEMA = "q2-multires-service-state-v2"
 SERVICE_LEASE_SCHEMA = "q2-multires-service-lease-v1"
 RETIREMENT_VALIDATION_SCHEMA = "q2-multires-retirement-validation-v1"
@@ -62,6 +71,7 @@ PRIMARY_ROLE = "primary-trainer"
 SERVICE_CONFIG_NAME = "multires-service.json"
 SERVICE_STATE_NAME = "multires-service-state.json"
 SERVICE_LEASE_NAME = "multires-service.lock"
+PRIMARY_ADMISSION_TIMEOUT_SECONDS = 30.0
 _SHA256_CHARS = frozenset("0123456789abcdef")
 
 
@@ -136,6 +146,252 @@ class ServiceAdmission:
     tensorboard_command: tuple[str, ...] | None
     retirement_validation_command: tuple[str, ...]
     retirement_validation: Mapping[str, Any]
+    integration_envelope: Path
+    integration_report: Path
+    integration_report_sha256: str
+    integration_verification: Mapping[str, Any]
+
+
+def _artifact_record(
+    value: object, label: str,
+) -> tuple[Path, dict[str, str]]:
+    if not isinstance(value, Mapping) or set(value) != {"path", "sha256"}:
+        raise MultiresServiceError(f"{label} record is malformed")
+    path = _absolute_file(value["path"], label)
+    digest = value["sha256"]
+    if not _valid_sha256(digest) or digest != _sha256(path):
+        raise MultiresServiceError(f"{label} byte digest differs")
+    return path, {"path": str(path), "sha256": str(digest)}
+
+
+def _integration_evidence_paths(envelope_path: Path) -> dict[str, Path]:
+    envelope = _json(envelope_path, "integration evidence envelope")
+    if set(envelope) != {"schema", "evidence"} or envelope.get(
+        "schema"
+    ) != INTEGRATION_ENVELOPE_SCHEMA:
+        raise MultiresServiceError(
+            "integration evidence envelope fields/schema differ"
+        )
+    evidence = envelope.get("evidence")
+    if not isinstance(evidence, Mapping) or set(evidence) != set(
+        INTEGRATION_GATE_ORDER
+    ):
+        raise MultiresServiceError("integration evidence inventory differs")
+    paths: dict[str, Path] = {}
+    for gate in INTEGRATION_GATE_ORDER:
+        raw = evidence[gate]
+        if not isinstance(raw, str) or not raw:
+            raise MultiresServiceError(
+                f"integration evidence path for {gate} is invalid"
+            )
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = envelope_path.parent / candidate
+        paths[gate] = _absolute_file(candidate, f"integration {gate} evidence")
+    return paths
+
+
+def _require_b6_file_binding(
+    bindings: Mapping[str, Any], name: str, expected: Path,
+) -> None:
+    record = bindings.get(name)
+    if (
+        not isinstance(record, Mapping)
+        or set(record) != {"bytes", "sha256"}
+        or record.get("bytes") != expected.stat().st_size
+        or record.get("sha256") != _sha256(expected)
+    ):
+        raise MultiresServiceError(
+            f"integration B6 {name} binding differs from service input"
+        )
+
+
+def _current_bot_source_identity() -> dict[str, Any]:
+    top = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        text=True,
+    )
+    try:
+        top_level = Path(top.stdout.strip()).resolve(strict=True)
+    except (OSError, RuntimeError):
+        top_level = None
+    if top.returncode != 0 or top_level != ROOT.resolve():
+        raise MultiresServiceError(
+            "primary trainer must run from the exact bot Git worktree root"
+        )
+    values: list[str] = []
+    for revision in ("HEAD^{commit}", "HEAD^{tree}"):
+        completed = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--verify", revision],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+        )
+        value = completed.stdout.strip()
+        if completed.returncode != 0 or not re.fullmatch(
+            r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value
+        ):
+            raise MultiresServiceError("cannot attest current bot Git source")
+        values.append(value)
+    status = subprocess.run(
+        [
+            "git", "-C", str(ROOT), "status", "--porcelain=v1",
+            "--untracked-files=normal",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        text=True,
+    )
+    if status.returncode != 0 or status.stdout:
+        raise MultiresServiceError("current bot Git source is dirty or unreadable")
+    return {"commit": values[0], "tree": values[1], "clean": True}
+
+
+def _verify_integration_admission(
+    *, runtime_root: Path, config: Mapping[str, Any],
+    cold_inputs: Mapping[str, Any], retirement_manifest: Path,
+) -> tuple[Path, Path, dict[str, Any]]:
+    """Re-evaluate the final B2-B6 envelope and bind it to this service."""
+    admission = config.get("integration_admission")
+    if not isinstance(admission, Mapping) or set(admission) != {
+        "envelope", "report", "bot_source"
+    }:
+        raise MultiresServiceError("integration admission records are malformed")
+    bot_source = admission["bot_source"]
+    if (
+        not isinstance(bot_source, Mapping)
+        or set(bot_source) != {"commit", "tree"}
+        or any(
+            not isinstance(bot_source.get(name), str)
+            or re.fullmatch(
+                r"(?:[0-9a-f]{40}|[0-9a-f]{64})", bot_source[name]
+            ) is None
+            for name in ("commit", "tree")
+        )
+    ):
+        raise MultiresServiceError("integration bot source record is malformed")
+    if cold_inputs.get("integration_bot_source") != dict(bot_source):
+        raise MultiresServiceError("cold-start integration bot source differs")
+    envelope_path, envelope_record = _artifact_record(
+        admission["envelope"], "integration evidence envelope"
+    )
+    report_path, report_record = _artifact_record(
+        admission["report"], "precomputed integration report"
+    )
+    if cold_inputs.get("integration_envelope") != envelope_record:
+        raise MultiresServiceError(
+            "cold-start integration envelope binding differs"
+        )
+    if cold_inputs.get("integration_report") != report_record:
+        raise MultiresServiceError(
+            "cold-start integration report binding differs"
+        )
+
+    evidence_paths = _integration_evidence_paths(envelope_path)
+    rerun = run_integration_gates(envelope_path)
+    rerun_payload = canonical_integration_report_bytes(rerun) + b"\n"
+    try:
+        precomputed_payload = report_path.read_bytes()
+    except OSError as error:
+        raise MultiresServiceError(
+            "precomputed integration report is unreadable"
+        ) from error
+    if precomputed_payload != rerun_payload:
+        raise MultiresServiceError(
+            "precomputed integration report bytes differ from fresh verification"
+        )
+    report = _json(report_path, "precomputed integration report")
+    unsigned = dict(report)
+    report_seal = unsigned.pop("report_sha256", None)
+    if (
+        report != rerun
+        or report.get("schema") != INTEGRATION_REPORT_SCHEMA
+        or report.get("overall") != "pass"
+        or report.get("failed_gates") != []
+        or not _valid_sha256(report_seal)
+        or report_seal != hashlib.sha256(_canonical(unsigned)).hexdigest()
+        or report.get("envelope_sha256") != envelope_record["sha256"]
+        or report_record["sha256"] != hashlib.sha256(
+            precomputed_payload
+        ).hexdigest()
+    ):
+        raise MultiresServiceError(
+            "integration report status/hash/seal differs"
+        )
+    gates = report.get("gates")
+    if (
+        not isinstance(gates, list)
+        or [entry.get("gate") for entry in gates if isinstance(entry, Mapping)]
+        != list(INTEGRATION_GATE_ORDER)
+        or any(
+            not isinstance(entry, Mapping)
+            or entry.get("status") != "pass"
+            or entry.get("reasons") != []
+            or entry.get("evidence_sha256")
+            != _sha256(evidence_paths[str(entry.get("gate"))])
+            for entry in gates
+        )
+    ):
+        raise MultiresServiceError("integration report gate inventory differs")
+
+    proof = config["proof"]
+    atlas_sha256 = proof["expected_atlas_sha256"]
+    runtime_sha256 = config["runtime_manifest_sha256"]
+    retirement_sha256 = config["retirement_manifest_sha256"]
+    bundle_gate = _json(
+        evidence_paths["bundle_v3_atlas"], "bundle-v3 integration evidence"
+    )
+    lineage_gate = _json(
+        evidence_paths["lineage_attestation"], "lineage integration evidence"
+    )
+    retirement_gate = _json(
+        evidence_paths["legacy_selector_deactivation"],
+        "retirement integration evidence",
+    )
+    b6 = _json(evidence_paths["wsl_b6_campaign"], "B6 integration evidence")
+    bindings = b6.get("bindings")
+    b6_sources = b6.get("source_repositories")
+    expected_bot_source = {**dict(bot_source), "clean": True}
+    if (
+        bundle_gate.get("atlas_sha256") != atlas_sha256
+        or lineage_gate.get("atlas_sha256") != atlas_sha256
+        or lineage_gate.get("runtime_manifest_sha256") != runtime_sha256
+        or retirement_gate.get("retirement_manifest_sha256")
+        != retirement_sha256
+        or not isinstance(bindings, Mapping)
+        or bindings.get("atlas_sha256") != atlas_sha256
+        or bindings.get("runtime_manifest_identity_sha256") != runtime_sha256
+        or not isinstance(bindings.get("retirement_manifest"), Mapping)
+        or bindings["retirement_manifest"].get("sha256") != retirement_sha256
+        or not isinstance(b6_sources, Mapping)
+        or b6_sources.get("bot") != expected_bot_source
+        or _current_bot_source_identity() != expected_bot_source
+    ):
+        raise MultiresServiceError(
+            "integration runtime/Atlas/retirement/source identities differ from service"
+        )
+
+    exact_files = {
+        "runtime_evidence": Path(str(proof["runtime_evidence"])).resolve(),
+        "runtime_manifest": (runtime_root / "runtime-manifest.json").resolve(),
+        "checkpoint": Path(str(proof["checkpoint"])).resolve(),
+        "training_manifest": Path(str(proof["training_manifest"])).resolve(),
+        "objectives": Path(str(proof["objectives"])).resolve(),
+        "bundle_manifest": Path(str(proof["bundle_manifest"])).resolve(),
+        "atlas": Path(str(proof["atlas_bin"])).resolve(),
+    }
+    for name, path in exact_files.items():
+        _require_b6_file_binding(bindings, name, _absolute_file(path, name))
+    _require_b6_file_binding(bindings, "retirement_manifest", retirement_manifest)
+    return envelope_path, report_path, report
 
 
 def _one_run_namespace(
@@ -153,6 +409,7 @@ def _one_run_namespace(
         checkpoint=Path(proof["checkpoint"]),
         training_manifest=Path(proof["training_manifest"]),
         runtime_evidence=Path(proof["runtime_evidence"]),
+        atlas_catalog=Path(proof["atlas_catalog"]),
         transition_count=int(proof["transition_count"]),
         policy_version=int(proof["policy_version"]),
         map_epoch=int(proof["map_epoch"]),
@@ -160,6 +417,9 @@ def _one_run_namespace(
         out=(evidence_dir / "service-preflight-one-run.json").resolve(),
         launch_id="service-preflight",
         expected_atlas_sha256=str(proof["expected_atlas_sha256"]),
+        expected_atlas_catalog_sha256=str(
+            proof["expected_atlas_catalog_sha256"]
+        ),
         expected_runtime_manifest_sha256=str(
             proof["expected_runtime_manifest_sha256"]
         ),
@@ -176,7 +436,7 @@ def service_preflight(runtime_root: Path) -> ServiceAdmission:
         "schema", "retirement_manifest_sha256", "runtime_manifest_sha256",
         "retirement_manifest", "retirement_cold_start", "operational_roots",
         "service_selectors", "modules", "proof", "training_runtime",
-        "evidence_dir", "log_path", "tensorboard",
+        "integration_admission", "evidence_dir", "log_path", "tensorboard",
     } or config.get("schema") != SERVICE_CONFIG_SCHEMA:
         raise MultiresServiceError("service configuration fields/schema differ")
     if config["modules"] != {
@@ -189,8 +449,10 @@ def service_preflight(runtime_root: Path) -> ServiceAdmission:
         "seed", "game_seed", "divergence_game_seed", "transition_count",
         "policy_version", "map_name", "map_epoch", "timeout_seconds", "q2ded",
         "client_binary", "bundle_manifest", "objectives", "atlas_bin",
+        "atlas_catalog",
         "checkpoint", "training_manifest", "runtime_evidence",
-        "expected_atlas_sha256", "expected_runtime_manifest_sha256",
+        "expected_atlas_sha256", "expected_atlas_catalog_sha256",
+        "expected_runtime_manifest_sha256",
     }
     if not isinstance(proof, Mapping) or set(proof) != required_proof:
         raise MultiresServiceError("service proof fields differ")
@@ -213,6 +475,8 @@ def service_preflight(runtime_root: Path) -> ServiceAdmission:
         raise MultiresServiceError("service qualification requires exactly 500 transitions")
     if proof["expected_runtime_manifest_sha256"] != config["runtime_manifest_sha256"]:
         raise MultiresServiceError("service/full runtime manifest digests differ")
+    if not _valid_sha256(proof["expected_atlas_catalog_sha256"]):
+        raise MultiresServiceError("service Atlas catalog digest is invalid")
     evidence_dir = _absolute_directory(config["evidence_dir"], "evidence_dir")
     log_path = Path(str(config["log_path"]))
     if not log_path.is_absolute() or log_path.is_symlink():
@@ -232,6 +496,20 @@ def service_preflight(runtime_root: Path) -> ServiceAdmission:
     )
     retirement_cold_start = _absolute_file(
         config["retirement_cold_start"], "retirement cold-start declaration"
+    )
+    cold_document = _json(
+        retirement_cold_start, "retirement cold-start declaration"
+    )
+    cold_inputs = cold_document.get("inputs")
+    if not isinstance(cold_inputs, Mapping):
+        raise MultiresServiceError("cold-start input bindings are missing")
+    integration_envelope, integration_report, integration_verification = (
+        _verify_integration_admission(
+            runtime_root=runtime_root,
+            config=config,
+            cold_inputs=cold_inputs,
+            retirement_manifest=retirement_manifest,
+        )
     )
     root_values = config["operational_roots"]
     if not isinstance(root_values, list) or not root_values:
@@ -299,19 +577,18 @@ def service_preflight(runtime_root: Path) -> ServiceAdmission:
         != config["retirement_manifest_sha256"]
     ):
         raise MultiresServiceError("cold-start retirement validation report differs")
-    cold_document = _json(retirement_cold_start, "retirement cold-start declaration")
     if cold_document.get("runtime_manifest_sha256") != config["runtime_manifest_sha256"]:
         raise MultiresServiceError("cold-start/service runtime digests differ")
+    if cold_document.get("atlas_catalog_sha256") != proof[
+        "expected_atlas_catalog_sha256"
+    ]:
+        raise MultiresServiceError("cold-start/service Atlas catalog digests differ")
     one_run_config_path = _absolute_file(
         runtime_root / RUNTIME_CONFIG_NAME, "one-run runtime configuration"
     )
     one_run_config = _json(one_run_config_path, "one-run runtime configuration")
     if cold_document.get("optimizer") != one_run_config.get("optimizer"):
         raise MultiresServiceError("cold-start/one-run optimizer configurations differ")
-    cold_inputs = cold_document.get("inputs")
-    if not isinstance(cold_inputs, Mapping):
-        raise MultiresServiceError("cold-start input bindings are missing")
-
     def require_cold_input(name: str, expected: object) -> None:
         record = cold_inputs.get(name)
         expected_path = Path(str(expected)).resolve()
@@ -329,6 +606,7 @@ def service_preflight(runtime_root: Path) -> ServiceAdmission:
     require_cold_input("training_manifest", proof["training_manifest"])
     require_cold_input("runtime_evidence", proof["runtime_evidence"])
     require_cold_input("bundle_manifest", proof["bundle_manifest"])
+    require_cold_input("atlas_catalog", proof["atlas_catalog"])
     training_runtime_record = config["training_runtime"]
     if (
         not isinstance(training_runtime_record, Mapping)
@@ -424,6 +702,9 @@ def service_preflight(runtime_root: Path) -> ServiceAdmission:
         "--bundle_manifest", str(one_run.bundle_manifest),
         "--objectives", str(one_run.objectives),
         "--atlas_bin", str(one_run.atlas_bin),
+        "--atlas_catalog", str(one_run.atlas_catalog.path),
+        "--expected_atlas_catalog_sha256",
+        str(one_run.atlas_catalog.atlas_catalog_sha256),
         "--checkpoint", str(Path(proof["checkpoint"]).resolve()),
         "--training_manifest", str(Path(proof["training_manifest"]).resolve()),
         "--runtime_evidence", str(Path(proof["runtime_evidence"]).resolve()),
@@ -492,6 +773,12 @@ def service_preflight(runtime_root: Path) -> ServiceAdmission:
         tensorboard_command=tensorboard_command,
         retirement_validation_command=retirement_validation_command,
         retirement_validation=retirement_validation,
+        integration_envelope=integration_envelope,
+        integration_report=integration_report,
+        integration_report_sha256=str(
+            integration_verification["report_sha256"]
+        ),
+        integration_verification=integration_verification,
     )
 
 
@@ -706,22 +993,15 @@ def _reconcile_zero_update_attempt(runtime_root: Path) -> dict[str, Any]:
             "primary attempt has service state; stop must run before reconciliation"
         )
     attempt = _json(attempt_path, "primary attempt record")
-    expected_fields = {
-        "schema", "runtime_manifest_sha256", "training_runtime_sha256",
-        "checkpoint_mode", "selected_checkpoint", "selected_checkpoint_sha256",
-        "current_run_root", "checkpoint_root", "tensorboard_root",
-        "rollout_root", "update_root", "current_season_report", "owner",
-        "selector_token_sha256", "tensorboard_filename_suffix",
-        "evidence_sha256",
-    }
     unsigned = dict(attempt)
     declared = unsigned.pop("evidence_sha256", None)
     if (
-        set(attempt) != expected_fields
+        set(attempt) != PRIMARY_ATTEMPT_FIELDS
         or attempt.get("schema") != PRIMARY_ATTEMPT_SCHEMA
         or not _valid_sha256(declared)
         or declared != hashlib.sha256(_canonical(unsigned)).hexdigest()
         or not _valid_sha256(attempt.get("runtime_manifest_sha256"))
+        or not _valid_sha256(attempt.get("atlas_catalog_sha256"))
         or not _valid_sha256(attempt.get("training_runtime_sha256"))
         or not _valid_sha256(attempt.get("selected_checkpoint_sha256"))
         or not _valid_sha256(attempt.get("selector_token_sha256"))
@@ -760,6 +1040,12 @@ def _reconcile_zero_update_attempt(runtime_root: Path) -> dict[str, Any]:
         training_path, "primary training runtime configuration"
     )
     checkpoint_selector = training_config.get("checkpoint")
+    if training_config.get("atlas_catalog_sha256") != attempt[
+        "atlas_catalog_sha256"
+    ]:
+        raise MultiresServiceError(
+            "primary attempt Atlas catalog differs from training runtime"
+        )
     if (
         training_config.get("schema") != "q2-multires-primary-training-runtime-v1"
         or training_config.get("runtime_manifest_sha256")
@@ -777,6 +1063,12 @@ def _reconcile_zero_update_attempt(runtime_root: Path) -> dict[str, Any]:
     )
     cold_start = _json(cold_start_path, "retirement cold-start declaration")
     cold_lineage = cold_start.get("lineage")
+    if cold_start.get("atlas_catalog_sha256") != attempt[
+        "atlas_catalog_sha256"
+    ]:
+        raise MultiresServiceError(
+            "primary attempt Atlas catalog differs from cold start"
+        )
     if (
         cold_start.get("runtime_manifest_sha256")
         != attempt["runtime_manifest_sha256"]
@@ -826,6 +1118,7 @@ def _reconcile_zero_update_attempt(runtime_root: Path) -> dict[str, Any]:
         if not _current_season_health(
             season,
             runtime_manifest_sha256=str(attempt["runtime_manifest_sha256"]),
+            atlas_catalog_sha256=str(attempt["atlas_catalog_sha256"]),
         ):
             raise MultiresServiceError(
                 "primary attempt has invalid/nonterminal season evidence"
@@ -1088,6 +1381,7 @@ def _write_state(
     records: Sequence[Mapping[str, Any]],
     *,
     runtime_manifest_sha256: str,
+    atlas_catalog_sha256: str,
     current_run_root: Path,
     tensorboard_root: Path,
     current_season_report: Path,
@@ -1101,6 +1395,7 @@ def _write_state(
         "service_role": PRIMARY_ROLE,
         "training_updates_enabled": True,
         "runtime_manifest_sha256": runtime_manifest_sha256,
+        "atlas_catalog_sha256": atlas_catalog_sha256,
         "current_run_root": str(current_run_root),
         "tensorboard_root": str(tensorboard_root),
         "current_season_report": str(current_season_report),
@@ -1128,7 +1423,8 @@ def _validated_state(path: Path) -> dict[str, Any]:
     state = _json(state_path, "service state")
     if set(state) != {
         "schema", "service_role", "training_updates_enabled",
-        "runtime_manifest_sha256", "current_run_root", "tensorboard_root",
+        "runtime_manifest_sha256", "atlas_catalog_sha256", "current_run_root",
+        "tensorboard_root",
         "current_season_report", "child_inventory", "terminal_evidence",
         "launch_config", "shutdown_grace_seconds", "processes",
     } or state.get("schema") != SERVICE_STATE_SCHEMA:
@@ -1137,6 +1433,7 @@ def _validated_state(path: Path) -> dict[str, Any]:
         state["service_role"] != PRIMARY_ROLE
         or state["training_updates_enabled"] is not True
         or not _valid_sha256(state["runtime_manifest_sha256"])
+        or not _valid_sha256(state["atlas_catalog_sha256"])
     ):
         raise MultiresServiceError("service state primary-trainer identity differs")
     current = Path(str(state["current_run_root"]))
@@ -1200,10 +1497,141 @@ def _validated_state(path: Path) -> dict[str, Any]:
     return state
 
 
+def _revalidate_service_integration(admission: ServiceAdmission) -> None:
+    """Close the preflight-to-launch mutation window before process creation."""
+    current_config = _json(
+        admission.runtime_root / SERVICE_CONFIG_NAME, "service configuration"
+    )
+    if current_config != admission.config:
+        raise MultiresServiceError(
+            "service configuration changed after integration preflight"
+        )
+    cold_start = _json(
+        _absolute_file(
+            current_config["retirement_cold_start"],
+            "retirement cold-start declaration",
+        ),
+        "retirement cold-start declaration",
+    )
+    cold_inputs = cold_start.get("inputs")
+    if not isinstance(cold_inputs, Mapping):
+        raise MultiresServiceError("cold-start input bindings are missing")
+    envelope, report, verification = _verify_integration_admission(
+        runtime_root=admission.runtime_root,
+        config=current_config,
+        cold_inputs=cold_inputs,
+        retirement_manifest=_absolute_file(
+            current_config["retirement_manifest"], "retirement manifest"
+        ),
+    )
+    if (
+        envelope != admission.integration_envelope
+        or report != admission.integration_report
+        or verification.get("report_sha256")
+        != admission.integration_report_sha256
+    ):
+        raise MultiresServiceError(
+            "integration admission changed after service preflight"
+        )
+
+
+def _wait_for_primary_admission(
+    admission: ServiceAdmission,
+    trainer: subprocess.Popen,
+    trainer_record: Mapping[str, Any],
+    selector_token: str,
+    *,
+    timeout_seconds: float = PRIMARY_ADMISSION_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Require the child to publish its sealed post-preflight attempt first."""
+    attempt_path = admission.runtime_root / PRIMARY_ATTEMPT_NAME
+    deadline = time.monotonic() + timeout_seconds
+    token_sha256 = hashlib.sha256(selector_token.encode("ascii")).hexdigest()
+    while True:
+        returncode = trainer.poll()
+        if attempt_path.exists() or attempt_path.is_symlink():
+            if attempt_path.is_symlink() or not attempt_path.is_file():
+                raise MultiresServiceError(
+                    "primary admission attempt is not a regular file"
+                )
+            attempt = _json(attempt_path, "primary admission attempt")
+            unsigned = dict(attempt)
+            seal = unsigned.pop("evidence_sha256", None)
+            owner = attempt.get("owner")
+            owner_matches = bool(
+                isinstance(owner, Mapping)
+                and set(owner) == {
+                    "role", "pid", "start_ticks", "process_group", "session"
+                }
+                and owner.get("role") == PRIMARY_TRAINER_MODULE
+                and all(
+                    owner.get(field) == trainer_record.get(field)
+                    for field in (
+                        "pid", "start_ticks", "process_group", "session"
+                    )
+                )
+            )
+            if (
+                set(attempt) != PRIMARY_ATTEMPT_FIELDS
+                or attempt.get("schema") != PRIMARY_ATTEMPT_SCHEMA
+                or not _valid_sha256(seal)
+                or seal != hashlib.sha256(_canonical(unsigned)).hexdigest()
+                or attempt.get("runtime_manifest_sha256")
+                != admission.one_run.runtime_manifest_sha256
+                or attempt.get("atlas_catalog_sha256")
+                != admission.one_run.atlas_catalog.atlas_catalog_sha256
+                or attempt.get("training_runtime_sha256")
+                != admission.primary.config_sha256
+                or attempt.get("checkpoint_mode")
+                != admission.primary.checkpoint_mode
+                or Path(str(attempt.get("selected_checkpoint"))).resolve()
+                != admission.primary.checkpoint
+                or attempt.get("selected_checkpoint_sha256")
+                != _sha256(admission.primary.checkpoint)
+                or Path(str(attempt.get("current_run_root"))).resolve()
+                != admission.current_run_root
+                or Path(str(attempt.get("checkpoint_root"))).resolve()
+                != admission.primary.checkpoint_root
+                or Path(str(attempt.get("tensorboard_root"))).resolve()
+                != admission.tensorboard_root
+                or Path(str(attempt.get("rollout_root"))).resolve()
+                != admission.primary.rollout_root
+                or Path(str(attempt.get("update_root"))).resolve()
+                != admission.primary.update_root
+                or Path(str(attempt.get("current_season_report"))).resolve()
+                != admission.current_season_report
+                or attempt.get("selector_token_sha256") != token_sha256
+                or attempt.get("tensorboard_filename_suffix")
+                != f".attempt-{token_sha256[:16]}"
+                or not owner_matches
+            ):
+                raise MultiresServiceError(
+                    "primary child admission attempt fields/bindings differ"
+                )
+            if returncode is not None or not _record_alive(trainer_record):
+                raise MultiresServiceError(
+                    "primary trainer exited during child admission"
+                )
+            return attempt
+        if returncode is not None:
+            raise MultiresServiceError(
+                f"primary trainer exited before child admission (status {returncode})"
+            )
+        if time.monotonic() >= deadline:
+            raise MultiresServiceError(
+                "primary trainer did not publish child admission before timeout"
+            )
+        time.sleep(0.01)
+
+
 def start_service(
     admission: ServiceAdmission, *, lease_acquired: bool = False,
     selector_token: str | None = None,
 ) -> dict[str, Any]:
+    # This is deliberately before lease acquisition, state reconciliation,
+    # log creation, and Popen.  CLI preflight performs the same verification
+    # before its selector lease, and this second pass closes the launch window.
+    _revalidate_service_integration(admission)
     if not lease_acquired:
         selector_token = _acquire_lease(admission.runtime_root, "start")
     if not isinstance(selector_token, str) or not re.fullmatch(
@@ -1252,6 +1680,21 @@ def start_service(
             env=trainer_environment,
         )
         processes.append((PRIMARY_ROLE, trainer))
+        trainer_record = _process_record(PRIMARY_ROLE, trainer)
+        _transfer_lease(
+            admission.runtime_root, "start", trainer_record, selector_token
+        )
+        primary_attempt = _wait_for_primary_admission(
+            admission, trainer, trainer_record, selector_token
+        )
+        # The child has independently completed service_preflight and sealed
+        # its exact selection. Recheck the final envelope/source immediately
+        # before allowing the observability process to exist.
+        _revalidate_service_integration(admission)
+        if trainer.poll() is not None or not _record_alive(trainer_record):
+            raise MultiresServiceError(
+                "primary trainer exited before TensorBoard admission"
+            )
         if admission.tensorboard_command is not None:
             tensorboard = subprocess.Popen(
                 admission.tensorboard_command,
@@ -1262,14 +1705,16 @@ def start_service(
                 start_new_session=True,
             )
             processes.append(("tensorboard-current-run", tensorboard))
-        records = [_process_record(role, process) for role, process in processes]
-        _transfer_lease(
-            admission.runtime_root, "start", records[0], selector_token
-        )
+        records = [trainer_record] + [
+            _process_record(role, process) for role, process in processes[1:]
+        ]
         _write_state(
             state_path,
             records,
             runtime_manifest_sha256=admission.one_run.runtime_manifest_sha256,
+            atlas_catalog_sha256=(
+                admission.one_run.atlas_catalog.atlas_catalog_sha256
+            ),
             current_run_root=admission.current_run_root,
             tensorboard_root=admission.tensorboard_root,
             current_season_report=admission.current_season_report,
@@ -1286,6 +1731,9 @@ def start_service(
             "health": "starting",
             "healthy": False,
             "current_season_evidence": False,
+            "primary_admission_evidence_sha256": primary_attempt[
+                "evidence_sha256"
+            ],
             "processes": records,
         }
     except Exception:
@@ -1421,6 +1869,7 @@ def service_status(runtime_root: Path) -> dict[str, Any]:
     season_evidence = _current_season_health(
         Path(str(state["current_season_report"])),
         runtime_manifest_sha256=str(state["runtime_manifest_sha256"]),
+        atlas_catalog_sha256=str(state["atlas_catalog_sha256"]),
     )
     terminal_evidence = _terminal_health(
         Path(str(state["terminal_evidence"])), state=state
@@ -1450,7 +1899,7 @@ def service_status(runtime_root: Path) -> dict[str, Any]:
 
 
 def _current_season_health(
-    path: Path, *, runtime_manifest_sha256: str
+    path: Path, *, runtime_manifest_sha256: str, atlas_catalog_sha256: str
 ) -> bool:
     if path.is_symlink() or not path.is_file():
         return False
@@ -1476,6 +1925,7 @@ def _current_season_health(
         report.get("schema") == "q2-multires-current-season-v1"
         and report.get("health") == "training-active"
         and report.get("runtime_manifest_sha256") == runtime_manifest_sha256
+        and report.get("atlas_catalog_sha256") == atlas_catalog_sha256
         and declared_evidence == sealed
         and isinstance(counters, Mapping)
         and type(counters.get("policy_updates")) is int
@@ -1490,6 +1940,8 @@ def _current_season_health(
         == counters["accepted_transitions"]
         and checkpoint_manifest.get("runtime_manifest_sha256")
         == runtime_manifest_sha256
+        and checkpoint_manifest.get("atlas_catalog_sha256")
+        == atlas_catalog_sha256
         and checkpoint.is_file()
         and checkpoint.parent == run_root / "checkpoints"
         and report.get("checkpoint_sha256") == _sha256(checkpoint)
@@ -1501,14 +1953,7 @@ def _terminal_health(path: Path, *, state: Mapping[str, Any]) -> bool:
         return False
     try:
         terminal = _json(path, "primary terminal evidence")
-        expected_fields = {
-            "schema", "status", "runtime_manifest_sha256",
-            "lineage_root_sha256", "accepted_transitions", "policy_updates",
-            "optimizer_steps", "next_policy_version", "current_season_report",
-            "current_season_sha256", "checkpoint", "checkpoint_sha256",
-            "evidence_sha256",
-        }
-        if set(terminal) != expected_fields:
+        if set(terminal) != PRIMARY_TERMINAL_FIELDS:
             return False
         unsigned = dict(terminal)
         declared = unsigned.pop("evidence_sha256")
@@ -1522,6 +1967,8 @@ def _terminal_health(path: Path, *, state: Mapping[str, Any]) -> bool:
             or terminal["status"] != "completed"
             or terminal["runtime_manifest_sha256"]
             != state["runtime_manifest_sha256"]
+            or terminal["atlas_catalog_sha256"]
+            != state["atlas_catalog_sha256"]
             or season != Path(str(state["current_season_report"])).resolve()
             or season.is_symlink() or not season.is_file()
             or terminal["current_season_sha256"] != _sha256(season)
@@ -1549,6 +1996,11 @@ def _terminal_health(path: Path, *, state: Mapping[str, Any]) -> bool:
             == terminal["next_policy_version"]
             and report.get("lineage_root_sha256")
             == terminal["lineage_root_sha256"]
+            and report.get("atlas_catalog_sha256")
+            == terminal["atlas_catalog_sha256"]
+            and isinstance(report.get("checkpoint_manifest"), Mapping)
+            and report["checkpoint_manifest"].get("atlas_catalog_sha256")
+            == terminal["atlas_catalog_sha256"]
             and (current_root / str(report.get("last_checkpoint", ""))).resolve()
             == checkpoint
         )
@@ -1613,6 +2065,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "status":
             result = service_status(args.runtime_root)
         else:
+            # The complete integration envelope is re-evaluated before a
+            # selector lease or zero-update reconciliation mutates runtime
+            # state. start_service performs one more pass immediately before
+            # child creation.
+            admission = service_preflight(args.runtime_root)
             if args.command in ("prove", "start"):
                 runtime_root = _absolute_directory(
                     args.runtime_root, "runtime_root"
@@ -1621,7 +2078,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 selector_lease = True
                 if args.command == "start":
                     reconciliation = _reconcile_zero_update_attempt(runtime_root)
-            admission = service_preflight(args.runtime_root)
             if args.command == "preflight":
                 result = {
                     "schema": SERVICE_PREFLIGHT_SCHEMA,
@@ -1656,6 +2112,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "retirement_validation_command": list(
                         admission.retirement_validation_command
                     ),
+                    "integration_admission": {
+                        "envelope": str(admission.integration_envelope),
+                        "report": str(admission.integration_report),
+                        "report_file_sha256": admission.config[
+                            "integration_admission"
+                        ]["report"]["sha256"],
+                        "report_sha256": (
+                            admission.integration_report_sha256
+                        ),
+                        "bot_source": dict(admission.config[
+                            "integration_admission"
+                        ]["bot_source"]),
+                        "verification": dict(
+                            admission.integration_verification
+                        ),
+                    },
                 }
             elif args.command == "prove":
                 selector_lease = False

@@ -24,6 +24,7 @@ from train.multires_train import (
 ATLAS = "a" * 64
 RUNTIME = "b" * 64
 LINEAGE = "c" * 64
+CATALOG = "d" * 64
 
 
 class FakeCheckpointRuntime:
@@ -32,6 +33,9 @@ class FakeCheckpointRuntime:
             atlas_sha256=ATLAS,
             runtime_manifest_sha256=RUNTIME,
         )
+        self.active_atlas_sha256 = ATLAS
+        self.qualification_atlas_sha256 = ATLAS
+        self.atlas_catalog_sha256 = CATALOG
         self.lineage_root_sha256 = lineage_root_sha256
         self.training_steps = []
 
@@ -47,7 +51,7 @@ class FakeCheckpointRuntime:
         return {
             "training_step": training_step,
             "lineage_root_sha256": self.lineage_root_sha256,
-            "atlas_sha256": self.runtime.atlas_sha256,
+            "atlas_catalog_sha256": self.atlas_catalog_sha256,
             "runtime_manifest_sha256": self.runtime.runtime_manifest_sha256,
         }
 
@@ -104,6 +108,8 @@ class FakeTrainer:
         self.policy_versions = []
         self.tick = 0
         self.reducer = CausalRewardReducer()
+        self.runtime_snapshots = None
+        self.admit_runtime_snapshots = False
         self.network_metrics = FakeNetworkMetrics()
         self.collector = SimpleNamespace(
             batch=SimpleNamespace(metrics=self.network_metrics)
@@ -134,8 +140,13 @@ class FakeTrainer:
                     "guide_classes": [0, 1, None, None],
                     "global_guide_drop": False,
                 })
+        if self.admit_runtime_snapshots and self.runtime_snapshots is not None:
+            for snapshot in self.runtime_snapshots:
+                self.observer.observe_runtime_snapshot(**snapshot)
         return SimpleNamespace(
             rollout=rollout,
+            runtime_snapshots=self.runtime_snapshots,
+            runtime_snapshots_admitted=self.admit_runtime_snapshots,
             ppo_metrics={
                 "policy_loss": -0.25, "value_loss": 0.5,
                 "optimizer_steps": 4,
@@ -313,6 +324,7 @@ def test_resume_preserves_lineage_counters_and_policy_versions(tmp_path):
         stage_one(),
         runtime_manifest_sha256=RUNTIME,
         atlas_sha256=ATLAS,
+        atlas_catalog_sha256=CATALOG,
         lineage_root_sha256=LINEAGE,
     )
     assert progress == TrainingProgress(
@@ -358,6 +370,71 @@ def test_causal_metric_delta_must_match_the_admitted_rollout(tmp_path):
     assert list((tmp_path / "checkpoints").iterdir()) == []
 
 
+def _runtime_snapshot():
+    return {
+        "atlas_loaded": True,
+        "atlas_hash_match": True,
+        "atlas_resident_bytes": 1024,
+        "atlas_build_peak_rss_bytes": 2048,
+        "atlas_cell_count": 20,
+        "atlas_chunk_count": 2,
+        "atlas_deserialize_ms": 0.5,
+        "query_timings_us": {
+            "dyn_query_us": 1.0,
+            "atlas_lookup_us": 2.0,
+            "recovery_query_us": 3.0,
+            "guide_query_us": 4.0,
+        },
+        "dyn_cell_count": 5,
+        "live_thermal_tracks": 1,
+        "expired_thermal_tracks": 0,
+        "dyn_snapshot_bytes": 512,
+        "thermal_checkpoint_fields": 0,
+    }
+
+
+def test_primary_runtime_snapshots_are_admitted_before_season_snapshot(tmp_path):
+    metrics = accumulator()
+    trainer = FakeTrainer(metrics)
+    trainer.collector.batch.envs = (object(), object())
+    trainer.runtime_snapshots = (
+        _runtime_snapshot(), _runtime_snapshot(), _runtime_snapshot()
+    )
+    trainer.admit_runtime_snapshots = True
+    core = MultiresContinuousTrainingCore(
+        trainer,
+        output_root=tmp_path.resolve(),
+        stage=stage_one(),
+        writer=FakeWriter(),
+        causal_metrics=metrics,
+        require_runtime_telemetry=True,
+    )
+    summary = core.run(maximum_updates=1)
+    report = read_json(summary.current_season_report)["causal_metrics_window"]
+    assert report["atlas"]["runtime_snapshots"] == 3
+    assert report["atlas"]["query_p99_us"]["dyn_query_us"] == 1.0
+    assert report["dyn"]["live_thermal_tracks_max"] == 1
+
+
+def test_primary_runtime_telemetry_missing_or_short_fails_before_checkpoint(tmp_path):
+    metrics = accumulator()
+    trainer = FakeTrainer(metrics)
+    trainer.collector.batch.envs = (object(), object())
+    trainer.runtime_snapshots = (_runtime_snapshot(),)
+    trainer.admit_runtime_snapshots = True
+    core = MultiresContinuousTrainingCore(
+        trainer,
+        output_root=tmp_path.resolve(),
+        stage=stage_one(),
+        writer=FakeWriter(),
+        causal_metrics=metrics,
+        require_runtime_telemetry=True,
+    )
+    with pytest.raises(MultiresTrainingCoreError, match="snapshot count differs"):
+        core.run(maximum_updates=1)
+    assert trainer.runtime.training_steps == []
+
+
 def test_curriculum_predecessor_gate_is_explicit_and_carries_progress(tmp_path):
     first_stage = stage_one()
     second_stage = CurriculumStage.create(
@@ -369,6 +446,7 @@ def test_curriculum_predecessor_gate_is_explicit_and_carries_progress(tmp_path):
         first_stage,
         decision="passed",
         runtime_manifest_sha256=RUNTIME,
+        atlas_catalog_sha256=CATALOG,
         lineage_root_sha256=LINEAGE,
         accepted_transitions=6,
         policy_updates=1,
@@ -387,6 +465,7 @@ def test_curriculum_predecessor_gate_is_explicit_and_carries_progress(tmp_path):
         first_stage,
         decision="failed",
         runtime_manifest_sha256=RUNTIME,
+        atlas_catalog_sha256=CATALOG,
         lineage_root_sha256=LINEAGE,
         accepted_transitions=6,
         policy_updates=1,
@@ -415,6 +494,67 @@ def test_curriculum_predecessor_gate_is_explicit_and_carries_progress(tmp_path):
     assert summary.accepted_transitions == 12
     assert summary.policy_updates == 2
     assert summary.optimizer_steps == 8
+
+
+def test_stage_advance_accepts_only_gate_bound_predecessor_current_report(tmp_path):
+    first_stage = stage_one()
+    first, _trainer, _writer, _metrics = make_core(tmp_path, stage=first_stage)
+    first.run(maximum_updates=1)
+    current = first.current_season_report
+    evaluator = tmp_path / "stage-01-evaluator.json"
+    evaluator.write_text("{}\n", encoding="utf-8")
+    gate = create_curriculum_gate_evidence(
+        first_stage, decision="passed", runtime_manifest_sha256=RUNTIME,
+        atlas_catalog_sha256=CATALOG, lineage_root_sha256=LINEAGE,
+        accepted_transitions=6,
+        policy_updates=1, optimizer_steps=4,
+        completed_stage={
+            "path": str(current.resolve()),
+            "sha256": hashlib.sha256(current.read_bytes()).hexdigest(),
+        },
+        evaluator={
+            "path": str(evaluator.resolve()),
+            "sha256": hashlib.sha256(evaluator.read_bytes()).hexdigest(),
+        },
+    )
+    second_stage = CurriculumStage.create(
+        2, {"maps": ["standing-crouched-fixture"]},
+        predecessor_stage_sha256=first_stage.configuration_sha256,
+    )
+    progress = TrainingProgress(
+        accepted_transitions=6, policy_updates=1, optimizer_steps=4,
+        next_policy_version=1, lineage_root_sha256=LINEAGE,
+    )
+    runtime = FakeCheckpointRuntime(lineage_root_sha256=LINEAGE)
+    # Rebinding the completed-stage path is rejected even when the report's
+    # semantic JSON is unchanged.
+    copied = tmp_path / "season/copied-stage-01.json"
+    copied.write_bytes(current.read_bytes())
+    rebound = dict(gate)
+    unsigned = dict(rebound)
+    unsigned.pop("evidence_sha256")
+    unsigned["artifacts"] = dict(unsigned["artifacts"])
+    unsigned["artifacts"]["completed_stage"] = {
+        "path": str(copied.resolve()),
+        "sha256": hashlib.sha256(copied.read_bytes()).hexdigest(),
+    }
+    rebound = {**unsigned, "evidence_sha256": hashlib.sha256(json.dumps(
+        unsigned, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()).hexdigest()}
+    with pytest.raises(MultiresTrainingCoreError, match="gate-bound"):
+        make_core(
+            tmp_path, runtime=runtime, stage=second_stage,
+            predecessor_gate=rebound, progress=progress,
+            start_policy_version=1,
+        )
+
+    advanced, trainer, _writer, _metrics = make_core(
+        tmp_path, runtime=runtime, stage=second_stage,
+        predecessor_gate=gate, progress=progress, start_policy_version=1,
+    )
+    summary = advanced.run(maximum_updates=1)
+    assert trainer.policy_versions == [1]
+    assert read_json(summary.current_season_report)["stage_id"] == 2
 
 
 def test_progress_rejects_policy_or_transition_regression():
@@ -459,6 +599,9 @@ def test_real_torch_checkpoint_is_attested_when_torch_is_available(tmp_path):
         ppo_config=ppo,
         training_config=training,
         initialization="random",
+        atlas_catalog_sha256=CATALOG,
+        qualification_atlas_sha256=ATLAS,
+        active_atlas_sha256=ATLAS,
     )
     metrics = accumulator()
     trainer = FakeTrainer(metrics, runtime=runtime)
@@ -482,7 +625,7 @@ def test_real_torch_checkpoint_is_attested_when_torch_is_available(tmp_path):
     manifest = load_attested_checkpoint(
         checkpoint,
         target,
-        expected_atlas_sha256=ATLAS,
+        expected_atlas_catalog_sha256=CATALOG,
         expected_runtime_manifest_sha256=RUNTIME,
         expected_training_config=training,
         optimizer=target_optimizer,

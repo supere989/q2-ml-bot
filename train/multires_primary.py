@@ -42,6 +42,21 @@ PRIMARY_CHILD_INVENTORY_NAME = "multires-primary-children.json"
 PRIMARY_TERMINAL_NAME = "multires-primary-terminal.json"
 PRIMARY_ATTEMPT_NAME = "multires-primary-attempt.json"
 PRIMARY_SELECTOR_TOKEN_ENV = "Q2_MULTIRES_PRIMARY_SELECTOR_TOKEN"
+PRIMARY_ATTEMPT_FIELDS = frozenset({
+    "schema", "runtime_manifest_sha256", "atlas_catalog_sha256",
+    "training_runtime_sha256", "checkpoint_mode", "selected_checkpoint",
+    "selected_checkpoint_sha256", "current_run_root", "checkpoint_root",
+    "tensorboard_root", "rollout_root", "update_root",
+    "current_season_report", "owner", "selector_token_sha256",
+    "tensorboard_filename_suffix", "evidence_sha256",
+})
+PRIMARY_TERMINAL_FIELDS = frozenset({
+    "schema", "status", "runtime_manifest_sha256", "atlas_catalog_sha256",
+    "lineage_root_sha256", "accepted_transitions", "policy_updates",
+    "optimizer_steps", "next_policy_version", "current_season_report",
+    "current_season_sha256", "checkpoint", "checkpoint_sha256",
+    "evidence_sha256",
+})
 
 
 class PrimaryTrainingError(RuntimeError):
@@ -170,6 +185,7 @@ def _write_attempt_evidence(
     payload = {
         "schema": PRIMARY_ATTEMPT_SCHEMA,
         "runtime_manifest_sha256": admission.service.one_run.runtime_manifest_sha256,
+        "atlas_catalog_sha256": admission.service.one_run.atlas_catalog.atlas_catalog_sha256,
         "training_runtime_sha256": admission.config_sha256,
         "checkpoint_mode": admission.checkpoint_mode,
         "selected_checkpoint": str(admission.checkpoint),
@@ -184,6 +200,8 @@ def _write_attempt_evidence(
         "selector_token_sha256": selector_token_sha256,
         "tensorboard_filename_suffix": suffix,
     }
+    if set(payload) != PRIMARY_ATTEMPT_FIELDS - {"evidence_sha256"}:
+        raise PrimaryTrainingError("primary attempt producer fields differ")
     payload["evidence_sha256"] = hashlib.sha256(_canonical(payload)).hexdigest()
     _atomic_json(path, payload, replace=False)
     return payload
@@ -238,6 +256,7 @@ def _write_terminal_evidence(
         "schema": PRIMARY_TERMINAL_SCHEMA,
         "status": "completed",
         "runtime_manifest_sha256": admission.service.one_run.runtime_manifest_sha256,
+        "atlas_catalog_sha256": admission.service.one_run.atlas_catalog.atlas_catalog_sha256,
         "lineage_root_sha256": summary.lineage_root_sha256,
         "accepted_transitions": summary.accepted_transitions,
         "policy_updates": summary.policy_updates,
@@ -248,6 +267,8 @@ def _write_terminal_evidence(
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": _sha256(checkpoint),
     }
+    if set(payload) != PRIMARY_TERMINAL_FIELDS - {"evidence_sha256"}:
+        raise PrimaryTrainingError("primary terminal producer fields differ")
     payload["evidence_sha256"] = hashlib.sha256(_canonical(payload)).hexdigest()
     _atomic_json(path, payload, replace=True)
     return payload
@@ -361,6 +382,7 @@ def admit_primary_training(
     config = _json(path, "primary training runtime configuration")
     required = {
         "schema", "runtime_manifest_sha256",
+        "atlas_catalog", "atlas_catalog_sha256",
         "network_barrier_execution_evidence_sha256", "seed", "game_seed",
         "map_name", "map_epoch", "collector", "optimizer", "curriculum",
         "execution", "checkpoint",
@@ -370,6 +392,17 @@ def admit_primary_training(
     one_run = service.one_run
     if config["runtime_manifest_sha256"] != one_run.runtime_manifest_sha256:
         raise PrimaryTrainingError("primary/service runtime manifest digests differ")
+    catalog_path, catalog_file_sha256 = _artifact_record(
+        config["atlas_catalog"], "primary Atlas catalog"
+    )
+    if (
+        not _valid_sha256(config["atlas_catalog_sha256"])
+        or config["atlas_catalog_sha256"]
+        != one_run.atlas_catalog.atlas_catalog_sha256
+        or catalog_path != one_run.atlas_catalog.path
+        or catalog_file_sha256 != one_run.atlas_catalog.file_sha256
+    ):
+        raise PrimaryTrainingError("primary Atlas catalog identity differs")
     if (
         not _valid_sha256(config["network_barrier_execution_evidence_sha256"])
         or config["network_barrier_execution_evidence_sha256"]
@@ -384,9 +417,25 @@ def admit_primary_training(
     if (
         not isinstance(config["map_name"], str)
         or not _SAFE_NAME.fullmatch(config["map_name"])
-        or config["map_name"] != one_run.args.map_name
     ):
-        raise PrimaryTrainingError("primary map name differs from the admitted bundle")
+        raise PrimaryTrainingError("primary map name is invalid")
+    catalog_map = one_run.atlas_catalog.by_name().get(config["map_name"])
+    if catalog_map is None:
+        raise PrimaryTrainingError("primary map is absent from the exact Atlas catalog")
+    installed_candidates = (
+        one_run.q2_root / "baseq2" / "maps" / f"{config['map_name']}.bsp",
+        one_run.q2_root / str(one_run.runtime_config["game"]) / "maps"
+        / f"{config['map_name']}.bsp",
+    )
+    installed = [
+        candidate.resolve() for candidate in installed_candidates
+        if candidate.is_file() and not candidate.is_symlink()
+        and _sha256(candidate) == _sha256(catalog_map.bsp)
+    ]
+    if not installed:
+        raise PrimaryTrainingError(
+            "primary catalog map BSP is not installed in the admitted q2 root"
+        )
 
     collector = config["collector"]
     if not isinstance(collector, Mapping) or set(collector) != {
@@ -525,16 +574,31 @@ def admit_primary_training(
     )
     mode = checkpoint["mode"]
     lineage = checkpoint["lineage_root_sha256"]
-    if mode not in ("fresh-step-zero", "same-lineage-resume") or not _valid_sha256(lineage):
+    if mode not in (
+        "fresh-step-zero", "same-lineage-resume", "same-lineage-stage-advance",
+    ) or not _valid_sha256(lineage):
         raise PrimaryTrainingError("primary checkpoint mode/lineage is invalid")
     season_path = None
     season_record = checkpoint["current_season_report"]
     if mode == "fresh-step-zero":
-        if season_record is not None or checkpoint_path != Path(one_run.args.checkpoint).resolve():
-            raise PrimaryTrainingError("fresh primary checkpoint differs from proof step zero")
-    else:
+        proof_checkpoint = _file(one_run.args.checkpoint, "B6 proof step-zero checkpoint")
+        if season_record is not None or _sha256(checkpoint_path) != _sha256(proof_checkpoint):
+            raise PrimaryTrainingError(
+                "fresh primary checkpoint bytes differ from proof step zero"
+            )
+    elif mode == "same-lineage-resume":
         season_path, _season_sha = _artifact_record(
             season_record, "current season resume report"
+        )
+    elif season_record is not None:
+        raise PrimaryTrainingError(
+            "stage advance rejects a new-stage current-season selector"
+        )
+    if mode == "same-lineage-stage-advance" and (
+        stage.stage_id == 1 or predecessor_gate is None
+    ):
+        raise PrimaryTrainingError(
+            "stage advance requires stage >1 and a passed predecessor gate"
         )
 
     lineage_document = cold_document.get("lineage")
@@ -583,7 +647,7 @@ def admit_primary_training(
                 raise PrimaryTrainingError(
                     f"fresh {name} must be empty before primary start"
                 )
-    else:
+    elif mode == "same-lineage-resume":
         report = _json(season_path, "current season resume report")
         try:
             reported_checkpoint = (
@@ -606,7 +670,8 @@ def admit_primary_training(
                 report,
                 stage,
                 runtime_manifest_sha256=one_run.runtime_manifest_sha256,
-                atlas_sha256=one_run.args.expected_atlas_sha256,
+                atlas_sha256=catalog_map.atlas_sha256,
+                atlas_catalog_sha256=one_run.atlas_catalog.atlas_catalog_sha256,
                 lineage_root_sha256=str(lineage),
             )
         except (TypeError, ValueError, RuntimeError) as error:
@@ -618,6 +683,54 @@ def admit_primary_training(
             "update_root", "season_report_root",
         ):
             regular_children(roots[name])
+    else:
+        current_report = expected_season
+        if current_report.is_symlink() or not current_report.is_file():
+            raise PrimaryTrainingError(
+                "stage advance lacks the completed predecessor season report"
+            )
+        artifacts = predecessor_gate.get("artifacts")
+        completed = (
+            artifacts.get("completed_stage")
+            if isinstance(artifacts, Mapping) else None
+        )
+        if (
+            not isinstance(completed, Mapping)
+            or set(completed) != {"path", "sha256"}
+            or Path(str(completed.get("path"))).resolve()
+            != current_report.resolve()
+            or completed.get("sha256") != _sha256(current_report)
+        ):
+            raise PrimaryTrainingError(
+                "stage advance completed-season binding differs"
+            )
+        report = _json(current_report, "completed predecessor season report")
+        counters = report.get("counters")
+        manifest = report.get("checkpoint_manifest")
+        if (
+            report.get("stage_id") != stage.stage_id - 1
+            or report.get("runtime_manifest_sha256")
+            != one_run.runtime_manifest_sha256
+            or report.get("atlas_catalog_sha256")
+            != one_run.atlas_catalog.atlas_catalog_sha256
+            or predecessor_gate.get("atlas_catalog_sha256")
+            != one_run.atlas_catalog.atlas_catalog_sha256
+            or report.get("lineage_root_sha256") != lineage
+            or not isinstance(counters, Mapping)
+            or any(
+                counters.get(name) != predecessor_gate.get(name)
+                for name in (
+                    "accepted_transitions", "policy_updates", "optimizer_steps",
+                )
+            )
+            or not isinstance(manifest, Mapping)
+            or manifest.get("training_step")
+            != predecessor_gate.get("accepted_transitions")
+            or report.get("checkpoint_sha256") != _sha256(checkpoint_path)
+        ):
+            raise PrimaryTrainingError(
+                "stage advance report/checkpoint/gate identity differs"
+            )
 
     return PrimaryTrainingAdmission(
         service=service,
@@ -686,7 +799,7 @@ def execute_primary(admission: PrimaryTrainingAdmission) -> dict[str, Any]:
     from harness.multires_contract import GuideDropoutConfig
     from harness.multires_metrics import MultiresSeasonMetrics
     from harness.multires_reward import CausalRewardConfig
-    from harness.rust_multires_provider import RustAtlasProviderFactory, RustMapArtifacts
+    from harness.rust_multires_provider import RustAtlasProviderFactory
     from train.multires_live import MultiresLiveTrainer
     from train.multires_one_run import (
         _load_extension,
@@ -729,6 +842,10 @@ def execute_primary(admission: PrimaryTrainingAdmission) -> dict[str, Any]:
         admission.checkpoint,
         one_run.runtime_evidence,
         expected_atlas_sha256=one_run.args.expected_atlas_sha256,
+        active_atlas_sha256=one_run.atlas_catalog.by_name()[
+            admission.config["map_name"]
+        ].atlas_sha256,
+        expected_atlas_catalog_sha256=one_run.atlas_catalog.atlas_catalog_sha256,
         device=device,
         optimizer_factory=optimizer_factory,
         reward_config=reward_config,
@@ -744,7 +861,7 @@ def execute_primary(admission: PrimaryTrainingAdmission) -> dict[str, Any]:
         ):
             raise PrimaryTrainingError("fresh primary checkpoint is not exact random step zero")
         progress = TrainingProgress(lineage_root_sha256=manifest.lineage_root_sha256)
-    else:
+    elif admission.checkpoint_mode == "same-lineage-resume":
         if manifest.training_step < 1 or admission.current_season_report is None:
             raise PrimaryTrainingError("resume checkpoint has no positive training progress")
         report = _json(admission.current_season_report, "current season resume report")
@@ -752,11 +869,31 @@ def execute_primary(admission: PrimaryTrainingAdmission) -> dict[str, Any]:
             report,
             admission.stage,
             runtime_manifest_sha256=runtime.runtime.runtime_manifest_sha256,
-            atlas_sha256=runtime.runtime.atlas_sha256,
+            atlas_sha256=runtime.active_atlas_sha256,
+            atlas_catalog_sha256=runtime.atlas_catalog_sha256,
             lineage_root_sha256=manifest.lineage_root_sha256,
         )
         if progress.accepted_transitions != manifest.training_step:
             raise PrimaryTrainingError("resume checkpoint/report training steps differ")
+    else:
+        gate = admission.predecessor_gate
+        if not isinstance(gate, Mapping):
+            raise PrimaryTrainingError("stage advance lacks predecessor gate")
+        progress = TrainingProgress(
+            accepted_transitions=int(gate["accepted_transitions"]),
+            policy_updates=int(gate["policy_updates"]),
+            optimizer_steps=int(gate["optimizer_steps"]),
+            next_policy_version=int(gate["policy_updates"]),
+            lineage_root_sha256=str(gate["lineage_root_sha256"]),
+        )
+        progress.validate()
+        if (
+            manifest.training_step != progress.accepted_transitions
+            or manifest.lineage_root_sha256 != progress.lineage_root_sha256
+        ):
+            raise PrimaryTrainingError(
+                "stage-advance checkpoint progress differs from predecessor gate"
+            )
 
     extension = _load_extension(one_run.rust_extension)
     count = int(config["client_count"])
@@ -765,14 +902,7 @@ def execute_primary(admission: PrimaryTrainingAdmission) -> dict[str, Any]:
     factories = [
         RustAtlasProviderFactory(
             extension_module=extension,
-            artifacts_by_map={
-                admission.config["map_name"]: RustMapArtifacts(
-                    bundle_manifest_path=one_run.bundle_manifest,
-                    uncompressed_atlas_path=one_run.atlas_bin,
-                    dyn_snapshot_path=one_run.dyn_snapshots[index],
-                    expected_atlas_sha256=one_run.args.expected_atlas_sha256,
-                )
-            },
+            artifacts_by_map=one_run.atlas_catalog.provider_artifacts_for_client(index),
             runtime_manifest_sha256=one_run.runtime_manifest_sha256,
             bound_client_id=f"{config['client_id_prefix']}-{index:02d}",
             rust_client_id=index,
@@ -786,6 +916,9 @@ def execute_primary(admission: PrimaryTrainingAdmission) -> dict[str, Any]:
     trainer_args.game_seed = int(admission.config["game_seed"])
     trainer_args.map_epoch = int(admission.config["map_epoch"])
     trainer_args.map_name = str(admission.config["map_name"])
+    trainer_args.expected_atlas_sha256 = one_run.atlas_catalog.by_name()[
+        trainer_args.map_name
+    ].atlas_sha256
     trainer_args.launch_id = "primary-trainer"
     trainer_one_run = dataclasses.replace(one_run, args=trainer_args)
     launch_cfg = _write_server_config(trainer_one_run)
@@ -858,7 +991,7 @@ def execute_primary(admission: PrimaryTrainingAdmission) -> dict[str, Any]:
         resources.batch = batch
         metrics = SanitizedCausalMetricsAccumulator(MultiresSeasonMetrics(
             season_id=f"stage-{admission.stage.stage_id:02d}",
-            atlas_sha256=runtime.runtime.atlas_sha256,
+            atlas_sha256=runtime.active_atlas_sha256,
             policy_start_version=progress.next_policy_version,
         ))
         trainer = MultiresLiveTrainer(
@@ -869,6 +1002,7 @@ def execute_primary(admission: PrimaryTrainingAdmission) -> dict[str, Any]:
             collector_config=admission.collector_config,
             deterministic_collection=True,
             transition_observer=metrics,
+            runtime_snapshot_observer=metrics.observe_runtime_snapshot,
         )
         initial_observations, initial_infos = batch.reset()
         for index, environment in enumerate(batch.envs):
@@ -904,6 +1038,7 @@ def execute_primary(admission: PrimaryTrainingAdmission) -> dict[str, Any]:
             causal_metrics=metrics,
             predecessor_gate=admission.predecessor_gate,
             progress=progress,
+            require_runtime_telemetry=True,
         )
         summary = run_admitted_core(
             core,
@@ -921,6 +1056,8 @@ def execute_primary(admission: PrimaryTrainingAdmission) -> dict[str, Any]:
             "optimizer_steps": summary.optimizer_steps,
             "next_policy_version": summary.next_policy_version,
             "lineage_root_sha256": summary.lineage_root_sha256,
+            "atlas_catalog_sha256": runtime.atlas_catalog_sha256,
+            "atlas_sha256": runtime.active_atlas_sha256,
             "current_season_report": str(summary.current_season_report),
             "tensorboard_root": str(admission.tensorboard_root),
             "terminal_evidence": str(terminal_path),
