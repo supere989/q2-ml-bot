@@ -42,6 +42,7 @@ type AppResult<T> = Result<T, String>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Arguments {
+    preflight_only: bool,
     repo_root: PathBuf,
     atlas: PathBuf,
     manifest: PathBuf,
@@ -321,7 +322,8 @@ fn usage() -> &'static str {
   --atlas RAW_ATLAS.bin --manifest CANONICAL_ATLAS_MANIFEST.json --bsp MAP.bsp \
   --expected-map-id MAP --expected-origin X,Y,Z \
   --expected-analyzer-authority SHA256 --expected-crate-commit GIT_COMMIT \
-  --map-epoch N --environment-steps N --output NEW_DIRECTORY [--samples N]\n\
+  --map-epoch N --environment-steps N --output NEW_DIRECTORY [--samples N] \
+  [--preflight-only true]\n\
 The binary must be compiled with Q2_LATTICE_CRATE_COMMIT set to the same full Git commit."
 }
 
@@ -338,6 +340,7 @@ fn parse_arguments(arguments: &[OsString]) -> AppResult<Arguments> {
     let mut map_epoch = None;
     let mut environment_steps = None;
     let mut samples = DEFAULT_SAMPLES;
+    let mut preflight_only = false;
     let mut index = 1;
     while index < arguments.len() {
         let flag = arguments[index]
@@ -394,6 +397,16 @@ fn parse_arguments(arguments: &[OsString]) -> AppResult<Arguments> {
                 samples = usize::try_from(parse_u64(&value, flag)?)
                     .map_err(|_| "--samples does not fit usize".to_owned())?;
             }
+            "--preflight-only" => {
+                let parsed = utf8_value(&value, flag)?;
+                if parsed != "true" {
+                    return Err("--preflight-only accepts only the literal true".to_owned());
+                }
+                if preflight_only {
+                    return Err("duplicate --preflight-only".to_owned());
+                }
+                preflight_only = true;
+            }
             _ => return Err(format!("unknown flag {flag}\n{}", usage())),
         }
         index += 2;
@@ -402,6 +415,7 @@ fn parse_arguments(arguments: &[OsString]) -> AppResult<Arguments> {
         return Err(format!("--samples must be at least {MIN_SAMPLES}"));
     }
     Ok(Arguments {
+        preflight_only,
         repo_root: required(repo_root, "--repo-root")?,
         atlas: required(atlas, "--atlas")?,
         manifest: required(manifest, "--manifest")?,
@@ -1354,6 +1368,10 @@ fn main() {
             std::process::exit(64);
         }
     };
+    if arguments.preflight_only {
+        println!("{{\"passed\":true,\"schema\":\"q2-b2-dyn-argv-preflight-v1\"}}");
+        return;
+    }
     match execute(arguments) {
         Ok((path, true)) => println!("{}", path.display()),
         Ok((path, false)) => {
@@ -1416,6 +1434,7 @@ mod tests {
     #[test]
     fn cli_requires_explicit_authority_origin_epoch_and_minimum_samples() {
         let parsed = parse_arguments(&complete_arguments()).unwrap();
+        assert!(!parsed.preflight_only);
         assert_eq!(parsed.expected_origin, [-256, 0, 512]);
         assert_eq!(parsed.map_epoch, 17);
         assert_eq!(parsed.samples, MIN_SAMPLES);
@@ -1427,6 +1446,27 @@ mod tests {
             .unwrap();
         too_few[ordinal + 1] = "1999".into();
         assert!(parse_arguments(&too_few).unwrap_err().contains("at least"));
+    }
+
+    #[test]
+    fn cli_preflight_parses_exact_negative_origin_without_reading_inputs() {
+        let mut arguments = complete_arguments();
+        arguments.extend(["--preflight-only".into(), "true".into()]);
+        let parsed = parse_arguments(&arguments).unwrap();
+        assert!(parsed.preflight_only);
+        assert_eq!(parsed.expected_origin, [-256, 0, 512]);
+
+        let ordinal = arguments
+            .iter()
+            .position(|value| value == "--expected-origin")
+            .unwrap();
+        arguments[ordinal] = "--expected-origin=-256,0,512".into();
+        arguments.remove(ordinal + 1);
+        assert!(
+            parse_arguments(&arguments)
+                .unwrap_err()
+                .contains("unknown flag --expected-origin=-256,0,512")
+        );
     }
 
     #[test]

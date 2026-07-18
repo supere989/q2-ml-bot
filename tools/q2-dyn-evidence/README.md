@@ -30,6 +30,19 @@ default nested `tools/q2-dyn-evidence/target` path is not admissible.
 Run on `DESKTOP-RTX2080` WSL with paths from the admitted current-authority
 campaign (the output directory must not already exist):
 
+Before final-cohort source generation, run
+`tools/preflight_b2_dyn_invocation.py` with the exact future producer values.
+It appends `--preflight-only true` to the same argv vector, requires the helper
+to return canonical schema `q2-b2-dyn-argv-preflight-v1`, proves that the
+negative origin is a separate value token, and refuses if either the future
+producer output or the exclusive preflight report already exists. The helper's
+preflight mode parses every producer argument and returns before reading the
+repository, Atlas, manifest, or BSP and before creating staging or output.
+The retained report binds the clean repository commit/tree, executable bytes,
+exact producer argv, and the absent output path. A failed final-lane CLI
+invocation is terminal; the preflight is the only authorized place to catch
+argv construction errors without consuming the cohort.
+
 ```sh
 tools/q2-dyn-evidence/target/release/q2-dyn-evidence \
   --repo-root "$PWD" \
