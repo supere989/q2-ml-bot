@@ -136,6 +136,13 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "71446600..71446603",
         "B2-GENERATED-COHORT-71446-FAILURE.json",
         "Cohort 71446 is permanently retired",
+        "b2g26_final_71447",
+        "B2-GENERATED-COHORT-71447-DECLARATION.json",
+        "76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa",
+        "71447000..71447003",
+        "71447600..71447603",
+        "b2q26_74628f1_71804000",
+        "48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73",
         "4b26c670ed54585787505cf7dfbb35bdc1830fdfbd42585a16d0484622ea306f",
         "oracle batch timeout must be finite and in (0, 60]",
         "not a 3,600-second runtime timeout",
@@ -174,28 +181,30 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert "b2g26_final_71446" in text
     assert "Retired 71446 final attempt" in text
     assert "Cohort 71446 is permanently retired" in text
+    assert "b2g26_final_71447" in text
     assert "Exactly one immutable/no-retry final producer attempt was authorized" in text
     assert "future-only" not in text
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
 
-def test_current_gate_contract_has_no_active_final_and_documents_activation() -> None:
+def test_current_gate_contract_pins_active_71447_authority() -> None:
     text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
         encoding="utf-8"
     )
     for required in (
-        "There is no active eligible final declaration",
-        "ACTIVE_FINAL_AUTHORITY = None",
-        "separate clean commit",
-        "new immutable declaration",
-        "declaration SHA-256",
-        "No successor has been declared or inferred yet",
+        "b2g26_final_71447",
+        "B2-GENERATED-COHORT-71447-DECLARATION.json",
+        "76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa",
+        "b2q26_74628f1_71804000",
+        "48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73",
+        "one no-retry final producer lifecycle",
     ):
         assert required in text
     for stale_claim in (
         "Only the exact fresh 71446 declaration is eligible",
         "The active 71446 prerequisite",
         "current alias names fresh cohort 71446 and can execute",
+        "ACTIVE_FINAL_AUTHORITY = None",
     ):
         assert stale_claim not in text
 

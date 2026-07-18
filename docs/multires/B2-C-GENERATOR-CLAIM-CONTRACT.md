@@ -1029,11 +1029,16 @@ check.
 
 ## Offline workflow
 
-There is no active final `COHORT_ID`. The current alias is the byte-identical
-historical 71446 declaration and is rejected by the retirement registry.
-Commands in this section are templates only until root commits a separately
-qualified successor declaration and updates the alias. Commands must never
-name retired cohorts 71426 through 71446. No retired or qualification
+The active final `COHORT_ID` is `b2g26_final_71447`. The current alias is
+byte-identical to immutable
+`B2-GENERATED-COHORT-71447-DECLARATION.json`, SHA-256
+`76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa`,
+and declares seed blocks 71447000..71447003 through 71447600..71447603.
+This authority was committed only after green non-admissible qualification
+`b2q26_74628f1_71804000`, report SHA-256
+`48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73`,
+passed all seven stages 28/28 and all six infrastructure checks. Commands must
+never name retired cohorts 71426 through 71446. No retired or qualification
 population, report, Dyn evidence, compiled byte, or passing subset may be
 copied into a successor root.
 

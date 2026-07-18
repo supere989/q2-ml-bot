@@ -2,8 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:q2-ml:q2-multires-b2-gate-v1",
   "title": "Fail-closed multi-resolution Atlas Batch B2 gate",
-  "$comment": "No final cohort is active. The empty-schema negation intentionally makes every green gate invalid until a committed successor activation replaces this sentinel and pins its authority.",
-  "not": {},
+  "$comment": "The only active final cohort is the explicitly committed 71447 successor authority.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -98,13 +97,10 @@
       ],
       "properties": {
         "cohort_id": {
-          "type": "string",
-          "pattern": "^b2g[0-9]+_final_[0-9]+$",
-          "not": {"const": "b2g26_final_71446"},
-          "$comment": "Structural shape only while no final cohort is active; tools/assemble_b2_gate.py requires an explicit committed authority."
+          "const": "b2g26_final_71447"
         },
         "declaration": {"$ref": "#/$defs/file"},
-        "declaration_sha256": {"$ref": "#/$defs/sha256"},
+        "declaration_sha256": {"const": "76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa"},
         "source": {"$ref": "#/$defs/source_stage"},
         "compiled": {"$ref": "#/$defs/compiled_stage"},
         "compiled_cm_preflight": {"$ref": "#/$defs/compiled_cm_preflight_stage"},

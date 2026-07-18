@@ -615,23 +615,23 @@ reuse of any retired cohort byte.
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. This template is intentionally non-executable now:
-`tools/assemble_b2_gate.py` has `ACTIVE_FINAL_AUTHORITY = None`, the current
-alias still names retired 71446 bytes, and both the named declaration and alias
-fail before evidence is read. No evidence path substitution can activate it.
+clean-tree authority. `ACTIVE_FINAL_AUTHORITY` explicitly pins
+`b2g26_final_71447`, immutable declaration SHA-256
+`76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa`,
+and the exact eleven-path declaration-only successor delta. The current alias
+is byte-identical to
+`B2-GENERATED-COHORT-71447-DECLARATION.json`, which declares seed blocks
+71447000..71447003 through 71447600..71447603. The gate schema independently
+pins the same cohort ID and digest.
 
-A later successor activation requires one fresh implementation leaf, a fresh
-B1 seal, and a fresh green but non-admissible qualification. From that exact
-qualified parent, a separate clean commit must add a new immutable declaration
-without reusing any retired byte, update the current-path alias byte-for-byte,
-construct `ACTIVE_FINAL_AUTHORITY` with the new cohort ID, declaration SHA-256,
-immutable declaration path, and exact declaration-only qualification delta,
-and replace the gate schema's no-active `"not": {}` sentinel with a cohort pin
-plus tests for that same authority. Activation and
-the new declaration must be reviewed and committed together before the sole
-source invocation. No successor has been declared or inferred yet. Only after
-those steps and every subsequent producer stage passes may this command shape
-be populated with the successor's fresh evidence paths.
+The qualified parent is commit `74628f1bc04c7012903b30d44afa61566f0ff38d`.
+Qualification `b2q26_74628f1_71804000` passed all seven stages 28/28 and six
+infrastructure checks; its green non-admissible report SHA-256 is
+`48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73`.
+Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. This
+activation authorizes one no-retry final producer lifecycle; it does not admit
+qualification artifacts, passing subsets, retired bytes, deployment, or
+training.
 
 ```sh
 python tools/assemble_b2_gate.py \

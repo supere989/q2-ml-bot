@@ -130,6 +130,19 @@ RETIRED_71446_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
+ACTIVE_71447_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+    "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
+    "docs/multires/B2-GATE-ASSEMBLY.md",
+    "docs/multires/B2-GENERATED-COHORT-71447-DECLARATION.json",
+    "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
+    "schemas/q2-multires-b2-gate-v1.schema.json",
+    "tests/test_b2_gate.py",
+    "tests/test_b2_operational_docs.py",
+    "tests/test_generator_claim_campaign.py",
+    "tests/test_generator_cohort.py",
+    "tests/test_retired_cohort_registry.py",
+    "tools/assemble_b2_gate.py",
+})
 
 
 class B2GateError(ValueError):
@@ -144,10 +157,19 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Fail closed after terminal retirement of 71446. A future activation commit
-# must construct this authority from a fresh post-qualification immutable
-# declaration; no declaration is inferred from the current-path alias.
-ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
+# Explicit post-qualification activation. The current-path alias is never used
+# to infer this authority, and the qualification successor delta must match the
+# fixed declaration-only path set exactly.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
+    cohort_id="b2g26_final_71447",
+    declaration_sha256=(
+        "76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa"
+    ),
+    immutable_declaration_path=(
+        "docs/multires/B2-GENERATED-COHORT-71447-DECLARATION.json"
+    ),
+    qualification_successor_paths=ACTIVE_71447_QUALIFICATION_SUCCESSOR_PATHS,
+)
 
 
 def _require_active_final_authority() -> ActiveFinalAuthority:
