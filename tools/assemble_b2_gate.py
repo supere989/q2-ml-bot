@@ -200,6 +200,19 @@ RETIRED_71451_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
+ACTIVE_71452_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+    "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
+    "docs/multires/B2-GATE-ASSEMBLY.md",
+    "docs/multires/B2-GENERATED-COHORT-71452-DECLARATION.json",
+    "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
+    "schemas/q2-multires-b2-gate-v1.schema.json",
+    "tests/test_b2_gate.py",
+    "tests/test_b2_operational_docs.py",
+    "tests/test_generator_claim_campaign.py",
+    "tests/test_generator_cohort.py",
+    "tests/test_retired_cohort_registry.py",
+    "tools/assemble_b2_gate.py",
+})
 
 
 class B2GateError(ValueError):
@@ -214,12 +227,20 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Cohort 71451 consumed its source authorization and then failed its sole Dyn
-# origin fence before staging: the pre-source v1 argv report guessed an origin
-# that could only be derived from promoted Atlas bytes. A separately committed
-# post-correction, post-qualification successor is required before this may
-# become non-None again; the current alias remains historical only.
-ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
+# Explicit post-qualification activation. Cohort 71451 remains permanently
+# retired; this authority pins only the fresh 71452 declaration and the exact
+# declaration/gate/schema/direct-test successor delta from qualified commit
+# 707331d0d87249074a591326c25e3f9688ba8276.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
+    cohort_id="b2g26_final_71452",
+    declaration_sha256=(
+        "eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf"
+    ),
+    immutable_declaration_path=(
+        "docs/multires/B2-GENERATED-COHORT-71452-DECLARATION.json"
+    ),
+    qualification_successor_paths=ACTIVE_71452_QUALIFICATION_SUCCESSOR_PATHS,
+)
 
 
 def _require_active_final_authority() -> ActiveFinalAuthority:

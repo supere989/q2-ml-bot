@@ -572,8 +572,9 @@ deployment, and training did not run.
 SHA-256
 `83d11b7bafd6a669c67fd8ae4cf7b8e990d9e30bf0a448fb3424b604d34551d2`,
 with phase `dyn-artifact-origin-fence` and status
-`permanently-failed-dyn-expected-origin-mismatch`. `ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort. No 71451 byte may be retried,
-resumed, reused, copied forward, salvaged, substituted, or admitted.
+`permanently-failed-dyn-expected-origin-mismatch`. The authority was cleared to
+`ACTIVE_FINAL_AUTHORITY = None` at terminal capture. No 71451 byte may be
+retried, resumed, reused, copied forward, salvaged, substituted, or admitted.
 
 The successor prerequisite is a two-phase, fail-closed Dyn authority. Phase A
 runs pre-source and publishes canonical schema
@@ -591,6 +592,30 @@ repeats the Rust no-write artifact verification, and executes the retained
 argv list directly without a shell. A completely fresh
 disposable qualification and separately committed declaration are mandatory
 before a successor can become active.
+
+### Active 71452 final cohort
+
+The two-phase correction was committed as
+`707331d0d87249074a591326c25e3f9688ba8276`, tree
+`02293e6c9776ad7c50358b7cbaf45544a280894d`. Fresh disposable qualification
+`b2q26_707331d_71809000` then passed 27/28 maps end to end (the contract
+requires at least 20), all 28 source, compile, compiled-CM, materialization,
+and claims rows, and all six infrastructure checks. Its sole sparse row,
+`b2q26_707331d_71809000_arena_lanes_71809602`, failed closed because
+`route:0002:segment:0004` had no evidenced Atlas route; no qualification map
+or artifact is admissible in the final lane. The canonical green,
+non-admissible report SHA-256 is
+`6563e3efe716997867a84325f19af8b562700b3a2e27a416daf3e53d6d32eb38`.
+
+The separately committed immutable declaration
+`B2-GENERATED-COHORT-71452-DECLARATION.json` and current alias are
+byte-identical with SHA-256
+`eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf`.
+They name `b2g26_final_71452` and fresh seed blocks
+71452000..71452003 through 71452600..71452603. `ACTIVE_FINAL_AUTHORITY`
+explicitly pins that cohort, digest, immutable path, and the exact eleven-path
+declaration/gate/schema/direct-test successor delta. Qualification 71452 maps,
+retired 71451 bytes, and passing subsets remain forbidden inputs.
 
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
@@ -696,9 +721,9 @@ syntax report must never be required to identify the execution runtime.
 
 The assembler rejects declarations for retired cohorts 71426 through 71451
 before reading campaign evidence. The immutable 71447, 71448, 71449, 71450,
-and 71451 declarations are historical only. No final cohort is active; the
-historical schema fields cannot supply authority while
-`ACTIVE_FINAL_AUTHORITY = None`.
+and 71451 declarations are historical only. The active authority and schema
+pin only 71452 and the byte-identical alias/named declaration; neither can
+substitute for qualification replay or the exact successor-delta check.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -915,19 +940,19 @@ reuse of any retired cohort byte.
 
 ## Assembly template
 
-This template is disabled while `ACTIVE_FINAL_AUTHORITY = None`. Historical
-71451 field pins remain in the schema only until a freshly qualified successor
-updates them; neither the current alias nor the schema can infer executable
-authority. When reactivated, all values are exact paths, `OUT` must not exist,
-and both two-phase Dyn authority reports are mandatory.
+This template is active only for the exact 71452 authority. All values are
+exact paths, `OUT` must not exist, and both two-phase Dyn authority reports are
+mandatory.
 
-The qualified parent is commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`.
-Qualification `b2q26_a4500d2_71808000` passed all seven stages 28/28 and six
-infrastructure checks; its green non-admissible report SHA-256 is
-`a0b411d394e8c8a5fcea6e185cf364abf82578c262eece6e8cd892144c3b204c`.
-Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. That
-historical activation is consumed and cannot admit qualification artifacts,
-passing subsets, retired bytes, deployment, or training.
+The qualified parent is commit `707331d0d87249074a591326c25e3f9688ba8276`,
+tree `02293e6c9776ad7c50358b7cbaf45544a280894d`. Qualification
+`b2q26_707331d_71809000` passed 27/28 end to end and six infrastructure checks;
+its green non-admissible report SHA-256 is
+`6563e3efe716997867a84325f19af8b562700b3a2e27a416daf3e53d6d32eb38`.
+Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. It
+cannot admit qualification artifacts, passing subsets, retired bytes,
+deployment, or training; it authorizes only the exact separately committed
+71452 successor relation.
 
 ```sh
 python tools/assemble_b2_gate.py \

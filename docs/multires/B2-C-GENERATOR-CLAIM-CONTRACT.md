@@ -1233,9 +1233,9 @@ did not run.
 `83d11b7bafd6a669c67fd8ae4cf7b8e990d9e30bf0a448fb3424b604d34551d2`,
 is canonical terminal authority with phase `dyn-artifact-origin-fence` and
 status `permanently-failed-dyn-expected-origin-mismatch`.
-`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort.
-No 71451 byte may be retried, resumed, reused, copied forward, salvaged,
-substituted, or admitted.
+The authority was cleared to `ACTIVE_FINAL_AUTHORITY = None` at terminal
+capture. No 71451 byte may be retried, resumed, reused, copied forward,
+salvaged, substituted, or admitted.
 
 A successor must implement two-phase Dyn authority. Pre-source Phase A schema
 `q2-b2-dyn-argv-shape-preflight-v2` binds all knowable argv, helper and clean
@@ -1249,6 +1249,25 @@ publishes `q2-b2-dyn-origin-binding-v1` with the complete argv. The sole
 launcher requires both reports, rehashes every bound input, and repeats the
 Rust no-write artifact verification. A fresh
 qualification and separately committed successor declaration remain mandatory.
+
+Fresh correction commit `707331d0d87249074a591326c25e3f9688ba8276`, tree
+`02293e6c9776ad7c50358b7cbaf45544a280894d`, passed disposable qualification
+`b2q26_707331d_71809000` with 27/28 end-to-end maps and all six infrastructure
+checks. The required threshold is 20; the sole sparse map failed closed on an
+unevidenced Atlas route (`route:0002:segment:0004`) and supplies no final
+artifact or passing subset. The
+canonical green, non-admissible report SHA-256 is
+`6563e3efe716997867a84325f19af8b562700b3a2e27a416daf3e53d6d32eb38`.
+
+The separately committed active declaration is now
+`b2g26_final_71452`. Immutable
+`B2-GENERATED-COHORT-71452-DECLARATION.json` and the current alias are
+byte-identical with SHA-256
+`eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf`.
+Its 28 wholly new members use seed blocks 71452000..71452003 through
+71452600..71452603. `ACTIVE_FINAL_AUTHORITY` pins only this identity and the
+exact eleven-path activation delta; qualification maps and every 71451 byte
+remain forbidden final inputs.
 
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
@@ -1346,14 +1365,14 @@ check.
 
 ## Offline workflow
 
-`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort.
-The command templates in this section are disabled until a separately
-committed, freshly qualified successor activation updates every authority pin.
+`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71452`. The command
+templates in this section apply only to that separately committed, freshly
+qualified authority and its fresh absent outputs.
 Cohorts 71449, 71450, and 71451 remain terminally retired under their canonical
 failure records. Commands must never name retired cohorts 71426 through 71451. No retired or
 qualification population, report, Dyn evidence, compiled byte, partial stock
-artifact, or passing subset may be copied into a future cohort root. For the
-future cohort, the first source invocation consumes its sole authorization.
+artifact, or passing subset may be copied into the 71452 cohort root. The first
+71452 source invocation consumes its sole authorization.
 
 The declaration-aware compiler remains the required final-cohort shape.
 Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer

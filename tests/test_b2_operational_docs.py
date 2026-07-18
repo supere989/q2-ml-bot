@@ -196,7 +196,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
 
-def test_current_gate_contract_retires_71451_and_requires_two_phase_successor() -> None:
+def test_current_gate_contract_retires_71451_and_activates_two_phase_71452() -> None:
     text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
         encoding="utf-8"
     )
@@ -283,13 +283,25 @@ def test_current_gate_contract_retires_71451_and_requires_two_phase_successor() 
         "q2-b2-dyn-argv-shape-preflight-v2",
         "q2-b2-dyn-origin-binding-v1",
         "--verify-artifacts-only true",
-        "`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort",
+        "The authority was cleared to",
         "exact eleven-path declaration/gate/schema/direct-test successor",
         "Lithium hook oracle",
         "byte identity of the CM, Pmove, and hook oracles",
         "separately committed immutable declaration",
         "fresh green disposable qualification",
         "The assembler rejects declarations for retired cohorts 71426 through 71451",
+        "Active 71452 final cohort",
+        "b2g26_final_71452",
+        "B2-GENERATED-COHORT-71452-DECLARATION.json",
+        "eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf",
+        "71452000..71452003",
+        "71452600..71452603",
+        "b2q26_707331d_71809000",
+        "6563e3efe716997867a84325f19af8b562700b3a2e27a416daf3e53d6d32eb38",
+        "707331d0d87249074a591326c25e3f9688ba8276",
+        "02293e6c9776ad7c50358b7cbaf45544a280894d",
+        "27/28",
+        "route:0002:segment:0004",
     ):
         assert required in text
     for stale_claim in (
@@ -311,6 +323,8 @@ def test_current_gate_contract_retires_71451_and_requires_two_phase_successor() 
         "Active 71451 final cohort",
         "`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71451`",
         "The active authority and schema both pin 71451",
+        "there is currently no active final cohort",
+        "No final cohort is active",
     ):
         assert stale_claim not in text
 
