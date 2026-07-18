@@ -77,6 +77,9 @@ FAILURE_71448 = (
 FAILURE_71449 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71449-FAILURE.json"
 )
+FAILURE_71450 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71450-FAILURE.json"
+)
 RETIRED_DECLARATIONS = (
     NAMED_71438,
     NAMED_71439,
@@ -90,6 +93,7 @@ RETIRED_DECLARATIONS = (
     NAMED_71447,
     NAMED_71448,
     NAMED_71449,
+    NAMED_71450,
 )
 
 
@@ -341,16 +345,80 @@ def test_named_71449_is_retired() -> None:
         )
 
 
-def test_current_alias_and_named_71450_are_active_and_unretired() -> None:
-    current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
+@pytest.mark.parametrize("declaration_path", [CURRENT_ALIAS, NAMED_71450])
+def test_current_alias_and_named_71450_are_retired(
+    declaration_path: Path,
+) -> None:
+    current, current_sha256 = cohort.load_declaration(declaration_path)
 
     assert current["cohort_id"] == "b2g26_final_71450"
     assert CURRENT_ALIAS.read_bytes() == NAMED_71450.read_bytes()
     assert current_sha256 == (
         "d02c7c0737cf38be314394dd30e0293dcdf0b80c004efc1e0d072abc72f437c4"
     )
-    registry.require_unretired_declaration(
-        CURRENT_ALIAS, current, current_sha256
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71450.*permanently retired"
+    ):
+        registry.require_unretired_declaration(
+            declaration_path, current, current_sha256
+        )
+
+
+def test_71450_terminal_failure_authority_is_canonical_and_exact() -> None:
+    payload = FAILURE_71450.read_bytes()
+    authority = json.loads(payload)
+
+    assert payload == cohort.canonical_bytes(authority)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "3405dc2e648450b85beb56bc04c60dddd03b12a20d42e70a76cadbc5897d505b"
+    )
+    assert authority["schema"] == registry.FAILURE_SCHEMA
+    assert authority["status"] == (
+        "permanently-failed-stock-objective-admission-pre-source"
+    )
+    assert authority["cohort_id"] == "b2g26_final_71450"
+    assert authority["declaration"]["sha256"] == (
+        "d02c7c0737cf38be314394dd30e0293dcdf0b80c004efc1e0d072abc72f437c4"
+    )
+    assert authority["failure"]["phase"] == (
+        "stock-objective-l1-admission-before-source"
+    )
+    stock = authority["evidence"]["stock_objective_admission"]
+    assert stock["stock_root"] == (
+        "/home/raymond/q2-multires-isolated/B2/stock-9f09b5e"
+    )
+    assert sorted(stock["completed_stock_summaries"]) == [
+        f"q2dm{number}" for number in range(1, 8)
+    ]
+    q2dm8 = stock["q2dm8"]
+    assert q2dm8["passed"] is False
+    assert q2dm8["deterministic"] is True
+    assert q2dm8["bsp_sha256"] == (
+        "c4baf022c69334bb20c42bc113f163c16c44e443df59ccb0d66e26bc0e3f6d9b"
+    )
+    assert q2dm8["error"] == (
+        "AtlasAnalysisError: objective entity 45 is 228.090 units from admitted L1"
+    )
+    assert q2dm8["objectives_published"] is False
+    assert q2dm8["atlas_manifest_published"] is False
+    assert q2dm8["analysis_manifest_published"] is False
+    assert q2dm8["build_summary_published"] is False
+    contract = authority["failure"]["publication_contract"]
+    assert contract["source_stage_published"] is False
+    assert contract["compiled_stage_published"] is False
+    assert contract["materialized_stage_published"] is False
+    assert contract["claims_stage_published"] is False
+    assert contract["analysis_stage_published"] is False
+    assert contract["dyn_run"] is False
+    assert contract["gate_run"] is False
+    assert contract["training_run"] is False
+    assert authority["evidence"]["source_authorization"]["consumed"] is False
+    assert authority["evidence"]["source_authorization"]["marker_exists"] is False
+    assert authority["evidence"]["final_workspace"]["exists"] is False
+    assert authority["admission"]["retry_under_same_declaration_allowed"] is False
+    assert authority["admission"]["source_stage_published"] is False
+    assert authority["admission"]["replacement_declaration_status"] == (
+        "pending-analyzer-fix-and-fresh-qualification"
     )
 
 

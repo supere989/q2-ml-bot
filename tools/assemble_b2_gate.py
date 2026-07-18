@@ -86,6 +86,7 @@ RETIRED_COHORT_71446 = "b2g26_final_71446"
 RETIRED_COHORT_71447 = "b2g26_final_71447"
 RETIRED_COHORT_71448 = "b2g26_final_71448"
 RETIRED_COHORT_71449 = "b2g26_final_71449"
+RETIRED_COHORT_71450 = "b2g26_final_71450"
 EXPECTED_DESIGN_SHA256 = (
     "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
 )
@@ -172,7 +173,7 @@ RETIRED_71449_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
-ACTIVE_71450_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+RETIRED_71450_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
     "docs/multires/B2-GATE-ASSEMBLY.md",
     "docs/multires/B2-GENERATED-COHORT-71450-DECLARATION.json",
@@ -199,19 +200,13 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Explicit post-qualification activation. The current alias is never used to
-# infer this authority, and the qualification-successor delta must match this
-# fixed declaration-only path set exactly.
-ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
-    cohort_id="b2g26_final_71450",
-    declaration_sha256=(
-        "d02c7c0737cf38be314394dd30e0293dcdf0b80c004efc1e0d072abc72f437c4"
-    ),
-    immutable_declaration_path=(
-        "docs/multires/B2-GENERATED-COHORT-71450-DECLARATION.json"
-    ),
-    qualification_successor_paths=ACTIVE_71450_QUALIFICATION_SUCCESSOR_PATHS,
-)
+# Cohort 71450 failed deterministically before its first final-campaign
+# source invocation: the current authored objective policy makes mandatory
+# canonical stock map q2dm8 unanalyzable at L1 admission. A separately
+# committed post-qualification successor is required before this may become
+# non-None again; the current alias is never sufficient to infer executable
+# authority.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
 
 
 def _require_active_final_authority() -> ActiveFinalAuthority:

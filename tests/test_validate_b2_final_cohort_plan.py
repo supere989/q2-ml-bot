@@ -528,15 +528,15 @@ def test_plan_requires_exact_active_declaration_path_and_identity(
 def test_non_retired_final_cohort_id_is_not_hard_refused(tmp_path: Path) -> None:
     """An unused cohort ID is not permanent tool semantics."""
 
-    args = _fixture_args(tmp_path, tag="id-71450")
+    args = _fixture_args(tmp_path, tag="id-71451")
     payload = json.loads(args.declaration.read_text())
     # Keep fresh maps/seeds; only rename the cohort identity to an unused final ID.
-    # This is not a declaration of cohort 71450.
-    payload["cohort_id"] = "b2g26_final_71450"
+    # This is not a declaration of cohort 71451.
+    payload["cohort_id"] = "b2g26_final_71451"
     args.declaration.write_bytes(canonical_bytes(payload))
     _activate_fixture_declaration(args.declaration)
     plan = build_plan(args)
-    assert plan["cohort_id"] == "b2g26_final_71450"
+    assert plan["cohort_id"] == "b2g26_final_71451"
     evidence = run_plan(plan, dry_run=True)
     assert evidence["passed"] is True
     assert evidence["authorization"]["source_authorization_consumed"] is False
