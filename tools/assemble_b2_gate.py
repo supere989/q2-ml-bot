@@ -83,6 +83,7 @@ from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
 
 GATE_SCHEMA = "q2-multires-b2-gate-v1"
 RETIRED_COHORT_71446 = "b2g26_final_71446"
+RETIRED_COHORT_71447 = "b2g26_final_71447"
 EXPECTED_DESIGN_SHA256 = (
     "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
 )
@@ -130,7 +131,7 @@ RETIRED_71446_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
-ACTIVE_71447_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+RETIRED_71447_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
     "docs/multires/B2-GATE-ASSEMBLY.md",
     "docs/multires/B2-GENERATED-COHORT-71447-DECLARATION.json",
@@ -157,19 +158,10 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Explicit post-qualification activation. The current-path alias is never used
-# to infer this authority, and the qualification successor delta must match the
-# fixed declaration-only path set exactly.
-ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
-    cohort_id="b2g26_final_71447",
-    declaration_sha256=(
-        "76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa"
-    ),
-    immutable_declaration_path=(
-        "docs/multires/B2-GENERATED-COHORT-71447-DECLARATION.json"
-    ),
-    qualification_successor_paths=ACTIVE_71447_QUALIFICATION_SUCCESSOR_PATHS,
-)
+# Cohort 71447 consumed its sole final lifecycle and failed at the atomic test
+# publisher. A later activation must be a separately committed, qualified,
+# immutable successor; the current alias cannot infer authority.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
 
 
 def _require_active_final_authority() -> ActiveFinalAuthority:
@@ -2623,34 +2615,75 @@ def _validate_dyn_evidence(
 
 
 def _validate_test_report(path: Path, implementation: Mapping[str, Any]) -> dict[str, Any]:
-    from tools.run_b2_test_suite import B2TestSuiteError, _parse_counts
+    from tools.run_b2_test_suite import (
+        B2TestSuiteError,
+        CARGO_TARGET_ENV,
+        REPORT_SCHEMA,
+        _parse_counts,
+        _path_is_within,
+    )
 
     _require(path.name == "b2-test-report.json", "B2 test report filename differs")
     report = _mapping(_load_json(path), "B2 test report")
-    _exact_keys(report, {"schema", "implementation", "runs", "failures", "passed"}, "B2 test report")
-    _require(report["schema"] == "q2-b2-test-report-v1", "B2 test report schema differs")
+    _exact_keys(
+        report,
+        {
+            "schema", "implementation", "execution_environment", "runs",
+            "failures", "passed",
+        },
+        "B2 test report",
+    )
+    _require(report["schema"] == REPORT_SCHEMA, "B2 test report schema differs")
     _require(report["implementation"] == implementation, "B2 test report implementation is stale")
+    environment = _mapping(
+        report["execution_environment"], "B2 test execution environment"
+    )
+    _exact_keys(
+        environment, {CARGO_TARGET_ENV}, "B2 test execution environment"
+    )
+    cargo_target = Path(environment[CARGO_TARGET_ENV])
+    expected_cargo_target = (
+        path.resolve().parent.parent
+        / f".{path.resolve().parent.name}.cargo-target"
+    ).resolve()
+    _require(cargo_target.is_absolute(), "B2 Cargo target path must be absolute")
+    _require(
+        cargo_target == expected_cargo_target,
+        "B2 Cargo target path differs from the exact evidence sibling",
+    )
+    _require(
+        not _path_is_within(cargo_target, ROOT),
+        "B2 Cargo target path is inside the implementation repository",
+    )
+    _require(
+        not cargo_target.exists() and not cargo_target.is_symlink(),
+        "B2 Cargo target path still exists after test publication",
+    )
     runs = _list(report["runs"], "B2 test runs")
+    cargo = [
+        "cargo", "--config",
+        "build.target-dir=" + json.dumps(str(cargo_target)),
+    ]
     expected_commands: list[tuple[str, list[str] | None]] = [
         ("python-syntax-floor", None),
         ("python", None),
-        ("rust-fmt", ["cargo", "fmt", "--all", "--", "--check"]),
+        ("rust-fmt", [*cargo, "fmt", "--all", "--", "--check"]),
         (
             "rust-clippy",
-            ["cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"],
+            [*cargo, "clippy", "--locked", "--all-targets", "--", "-D", "warnings"],
         ),
-        ("rust-tests", ["cargo", "test", "--locked", "--all-targets"]),
+        ("rust-tests", [*cargo, "test", "--locked", "--all-targets"]),
         (
             "dyn-fmt",
             [
-                "cargo", "fmt", "--manifest-path",
+                *cargo, "fmt", "--manifest-path",
                 "tools/q2-dyn-evidence/Cargo.toml", "--", "--check",
             ],
         ),
         (
             "dyn-clippy",
             [
-                "cargo", "clippy", "--locked", "--manifest-path",
+                *cargo, "clippy", "--locked", "--manifest-path",
                 "tools/q2-dyn-evidence/Cargo.toml", "--all-targets", "--", "-D",
                 "warnings",
             ],
@@ -2658,7 +2691,7 @@ def _validate_test_report(path: Path, implementation: Mapping[str, Any]) -> dict
         (
             "dyn-tests",
             [
-                "cargo", "test", "--locked", "--manifest-path",
+                *cargo, "test", "--locked", "--manifest-path",
                 "tools/q2-dyn-evidence/Cargo.toml",
             ],
         ),

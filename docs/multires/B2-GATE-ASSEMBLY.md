@@ -328,6 +328,48 @@ action ran. A successor requires a fresh implementation leaf, fresh B1 seal,
 fresh disposable qualification, and a separately committed immutable
 declaration; there is currently no active final cohort.
 
+### Retired 71447 final attempt
+
+Fresh qualification `b2q26_74628f1_71804000` passed all seven executable
+stages 28/28 and all six infrastructure checks against qualified commit
+`74628f1bc04c7012903b30d44afa61566f0ff38d`; its canonical non-admissible
+report SHA-256 is
+`48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73`.
+That qualification authorized exactly one immutable final lifecycle for
+`b2g26_final_71447`, declaration SHA-256
+`76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa`,
+at producer commit/tree
+`ac73b2cc62e318923ffdf4d5eccda929207fcd5b` /
+`629db86d21cab3127c3180af4493a5c28e697819`.
+The declaration uses seed blocks 71447000..71447003 through
+71447600..71447603; those seeds and map IDs are now retired.
+
+The sole producer passed source, real compilation, compiled static,
+compiled-CM, materialization, claims, cold Atlas, and compiled promotion for
+all 28 members. Dyn also passed on `DESKTOP-RTX2080` with 4,000 resident
+samples and 297,455 ns total p99 under the 500,000 ns limit. The sole atomic
+test publisher then ran its nested Dyn Cargo commands without an external
+target binding. Cargo created untracked
+`tools/q2-dyn-evidence/target/`; the publisher's clean-repository
+postcondition correctly refused publication and removed its partial evidence
+root. No `b2-test-report.json`, assembled gate, deployment, or training action
+exists.
+
+`B2-GENERATED-COHORT-71447-FAILURE.json` is the canonical terminal authority,
+SHA-256
+`f411e66859d3176d4ed6e0ffe24aeb809db24c1e30bf7b85ae4be9d8fbc7ce9e`.
+Cohort 71447 is permanently retired. None of its source, compiled,
+materialized, claims, analysis, Dyn, report, log, build, WSL, or
+producer-snapshot bytes may be retried, resumed, reused, copied forward,
+salvaged, substituted, or admitted. `ACTIVE_FINAL_AUTHORITY = None`; a
+successor requires the corrected atomic publisher, fresh qualification, and a
+separately committed immutable declaration.
+
+The declaration-bearing 71447 producer commit was a strict successor of
+qualified commit `74628f1bc04c7012903b30d44afa61566f0ff38d`. Its exact
+declaration/gate/schema/direct-test delta remains historical proof only and
+cannot authorize a future cohort.
+
 The declaration-bearing 71446 producer commit was required to be a strict successor of
 qualified commit `a05ddb7037774c1b246a6b13972b228570acb8ef`. Gate replay
 must prove that ancestry, the exact qualified commit/tree and report binding,
@@ -357,7 +399,7 @@ pass the no-write `/usr/bin/python3.10 -B` syntax-floor scan, the pinned
 `/home/raymond/miniconda3/bin/python3.11` materializer import/CLI preflights,
 a no-write `tools/preflight_b2_materialization_authorities.py` invocation over
 the exact five final oracle/attestation paths,
-a same-process `import pytest, zstandard` probe, and
+a same-process `import pytest, zstandard, torch` probe, and
 `python -m pytest --version`. These checks may run concurrently only when they
 are read-only and must all finish green before the one source invocation. The
 final producer lane itself is strictly sequential:
@@ -402,7 +444,7 @@ cohort bootstrap; a local newer-Python parse is not sufficient because Python 3.
 accepted the PEP-701 construct that terminated 71439 on Python 3.10.
 Before any future final-cohort source generation, the exact interpreter path
 reserved for `tools/run_b2_test_suite.py` must also pass a same-process
-`import pytest, zstandard` probe and `python -m pytest --version`. A missing
+`import pytest, zstandard, torch` probe and `python -m pytest --version`. A missing
 dependency retires no cohort because this is a pre-source infrastructure
 check; after source publication the canonical test suite remains a single
 no-retry action and runs only after generated promotion and Dyn, never in
@@ -414,8 +456,8 @@ while the infrastructure producer and materializer remain bound to the
 separate CPython 3.11.4 executable and zstandard module digests above. The
 syntax report must never be required to identify the execution runtime.
 
-The assembler rejects declarations for retired cohorts 71426 through 71446
-before reading campaign evidence. The 71446 immutable declaration and its
+The assembler rejects declarations for retired cohorts 71426 through 71447
+before reading campaign evidence. The 71447 immutable declaration and its
 current-path alias are historical inputs only and cannot assemble or validate
 a green gate. There is no active eligible final declaration.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
@@ -526,15 +568,21 @@ tests, and assembly. Every item below comes from fresh final-cohort roots.
   identity (including SHA-256 of the canonical 32-lowercase-hex
   `/etc/machine-id` value with at most one trailing LF excluded and all other
   whitespace rejected), snapshot bytes, negative
-  fences, and p99 measurement. Build the
-  producer once from the clean committed root, retain that exact executable,
-  and copy those same executable bytes to WSL. The gate independently decodes
+  fences, and p99 measurement. Build the producer once from the clean
+  committed root with an explicit fresh `CARGO_TARGET_DIR` outside that root,
+  retain that exact executable, and copy those same executable bytes to WSL.
+  The gate independently decodes
   every header and zstd payload, validates the payload digest/cells/derived L3,
   and requires a byte-identical semantic and canonical-zstd re-encode. A magic
   prefix alone is never evidence.
 - `tools/run_b2_test_suite.py --output NEW_DIRECTORY` executes the fixed Python
   syntax-floor, pytest, Rust, and standalone Dyn-helper suites and atomically
-  writes `b2-test-report.json` plus eight hashed raw logs. The syntax-floor log
+  writes schema `q2-b2-test-report-v2`, `b2-test-report.json`, and eight hashed
+  raw logs. It exclusively creates one deterministic external Cargo target
+  sibling, binds that absolute path through both `CARGO_TARGET_DIR` and every
+  Cargo command's `--config build.target-dir=...` argv, removes it before the
+  clean-tree recheck and publication, and records the binding for independent
+  assembly-time outside-repository and absence validation. The syntax-floor log
   binds the exact interpreter used by that suite; it complements rather than
   replaces the mandatory WSL Python 3.10 pre-declaration check. The directory
   must be outside the repository so its creation does not invalidate the clean
@@ -615,22 +663,21 @@ reuse of any retired cohort byte.
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. `ACTIVE_FINAL_AUTHORITY` explicitly pins
-`b2g26_final_71447`, immutable declaration SHA-256
-`76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa`,
-and the exact eleven-path declaration-only successor delta. The current alias
-is byte-identical to
-`B2-GENERATED-COHORT-71447-DECLARATION.json`, which declares seed blocks
-71447000..71447003 through 71447600..71447603. The gate schema independently
-pins the same cohort ID and digest.
+clean-tree authority. `ACTIVE_FINAL_AUTHORITY` is `None`. The current alias
+remains byte-identical to retired
+`B2-GENERATED-COHORT-71447-DECLARATION.json`; it is forensic only and the
+assembler rejects it before evidence replay. The command below documents
+argument shape, not an executable 71447 assembly. A separately committed
+post-qualification successor must replace every cohort pin before this
+template becomes executable again.
 
 The qualified parent is commit `74628f1bc04c7012903b30d44afa61566f0ff38d`.
 Qualification `b2q26_74628f1_71804000` passed all seven stages 28/28 and six
 infrastructure checks; its green non-admissible report SHA-256 is
 `48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73`.
-Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. This
-activation authorizes one no-retry final producer lifecycle; it does not admit
-qualification artifacts, passing subsets, retired bytes, deployment, or
+Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. Its
+single successor activation was consumed by retired cohort 71447 and cannot
+admit qualification artifacts, passing subsets, retired bytes, deployment, or
 training.
 
 ```sh

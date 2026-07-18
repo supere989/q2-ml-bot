@@ -944,6 +944,44 @@ retried, resumed, reused, copied forward, salvaged, substituted, or admitted.
 A successor requires a fresh implementation leaf, B1 seal, disposable
 qualification, and separately committed immutable declaration.
 
+### Retired 71447 final attempt
+
+Qualified commit `74628f1bc04c7012903b30d44afa61566f0ff38d` passed fresh
+qualification `b2q26_74628f1_71804000` 28/28 across all seven executable
+stages and 6/6 infrastructure checks. Its canonical non-admissible report
+SHA-256 is
+`48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73`.
+Exactly one immutable/no-retry final producer attempt was authorized for
+`b2g26_final_71447`, declaration SHA-256
+`76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa`,
+at commit/tree `ac73b2cc62e318923ffdf4d5eccda929207fcd5b` /
+`629db86d21cab3127c3180af4493a5c28e697819`.
+The declaration uses seed blocks 71447000..71447003 through
+71447600..71447603; those seeds and map IDs are now retired.
+
+The final lane passed all 28 members through source, real compilation,
+compiled static, compiled-CM, materialization, claims, cold Atlas, and
+compiled promotion. Dyn evidence also passed on `DESKTOP-RTX2080`: four
+clients, 4,000 resident samples, all negative fences, and 297,455 ns total p99
+under the 500,000 ns limit. The sole atomic test publisher then created
+untracked `tools/q2-dyn-evidence/target/` because its nested Cargo commands
+had no external target binding. Its clean-tree postcondition refused the
+report with exit code 2 and removed the partial evidence root. No atomic test
+report, B2 gate, deployment, or training action exists.
+
+`B2-GENERATED-COHORT-71447-FAILURE.json` is canonical terminal authority,
+SHA-256
+`f411e66859d3176d4ed6e0ffe24aeb809db24c1e30bf7b85ae4be9d8fbc7ce9e`.
+Cohort 71447 is permanently retired; none of its source, compiled,
+materialized, claims, analysis, Dyn, report, log, build, WSL, or
+producer-snapshot bytes may be retried, resumed, reused, copied forward,
+salvaged, substituted, or admitted. The corrected publisher binds a fresh
+deterministic external Cargo target in both `CARGO_TARGET_DIR` and every Cargo
+`--config build.target-dir=...` argv,
+deletes it before clean-tree verification and publication, and emits the new
+`q2-b2-test-report-v2` schema. `ACTIVE_FINAL_AUTHORITY = None` until a fresh
+qualification is followed by a separately committed successor declaration.
+
 The declaration-bearing 71446 producer commit was required to be a strict successor of
 qualified commit `a05ddb7037774c1b246a6b13972b228570acb8ef`. Gate replay
 must prove ancestry, the exact qualified commit/tree and report binding,
@@ -972,7 +1010,7 @@ pass the no-write `/usr/bin/python3.10 -B` syntax-floor scan, the pinned
 `/home/raymond/miniconda3/bin/python3.11` materializer import/CLI preflights,
 a no-write `tools/preflight_b2_materialization_authorities.py` invocation over
 the exact five final oracle/attestation paths,
-a same-process `import pytest, zstandard` probe, and
+a same-process `import pytest, zstandard, torch` probe, and
 `python -m pytest --version`. These checks may run concurrently only when they
 are read-only and must all finish green before the one source invocation. The
 final producer lane itself is strictly sequential:
@@ -1017,7 +1055,7 @@ The system Python lacks zstandard and must not run materialization or the full
 test publisher; it is syntax-floor authority only. All syntax checks use `-B`,
 create no bytecode or cohort paths, and finish before generation.
 The exact interpreter path reserved for the future final test publisher must
-also pass a same-process `import pytest, zstandard` probe and
+also pass a same-process `import pytest, zstandard, torch` probe and
 `python -m pytest --version` before any final source is generated. The fixed
 publisher repeats the dependency probe before creating its evidence staging
 root. Its sole eight-command campaign runs only after generated promotion and Dyn
@@ -1029,18 +1067,13 @@ check.
 
 ## Offline workflow
 
-The active final `COHORT_ID` is `b2g26_final_71447`. The current alias is
-byte-identical to immutable
-`B2-GENERATED-COHORT-71447-DECLARATION.json`, SHA-256
-`76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa`,
-and declares seed blocks 71447000..71447003 through 71447600..71447603.
-This authority was committed only after green non-admissible qualification
-`b2q26_74628f1_71804000`, report SHA-256
-`48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73`,
-passed all seven stages 28/28 and all six infrastructure checks. Commands must
-never name retired cohorts 71426 through 71446. No retired or qualification
-population, report, Dyn evidence, compiled byte, or passing subset may be
-copied into a successor root.
+There is no active final `COHORT_ID`. The current alias is byte-identical to
+retired `B2-GENERATED-COHORT-71447-DECLARATION.json` and is forensic only.
+Commands must never name retired cohorts 71426 through 71447. No retired or
+qualification population, report, Dyn evidence, compiled byte, or passing
+subset may be copied into a successor root. Execution resumes only after a
+fresh green non-admissible qualification and a separately committed immutable
+successor declaration.
 
 The declaration-aware compiler remains the required final-cohort shape.
 Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer

@@ -16,9 +16,16 @@ Build from a clean committed tree:
 
 ```sh
 Q2_LATTICE_CRATE_COMMIT=$(git rev-parse HEAD) \
+CARGO_TARGET_DIR=/absolute/fresh/outside-repository/dyn-target \
   cargo build --release --locked \
   --manifest-path tools/q2-dyn-evidence/Cargo.toml
 ```
+
+The target directory must be absent, created exclusively for this build, and
+outside the clean committed repository. Retain
+`$CARGO_TARGET_DIR/release/q2-dyn-evidence`, remove no source-tree dirt to make
+the build appear clean, and copy those exact executable bytes to WSL. The
+default nested `tools/q2-dyn-evidence/target` path is not admissible.
 
 Run on `DESKTOP-RTX2080` WSL with paths from the admitted current-authority
 campaign (the output directory must not already exist):

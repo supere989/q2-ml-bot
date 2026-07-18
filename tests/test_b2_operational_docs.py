@@ -69,7 +69,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "/home/raymond/miniconda3/bin/python3.11",
         "b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da45494ff4",
         "zstandard 0.19.0",
-        "import pytest, zstandard",
+        "import pytest, zstandard, torch",
         "python -m pytest --version",
         "only after generated promotion and Dyn",
         "permanently retired",
@@ -143,6 +143,13 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "71447600..71447603",
         "b2q26_74628f1_71804000",
         "48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73",
+        "B2-GENERATED-COHORT-71447-FAILURE.json",
+        "Cohort 71447 is permanently retired",
+        "f411e66859d3176d4ed6e0ffe24aeb809db24c1e30bf7b85ae4be9d8fbc7ce9e",
+        "tools/q2-dyn-evidence/target/",
+        "q2-b2-test-report-v2",
+        "CARGO_TARGET_DIR",
+        "build.target-dir",
         "4b26c670ed54585787505cf7dfbb35bdc1830fdfbd42585a16d0484622ea306f",
         "oracle batch timeout must be finite and in (0, 60]",
         "not a 3,600-second runtime timeout",
@@ -182,12 +189,14 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert "Retired 71446 final attempt" in text
     assert "Cohort 71446 is permanently retired" in text
     assert "b2g26_final_71447" in text
+    assert "Retired 71447 final attempt" in text
+    assert "Cohort 71447 is permanently retired" in text
     assert "Exactly one immutable/no-retry final producer attempt was authorized" in text
     assert "future-only" not in text
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
 
-def test_current_gate_contract_pins_active_71447_authority() -> None:
+def test_current_gate_contract_retires_71447_and_has_no_active_authority() -> None:
     text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
         encoding="utf-8"
     )
@@ -197,14 +206,18 @@ def test_current_gate_contract_pins_active_71447_authority() -> None:
         "76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa",
         "b2q26_74628f1_71804000",
         "48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73",
-        "one no-retry final producer lifecycle",
+        "ACTIVE_FINAL_AUTHORITY = None",
+        "B2-GENERATED-COHORT-71447-FAILURE.json",
+        "f411e66859d3176d4ed6e0ffe24aeb809db24c1e30bf7b85ae4be9d8fbc7ce9e",
+        "q2-b2-test-report-v2",
     ):
         assert required in text
     for stale_claim in (
         "Only the exact fresh 71446 declaration is eligible",
         "The active 71446 prerequisite",
         "current alias names fresh cohort 71446 and can execute",
-        "ACTIVE_FINAL_AUTHORITY = None",
+        "The active final `COHORT_ID` is `b2g26_final_71447`",
+        "`ACTIVE_FINAL_AUTHORITY` explicitly pins",
     ):
         assert stale_claim not in text
 

@@ -59,6 +59,9 @@ FAILURE_71445 = (
 FAILURE_71446 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71446-FAILURE.json"
 )
+FAILURE_71447 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71447-FAILURE.json"
+)
 RETIRED_DECLARATIONS = (
     NAMED_71438,
     NAMED_71439,
@@ -69,6 +72,7 @@ RETIRED_DECLARATIONS = (
     NAMED_71444,
     NAMED_71445,
     NAMED_71446,
+    NAMED_71447,
 )
 
 
@@ -274,15 +278,45 @@ def test_alias_and_named_71441_are_retired(declaration_path: Path) -> None:
         )
 
 
-def test_current_alias_71447_is_active_and_unretired() -> None:
-    current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
+@pytest.mark.parametrize("declaration_path", [CURRENT_ALIAS, NAMED_71447])
+def test_alias_and_named_71447_are_retired(declaration_path: Path) -> None:
+    current, current_sha256 = cohort.load_declaration(declaration_path)
 
     assert current["cohort_id"] == "b2g26_final_71447"
     assert CURRENT_ALIAS.read_bytes() == NAMED_71447.read_bytes()
     assert current_sha256 == (
         "76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa"
     )
-    registry.require_unretired_declaration(CURRENT_ALIAS, current, current_sha256)
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71447.*permanently retired"
+    ):
+        registry.require_unretired_declaration(
+            declaration_path, current, current_sha256
+        )
+
+
+def test_71447_terminal_failure_authority_is_canonical_and_exact() -> None:
+    payload = FAILURE_71447.read_bytes()
+    authority = json.loads(payload)
+
+    assert payload == cohort.canonical_bytes(authority)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "f411e66859d3176d4ed6e0ffe24aeb809db24c1e30bf7b85ae4be9d8fbc7ce9e"
+    )
+    assert authority["schema"] == registry.FAILURE_SCHEMA
+    assert authority["status"] == (
+        "permanently-failed-atomic-test-publisher-clean-tree-postcondition"
+    )
+    assert authority["cohort_id"] == "b2g26_final_71447"
+    assert authority["failure"]["phase"] == (
+        "atomic-test-publisher-clean-tree-postcondition"
+    )
+    publisher = authority["evidence"]["test_publisher"]
+    assert publisher["cargo_target_created_in_repository"] == (
+        "tools/q2-dyn-evidence/target/"
+    )
+    assert publisher["report_published"] is False
+    assert authority["admission"]["retry_under_same_declaration_allowed"] is False
 
 
 def test_71446_terminal_failure_authority_is_canonical_and_exact() -> None:

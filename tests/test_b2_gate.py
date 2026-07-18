@@ -20,14 +20,15 @@ from harness.hook_claims_v4 import (
 import tools.assemble_b2_gate as b2_gate
 import tools.run_b2_test_suite as b2_test_suite
 from tools.assemble_b2_gate import (
-    ACTIVE_71447_QUALIFICATION_SUCCESSOR_PATHS,
     ACTIVE_FINAL_AUTHORITY,
     ActiveFinalAuthority,
     B2GateError,
     B2GatePaths,
     EXPECTED_DESIGN_SHA256,
     RETIRED_71446_QUALIFICATION_SUCCESSOR_PATHS,
+    RETIRED_71447_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_COHORT_71446,
+    RETIRED_COHORT_71447,
     assemble_gate,
     _exact_directory_files,
     _decode_dyn_snapshot,
@@ -44,6 +45,7 @@ from tools.assemble_b2_gate import (
     _validate_source_spawn_origin_binding_pass_count,
     _validate_test_report,
     _parser,
+    _require_active_final_authority,
     validate_gate,
 )
 from tools.run_generator_cohort import STAGE_SUFFIXES, canonical_bytes
@@ -748,6 +750,14 @@ def test_retired_71446_identity_remains_readable_and_cli_is_explicit() -> None:
             ROOT / "docs/multires/B2-GENERATED-COHORT-71446-DECLARATION.json",
             "71446",
         ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71447-DECLARATION.json",
+            "71447",
+        ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
+            "71447",
+        ),
     ],
 )
 def test_gate_refuses_retired_declaration_before_evidence(
@@ -757,41 +767,14 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_gate_accepts_only_explicit_active_71447_declaration() -> None:
-    declaration, digest = _validate_declaration(
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
-    assert declaration["cohort_id"] == "b2g26_final_71447"
-    assert digest == (
-        "76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa"
-    )
-
-
-@pytest.mark.parametrize(
-    "declaration",
-    [
-        ROOT / "docs/multires/B2-GENERATED-COHORT-71447-DECLARATION.json",
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
-    ],
-)
-def test_active_final_still_requires_complete_evidence(
-    tmp_path: Path, declaration: Path,
-) -> None:
-    assert ACTIVE_FINAL_AUTHORITY is not None
-    paths = replace(_paths(tmp_path), declaration=declaration)
-    with pytest.raises(B2GateError, match="required regular file"):
-        assemble_gate(paths, implementation_binding=_implementation())
-
-
-def test_active_final_authority_is_exact_and_explicit() -> None:
-    assert ACTIVE_FINAL_AUTHORITY is not None
-    assert ACTIVE_FINAL_AUTHORITY.cohort_id == "b2g26_final_71447"
-    assert ACTIVE_FINAL_AUTHORITY.declaration_sha256 == (
-        "76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa"
-    )
+def test_no_final_cohort_is_active_after_71447_retirement() -> None:
+    assert ACTIVE_FINAL_AUTHORITY is None
+    with pytest.raises(B2GateError, match="no active final cohort"):
+        _require_active_final_authority()
+    assert RETIRED_COHORT_71447 == "b2g26_final_71447"
     assert (
-        ACTIVE_FINAL_AUTHORITY.qualification_successor_paths
-        == ACTIVE_71447_QUALIFICATION_SUCCESSOR_PATHS
+        "docs/multires/B2-GENERATED-COHORT-71447-DECLARATION.json"
+        in RETIRED_71447_QUALIFICATION_SUCCESSOR_PATHS
     )
 
 
@@ -1280,7 +1263,8 @@ def test_fake_magic_only_dyn_snapshot_is_rejected() -> None:
 def test_test_report_recomputes_log_hash_and_rejects_tamper(tmp_path: Path) -> None:
     report_path = tmp_path / "b2-test-report.json"
     runs = []
-    for name, command in _commands("python3"):
+    cargo_target = (tmp_path.parent / f".{tmp_path.name}.cargo-target").resolve()
+    for name, command in _commands("python3", cargo_target):
         if name == "python-syntax-floor":
             payload = canonical_bytes({
                 "enumeration": "git-tracked",
@@ -1324,14 +1308,48 @@ def test_test_report_recomputes_log_hash_and_rejects_tamper(tmp_path: Path) -> N
             },
         })
     report = {
-        "schema": "q2-b2-test-report-v1",
+        "schema": b2_test_suite.REPORT_SCHEMA,
         "implementation": _implementation(),
+        "execution_environment": {
+            b2_test_suite.CARGO_TARGET_ENV: str(
+                cargo_target
+            ),
+        },
         "runs": runs,
         "failures": [],
         "passed": True,
     }
     report_path.write_bytes(canonical_bytes(report))
     assert _validate_test_report(report_path, _implementation())["passed_count"] == 16
+
+    expected_target = Path(
+        report["execution_environment"][b2_test_suite.CARGO_TARGET_ENV]
+    )
+    report["execution_environment"][b2_test_suite.CARGO_TARGET_ENV] = str(
+        tmp_path / "wrong-target"
+    )
+    report_path.write_bytes(canonical_bytes(report))
+    with pytest.raises(B2GateError, match="target path differs"):
+        _validate_test_report(report_path, _implementation())
+    report["execution_environment"][b2_test_suite.CARGO_TARGET_ENV] = str(
+        expected_target
+    )
+
+    expected_target.mkdir()
+    report_path.write_bytes(canonical_bytes(report))
+    with pytest.raises(B2GateError, match="still exists"):
+        _validate_test_report(report_path, _implementation())
+    expected_target.rmdir()
+
+    cargo_run = next(run for run in report["runs"] if run["name"] == "rust-fmt")
+    original_config = cargo_run["command"][2]
+    cargo_run["command"][2] = 'build.target-dir="/tmp/unbound"'
+    report_path.write_bytes(canonical_bytes(report))
+    with pytest.raises(B2GateError, match="rust-fmt command differs"):
+        _validate_test_report(report_path, _implementation())
+    cargo_run["command"][2] = original_config
+    report_path.write_bytes(canonical_bytes(report))
+
     log = tmp_path / "python.log"
     log.write_text("changed\n")
     with pytest.raises(B2GateError, match="identity differs"):
@@ -1343,7 +1361,7 @@ def test_b2_gate_schemas_are_strict() -> None:
         (ROOT / "schemas/q2-multires-b2-gate-v1.schema.json").read_text()
     )
     test_schema = json.loads(
-        (ROOT / "schemas/q2-b2-test-report-v1.schema.json").read_text()
+        (ROOT / "schemas/q2-b2-test-report-v2.schema.json").read_text()
     )
     assert gate_schema["additionalProperties"] is False
     assert "not" not in gate_schema
@@ -1353,7 +1371,9 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert cohort_schema["const"] == "b2g26_final_71447"
     assert gate_schema["properties"]["generated_cohort"]["properties"][
         "declaration_sha256"
-    ]["const"] == ACTIVE_FINAL_AUTHORITY.declaration_sha256
+    ]["const"] == (
+        "76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa"
+    )
     assert gate_schema["properties"]["generated_cohort"]["properties"][
         "compiled_cm_preflight"
     ]["$ref"] == "#/$defs/compiled_cm_preflight_stage"
@@ -1369,7 +1389,7 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
         "implementation_successor"
     ]["properties"]["changed_paths"]["minItems"] == len(
-        ACTIVE_71447_QUALIFICATION_SUCCESSOR_PATHS
+        RETIRED_71447_QUALIFICATION_SUCCESSOR_PATHS
     )
     assert gate_schema["$defs"]["compiled_cm_preflight_stage"]["properties"][
         "pass_count"
@@ -1384,7 +1404,9 @@ def test_b2_gate_schemas_are_strict() -> None:
 
 
 def test_test_evidence_adapter_has_fixed_suites_and_parses_counts() -> None:
-    assert [name for name, _command in _commands("python3")] == [
+    cargo_target = Path("/tmp/b2-test-target")
+    commands = _commands("python3", cargo_target)
+    assert [name for name, _command in commands] == [
         "python-syntax-floor",
         "python",
         "rust-fmt",
@@ -1394,6 +1416,10 @@ def test_test_evidence_adapter_has_fixed_suites_and_parses_counts() -> None:
         "dyn-clippy",
         "dyn-tests",
     ]
+    cargo_config = "build.target-dir=" + json.dumps(str(cargo_target))
+    for name, command in commands:
+        if name.startswith("rust-") or name.startswith("dyn-"):
+            assert command[:3] == ["cargo", "--config", cargo_config]
     syntax = canonical_bytes({
         "enumeration": "git-tracked",
         "failures": [],
@@ -1441,12 +1467,15 @@ def test_failed_pytest_evidence_is_published_instead_of_deleted(
     output = tmp_path / "b2-tests"
     implementation = _implementation()
     collection_failure = b"no tests collected, 6 errors in 0.66s\n"
+    suite_environments = []
     monkeypatch.setattr(
         b2_test_suite, "repository_binding", lambda _root: implementation,
     )
     monkeypatch.setattr(
         b2_test_suite, "_commands",
-        lambda _python: (("python", ["python3", "-m", "pytest", "-q"]),),
+        lambda _python, _cargo_target: (
+            ("python", ["python3", "-m", "pytest", "-q"]),
+        ),
     )
 
     def fake_run(
@@ -1456,6 +1485,8 @@ def test_failed_pytest_evidence_is_published_instead_of_deleted(
             return b2_test_suite.subprocess.CompletedProcess(
                 args=command, returncode=0, stdout=b"",
             )
+        suite_environments.append(_kwargs["env"])
+        assert (tmp_path / ".b2-tests.cargo-target").is_dir()
         return b2_test_suite.subprocess.CompletedProcess(
             args=command, returncode=2, stdout=collection_failure,
         )
@@ -1466,13 +1497,24 @@ def test_failed_pytest_evidence_is_published_instead_of_deleted(
 
     assert report["passed"] is False
     assert report["failures"] == ["python: exit 2"]
+    assert report["schema"] == b2_test_suite.REPORT_SCHEMA
+    assert report["execution_environment"] == {
+        b2_test_suite.CARGO_TARGET_ENV: str(
+            (tmp_path / ".b2-tests.cargo-target").resolve()
+        ),
+    }
+    assert len(suite_environments) == 1
+    assert suite_environments[0][b2_test_suite.CARGO_TARGET_ENV] == str(
+        (tmp_path / ".b2-tests.cargo-target").resolve()
+    )
     assert report["runs"][0]["passed_count"] == 0
     assert (output / "python.log").read_bytes() == collection_failure
     assert json.loads((output / b2_test_suite.REPORT_NAME).read_bytes()) == report
     assert not list(tmp_path.glob(".b2-tests.partial-*"))
+    assert not (tmp_path / ".b2-tests.cargo-target").exists()
 
 
-@pytest.mark.parametrize("missing", ["pytest", "zstandard"])
+@pytest.mark.parametrize("missing", ["pytest", "zstandard", "torch"])
 def test_python_dependency_preflight_fails_before_suite_or_evidence_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str,
 ) -> None:
@@ -1486,7 +1528,7 @@ def test_python_dependency_preflight_fails_before_suite_or_evidence_root(
     )
 
     def reject_suite_commands(
-        _python: str,
+        _python: str, _cargo_target: Path,
     ) -> tuple[tuple[str, list[str]], ...]:
         nonlocal suite_commands_created
         suite_commands_created = True
@@ -1515,10 +1557,11 @@ def test_python_dependency_preflight_fails_before_suite_or_evidence_root(
     assert preflight_commands[0][:3] == ["/chosen/python", "-B", "-c"]
     preflight_source = preflight_commands[0][3]
     assert 'importlib.import_module(dependency)' in preflight_source
-    assert '("pytest", "zstandard")' in preflight_source
+    assert '("pytest", "zstandard", "torch")' in preflight_source
     assert suite_commands_created is False
     assert not output.exists()
     assert not list(tmp_path.glob(".b2-tests.partial-*"))
+    assert not (tmp_path / ".b2-tests.cargo-target").exists()
 
 
 def test_test_evidence_publication_never_replaces_destination(

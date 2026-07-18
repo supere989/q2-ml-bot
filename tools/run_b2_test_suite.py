@@ -26,6 +26,8 @@ from tools.run_generator_cohort import canonical_bytes, repository_binding  # no
 
 
 REPORT_NAME = "b2-test-report.json"
+REPORT_SCHEMA = "q2-b2-test-report-v2"
+CARGO_TARGET_ENV = "CARGO_TARGET_DIR"
 PYTEST_SUMMARY = re.compile(r"(?P<passed>\d+) passed(?:, (?P<skipped>\d+) skipped)?")
 CARGO_SUMMARY = re.compile(
     r"test result: ok\. (?P<passed>\d+) passed; 0 failed; "
@@ -38,7 +40,7 @@ PYTHON_DEPENDENCY_PREFLIGHT = """\
 import importlib
 
 missing = []
-for dependency in ("pytest", "zstandard"):
+for dependency in ("pytest", "zstandard", "torch"):
     try:
         importlib.import_module(dependency)
     except Exception:
@@ -205,20 +207,26 @@ def _preflight_python_dependencies(python: str) -> None:
     )
 
 
-def _commands(python: str) -> tuple[tuple[str, list[str]], ...]:
+def _commands(
+    python: str, cargo_target: Path,
+) -> tuple[tuple[str, list[str]], ...]:
     dyn_manifest = "tools/q2-dyn-evidence/Cargo.toml"
+    cargo = [
+        "cargo", "--config",
+        "build.target-dir=" + json.dumps(str(cargo_target)),
+    ]
     return (
         (
             "python-syntax-floor",
             [python, "-B", "tools/check_python_syntax_floor.py"],
         ),
         ("python", [python, "-m", "pytest", "-q"]),
-        ("rust-fmt", ["cargo", "fmt", "--all", "--", "--check"]),
-        ("rust-clippy", ["cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"]),
-        ("rust-tests", ["cargo", "test", "--locked", "--all-targets"]),
-        ("dyn-fmt", ["cargo", "fmt", "--manifest-path", dyn_manifest, "--", "--check"]),
-        ("dyn-clippy", ["cargo", "clippy", "--locked", "--manifest-path", dyn_manifest, "--all-targets", "--", "-D", "warnings"]),
-        ("dyn-tests", ["cargo", "test", "--locked", "--manifest-path", dyn_manifest]),
+        ("rust-fmt", [*cargo, "fmt", "--all", "--", "--check"]),
+        ("rust-clippy", [*cargo, "clippy", "--locked", "--all-targets", "--", "-D", "warnings"]),
+        ("rust-tests", [*cargo, "test", "--locked", "--all-targets"]),
+        ("dyn-fmt", [*cargo, "fmt", "--manifest-path", dyn_manifest, "--", "--check"]),
+        ("dyn-clippy", [*cargo, "clippy", "--locked", "--manifest-path", dyn_manifest, "--all-targets", "--", "-D", "warnings"]),
+        ("dyn-tests", [*cargo, "test", "--locked", "--manifest-path", dyn_manifest]),
     )
 
 
@@ -235,15 +243,32 @@ def run_suite(output: Path, *, python: str = sys.executable) -> dict[str, Any]:
     if binding.get("git_clean") is not True:
         raise B2TestSuiteError("implementation repository is not clean")
     _preflight_python_dependencies(python)
-    stage = Path(tempfile.mkdtemp(prefix=f".{output.name}.partial-", dir=output.parent))
+    cargo_target = (
+        output.parent / f".{output.name}.cargo-target"
+    ).resolve()
+    if _path_is_within(cargo_target, ROOT):
+        raise B2TestSuiteError(
+            "Cargo target directory must be outside the implementation repository"
+        )
+    if cargo_target.exists() or cargo_target.is_symlink():
+        raise B2TestSuiteError("Cargo target directory already exists")
+    cargo_target.mkdir(mode=0o700)
+    execution_environment = {CARGO_TARGET_ENV: str(cargo_target)}
+    subprocess_environment = os.environ.copy()
+    subprocess_environment.update(execution_environment)
+    stage: Path | None = None
     published = False
     try:
+        stage = Path(
+            tempfile.mkdtemp(prefix=f".{output.name}.partial-", dir=output.parent)
+        )
         runs = []
         failures = []
-        for name, command in _commands(python):
+        for name, command in _commands(python, cargo_target):
             completed = subprocess.run(
                 command,
                 cwd=ROOT,
+                env=subprocess_environment,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 check=False,
@@ -269,13 +294,19 @@ def run_suite(output: Path, *, python: str = sys.executable) -> dict[str, Any]:
                     "sha256": _sha256(payload),
                 },
             })
+        shutil.rmtree(cargo_target)
+        if cargo_target.exists() or cargo_target.is_symlink():
+            raise B2TestSuiteError(
+                "Cargo target directory remains after suite cleanup"
+            )
         if repository_binding(ROOT) != binding:
             raise B2TestSuiteError(
                 "implementation repository changed while tests were running"
             )
         report = {
-            "schema": "q2-b2-test-report-v1",
+            "schema": REPORT_SCHEMA,
             "implementation": binding,
+            "execution_environment": execution_environment,
             "runs": runs,
             "failures": failures,
             "passed": not failures,
@@ -287,7 +318,9 @@ def run_suite(output: Path, *, python: str = sys.executable) -> dict[str, Any]:
         published = True
         return report
     finally:
-        if not published:
+        if cargo_target.exists() and not cargo_target.is_symlink():
+            shutil.rmtree(cargo_target, ignore_errors=True)
+        if not published and stage is not None:
             shutil.rmtree(stage, ignore_errors=True)
 
 
