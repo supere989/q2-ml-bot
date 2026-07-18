@@ -344,7 +344,10 @@ def _validate_requalification(
     normative: Mapping[str, Any],
 ) -> tuple[dict[str, Any], Any, dict[str, str]]:
     expected_path = repo_root / "docs/multires/B1-GATE.json"
-    _require(b1_gate_path.resolve() == expected_path.resolve(), "supplied B1 gate is not the repository trust root")
+    _require(
+        _file_record(b1_gate_path) == _file_record(expected_path),
+        "supplied B1 gate bytes differ from the repository trust root",
+    )
     try:
         authority = load_b1_authority_gate(repo_root)
     except B1AuthorityError as error:

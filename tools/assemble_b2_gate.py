@@ -437,8 +437,8 @@ def _validate_b1_and_oracles(
 ) -> tuple[dict[str, Any], dict[str, str]]:
     expected_gate = paths.repo_root / "docs/multires/B1-GATE.json"
     _require(
-        paths.b1_gate.resolve() == expected_gate.resolve(),
-        "supplied B1 gate is not the repository trust root",
+        _file_record(paths.b1_gate) == _file_record(expected_gate),
+        "supplied B1 gate bytes differ from the repository trust root",
     )
     try:
         authority = load_b1_authority_gate(paths.repo_root)

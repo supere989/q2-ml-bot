@@ -623,7 +623,8 @@ def test_requalification_binds_amended_docs_repo_and_live_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = tmp_path / "repo"
-    b1_path = repo / "docs/multires/B1-GATE.json"
+    repository_b1_path = repo / "docs/multires/B1-GATE.json"
+    b1_path = tmp_path / "immutable-b1-authority/B1-GATE.json"
     implementation = _implementation()
     normative = {
         "design": {"sha256": _digest("design")},
@@ -661,6 +662,7 @@ def test_requalification_binds_amended_docs_repo_and_live_identity(
         "checks": {"live-identities-recomputed": True},
         "failures": [],
     }
+    _write(repository_b1_path, {"authority_requalification": requalification})
     _write(b1_path, {"authority_requalification": requalification})
     monkeypatch.setattr(
         gate,
@@ -677,8 +679,17 @@ def test_requalification_binds_amended_docs_repo_and_live_identity(
     assert summary["collision_identity"] == collision
     assert collision["physics_identity"] == _digest("cm-physics")
 
+    b1_path.write_bytes(canonical_bytes({"authority_requalification": {}}))
+    with pytest.raises(
+        gate.B2QualificationError,
+        match="bytes differ from the repository trust root",
+    ):
+        gate._validate_requalification(b1_path, repo, normative)
+
     requalification["current_normative_documents"]["plan_sha256"] = _digest("substituted")
-    _write(b1_path, {"authority_requalification": requalification}) if not b1_path.exists() else b1_path.write_bytes(canonical_bytes({"authority_requalification": requalification}))
+    substituted = canonical_bytes({"authority_requalification": requalification})
+    repository_b1_path.write_bytes(substituted)
+    b1_path.write_bytes(substituted)
     with pytest.raises(gate.B2QualificationError, match="amended documents"):
         gate._validate_requalification(b1_path, repo, normative)
 
