@@ -1154,7 +1154,7 @@ list directly, without a shell or manually reconstructed flags.
 The exclusive preflight report must be an absolute fresh path outside the
 repository so its publication cannot invalidate the clean commit/tree binding.
 
-### Active 71450 final cohort
+### Retired 71450 final attempt
 
 The Dyn-argv-preflight-corrected implementation was qualified at commit/tree
 `a38b3bad461e63c0c9d3f2a7bb184854aa6b923d` /
@@ -1170,23 +1170,40 @@ The qualification remains `non_admissible: true` and
 `final_cohort_authorized: false`; it supplies no map, seed, stage, artifact,
 Dyn evidence, or passing subset to the final lane.
 
-`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71450`, immutable
-declaration `B2-GENERATED-COHORT-71450-DECLARATION.json`, declaration
-SHA-256
+At activation, the authority pinned `b2g26_final_71450`, immutable declaration
+`B2-GENERATED-COHORT-71450-DECLARATION.json`, declaration SHA-256
 `d02c7c0737cf38be314394dd30e0293dcdf0b80c004efc1e0d072abc72f437c4`,
-and the exact eleven-path declaration/gate/schema/direct-test successor
-delta. The current alias is byte-identical. The declaration uses fresh,
-disjoint seed blocks 71450000..71450003 through 71450600..71450603.
-Exactly one fresh, strictly sequential, immutable/no-retry producer lifecycle
-is authorized. This activation does not admit qualification artifacts,
-retired bytes, passing subsets, deployment, or training.
+and the exact eleven-path declaration/gate/schema/direct-test successor delta.
+The current alias remains byte-identical and names disjoint seed blocks
+71450000..71450003 through 71450600..71450603, but it is historical and
+non-executable.
 
-The declaration-bearing 71450 producer commit must be a strict successor of
-qualified commit `a38b3bad461e63c0c9d3f2a7bb184854aa6b923d`. Gate replay
-must prove ancestry, the exact qualified commit/tree and report binding,
-byte-identical stable generator/routes/Atlas-analyzer authority fields, and a
-complete Git delta equal to the frozen 71450
-declaration/gate/schema/direct-test authorization path set.
+Before the first final source invocation, fresh stock reconstruction completed
+q2dm1 through q2dm7 and then failed deterministically on canonical q2dm8 BSP
+SHA-256
+`c4baf022c69334bb20c42bc113f163c16c44e443df59ccb0d66e26bc0e3f6d9b`.
+`harness/atlas_analyzer.py _objective_artifact` raised
+`AtlasAnalysisError: objective entity 45 is 228.090 units from admitted L1`
+before q2dm8 objectives, Atlas manifest, analysis manifest, or build-summary
+publication. The final workspace and source-authorization marker remained
+absent, so source authorization was not consumed. No final source, Dyn, test,
+gate, deployment, or training action ran.
+
+`B2-GENERATED-COHORT-71450-FAILURE.json` is the canonical terminal authority,
+SHA-256
+`3405dc2e648450b85beb56bc04c60dddd03b12a20d42e70a76cadbc5897d505b`,
+with phase `stock-objective-l1-admission-before-source` and status
+`permanently-failed-stock-objective-admission-pre-source`.
+Cohort 71450 is permanently retired. None of its qualification, preflight, stock, partial,
+declaration, alias, or activation bytes may be retried, resumed, reused,
+copied forward, salvaged, substituted, or admitted.
+
+`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort.
+A successor requires the bounded stock/authored objective-omission policy,
+exact emitted-plus-omitted BSP item accounting, generated zero-omission
+enforcement, a completely fresh green disposable qualification, and a
+separately committed immutable successor declaration. The historical 71450
+qualification and declaration cannot authorize that successor.
 
 The declaration-bearing 71449 producer commit was a strict successor of
 qualified commit `7c3463c28e8913e340d77f182e52752be3381999`. Its exact
@@ -1278,18 +1295,16 @@ check.
 
 ## Offline workflow
 
-`ACTIVE_FINAL_AUTHORITY` now pins `b2g26_final_71450`. The command
-templates in this section are executable only from the exact clean activated
-snapshot, after the no-write final preauthorization closes every pinned
-runtime input, and only against the fresh 71450 root. Cohort
-`b2g26_final_71449` remains terminally retired under
-`B2-GENERATED-COHORT-71449-FAILURE.json`; no command may name any retired,
-qualification, or 71449 path.
-Commands must never name retired cohorts 71426 through 71449. No retired or
-qualification population, report,
-Dyn evidence, compiled byte, or passing subset may be copied into a future
-cohort root. For the active 71450 cohort, the first source invocation consumes
-its sole authorization.
+`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort.
+The command templates in this section are retained only as the required shape
+for a future, separately qualified and explicitly activated successor. They
+are not executable against the current alias or any 71450 root. Cohorts 71449
+and 71450 remain terminally retired under their canonical failure records.
+Commands must never name retired cohorts 71426 through 71450. No retired or
+qualification population, report, Dyn evidence, compiled byte, partial stock
+artifact, or passing subset may be copied into a future cohort root. Only a
+new immutable declaration committed after a fresh qualification may restore
+an executable authority and consume its own one-shot source authorization.
 
 The declaration-aware compiler remains the required final-cohort shape.
 Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer

@@ -196,7 +196,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
 
-def test_current_gate_contract_retires_71449_and_activates_71450() -> None:
+def test_current_gate_contract_retires_71450_and_clears_active_authority() -> None:
     text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
         encoding="utf-8"
     )
@@ -244,10 +244,13 @@ def test_current_gate_contract_retires_71449_and_activates_71450() -> None:
         "parse_arguments",
         "StagingDirectory::create",
         "Cohort 71449 is permanently retired",
-        "Active 71450 final cohort",
+        "Retired 71450 final attempt",
         "b2g26_final_71450",
         "B2-GENERATED-COHORT-71450-DECLARATION.json",
+        "B2-GENERATED-COHORT-71450-FAILURE.json",
         "d02c7c0737cf38be314394dd30e0293dcdf0b80c004efc1e0d072abc72f437c4",
+        "3405dc2e648450b85beb56bc04c60dddd03b12a20d42e70a76cadbc5897d505b",
+        "c4baf022c69334bb20c42bc113f163c16c44e443df59ccb0d66e26bc0e3f6d9b",
         "71450000..71450003",
         "71450600..71450603",
         "b2q26_a38b3ba_71807000",
@@ -255,13 +258,17 @@ def test_current_gate_contract_retires_71449_and_activates_71450() -> None:
         "a38b3bad461e63c0c9d3f2a7bb184854aa6b923d",
         "ede3ae277dc75dbae56918bff23382e3fc5e690e",
         "055c693027a4091178705331d1bf6c64a81638995f041e978aaf95e33effd354",
-        "`ACTIVE_FINAL_AUTHORITY` explicitly pins",
+        "stock-objective-l1-admission-before-source",
+        "permanently-failed-stock-objective-admission-pre-source",
+        "source authorization was not consumed",
+        "Cohort 71450 is permanently retired",
+        "`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort",
         "exact eleven-path declaration/gate/schema/direct-test successor",
         "Lithium hook oracle",
         "byte identity of the CM, Pmove, and hook oracles",
         "separately committed immutable declaration",
         "fresh green disposable qualification",
-        "The assembler rejects declarations for retired cohorts 71426 through 71449",
+        "The assembler rejects declarations for retired cohorts 71426 through 71450",
     ):
         assert required in text
     for stale_claim in (
@@ -276,7 +283,8 @@ def test_current_gate_contract_retires_71449_and_activates_71450() -> None:
         "sole active eligible declaration pair",
         "The active authority and schema both pin 71448",
         "The active authority and schema both pin 71449",
-        "`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort",
+        "Active 71450 final cohort",
+        "`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71450`",
         "historical and non-executable until a successor activation",
     ):
         assert stale_claim not in text
