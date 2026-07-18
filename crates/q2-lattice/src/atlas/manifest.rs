@@ -310,8 +310,8 @@ impl AtlasManifest {
         if !pmove
             .parameters
             .constants
-            .split(';')
-            .any(|item| item == "maxspeed=300")
+            .split(',')
+            .any(|item| item == "max=300")
         {
             return Err(AtlasError::InvalidFormat(
                 "manifest recovery walk speed differs from Pmove maxspeed".to_owned(),

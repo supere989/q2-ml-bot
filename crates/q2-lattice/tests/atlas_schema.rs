@@ -130,7 +130,7 @@ fn oracle_admissions(bsp: &BspIdentity, pmove: bool, hook: bool) -> OracleAdmiss
             parameters: PmoveParameters {
                 gravity: 800,
                 airaccelerate_f32_bits: 0.0_f32.to_bits(),
-                constants: "stopspeed=100;maxspeed=300;duckspeed=100;accelerate=10;wateraccelerate=10;friction=6;waterfriction=1;waterspeed=400".to_owned(),
+                constants: "stop=100,max=300,duck=100,accel=10,water_accel=10,friction=6,water_friction=1,water_speed=400,step=18,clip_planes=5,min_step_normal=0.7".to_owned(),
             },
             source: PmoveSourceClosure {
                 collision_sha256: collision.source.collision_sha256.clone(),
@@ -1050,7 +1050,7 @@ fn manifest_is_canonical_bound_and_strict() {
     let bytes = source.canonical_json(&limits).unwrap();
     assert_eq!(
         sha256_hex(&bytes),
-        "e2429eb003cd8f3135a535ebdbdfcac0f0f557a1abf41531fb10e3484ac06879"
+        "a5682b80aeba6f28a854a4bb80a3fcc31b7f86bcaa4802085bb1e24515aea338"
     );
     let restored = AtlasManifest::from_canonical_json(&bytes, &limits).unwrap();
     let mut mixed_cadence = restored.clone();

@@ -83,7 +83,7 @@ Every admitted runtime manifest also carries
 `recovery_physics.{hook_walk_budget_ticks,game_tick_hz,walk_speed_q8_per_second}`
 with the exact values `15`, `10`, and `76800` Q8 (300 world units/second).
 Admission rejects missing or mixed values and requires the Pmove authority to
-bind `maxspeed=300`. The private hook-necessity evaluator converts accumulated
+bind its canonical `max=300` token. The private hook-necessity evaluator converts accumulated
 ordinary-edge Q8 traversal distance through this cadence identity; graph edges
 are never guessed to equal one tick.
 
