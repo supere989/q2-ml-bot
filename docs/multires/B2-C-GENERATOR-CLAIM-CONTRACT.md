@@ -952,7 +952,8 @@ stages and 6/6 infrastructure checks. Its canonical non-admissible report
 SHA-256 is
 `48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73`.
 Exactly one immutable/no-retry final producer attempt was authorized for
-`b2g26_final_71447`, declaration SHA-256
+`b2g26_final_71447`, immutable declaration
+`B2-GENERATED-COHORT-71447-DECLARATION.json`, declaration SHA-256
 `76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa`,
 at commit/tree `ac73b2cc62e318923ffdf4d5eccda929207fcd5b` /
 `629db86d21cab3127c3180af4493a5c28e697819`.
@@ -979,8 +980,33 @@ salvaged, substituted, or admitted. The corrected publisher binds a fresh
 deterministic external Cargo target in both `CARGO_TARGET_DIR` and every Cargo
 `--config build.target-dir=...` argv,
 deletes it before clean-tree verification and publication, and emits the new
-`q2-b2-test-report-v2` schema. `ACTIVE_FINAL_AUTHORITY = None` until a fresh
-qualification is followed by a separately committed successor declaration.
+`q2-b2-test-report-v2` schema. The active authority was cleared until a fresh
+qualification was followed by a separately committed successor declaration.
+
+### Active 71448 final cohort
+
+At qualified commit/tree `ae41232662213342aba72823bfdfe68d0ebe475c` /
+`cd3322b844edd2d08b8a77fe90ba2b77e273d280`, the corrected atomic publisher
+passed 1,965 Python tests, 61 Rust tests, 13 standalone Dyn tests, both Clippy
+campaigns, both formatting checks, and the 246-file Python syntax floor. Its
+canonical schema-v2 report SHA-256 is
+`3e06b1dd5af58f62d48c2d18b07ae22cc0e0742f66b3ef31d244f96d9dcc92f5`.
+
+Fresh disposable qualification `b2q26_ae41232_71805000` passed all seven
+executable stages 28/28 and all six infrastructure checks. Its canonical
+green, non-admissible report SHA-256 is
+`c7a623eed20eea7c115c6167391158be90bb70bd4914e1d591ecee9c1f2ff3d8`,
+and it binds the immutable `055c6930-r2` B1 authority.
+
+`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71448`, immutable
+declaration `B2-GENERATED-COHORT-71448-DECLARATION.json`, and declaration
+SHA-256
+`0b48462a8cd8dfb752a73b711954616dd22d45d857748d316505bd17c976262a`.
+The current alias is byte-identical. The declaration uses seed blocks
+71448000..71448003 through 71448600..71448603. Exactly one fresh,
+strictly-sequential, immutable/no-retry producer lifecycle is authorized; no
+qualification artifact, retired byte, passing subset, deployment, or training
+is admitted by this activation.
 
 The declaration-bearing 71446 producer commit was required to be a strict successor of
 qualified commit `a05ddb7037774c1b246a6b13972b228570acb8ef`. Gate replay
@@ -1067,13 +1093,12 @@ check.
 
 ## Offline workflow
 
-There is no active final `COHORT_ID`. The current alias is byte-identical to
-retired `B2-GENERATED-COHORT-71447-DECLARATION.json` and is forensic only.
-Commands must never name retired cohorts 71426 through 71447. No retired or
-qualification population, report, Dyn evidence, compiled byte, or passing
-subset may be copied into a successor root. Execution resumes only after a
-fresh green non-admissible qualification and a separately committed immutable
-successor declaration.
+The active final `COHORT_ID` is `b2g26_final_71448`. The current alias is
+byte-identical to immutable
+`B2-GENERATED-COHORT-71448-DECLARATION.json`. Commands must never name retired
+cohorts 71426 through 71447. No retired or qualification population, report,
+Dyn evidence, compiled byte, or passing subset may be copied into the 71448
+root. The first source invocation consumes the sole authorization.
 
 The declaration-aware compiler remains the required final-cohort shape.
 Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer

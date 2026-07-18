@@ -324,9 +324,9 @@ Cohort 71446 is permanently retired. None of its source, compiled, report,
 log, WSL, or producer-snapshot bytes may be retried, resumed, reused, copied
 forward, salvaged, substituted, or admitted. No compiled-CM, materialization,
 claims, analysis, Dyn, final tests, assembled gate, deployment, or training
-action ran. A successor requires a fresh implementation leaf, fresh B1 seal,
-fresh disposable qualification, and a separately committed immutable
-declaration; there is currently no active final cohort.
+action ran. At that historical boundary no active final cohort remained; any
+successor still had to satisfy the applicable implementation, B1, disposable
+qualification, and separately committed immutable-declaration requirements.
 
 ### Retired 71447 final attempt
 
@@ -336,7 +336,8 @@ stages 28/28 and all six infrastructure checks against qualified commit
 report SHA-256 is
 `48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73`.
 That qualification authorized exactly one immutable final lifecycle for
-`b2g26_final_71447`, declaration SHA-256
+`b2g26_final_71447`, immutable declaration
+`B2-GENERATED-COHORT-71447-DECLARATION.json`, declaration SHA-256
 `76c0ffc41ff80cb4b9f0ea6648240a73b55f0a7933970f8f2e2fd05a086cb4aa`,
 at producer commit/tree
 `ac73b2cc62e318923ffdf4d5eccda929207fcd5b` /
@@ -361,9 +362,39 @@ SHA-256
 Cohort 71447 is permanently retired. None of its source, compiled,
 materialized, claims, analysis, Dyn, report, log, build, WSL, or
 producer-snapshot bytes may be retried, resumed, reused, copied forward,
-salvaged, substituted, or admitted. `ACTIVE_FINAL_AUTHORITY = None`; a
-successor requires the corrected atomic publisher, fresh qualification, and a
-separately committed immutable declaration.
+salvaged, substituted, or admitted. The active authority was cleared after
+this terminal attempt; a successor required the corrected atomic publisher,
+fresh qualification, and a separately committed immutable declaration.
+
+### Active 71448 final cohort
+
+The corrected atomic publisher passed its complete pre-activation proof at
+commit `ae41232662213342aba72823bfdfe68d0ebe475c`: 1,965 Python tests, 61
+Rust tests, 13 standalone Dyn tests, both Clippy campaigns, both formatting
+checks, and the 246-file Python syntax floor. Its canonical schema-v2 report
+SHA-256 is
+`3e06b1dd5af58f62d48c2d18b07ae22cc0e0742f66b3ef31d244f96d9dcc92f5`.
+Every Cargo argv bound the external target and that target was absent before
+clean-tree verification and atomic publication.
+
+Fresh qualification `b2q26_ae41232_71805000` then passed all seven executable
+stages 28/28 and all six infrastructure checks against qualified commit/tree
+`ae41232662213342aba72823bfdfe68d0ebe475c` /
+`cd3322b844edd2d08b8a77fe90ba2b77e273d280`. Its canonical green,
+non-admissible report SHA-256 is
+`c7a623eed20eea7c115c6167391158be90bb70bd4914e1d591ecee9c1f2ff3d8`.
+It binds the immutable `055c6930-r2` B1 authority.
+
+`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71448`, immutable
+declaration `B2-GENERATED-COHORT-71448-DECLARATION.json`, declaration
+SHA-256
+`0b48462a8cd8dfb752a73b711954616dd22d45d857748d316505bd17c976262a`,
+and the exact eleven-path declaration/gate/schema/direct-test successor
+delta. The current alias is byte-identical to that immutable declaration. It
+declares seed blocks 71448000..71448003 through 71448600..71448603. This
+activation authorizes exactly one fresh, strictly sequential, no-retry final
+producer lifecycle. It does not admit qualification artifacts, retired bytes,
+passing subsets, deployment, or training.
 
 The declaration-bearing 71447 producer commit was a strict successor of
 qualified commit `74628f1bc04c7012903b30d44afa61566f0ff38d`. Its exact
@@ -457,9 +488,9 @@ separate CPython 3.11.4 executable and zstandard module digests above. The
 syntax report must never be required to identify the execution runtime.
 
 The assembler rejects declarations for retired cohorts 71426 through 71447
-before reading campaign evidence. The 71447 immutable declaration and its
-current-path alias are historical inputs only and cannot assemble or validate
-a green gate. There is no active eligible final declaration.
+before reading campaign evidence. The immutable 71447 declaration is
+historical only. The byte-identical current alias and immutable 71448
+declaration are the sole active eligible declaration pair.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -663,21 +694,17 @@ reuse of any retired cohort byte.
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. `ACTIVE_FINAL_AUTHORITY` is `None`. The current alias
-remains byte-identical to retired
-`B2-GENERATED-COHORT-71447-DECLARATION.json`; it is forensic only and the
-assembler rejects it before evidence replay. The command below documents
-argument shape, not an executable 71447 assembly. A separately committed
-post-qualification successor must replace every cohort pin before this
-template becomes executable again.
+clean-tree authority. The active authority and schema both pin 71448 and its
+declaration digest. The current alias is byte-identical to the immutable 71448
+declaration.
 
-The qualified parent is commit `74628f1bc04c7012903b30d44afa61566f0ff38d`.
-Qualification `b2q26_74628f1_71804000` passed all seven stages 28/28 and six
+The qualified parent is commit `ae41232662213342aba72823bfdfe68d0ebe475c`.
+Qualification `b2q26_ae41232_71805000` passed all seven stages 28/28 and six
 infrastructure checks; its green non-admissible report SHA-256 is
-`48e7f3488addacbd43d6c5f6b6fe92f35a62b3c3f5d717a3c646816858bd7e73`.
-Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. Its
-single successor activation was consumed by retired cohort 71447 and cannot
-admit qualification artifacts, passing subsets, retired bytes, deployment, or
+`c7a623eed20eea7c115c6167391158be90bb70bd4914e1d591ecee9c1f2ff3d8`.
+Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. This
+activation authorizes one no-retry final producer lifecycle and cannot admit
+qualification artifacts, passing subsets, retired bytes, deployment, or
 training.
 
 ```sh
