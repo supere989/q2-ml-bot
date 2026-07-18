@@ -474,13 +474,13 @@ with terminal phase `dyn-operator-argv-parse` and status
 Cohort 71449 is permanently retired. None of its source, compiled,
 materialized, claims, analysis, promotion, report, log, build, WSL,
 authorization, or producer-snapshot bytes may be retried, resumed, reused,
-copied forward, salvaged, substituted, or admitted. `ACTIVE_FINAL_AUTHORITY =
-None`; there is currently no active final cohort. A successor requires a Dyn
-CLI argv preflight that proves the separate-token `--expected-origin X,Y,Z`
-form (and refuses equals-glued flags) before any final Dyn invocation, a fresh
-green disposable qualification, and a separately committed immutable
-declaration before any producer may run. The corrected toolchain implements
-that boundary in `tools/preflight_b2_dyn_invocation.py` and the helper's
+copied forward, salvaged, substituted, or admitted. The authority was cleared
+to `None` after that terminal failure. A successor required a Dyn CLI argv
+preflight that proves the separate-token `--expected-origin X,Y,Z` form (and
+refuses equals-glued flags) before any final Dyn invocation, a fresh green
+disposable qualification, and a separately committed immutable declaration
+before any producer could run. The corrected toolchain implements that
+boundary in `tools/preflight_b2_dyn_invocation.py` and the helper's
 `--preflight-only true` mode. The retained pre-source report must be canonical
 schema `q2-b2-dyn-argv-preflight-v1`, bind the clean activation commit/tree and
 exact helper bytes, retain the complete later producer argv with
@@ -492,6 +492,37 @@ helper and clean repository binding and executes the retained `producer_argv`
 list directly, without a shell or manually reconstructed flags.
 The exclusive preflight report must be an absolute fresh path outside the
 repository so its publication cannot invalidate the clean commit/tree binding.
+
+### Active 71450 final cohort
+
+The Dyn-argv-preflight-corrected implementation was qualified at commit/tree
+`a38b3bad461e63c0c9d3f2a7bb184854aa6b923d` /
+`ede3ae277dc75dbae56918bff23382e3fc5e690e`. Fresh qualification
+`b2q26_a38b3ba_71807000` passed all seven executable stages 28/28 and all six
+infrastructure checks. Its canonical green, non-admissible report SHA-256 is
+`7f6a4d4c457dc257c93a7eec01f61c7fda4cb79d1737522842dde19d6a341596`.
+It binds immutable B1 authority `055c6930-r2`, canonical gate SHA-256
+`055c693027a4091178705331d1bf6c64a81638995f041e978aaf95e33effd354`.
+The qualification remains `non_admissible: true` and
+`final_cohort_authorized: false`; it supplies no map, seed, stage, artifact,
+Dyn evidence, or passing subset to the final lane.
+
+`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71450`, immutable
+declaration `B2-GENERATED-COHORT-71450-DECLARATION.json`, declaration
+SHA-256
+`d02c7c0737cf38be314394dd30e0293dcdf0b80c004efc1e0d072abc72f437c4`,
+and the exact eleven-path declaration/gate/schema/direct-test successor
+delta. The current alias is byte-identical and declares fresh, disjoint seed
+blocks 71450000..71450003 through 71450600..71450603. This activation
+authorizes exactly one fresh, strictly sequential, no-retry final producer
+lifecycle. It does not admit qualification artifacts, retired bytes, passing
+subsets, deployment, or training.
+
+The declaration-bearing 71450 producer commit must be a strict successor of
+qualified commit `a38b3bad461e63c0c9d3f2a7bb184854aa6b923d`. Gate replay
+must prove ancestry, the exact qualified commit/tree and report binding,
+byte-identical stable authority fields, and a complete Git delta equal to the
+frozen 71450 declaration/gate/schema/direct-test authorization path set.
 
 The declaration-bearing 71449 producer commit was a strict successor of
 qualified commit `7c3463c28e8913e340d77f182e52752be3381999`. Its exact
@@ -591,9 +622,9 @@ syntax report must never be required to identify the execution runtime.
 
 The assembler rejects declarations for retired cohorts 71426 through 71449
 before reading campaign evidence. The immutable 71447, 71448, and 71449
-declarations are historical only. There is no active eligible declaration
-pair; a successor requires a separately committed fresh declaration after a
-green qualification.
+declarations are historical only. The active authority and schema both pin
+71450 and the byte-identical alias/named declaration under
+`ACTIVE_FINAL_AUTHORITY`.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -795,24 +826,22 @@ reuse of any retired cohort byte.
 
 ## Assembly template
 
-This template is historical and non-executable until a successor activation:
-cohort 71449 is terminally retired, `ACTIVE_FINAL_AUTHORITY = None`, and
-there is currently no active final cohort. It records the required assembler
-shape only and must not be run against any retired, qualification, or 71449
-path. All values are exact paths. `OUT` must not exist and must be outside
-the implementation repository so publishing the gate cannot invalidate its
-own clean-tree authority. At activation, the authority and schema both pinned
-71449 and its declaration digest, and the then-current alias was
-byte-identical to the immutable 71449 declaration.
+This template applies only to the active 71450 lifecycle and must not be run
+against any retired, qualification, or 71449 path. All values are exact
+paths. `OUT` must not exist and must be outside the implementation
+repository so publishing the gate cannot invalidate its own clean-tree
+authority. The authority and schema both pin 71450 and its declaration
+digest, and the current alias is byte-identical to the immutable 71450
+declaration.
 
-The qualified parent was commit `7c3463c28e8913e340d77f182e52752be3381999`.
-Qualification `b2q26_7c3463c_71806000` passed all seven stages 28/28 and six
+The qualified parent is commit `a38b3bad461e63c0c9d3f2a7bb184854aa6b923d`.
+Qualification `b2q26_a38b3ba_71807000` passed all seven stages 28/28 and six
 infrastructure checks; its green non-admissible report SHA-256 is
-`874e1936ccbcf235c781e906904e021c8f4b3fea966bb96d40a22bc1db5c3875`.
-Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. That
-consumed activation authorized one no-retry final producer lifecycle and
-could not admit qualification artifacts, passing subsets, retired bytes,
-deployment, or training.
+`7f6a4d4c457dc257c93a7eec01f61c7fda4cb79d1737522842dde19d6a341596`.
+Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. This
+activation authorizes one no-retry final producer lifecycle and cannot admit
+qualification artifacts, passing subsets, retired bytes, deployment, or
+training.
 
 ```sh
 python tools/assemble_b2_gate.py \

@@ -172,6 +172,19 @@ RETIRED_71449_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
+ACTIVE_71450_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+    "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
+    "docs/multires/B2-GATE-ASSEMBLY.md",
+    "docs/multires/B2-GENERATED-COHORT-71450-DECLARATION.json",
+    "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
+    "schemas/q2-multires-b2-gate-v1.schema.json",
+    "tests/test_b2_gate.py",
+    "tests/test_b2_operational_docs.py",
+    "tests/test_generator_claim_campaign.py",
+    "tests/test_generator_cohort.py",
+    "tests/test_retired_cohort_registry.py",
+    "tools/assemble_b2_gate.py",
+})
 
 
 class B2GateError(ValueError):
@@ -186,11 +199,19 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Cohort 71449 consumed its one-shot source authorization and failed at the
-# sole Dyn invocation on operator argv parsing. A separately committed
-# post-qualification successor is required before this may become non-None
-# again; the current alias is never sufficient to infer executable authority.
-ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
+# Explicit post-qualification activation. The current alias is never used to
+# infer this authority, and the qualification-successor delta must match this
+# fixed declaration-only path set exactly.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
+    cohort_id="b2g26_final_71450",
+    declaration_sha256=(
+        "d02c7c0737cf38be314394dd30e0293dcdf0b80c004efc1e0d072abc72f437c4"
+    ),
+    immutable_declaration_path=(
+        "docs/multires/B2-GENERATED-COHORT-71450-DECLARATION.json"
+    ),
+    qualification_successor_paths=ACTIVE_71450_QUALIFICATION_SUCCESSOR_PATHS,
+)
 
 
 def _require_active_final_authority() -> ActiveFinalAuthority:
