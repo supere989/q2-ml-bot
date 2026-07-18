@@ -21,6 +21,9 @@ from harness.atlas_analyzer import (
     CONTENTS_PLAYERCLIP,
     FROZEN_L0_BIT_PLANE_NAMES,
     FROZEN_L0_SCALAR_PLANE_NAMES,
+    OBJECTIVE_OMISSION_BEYOND_FENCE,
+    OBJECTIVE_OMISSION_NO_TARGET,
+    OBJECTIVE_TARGET_MAX_DISTANCE,
     NavNode,
     OracleProcess,
     _MoverDependencyIndex,
@@ -49,12 +52,14 @@ from harness.atlas_analyzer import (
     _movement_requests_for_source,
     _normalized_analysis_manifest,
     _objective_artifact,
+    _objective_guidepost_analysis,
     _process_tree_rss_bytes,
     _run_measured_process,
     _surface_candidate_scope,
     _surface_request_upper_bound,
     _supported_floor_candidate,
     analyze_map,
+    canonical_json,
     sha256_file,
 )
 from harness.atlas_entity_semantics import Aabb, L0BudgetState
@@ -323,17 +328,19 @@ def test_objective_artifact_is_versioned_atlas_bound_and_uses_admitted_l1() -> N
             (2, 0, 1), (32.0, 0.0, 24.0), True, True, True, 0, (0.0, 0.0, 1.0),
         ),
     }
-    artifact = _objective_artifact(
+    artifact, omissions = _objective_artifact(
         SimpleNamespace(entities=entities, sha256="ab" * 32),
         nodes,
         {1: (0, 0, 0)},
         (0, 0, 0),
         "objective-fixture",
         "cd" * 32,
+        strict_binding=True,
     )
     assert artifact["schema"] == "q2-atlas-objectives-v1"
     assert artifact["canonical_map_id"] == "objective-fixture"
     assert artifact["atlas_sha256"] == "cd" * 32
+    assert omissions == []
     assert artifact["objectives"] == [
         {
             "class": "spawn_egress",
@@ -354,6 +361,175 @@ def test_objective_artifact_is_versioned_atlas_bound_and_uses_admitted_l1() -> N
             "world_milliunits": [32000, 0, 24000],
         },
     ]
+
+
+def test_strict_generated_objective_binding_rejects_beyond_fence() -> None:
+    entities = (
+        EntityMetadata(45, "ammo_grenades", (("origin", "0 0 24"),)),
+    )
+    nodes = {
+        (20, 0, 1): NavNode(
+            (20, 0, 1), (320.0, 0.0, 24.0), True, True, True, 0, (0.0, 0.0, 1.0),
+        ),
+    }
+    with pytest.raises(AtlasAnalysisError, match="objective entity 45 is 320.000"):
+        _objective_artifact(
+            SimpleNamespace(entities=entities, sha256="ab" * 32),
+            nodes,
+            {},
+            (0, 0, 0),
+            "generated-fixture",
+            "cd" * 32,
+            strict_binding=True,
+        )
+
+
+def test_authored_objective_omits_unbound_with_deterministic_evidence() -> None:
+    entities = (
+        # Far from every admitted L1 (nearest is 228 units), like q2dm8 entity 45.
+        EntityMetadata(45, "ammo_grenades", (("origin", "0 0 24"),)),
+        EntityMetadata(7, "weapon_railgun", (("origin", "400 0 24"),)),
+    )
+    nodes = {
+        (14, 0, 1): NavNode(
+            (14, 0, 1), (228.09, 0.0, 24.0), True, True, True, 0, (0.0, 0.0, 1.0),
+        ),
+        (25, 0, 1): NavNode(
+            (25, 0, 1), (400.0, 0.0, 24.0), True, True, True, 0, (0.0, 0.0, 1.0),
+        ),
+    }
+    artifact, omissions = _objective_artifact(
+        SimpleNamespace(entities=entities, sha256="ab" * 32),
+        nodes,
+        {},
+        (0, 0, 0),
+        "stock-fixture",
+        "cd" * 32,
+        strict_binding=False,
+    )
+    assert [record["objective_id"] for record in artifact["objectives"]] == [7]
+    assert artifact["objectives"][0]["classname"] == "weapon_railgun"
+    assert artifact["objectives"][0]["l1_index"] == [25, 0, 1]
+    assert omissions == [{
+        "classname": "ammo_grenades",
+        "entity_id": 45,
+        "nearest_distance_milliunits": 228_090,
+        "reason": OBJECTIVE_OMISSION_BEYOND_FENCE,
+    }]
+    guideposts = _objective_guidepost_analysis(len(artifact["objectives"]), omissions)
+    assert guideposts["admitted_count"] == 1
+    assert guideposts["omitted_count"] == 1
+    assert guideposts["omissions"] == omissions
+
+
+def test_authored_objective_omission_without_supported_passable_target() -> None:
+    entities = (
+        EntityMetadata(9, "item_quad", (("origin", "0 0 24"),)),
+    )
+    nodes = {
+        (0, 0, 0): NavNode(
+            (0, 0, 0), (0.0, 0.0, 24.0), False, False, False, 0, (0.0, 0.0, 1.0),
+        ),
+    }
+    artifact, omissions = _objective_artifact(
+        SimpleNamespace(entities=entities, sha256="ab" * 32),
+        nodes,
+        {},
+        (0, 0, 0),
+        "stock-fixture",
+        "cd" * 32,
+        incident=set(),
+        strict_binding=False,
+    )
+    assert artifact["objectives"] == []
+    assert omissions == [{
+        "classname": "item_quad",
+        "entity_id": 9,
+        "nearest_distance_milliunits": 0,
+        "reason": OBJECTIVE_OMISSION_NO_TARGET,
+    }]
+
+
+def test_near_objective_within_fence_is_retained() -> None:
+    entities = (
+        EntityMetadata(3, "ammo_bullets", (("origin", "0 0 24"),)),
+    )
+    # Nearest admitted L1 is 150 units away, still inside the 160 fence.
+    nodes = {
+        (9, 0, 1): NavNode(
+            (9, 0, 1), (150.0, 0.0, 24.0), True, True, True, 0, (0.0, 0.0, 1.0),
+        ),
+    }
+    artifact, omissions = _objective_artifact(
+        SimpleNamespace(entities=entities, sha256="ab" * 32),
+        nodes,
+        {},
+        (0, 0, 0),
+        "near-fixture",
+        "cd" * 32,
+        strict_binding=False,
+    )
+    assert omissions == []
+    assert artifact["objectives"] == [{
+        "class": "ammunition",
+        "classname": "ammo_bullets",
+        "confidence": 65535,
+        "l1_index": [9, 0, 1],
+        "objective_id": 3,
+        "risk": 0,
+        "world_milliunits": [0, 0, 24000],
+    }]
+    assert OBJECTIVE_TARGET_MAX_DISTANCE == 160.0
+
+
+def test_objective_omission_evidence_is_cold_semantically_stable() -> None:
+    primary = {
+        "schema": "q2-atlas-analysis-v1",
+        "status": "candidate",
+        "deterministic_rebuild": False,
+        "performance": {"primary_elapsed_milliseconds": 12},
+        "identity": {"atlas_manifest_sha256": "1" * 64},
+        "artifacts": {
+            "atlas": {"build_peak_rss_bytes": 1024},
+            "atlas_manifest": {
+                "sha256": "2" * 64,
+                "uncompressed_bytes": 999,
+                "verification": {"manifest_sha256": "3" * 64},
+            },
+        },
+        "compiled_world": {
+            "objective_guideposts": _objective_guidepost_analysis(
+                1,
+                [{
+                    "classname": "ammo_grenades",
+                    "entity_id": 45,
+                    "nearest_distance_milliunits": 228_090,
+                    "reason": OBJECTIVE_OMISSION_BEYOND_FENCE,
+                }],
+            ),
+            "pmove_source_accounting": {"selected": 7, "omitted": 3},
+        },
+    }
+    cold = json.loads(json.dumps(primary))
+    cold["performance"]["primary_elapsed_milliseconds"] = 44
+    cold["artifacts"]["atlas"]["build_peak_rss_bytes"] = 2048
+    cold["identity"]["atlas_manifest_sha256"] = "4" * 64
+    cold["artifacts"]["atlas_manifest"]["sha256"] = "5" * 64
+    cold["artifacts"]["atlas_manifest"]["uncompressed_bytes"] = 1000
+    cold["artifacts"]["atlas_manifest"]["verification"]["manifest_sha256"] = "6" * 64
+    assert _normalized_analysis_manifest(primary) == _normalized_analysis_manifest(cold)
+    assert (
+        canonical_json(_normalized_analysis_manifest(primary))
+        == canonical_json(_normalized_analysis_manifest(cold))
+    )
+
+    drifted = json.loads(json.dumps(cold))
+    drifted["compiled_world"]["objective_guideposts"]["omissions"][0][
+        "nearest_distance_milliunits"
+    ] = 228_091
+    assert _normalized_analysis_manifest(primary) != _normalized_analysis_manifest(
+        drifted
+    )
 
 
 def test_unknown_objective_class_fails_instead_of_disappearing() -> None:

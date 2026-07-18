@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Iterable, Mapping, Sequence
+from typing import AbstractSet, Any, Iterable, Mapping, Sequence
 
 import zstandard
 
@@ -77,6 +77,9 @@ SCHEMA = "q2-atlas-analysis-v1"
 OBJECTIVE_SCHEMA = "q2-atlas-objectives-v1"
 OBJECTIVE_MEDIA_TYPE = "application/vnd.q2.atlas-objectives-v1"
 OBJECTIVE_TARGET_MAX_DISTANCE = 160.0
+OBJECTIVE_GUIDEPOST_ANALYSIS_SCHEMA = "q2-atlas-objective-guidepost-analysis-v1"
+OBJECTIVE_OMISSION_BEYOND_FENCE = "beyond_objective_target_max_distance"
+OBJECTIVE_OMISSION_NO_TARGET = "no_admitted_supported_passable_l1"
 BUILD_PLAN_SCHEMA = "q2-atlas-build-plan-v2"
 EVIDENCE_CM_TRACE_V1 = 1
 EVIDENCE_PMOVE_V1 = 2
@@ -862,6 +865,45 @@ def _objective_class(classname: str) -> str | None:
     return None
 
 
+def _objective_target_distance(
+    node: NavNode, world_point: Sequence[float],
+) -> float:
+    return math.sqrt(sum(
+        (node.position[axis] - world_point[axis]) ** 2 for axis in range(3)
+    ))
+
+
+def _is_supported_passable_objective_target(
+    node: NavNode,
+    key: tuple[int, int, int],
+    incident: AbstractSet[tuple[int, int, int]],
+) -> bool:
+    """Return whether an L1 node may host a public objective guidepost."""
+
+    return (
+        key in incident
+        and node.supported
+        and (node.standing_clear or node.crouched_clear)
+    )
+
+
+def _objective_omission(
+    entity_id: int,
+    classname: str,
+    reason: str,
+    nearest_distance: float | None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "classname": classname,
+        "entity_id": entity_id,
+        "reason": reason,
+    }
+    if nearest_distance is not None:
+        # Milliunits keep omission evidence integer-stable across cold rebuilds.
+        record["nearest_distance_milliunits"] = int(round(nearest_distance * 1000.0))
+    return record
+
+
 def _objective_artifact(
     metadata: BspMetadata,
     nodes: Mapping[tuple[int, int, int], NavNode],
@@ -869,8 +911,30 @@ def _objective_artifact(
     origin: tuple[int, int, int],
     canonical_map_id: str,
     atlas_sha256: str,
-) -> dict[str, Any]:
+    *,
+    incident: AbstractSet[tuple[int, int, int]] | None = None,
+    strict_binding: bool = True,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Emit public objective guideposts bound to admitted L1 targets.
+
+    Generated analysis (`strict_binding=True`, generator claims present) fails
+    closed when any supported objective class lacks an admitted
+    supported/passable L1 target within ``OBJECTIVE_TARGET_MAX_DISTANCE``.
+
+    Authored/stock analysis without generator claims never rebinds beyond the
+    fence: unbound objectives are omitted with deterministic evidence, while
+    the objectives JSON schema and 160-unit runtime validator stay unchanged.
+    Stock item completeness remains a separate inventory/design-signature check.
+    """
+
+    if incident is None:
+        incident = set(nodes)
+    candidates = {
+        key: node for key, node in nodes.items()
+        if _is_supported_passable_objective_target(node, key, incident)
+    }
     records = []
+    omissions: list[dict[str, Any]] = []
     for entity in metadata.entities:
         classname = entity.classname.casefold()
         objective_class = _objective_class(classname)
@@ -889,31 +953,88 @@ def _objective_artifact(
         if classname == "info_player_deathmatch" and target is None:
             # Only engine-linked, oracle-clear spawns are public egress facts.
             continue
+        nearest_distance: float | None = None
         if target is None:
             ranked = sorted(
-                nodes.values(),
+                candidates.values(),
                 key=lambda node: (
-                    sum((node.position[axis] - world_point[axis]) ** 2 for axis in range(3)),
+                    _objective_target_distance(node, world_point),
                     node.index[2], node.index[1], node.index[0],
                 ),
             )
             if not ranked:
-                raise AtlasAnalysisError(
-                    f"objective entity {entity.index} has no admitted L1 target"
-                )
+                if nodes:
+                    nearest_any = min(
+                        nodes.values(),
+                        key=lambda node: (
+                            _objective_target_distance(node, world_point),
+                            node.index[2], node.index[1], node.index[0],
+                        ),
+                    )
+                    nearest_distance = _objective_target_distance(
+                        nearest_any, world_point,
+                    )
+                if strict_binding:
+                    raise AtlasAnalysisError(
+                        f"objective entity {entity.index} has no admitted L1 target"
+                    )
+                omissions.append(_objective_omission(
+                    entity.index, classname, OBJECTIVE_OMISSION_NO_TARGET,
+                    nearest_distance,
+                ))
+                continue
             target = ranked[0].index
+            nearest_distance = _objective_target_distance(ranked[0], world_point)
         node = nodes.get(target)
-        if node is None:
-            raise AtlasAnalysisError(
-                f"objective entity {entity.index} target is not in Atlas L1"
-            )
-        distance = math.sqrt(sum(
-            (node.position[axis] - world_point[axis]) ** 2 for axis in range(3)
-        ))
+        if node is None or not _is_supported_passable_objective_target(
+            node, target, incident,
+        ):
+            if candidates:
+                nearest = min(
+                    candidates.values(),
+                    key=lambda candidate: (
+                        _objective_target_distance(candidate, world_point),
+                        candidate.index[2], candidate.index[1], candidate.index[0],
+                    ),
+                )
+                nearest_distance = _objective_target_distance(nearest, world_point)
+            elif nodes:
+                nearest_any = min(
+                    nodes.values(),
+                    key=lambda candidate: (
+                        _objective_target_distance(candidate, world_point),
+                        candidate.index[2], candidate.index[1], candidate.index[0],
+                    ),
+                )
+                nearest_distance = _objective_target_distance(
+                    nearest_any, world_point,
+                )
+            if strict_binding:
+                raise AtlasAnalysisError(
+                    f"objective entity {entity.index} target is not in Atlas L1"
+                    if node is None else
+                    f"objective entity {entity.index} target is not supported/passable"
+                )
+            omissions.append(_objective_omission(
+                entity.index, classname, OBJECTIVE_OMISSION_NO_TARGET,
+                nearest_distance,
+            ))
+            continue
+        distance = (
+            nearest_distance if nearest_distance is not None
+            else _objective_target_distance(node, world_point)
+        )
         if distance > OBJECTIVE_TARGET_MAX_DISTANCE:
-            raise AtlasAnalysisError(
-                f"objective entity {entity.index} is {distance:.3f} units from admitted L1"
-            )
+            if strict_binding:
+                raise AtlasAnalysisError(
+                    f"objective entity {entity.index} is {distance:.3f} units "
+                    f"from admitted L1"
+                )
+            omissions.append(_objective_omission(
+                entity.index, classname, OBJECTIVE_OMISSION_BEYOND_FENCE,
+                distance,
+            ))
+            continue
         hazard = bool(node.contents & (CONTENTS_LAVA | CONTENTS_SLIME))
         records.append({
             "class": objective_class,
@@ -925,13 +1046,27 @@ def _objective_artifact(
             "world_milliunits": _milliunits(world_point, f"objective {entity.index}"),
         })
     records.sort(key=lambda record: record["objective_id"])
-    return {
+    omissions.sort(key=lambda record: record["entity_id"])
+    document = {
         "atlas_sha256": atlas_sha256,
         "bsp_sha256": metadata.sha256,
         "canonical_map_id": canonical_map_id,
         "objectives": records,
         "origin": list(origin),
         "schema": OBJECTIVE_SCHEMA,
+    }
+    return document, omissions
+
+
+def _objective_guidepost_analysis(
+    admitted_count: int,
+    omissions: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "schema": OBJECTIVE_GUIDEPOST_ANALYSIS_SCHEMA,
+        "admitted_count": admitted_count,
+        "omitted_count": len(omissions),
+        "omissions": [dict(item) for item in omissions],
     }
 
 
@@ -5706,13 +5841,19 @@ def analyze_map(
     design_path = base.with_suffix(".design-signature.json")
     design_bytes = canonical_json(design) + b"\n"
     design_path.write_bytes(design_bytes)
-    objective_document = _objective_artifact(
+    objective_document, objective_omissions = _objective_artifact(
         metadata, nodes, spawn_indices, origin, canonical_map_id,
         pack_result["uncompressed_sha256"],
+        incident=incident,
+        strict_binding=generator_claims is not None,
     )
     objective_path = base.with_suffix(".objectives.json")
     objective_bytes = canonical_json(objective_document) + b"\n"
     objective_path.write_bytes(objective_bytes)
+    objective_guideposts = _objective_guidepost_analysis(
+        len(objective_document["objectives"]),
+        objective_omissions,
+    )
     artifacts = {
         "atlas": {
             **pack_result,
@@ -5874,6 +6015,7 @@ def analyze_map(
             "lighting": compiled_non_hook["lighting"],
             "hooks": compiled_hooks,
             "teleporters": teleporter_analysis.report(),
+            "objective_guideposts": objective_guideposts,
             "route_claims": compiled_non_hook["route_claims"],
             "pmove_source_accounting": pmove_source_accounting,
         },

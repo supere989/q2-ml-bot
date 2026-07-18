@@ -725,7 +725,15 @@ tests, and assembly. Every item below comes from fresh final-cohort roots.
   `tools/generator_claim_validator.py --mode stock`. The stock BSP, analysis,
   and validation roots contain exactly the eight pinned maps and no other
   file or symlink. Independent cold evidence is embedded in and revalidated
-  from each analysis manifest.
+  from each analysis manifest. Stock/authored analysis without generator
+  claims emits only objective guideposts bound to an admitted
+  supported/passable L1 target within 160 units; unbound objectives are
+  omitted with deterministic `compiled_world.objective_guideposts` evidence
+  and never rebound beyond the fence. Generated analysis with generator
+  claims remains strict and still fails closed on any unbound supported
+  objective. The `.objectives.json` schema and Rust 160-unit validator are
+  unchanged; stock item completeness continues to use pinned BSP inventory
+  and design-signature multisets, not guidepost emission completeness.
 - `tools/q2-dyn-evidence` runs on `DESKTOP-RTX2080` WSL and atomically writes
   its report plus four real `Q2LAT002` snapshots. Its selected map would have to
   be a member of an admitted population. The assembler binds it to the exact

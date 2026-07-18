@@ -225,6 +225,36 @@ evidence, and a validation version; an unconditional pass is rejected. Stock
 analysis does **not** require generator tags, eight spawns, 98% tagged
 floor-light coverage, v6 hook claims, or v6 headroom/guard metadata.
 
+### Objective guidepost binding split
+
+Public objective guideposts and BSP item completeness are intentionally
+separate authorities:
+
+1. **Generated analysis with generator claims remains strict.** Every supported
+   objective class entity must bind to an admitted supported/passable L1 target
+   within `OBJECTIVE_TARGET_MAX_DISTANCE` (160 units). Any missing or out-of-
+   fence target fails analysis closed; the producer never silently drops a
+   claimed generated objective.
+2. **Stock/authored analysis without generator claims is fence-bound, not
+   complete-item-bound.** It emits only public objective guideposts that bind to
+   an admitted supported/passable L1 target within 160 units. An unbound
+   objective is omitted and never rebound beyond the fence. Dynamic-geometry-
+   dependent pickups and distant authored ammo/items therefore do not fail stock
+   Atlas construction solely because their nearest map-static L1 exceeds 160.
+3. **Omissions are explicit deterministic evidence.** Each omission is recorded
+   in the analysis manifest under
+   `compiled_world.objective_guideposts.omissions` with stable `entity_id`,
+   `classname`, `reason`, and `nearest_distance_milliunits` when any admitted L1
+   nodes exist. Cold rebuilds compare this evidence semantically; omission is
+   never silent.
+4. **Unchanged artifact contracts.** The public `.objectives.json` schema
+   (`q2-atlas-objectives-v1`) and the Rust 160-unit L1-target validator remain
+   unchanged. Emitted guideposts must still satisfy that validator.
+5. **Stock item completeness stays on inventory/design-signature authority.**
+   Pinned BSP inventory and the compiled design signature continue to enforce
+   deathmatch-spawn counts and item-class multisets for q2dm1–q2dm8. Omitting a
+   guidepost does not erase or relax that inventory check.
+
 ## Full-cold producer closure (fail closed)
 
 The analyzer now emits the complete `q2-atlas-full-cold-proof-v1` contract from
