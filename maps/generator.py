@@ -877,6 +877,39 @@ class MapGenerator:
             and first.wy + first.d > second.wy
         )
 
+    def _ensure_spawn_arena(self, grid_n: int) -> None:
+        """Guarantee one deterministic map-spanning spawn domain.
+
+        Kind assignment is stochastic and a sparse occupied grid can miss the
+        central cells that are normally forced to arenas.  A zero-arena layout
+        then has no room wide enough for the unchanged 1024-by-1024 spawn-span
+        contract, even when hundreds of locally clear points exist.  Promote
+        the closest, widest existing room before geometry is derived.  This
+        consumes no RNG and does not rescue or relax any later clearance,
+        component, separation, or span check.
+        """
+
+        if any(room.kind == "arena" for room in self.rooms):
+            return
+        if not self.rooms:
+            return
+        center = grid_n // 2
+        anchor = min(
+            self.rooms,
+            key=lambda room: (
+                abs(room.gx - center) + abs(room.gy - center),
+                -(room.w * room.d),
+                -room.floor_z,
+                room.wy,
+                room.wx,
+            ),
+        )
+        authored_height = anchor.ceil_z - anchor.floor_z
+        anchor.kind = "arena"
+        anchor.w = 3 * GRID_SIZE
+        anchor.d = 3 * GRID_SIZE
+        anchor.ceil_z = anchor.floor_z + max(384, authored_height)
+
     def _normalize_spawn_arena_floor(self) -> None:
         """Keep one arena perimeter available as a standing component.
 
@@ -1099,6 +1132,8 @@ class MapGenerator:
                     room.kind = 'room'
                     room.w, room.d, height = self._room_params('room')
                     room.ceil_z = room.floor_z + height
+
+        self._ensure_spawn_arena(N)
 
         # Establish one map-spanning standing-floor domain before connections,
         # platforms, and static blockers are derived from the room geometry.

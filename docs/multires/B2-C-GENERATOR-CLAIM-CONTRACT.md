@@ -1363,6 +1363,21 @@ all eight retained infrastructure checks, including
 fresh disjoint 71454 declaration, update the schema, and activate it. No green
 gate, declaration, cohort execution, deployment, or training authority exists.
 
+Disposable qualification `b2q26_926efb4_71813000`, canonical plan SHA-256
+`eaac7db4d962f79e00da8fe9bed3f00e2d438f517924fc4caf697bbcd76fa228`,
+stopped at primary source generation. It published no report and retained only
+27 complete primary members; cold generation never began. The missing member,
+`pits_71813302`, was the plan's sole zero-arena layout. Its 446 locally legal
+spawn candidates were divided among nine source standing components, none of
+which met the unchanged 1024-by-1024 dual-span rule, so refusal was correct.
+The workspace, ID, and seeds are forensic-only and cannot be resumed or
+reused. Generation now guarantees an arena before derived geometry by
+deterministically promoting the nearest widest existing room only when the
+arena count is zero. The operation consumes no RNG and does not alter the
+clearance, separation, span, or component admission checks. The failed seed is
+retained only as a regression; a new clean commit and disjoint qualification
+are required.
+
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
 proved ancestry, the exact qualified commit/tree and report binding,

@@ -733,6 +733,22 @@ disposable-qualification threshold remains unchanged. A new implementation
 commit and wholly fresh qualification ID, workspace, and seed range are
 required.
 
+Disposable qualification `b2q26_926efb4_71813000`, canonical plan SHA-256
+`eaac7db4d962f79e00da8fe9bed3f00e2d438f517924fc4caf697bbcd76fa228`,
+subsequently stopped during primary source generation with no stage report,
+27 complete primary members, and no cold population. Member
+`b2q26_926efb4_71813000_pits_71813302` had 446 locally legal candidates split
+across nine source standing components; no component satisfied the unchanged
+1024-by-1024 dual-span contract. It was the only zero-arena member in the
+28-map plan, so no protected 1536-by-1536 spawn domain existed. The workspace,
+qualification ID, and seed range are forensic-only and cannot be resumed or
+reused. The implementation now deterministically promotes the nearest widest
+ordinary room to standard arena geometry when stochastic assignment creates
+zero arenas, before any derived geometry and without consuming RNG. The exact
+failed seed now passes the unchanged clearance, separation, dual-span, and
+single-source-component gates as a regression fixture only. A new committed
+implementation and a disjoint qualification remain mandatory.
+
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
 proved ancestry, the exact qualified commit/tree and report binding,

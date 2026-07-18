@@ -126,6 +126,22 @@ it does not admit the intervening air gap or widen the hurt region. The exact
 failed BSP now completes a real Atlas build under the correction. A new clean
 commit and fresh 28/28 qualification remain mandatory before 71454 activation.
 
+Disposable qualification `b2q26_926efb4_71813000`, plan SHA-256
+`eaac7db4d962f79e00da8fe9bed3f00e2d438f517924fc4caf697bbcd76fa228`,
+then stopped fail-closed during primary source generation. It published no
+stage report: 27 complete primary members and zero cold members existed when
+`pits_71813302` refused placement because its 446 locally legal candidates
+were split across nine source standing components and none met the unchanged
+1024-by-1024 dual-span requirement. That layout was the cohort's sole
+zero-arena member, so the protected 1536-by-1536 spawn domain had never been
+created. The failed workspace, ID, and seed range are forensic-only and must
+not be resumed or reused. Zero-arena layouts now deterministically promote the
+nearest widest existing room to the standard arena geometry before any
+connections, platforms, lighting, or blockers are derived, consuming no RNG
+and leaving all clearance, separation, span, and component gates unchanged.
+The exact failed seed is a regression fixture only. Another new clean commit,
+workspace, qualification ID, and disjoint seed range remain required.
+
 ## Training Topology
 
 Training runs on the Windows RTX 2080 box (DESKTOP-RTX2080), inside WSL.

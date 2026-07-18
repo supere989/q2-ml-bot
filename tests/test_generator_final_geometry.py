@@ -85,6 +85,52 @@ def test_spawn_placement_fails_when_no_component_can_span_the_map() -> None:
     assert "span=" in diagnostic
 
 
+def test_zero_arena_promotion_is_deterministic_and_rng_neutral() -> None:
+    generator = MapGenerator(seed=17, style="pits")
+    generator.rooms = [
+        Room(4, 2, 2048, 1024, 1024, 512, 0, 320, "room"),
+        Room(3, 3, 1536, 1536, 1024, 1024, 0, 379, "room"),
+        Room(3, 1, 1536, 512, 512, 1024, 96, 267, "corridor"),
+    ]
+    rng_state = generator.rng.getstate()
+
+    generator._ensure_spawn_arena(5)
+
+    assert generator.rng.getstate() == rng_state
+    promoted = generator.rooms[1]
+    assert (
+        promoted.kind,
+        promoted.w,
+        promoted.d,
+        promoted.floor_z,
+        promoted.ceil_z,
+    ) == ("arena", 1536, 1536, 0, 384)
+    assert generator.rooms[0].kind == "room"
+    assert generator.rooms[2].kind == "corridor"
+
+
+def test_failed_71813_pits_member_gets_protected_spanning_spawn_component() -> None:
+    generator = MapGenerator(seed=71_813_302, style="pits")
+    generator.generate(5)
+
+    anchor = generator._spawn_protected_anchor
+    assert anchor is not None
+    assert (anchor.gx, anchor.gy, anchor.kind, anchor.w, anchor.d) == (
+        3, 3, "arena", 1536, 1536,
+    )
+    assert generator.spawn_points == generator._spawn_protected_witnesses
+    assert len(generator.spawn_points) == DM_SPAWN_COUNT
+    assert generator._spawn_span_ok(generator.spawn_points)
+    assert generator._shared_spawn_source_component(
+        generator.spawn_points
+    ) is not None
+    assert min(
+        math.hypot(left[0] - right[0], left[1] - right[1])
+        for index, left in enumerate(generator.spawn_points)
+        for right in generator.spawn_points[index + 1:]
+    ) >= MIN_SPAWN_SEPARATION
+
+
 def test_spawn_arena_floor_normalization_preserves_height_and_nonoverlap() -> None:
     generator = MapGenerator(seed=23, style="pits")
     anchor = Room(1, 1, 512, 512, 1536, 1536, 0, 384, "arena")
