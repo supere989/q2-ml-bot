@@ -21,7 +21,6 @@ from harness.atlas_analyzer import _rust_struct_json
 import tools.assemble_b2_gate as b2_gate
 import tools.run_b2_test_suite as b2_test_suite
 from tools.assemble_b2_gate import (
-    ACTIVE_71453_QUALIFICATION_SUCCESSOR_PATHS,
     ACTIVE_FINAL_AUTHORITY,
     ActiveFinalAuthority,
     B2GateError,
@@ -34,6 +33,7 @@ from tools.assemble_b2_gate import (
     RETIRED_71450_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_71451_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_71452_QUALIFICATION_SUCCESSOR_PATHS,
+    RETIRED_71453_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_COHORT_71446,
     RETIRED_COHORT_71447,
     RETIRED_COHORT_71448,
@@ -41,6 +41,9 @@ from tools.assemble_b2_gate import (
     RETIRED_COHORT_71450,
     RETIRED_COHORT_71451,
     RETIRED_COHORT_71452,
+    RETIRED_COHORT_71453,
+    STOCK_PROVENANCE_COMPACT_SHA256,
+    STOCK_PROVENANCE_SHA256,
     assemble_gate,
     _exact_directory_files,
     _decode_dyn_snapshot,
@@ -57,6 +60,7 @@ from tools.assemble_b2_gate import (
     _validate_source_spawn_origin_binding_pass_count,
     _validate_test_report,
     _parser,
+    _load_stock_provenance,
     _require_active_final_authority,
     validate_gate,
 )
@@ -939,6 +943,10 @@ def test_retired_71446_identity_remains_readable_and_cli_is_explicit() -> None:
             ROOT / "docs/multires/B2-GENERATED-COHORT-71452-DECLARATION.json",
             "71452",
         ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json",
+            "71453",
+        ),
     ],
 )
 def test_gate_refuses_retired_declaration_before_evidence(
@@ -948,19 +956,14 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_71452_is_retired_and_71453_is_the_active_final_authority() -> None:
-    authority = _require_active_final_authority()
-    assert ACTIVE_FINAL_AUTHORITY == authority
-    assert authority.cohort_id == "b2g26_final_71453"
-    assert authority.declaration_sha256 == (
-        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810"
-    )
-    assert authority.immutable_declaration_path == (
-        "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
-    )
+def test_71453_is_retired_and_no_final_authority_is_active() -> None:
+    assert ACTIVE_FINAL_AUTHORITY is None
+    with pytest.raises(B2GateError, match="no active final cohort"):
+        _require_active_final_authority()
+    assert RETIRED_COHORT_71453 == "b2g26_final_71453"
     assert (
-        authority.qualification_successor_paths
-        == ACTIVE_71453_QUALIFICATION_SUCCESSOR_PATHS
+        "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
+        in RETIRED_71453_QUALIFICATION_SUCCESSOR_PATHS
     )
     assert RETIRED_COHORT_71452 == "b2g26_final_71452"
     assert (
@@ -994,17 +997,98 @@ def test_71452_is_retired_and_71453_is_the_active_final_authority() -> None:
     )
 
 
-def test_current_alias_is_byte_identical_to_active_71453() -> None:
-    declaration, digest = _validate_declaration(
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
-    assert declaration["cohort_id"] == "b2g26_final_71453"
-    assert digest == ACTIVE_FINAL_AUTHORITY.declaration_sha256
+def test_current_alias_is_forensic_71453_and_is_rejected() -> None:
+    alias = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
     assert (
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+        alias
     ).read_bytes() == (
         ROOT / "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
     ).read_bytes()
+    with pytest.raises(B2GateError, match="71453.*permanently retired"):
+        _validate_declaration(alias)
+
+
+def test_gate_requires_the_exact_activated_immutable_declaration_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declaration = json.loads(
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
+        ).read_bytes()
+    )
+    declaration["cohort_id"] = "b2g26_final_99001"
+    for row in declaration["maps"]:
+        row["map"] = f"b2g26_fresh_path_{row['ordinal']:02d}"
+        row["seed"] = 99_001_000 + row["ordinal"]
+    immutable = tmp_path / "immutable-declaration.json"
+    immutable.write_bytes(canonical_bytes(declaration))
+    digest = hashlib.sha256(immutable.read_bytes()).hexdigest()
+    alias = tmp_path / "byte-identical-alias.json"
+    alias.write_bytes(immutable.read_bytes())
+    monkeypatch.setattr(
+        b2_gate,
+        "ACTIVE_FINAL_AUTHORITY",
+        ActiveFinalAuthority(
+            cohort_id=declaration["cohort_id"],
+            declaration_sha256=digest,
+            immutable_declaration_path=str(immutable),
+            qualification_successor_paths=frozenset({str(immutable)}),
+        ),
+    )
+
+    with pytest.raises(B2GateError, match="activated immutable path"):
+        _validate_declaration(alias)
+    loaded, loaded_digest = _validate_declaration(immutable)
+    assert loaded == declaration
+    assert loaded_digest == digest
+
+
+def test_real_stock_provenance_uses_exact_committed_writer_bytes() -> None:
+    path = ROOT / "docs/multires/stock-q2dm1-q2dm8.provenance.json"
+    raw = path.read_bytes()
+    provenance = _load_stock_provenance(path)
+
+    assert hashlib.sha256(raw).hexdigest() == STOCK_PROVENANCE_SHA256
+    assert len(raw) == 4989
+    assert [row["canonical_id"] for row in provenance["records"]] == [
+        f"q2dm{number}" for number in range(1, 9)
+    ]
+    compact = canonical_bytes(provenance)
+    assert hashlib.sha256(compact).hexdigest() == STOCK_PROVENANCE_COMPACT_SHA256
+    assert len(compact) == 4193
+    assert compact != raw
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (b'{"schema":"x","schema":"y","records":[]}\n', "duplicate JSON key"),
+        (b'{"records":[NaN],"schema":"q2-corpus-provenance-v1"}\n', "non-finite JSON token"),
+        (b'{"records":[],"schema":"q2-corpus-provenance-v1"}\n', "writer-canonical"),
+    ],
+)
+def test_stock_provenance_loader_rejects_non_writer_artifacts(
+    tmp_path: Path, payload: bytes, message: str,
+) -> None:
+    path = tmp_path / "provenance.json"
+    path.write_bytes(payload)
+    with pytest.raises(B2GateError, match=message):
+        _load_stock_provenance(path)
+
+
+def test_stock_provenance_loader_rejects_writer_canonical_semantic_rewrite(
+    tmp_path: Path,
+) -> None:
+    source = ROOT / "docs/multires/stock-q2dm1-q2dm8.provenance.json"
+    provenance = json.loads(source.read_bytes())
+    provenance["records"][0]["author"] += " rewritten"
+    path = tmp_path / "provenance.json"
+    path.write_text(
+        json.dumps(provenance, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(B2GateError, match="exact committed digest differs"):
+        _load_stock_provenance(path)
 
 
 def test_retired_71446_qualification_delta_remains_historically_readable(
@@ -1655,7 +1739,7 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
         "implementation_successor"
     ]["properties"]["changed_paths"]["minItems"] == len(
-        ACTIVE_71453_QUALIFICATION_SUCCESSOR_PATHS
+        RETIRED_71453_QUALIFICATION_SUCCESSOR_PATHS
     )
     assert gate_schema["$defs"]["compiled_cm_preflight_stage"]["properties"][
         "pass_count"

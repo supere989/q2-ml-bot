@@ -92,6 +92,7 @@ REQUIRED_INFRASTRUCTURE_CHECKS = {
     "exclusive-create",
     "python310-syntax-floor",
     "resource-bounds",
+    "stock-provenance-writer-format",
     "timeout-fail-closed",
 }
 
@@ -863,6 +864,7 @@ def _validate_retained_stage_evidence(
                 "generated-promotion": Path(roots["promotion_evidence_root"]),
             },
             syntax_report=Path(roots["syntax_report"]),
+            repo_root=repo_root,
         )
     except (ValueError, RuntimeError, OSError, KeyError, TypeError) as error:
         raise B2QualificationError(

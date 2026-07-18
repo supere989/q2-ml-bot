@@ -196,7 +196,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
 
-def test_current_gate_contract_retires_71452_and_activates_71453() -> None:
+def test_current_gate_contract_retires_71453_and_prepares_71454() -> None:
     text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
         encoding="utf-8"
     )
@@ -289,7 +289,7 @@ def test_current_gate_contract_retires_71452_and_activates_71453() -> None:
         "byte identity of the CM, Pmove, and hook oracles",
         "separately committed immutable declaration",
         "fresh green disposable qualification",
-        "The assembler rejects declarations for retired cohorts 71426 through 71452",
+        "The assembler rejects declarations for retired cohorts 71426 through 71453",
         "Retired 71452 final attempt",
         "b2g26_final_71452",
         "B2-GENERATED-COHORT-71452-DECLARATION.json",
@@ -313,22 +313,31 @@ def test_current_gate_contract_retires_71452_and_activates_71453() -> None:
         "atlas_manifest_sha256",
         "analysis_manifest_sha256",
         "ACTIVE_FINAL_AUTHORITY = None",
-        "seven retained checks",
         "dyn-phase-b-atlas-manifest-binding",
         "refuses any identity",
-        "Active 71453 final cohort",
+        "eight retained checks",
+        "stock-provenance-writer-format",
+        "Retired 71453 final attempt and 71454 successor preparation",
         "b2g26_final_71453",
         "B2-GENERATED-COHORT-71453-DECLARATION.json",
         "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810",
         "71453000..71453003",
         "71453600..71453603",
+        "B2-GENERATED-COHORT-71453-FAILURE.json",
+        "34e4f74b4ccb9de41f29688546baa0ea1866dd28de29b78431d6a1afda7e9733",
+        "3ed2e930dcccf3abdabc7b5e1d9a1a95d74db4915a481bd523c51688c2bad030",
+        "c6ed658e80a4667d36a72a3367a6f0c9c25d5020c24edfd54f00d15b8d74995a",
+        "first and only authorized final gate invocation",
+        "compiled-CM declaration binding differs",
+        "unauthorized diagnostic replay",
+        "zero gate publication",
+        "There is currently no active final cohort",
+        "pre-declaration",
         "b2q26_14dfc40_71810000",
         "30e9e6e044ef49ec6b3352b7c57580833ff182b11cfddc909c32b840c3297d0d",
         "14dfc409b047611cb0722e53cad57d8c8584acb5",
         "725815ca68b1a44cbb8699656e214f4d19e60409",
         "28/28",
-        "exact twelve-path",
-        "The active authority and schema pin only 71453",
     ):
         assert required in text
     for stale_claim in (
@@ -353,8 +362,8 @@ def test_current_gate_contract_retires_71452_and_activates_71453() -> None:
         "Active 71452 final cohort",
         "`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71452`",
         "The active authority and schema pin only 71452",
-        "there is currently no active final cohort",
-        "No final cohort is active",
+        "Active 71453 final cohort",
+        "The active authority and schema pin only 71453",
     ):
         assert stale_claim not in text
 

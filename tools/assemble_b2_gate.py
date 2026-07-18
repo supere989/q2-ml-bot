@@ -93,6 +93,7 @@ RETIRED_COHORT_71449 = "b2g26_final_71449"
 RETIRED_COHORT_71450 = "b2g26_final_71450"
 RETIRED_COHORT_71451 = "b2g26_final_71451"
 RETIRED_COHORT_71452 = "b2g26_final_71452"
+RETIRED_COHORT_71453 = "b2g26_final_71453"
 EXPECTED_DESIGN_SHA256 = (
     "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
 )
@@ -113,6 +114,16 @@ PREFLIGHT_IMPLEMENTATION_PATHS = (
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 STOCK_IDS = tuple(f"q2dm{number}" for number in range(1, 9))
+STOCK_PROVENANCE_RELATIVE_PATH = (
+    "docs/multires/stock-q2dm1-q2dm8.provenance.json"
+)
+STOCK_PROVENANCE_WRITER_FORMAT = "json-indent-2-sorted-plus-lf"
+STOCK_PROVENANCE_SHA256 = (
+    "3ed2e930dcccf3abdabc7b5e1d9a1a95d74db4915a481bd523c51688c2bad030"
+)
+STOCK_PROVENANCE_COMPACT_SHA256 = (
+    "c6ed658e80a4667d36a72a3367a6f0c9c25d5020c24edfd54f00d15b8d74995a"
+)
 STOCK_ANALYSIS_SUFFIXES = STAGE_SUFFIXES["analysis"]
 MAX_L0_CHUNKS = 1200
 MAX_L0_BYTES = 16 * 1024 * 1024
@@ -218,7 +229,7 @@ RETIRED_71452_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
-ACTIVE_71453_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+RETIRED_71453_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "AGENTS.md",
     "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
     "docs/multires/B2-GATE-ASSEMBLY.md",
@@ -246,21 +257,14 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Corrective commit 14dfc409b047611cb0722e53cad57d8c8584acb5 passed a
-# completely fresh disposable qualification 28/28 with all seven retained
-# infrastructure checks. Cohort 71453 is the separately committed, disjoint,
-# one-shot successor; qualification bytes and retired 71452 bytes remain
-# inadmissible.
-ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
-    cohort_id="b2g26_final_71453",
-    declaration_sha256=(
-        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810"
-    ),
-    immutable_declaration_path=(
-        "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
-    ),
-    qualification_successor_paths=ACTIVE_71453_QUALIFICATION_SUCCESSOR_PATHS,
-)
+# Cohort 71453's sole authorized assembly failed before gate publication on
+# alias-versus-immutable compiled-CM declaration path binding.  An unauthorized
+# diagnostic replay then exposed that stock provenance uses the committed
+# corpus writer's pretty/sorted form while the gate used the unrelated compact
+# loader.  Its declaration and current alias are forensic only.
+# A 71454 declaration must not exist until this corrective implementation has
+# passed a completely fresh disposable qualification.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
 
 
 def _require_active_final_authority() -> ActiveFinalAuthority:
@@ -380,6 +384,51 @@ def _load_json_and_raw(
 
 def _load_json(path: Path, *, canonical: bool = True) -> Any:
     return _load_json_and_raw(path, canonical=canonical)[0]
+
+
+def _stock_provenance_writer_bytes(value: object) -> bytes:
+    try:
+        return (
+            json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise B2GateError(
+            f"stock provenance cannot be encoded by the committed writer: {exc}"
+        ) from exc
+
+
+def _load_stock_provenance(path: Path) -> Mapping[str, Any]:
+    """Load only the exact, hash-pinned corpus-writer provenance artifact."""
+
+    value, raw = _load_json_and_raw(path, canonical=False)
+    provenance = _mapping(value, "stock provenance")
+    writer_bytes = _stock_provenance_writer_bytes(provenance)
+    _require(
+        raw == writer_bytes,
+        "stock provenance is not writer-canonical pretty/sorted JSON plus LF",
+    )
+    _require(
+        _sha256_bytes(raw) == STOCK_PROVENANCE_SHA256,
+        "stock provenance exact committed digest differs",
+    )
+    return provenance
+
+
+def stock_provenance_writer_evidence(path: Path) -> dict[str, Any]:
+    """Return the qualification evidence for the production provenance loader."""
+
+    provenance = _load_stock_provenance(path)
+    records = _list(provenance.get("records"), "stock provenance records")
+    return {
+        "schema": provenance.get("schema"),
+        "record_ids": [
+            _mapping(record, "stock provenance record").get("canonical_id")
+            for record in records
+        ],
+        "writer_format": STOCK_PROVENANCE_WRITER_FORMAT,
+        "writer_artifact": _file_record(path),
+        "compact_sorted_sha256": _sha256_bytes(canonical_bytes(provenance)),
+    }
 
 
 def _mapping(value: object, label: str) -> Mapping[str, Any]:
@@ -812,6 +861,11 @@ def _validate_declaration(path: Path) -> tuple[dict[str, Any], str]:
     except RetiredCohortRegistryError as exc:
         raise B2GateError(f"B2 declaration admission refused: {exc}") from exc
     authority = _require_active_final_authority()
+    expected_path = (ROOT / authority.immutable_declaration_path).resolve()
+    _require(
+        path.resolve() == expected_path,
+        "B2 declaration path differs from the explicitly activated immutable path",
+    )
     _require(
         declaration["cohort_id"] == authority.cohort_id,
         "B2 declaration does not name the explicitly active final cohort",
@@ -2087,7 +2141,7 @@ def _validate_stock(
     implementation: Mapping[str, Any],
     binaries: Mapping[str, str],
 ) -> dict[str, Any]:
-    provenance = _mapping(_load_json(paths.stock_provenance), "stock provenance")
+    provenance = _load_stock_provenance(paths.stock_provenance)
     inventory = _mapping(_load_json(paths.stock_inventory), "stock inventory")
     _require(provenance.get("schema") == "q2-corpus-provenance-v1", "stock provenance schema differs")
     _require(inventory.get("schema") == "q2-stock-map-fixtures-v1", "stock inventory schema differs")

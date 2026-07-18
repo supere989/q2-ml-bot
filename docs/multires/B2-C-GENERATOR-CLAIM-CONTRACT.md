@@ -1304,14 +1304,16 @@ so mutually rewritten manifests remain ineligible. The correction must pass a
 completely fresh disposable qualification that drives real writer bytes
 through Phase B, followed by a separately committed disjoint successor
 declaration. Qualification infrastructure now
-requires seven retained checks. New check
+requires eight retained checks. Existing check
 `dyn-phase-b-atlas-manifest-binding` drives every promoted map's real Atlas
 manifest through the production compact loader, replays both exact manifest
 digests sealed in that map's promotion evidence, and re-derives snapped origin
-from `model0_mins`. Final Phase B also rejects retired cohort identities
-before artifact binding.
+from `model0_mins`. New check `stock-provenance-writer-format` drives the real
+committed stock provenance bytes through the production gate predicate and
+retains their exact writer digest. Final Phase B also rejects retired cohort
+identities before artifact binding.
 
-### Active 71453 final cohort
+### Retired 71453 final attempt and 71454 successor preparation
 
 Corrective commit `14dfc409b047611cb0722e53cad57d8c8584acb5`, tree
 `725815ca68b1a44cbb8699656e214f4d19e60409`, passed the completely fresh
@@ -1328,12 +1330,38 @@ The separately committed immutable
 byte-identical with SHA-256
 `5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810`.
 They name `b2g26_final_71453`; its 28 disjoint members use seed blocks
-71453000..71453003 through 71453600..71453603. `ACTIVE_FINAL_AUTHORITY`
-explicitly pins only that identity, digest, immutable path, and the
-exact twelve-path declaration/gate/schema/direct-test/agent-guidance successor
-delta. Cohort 71453 has exactly one immutable source authorization and no
-repair, resume, salvage, substitution, or retry lane after consumption.
-Retired 71452 and qualification bytes cannot cross into its final root.
+71453000..71453003 through 71453600..71453603. The first and only authorized
+final gate invocation used the current alias while the compiled-CM report
+bound the byte-identical immutable versioned declaration path. It failed with
+`compiled-CM declaration binding differs` and zero gate publication. That
+first invocation is terminal. The second invocation used the versioned path
+but was an unauthorized diagnostic replay only; it could not reopen the
+lifecycle and also published no gate.
+
+The diagnostic replay exposed a separate successor blocker: the generic
+compact/sorted JSON loader rejected the exact stock provenance writer
+artifact. The raw file is 4,989 bytes, pretty/sorted JSON plus LF, SHA-256
+`3ed2e930dcccf3abdabc7b5e1d9a1a95d74db4915a481bd523c51688c2bad030`;
+the generic loader expected a distinct 4,193-byte compact rewrite, SHA-256
+`c6ed658e80a4667d36a72a3367a6f0c9c25d5020c24edfd54f00d15b8d74995a`.
+Stock reports bind the raw writer digest, so the artifact must not be
+rewritten.
+
+`B2-GENERATED-COHORT-71453-FAILURE.json`, SHA-256
+`34e4f74b4ccb9de41f29688546baa0ea1866dd28de29b78431d6a1afda7e9733`,
+is terminal authority. `ACTIVE_FINAL_AUTHORITY = None`; the current alias is a
+forensic 71453 byte-copy and the registry rejects it before evidence. Every
+71453 declaration, map, seed, stage, report, and artifact is permanently
+non-admissible.
+
+The 71454 lane is pre-declaration. Its final plan must preauthorize the exact
+immutable declaration path. Its dedicated loader rejects duplicate keys
+and non-finite tokens, requires exact pretty/sorted writer form, and pins the
+raw digest. A completely fresh disposable qualification must pass 28/28 and
+all eight retained infrastructure checks, including
+`stock-provenance-writer-format`, before a separate commit may introduce a
+fresh disjoint 71454 declaration, update the schema, and activate it. No green
+gate, declaration, cohort execution, deployment, or training authority exists.
 
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
@@ -1433,9 +1461,9 @@ check.
 
 `ACTIVE_FINAL_AUTHORITY = None`. The command templates in this section are
 disabled until a separately committed, freshly qualified successor replaces
-all historical paths. Cohorts 71449, 71450, 71451, and 71452 are terminally
+all historical paths. Cohorts 71449, 71450, 71451, 71452, and 71453 are terminally
 retired under their canonical failure records. Commands must never name
-retired cohorts 71426 through 71452. No retired or qualification population,
+retired cohorts 71426 through 71453. No retired or qualification population,
 report, Dyn evidence, compiled byte, partial stock artifact, or passing subset
 may be copied into a successor root.
 

@@ -81,21 +81,27 @@ passing component tests or an isolated staging checkout cannot. The old
 in-process public ONNX runtime is retired and has no operational selector or
 rollback role.
 
-**Current B2 authority (updated 2026-07-18):** final cohort 71452 remains
-permanently retired under
-`docs/multires/B2-GENERATED-COHORT-71452-FAILURE.json`; none of its bytes may be
-retried, repaired, or reused. Corrective commit
-`14dfc409b047611cb0722e53cad57d8c8584acb5` passed fresh disposable
-qualification `b2q26_14dfc40_71810000` 28/28 plus all seven infrastructure
-checks, including production Phase-B replay of real compact Atlas writer bytes
-and both promotion-sealed manifest digests. Qualification bytes remain
-non-admissible. `ACTIVE_FINAL_AUTHORITY` now pins only fresh disjoint cohort
-`b2g26_final_71453`, declaration SHA-256
-`5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810`,
-and the exact twelve-path qualified-successor delta. Its first source attempt
-consumes its sole authorization. Gate assembly, deployment, trainer, and
-TensorBoard remain forbidden until that one-shot final cohort and every B2-B6
-cutover gate pass.
+**Current B2 authority (updated 2026-07-18):** final cohorts through 71453 are
+permanently retired. Cohort 71453's first and only authorized final gate
+invocation used the current alias while compiled-CM evidence bound the
+byte-identical immutable path; `compiled-CM declaration binding differs` was
+terminal and no gate was published. A second invocation was an unauthorized
+diagnostic replay only. It exposed a separate blocker: the generic compact
+JSON loader rejected the exact committed stock provenance writer bytes
+(pretty/sorted JSON plus LF, SHA-256
+`3ed2e930dcccf3abdabc7b5e1d9a1a95d74db4915a481bd523c51688c2bad030`).
+Its canonical terminal authority is
+`docs/multires/B2-GENERATED-COHORT-71453-FAILURE.json`; its named declaration,
+current alias, maps, seeds, stages, reports, and artifacts are forensic only.
+`ACTIVE_FINAL_AUTHORITY = None`. The 71454 lane is pre-declaration: its final
+plan must preauthorize the exact immutable declaration path, and the
+dedicated hash-pinned provenance writer-format loader and non-vacuous real-byte
+regressions must first pass a completely fresh disposable qualification with
+all eight retained infrastructure checks, including
+`stock-provenance-writer-format`. Only a later, separate commit may add and
+activate a fresh disjoint 71454 declaration. Gate publication, deployment,
+trainer, and TensorBoard remain forbidden until that successor and every
+B2-B6 cutover gate pass.
 
 ## Training Topology
 
