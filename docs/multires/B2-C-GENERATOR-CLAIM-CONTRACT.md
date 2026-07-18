@@ -228,13 +228,14 @@ floor-light coverage, v6 hook claims, or v6 headroom/guard metadata.
 ### Objective guidepost binding split
 
 Public objective guideposts and BSP item completeness are intentionally
-separate authorities:
+separate authorities, with fail-closed accounting between them:
 
 1. **Generated analysis with generator claims remains strict.** Every supported
    objective class entity must bind to an admitted supported/passable L1 target
    within `OBJECTIVE_TARGET_MAX_DISTANCE` (160 units). Any missing or out-of-
    fence target fails analysis closed; the producer never silently drops a
-   claimed generated objective.
+   claimed generated objective. Promotion validation requires
+   `compiled_world.objective_guideposts.omitted_count == 0`.
 2. **Stock/authored analysis without generator claims is fence-bound, not
    complete-item-bound.** It emits only public objective guideposts that bind to
    an admitted supported/passable L1 target within 160 units. An unbound
@@ -243,17 +244,32 @@ separate authorities:
    Atlas construction solely because their nearest map-static L1 exceeds 160.
 3. **Omissions are explicit deterministic evidence.** Each omission is recorded
    in the analysis manifest under
-   `compiled_world.objective_guideposts.omissions` with stable `entity_id`,
-   `classname`, `reason`, and `nearest_distance_milliunits` when any admitted L1
-   nodes exist. Cold rebuilds compare this evidence semantically; omission is
-   never silent.
-4. **Unchanged artifact contracts.** The public `.objectives.json` schema
+   `compiled_world.objective_guideposts` with schema
+   `q2-atlas-objective-guidepost-analysis-v1` and exact keys
+   `admitted_count` / `omitted_count` / `omissions` / `schema`. Each omission
+   record carries stable `entity_id`, canonical lowercase `classname`, an
+   admitted reason (`beyond_objective_target_max_distance` or
+   `no_admitted_supported_passable_l1`), and bounded nonnegative
+   `nearest_distance_milliunits` when present. Omission `entity_id` values are
+   unique and sorted. Cold rebuilds compare this evidence semantically;
+   omission is never silent.
+4. **Stock non-spawn item accounting is a complete disjoint union.** Stock
+   validation parses the pinned canonical BSP and requires that emitted
+   non-`spawn_egress` objective IDs/classnames from `.objectives.json` plus
+   manifest omission IDs/classnames exactly equal the BSP objective-class item
+   entities. The union is disjoint (no ID both emitted and omitted). This
+   catches a silently dropped reachable item, duplicate emitted/omitted IDs,
+   wrong classname, unknown ID, count drift, and missing omission evidence.
+   `spawn_egress` remains under compiled spawn gates and does not pollute the
+   item union.
+5. **Unchanged artifact contracts.** The public `.objectives.json` schema
    (`q2-atlas-objectives-v1`) and the Rust 160-unit L1-target validator remain
    unchanged. Emitted guideposts must still satisfy that validator.
-5. **Stock item completeness stays on inventory/design-signature authority.**
-   Pinned BSP inventory and the compiled design signature continue to enforce
-   deathmatch-spawn counts and item-class multisets for q2dm1–q2dm8. Omitting a
-   guidepost does not erase or relax that inventory check.
+6. **Stock item-class multiset/design-signature checks remain.** Pinned BSP
+   inventory and the compiled design signature continue to enforce
+   deathmatch-spawn counts and item-class multisets for q2dm1–q2dm8. The union
+   check is entity-ID exact; the multiset check remains class-count exact.
+   Omitting a guidepost does not erase or relax either.
 
 ## Full-cold producer closure (fail closed)
 

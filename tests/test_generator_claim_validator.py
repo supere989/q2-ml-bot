@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import struct
+from typing import Mapping, Sequence
 
 import pytest
 
@@ -21,6 +22,9 @@ from harness.hook_claims_v4 import (
 )
 from maps.generator import generate_map
 from tools.generator_claim_validator import (
+    OBJECTIVE_GUIDEPOST_ANALYSIS_SCHEMA,
+    OBJECTIVE_OMISSION_BEYOND_FENCE,
+    OBJECTIVE_OMISSION_NO_TARGET,
     ClaimValidationError,
     _canonical_semantic_analysis_manifest,
     _expected_analyzer_sha256,
@@ -39,21 +43,52 @@ from tools.validate_maps import Q2_BSP_LIGHTING_LUMP, Q2_BSP_LUMPS
 
 ROOT = Path(__file__).resolve().parents[1]
 NONZERO = "11" * 32
+ZERO_OBJECTIVE_GUIDEPOSTS = {
+    "schema": OBJECTIVE_GUIDEPOST_ANALYSIS_SCHEMA,
+    "admitted_count": 0,
+    "omitted_count": 0,
+    "omissions": [],
+}
 
 
-def _write_compiled_bsp(map_path: Path) -> Path:
-    header = bytearray(8 + Q2_BSP_LUMPS * 8)
+def _entity_lump(entities: Sequence[tuple[str, Mapping[str, str]]]) -> bytes:
+    """Serialize IBSP entity lump bytes with trailing NUL."""
+
+    chunks: list[str] = []
+    for classname, properties in entities:
+        lines = ['{', f'"classname" "{classname}"']
+        for key, value in properties.items():
+            if key == "classname":
+                continue
+            lines.append(f'"{key}" "{value}"')
+        lines.append("}")
+        chunks.append("\n".join(lines))
+    return ("\n".join(chunks) + "\n\0").encode("utf-8")
+
+
+def _write_compiled_bsp(
+    map_path: Path,
+    *,
+    entities: Sequence[tuple[str, Mapping[str, str]]] | None = None,
+) -> Path:
+    header_size = 8 + Q2_BSP_LUMPS * 8
+    header = bytearray(header_size)
     struct.pack_into("<4sI", header, 0, b"IBSP", 38)
+    entity_records = list(entities) if entities is not None else [
+        ("worldspawn", {}),
+    ]
+    entity_bytes = _entity_lump(entity_records)
     lightdata = bytes(range(256)) * 16
+    struct.pack_into("<II", header, 8, header_size, len(entity_bytes))
     struct.pack_into(
         "<II",
         header,
         8 + Q2_BSP_LIGHTING_LUMP * 8,
-        len(header),
+        header_size + len(entity_bytes),
         len(lightdata),
     )
     bsp_path = map_path.with_suffix(".bsp")
-    bsp_path.write_bytes(header + lightdata)
+    bsp_path.write_bytes(bytes(header) + entity_bytes + lightdata)
     return bsp_path
 
 
@@ -385,12 +420,18 @@ def _analysis(map_path: Path, claims: dict) -> dict:
                 ],
             },
             "route_claims": _route_results(claims),
+            "objective_guideposts": dict(ZERO_OBJECTIVE_GUIDEPOSTS),
         },
     }
 
 
 def _write_authority_artifacts(
-    map_path: Path, analysis: dict, analysis_path: Path,
+    map_path: Path,
+    analysis: dict,
+    analysis_path: Path,
+    *,
+    objectives: list[dict] | None = None,
+    item_class_multiset: dict | None = None,
 ) -> None:
     """Seal a compact producer fixture with the complete future cold contract."""
 
@@ -417,12 +458,13 @@ def _write_authority_artifacts(
     visibility_path = directory / f"{map_id}.visibility.bin.zst"
     navigation_path.write_bytes(b"fixture-navigation")
     visibility_path.write_bytes(b"fixture-visibility")
+    objective_records = list(objectives) if objectives is not None else []
     design_path = directory / f"{map_id}.design-signature.json"
     design_path.write_bytes(canonical_bytes({
         "schema": "q2-atlas-design-signature-v1", "coordinate_free": True,
         "bsp_sha256": analysis["identity"]["bsp_sha256"],
         "counts": {"deathmatch_spawns": len(analysis["compiled_world"]["spawns"])},
-        "item_class_multiset": {},
+        "item_class_multiset": dict(item_class_multiset or {}),
     }))
     objectives_path = directory / f"{map_id}.objectives.json"
 
@@ -432,11 +474,16 @@ def _write_authority_artifacts(
         **counts, "l0_bit_cells": 1, "l0_scalar_cells": 0,
     }
     atlas_sha = file_sha256(atlas_path)
+    guideposts = analysis.setdefault("compiled_world", {}).setdefault(
+        "objective_guideposts", dict(ZERO_OBJECTIVE_GUIDEPOSTS),
+    )
+    if "admitted_count" in guideposts:
+        guideposts["admitted_count"] = len(objective_records)
     objectives_path.write_bytes(canonical_bytes({
         "atlas_sha256": atlas_sha,
         "bsp_sha256": analysis["identity"]["bsp_sha256"],
         "canonical_map_id": map_id,
-        "objectives": [],
+        "objectives": objective_records,
         "origin": [0, 0, 0],
         "schema": "q2-atlas-objectives-v1",
     }))
@@ -476,7 +523,7 @@ def _write_authority_artifacts(
                 "sha256_uncompressed": file_sha256(objectives_path),
                 "uncompressed_size": objectives_path.stat().st_size,
                 "compressed_size": objectives_path.stat().st_size,
-                "counts": {"objectives": 0},
+                "counts": {"objectives": len(objective_records)},
             },
         },
     }
@@ -506,7 +553,7 @@ def _write_authority_artifacts(
         "objectives": {
             "sha256": file_sha256(objectives_path),
             "uncompressed_bytes": objectives_path.stat().st_size,
-            "count": 0,
+            "count": len(objective_records),
             "schema": "q2-atlas-objectives-v1",
         },
         "atlas_manifest": {
@@ -1237,7 +1284,7 @@ def test_unpinned_map_cannot_enter_stock_analysis_lane(generated):
     assert set(report["criteria"]) == {
         "analysis_quality", "artifact_authority", "stock_provenance",
         "stock_reachable_spawns", "stock_structural_inventory",
-        "stock_hazard_classification",
+        "stock_objective_accounting", "stock_hazard_classification",
     }
 
 
@@ -1391,6 +1438,309 @@ def test_contract_schemas_forbid_unknown_top_level_fields():
     )
     assert claims_schema["additionalProperties"] is False
     assert report_schema["additionalProperties"] is False
+
+
+def _objective_record(
+    objective_id: int,
+    classname: str,
+    *,
+    l1_index: list[int] | None = None,
+) -> dict:
+    from tools.generator_claim_validator import _objective_class_for_classname
+
+    return {
+        "class": _objective_class_for_classname(classname),
+        "classname": classname,
+        "confidence": 65535,
+        "l1_index": l1_index or [0, 0, 0],
+        "objective_id": objective_id,
+        "risk": 0,
+        "world_milliunits": [0, 0, 24000],
+    }
+
+
+def _stock_item_fixture(
+    generated,
+    tmp_path: Path,
+    *,
+    bsp_entities: Sequence[tuple[str, Mapping[str, str]]],
+    objectives: list[dict],
+    omissions: list[dict],
+    item_classes: dict | None = None,
+):
+    generated_map, claims, _generated_analysis = generated
+    stock_bsp = tmp_path / "q2dm1.bsp"
+    _write_compiled_bsp(stock_bsp, entities=bsp_entities)
+    analysis_path = tmp_path / "stock-analysis/q2dm1.analysis.manifest.json"
+    analysis = _analysis(generated_map, claims)
+    analysis["identity"]["bsp_sha256"] = file_sha256(stock_bsp)
+    analysis["identity"]["generator_claims_sha256"] = None
+    analysis["compiled_world"]["hazards"].update({
+        "classification_status": "oracle", "evidence": 1,
+        "validation_version": 1,
+    })
+    analysis["compiled_world"]["objective_guideposts"] = {
+        "schema": OBJECTIVE_GUIDEPOST_ANALYSIS_SCHEMA,
+        "admitted_count": len(objectives),
+        "omitted_count": len(omissions),
+        "omissions": list(omissions),
+    }
+    multiset = item_classes if item_classes is not None else {}
+    _write_authority_artifacts(
+        stock_bsp,
+        analysis,
+        analysis_path,
+        objectives=objectives,
+        item_class_multiset=multiset,
+    )
+    analysis_path.write_bytes(canonical_bytes(analysis))
+    provenance, inventory = _write_stock_pins(
+        tmp_path, file_sha256(stock_bsp), item_classes=multiset,
+    )
+    return stock_bsp, analysis_path, provenance, inventory
+
+
+def test_stock_objective_accounting_accepts_complete_disjoint_union(
+    generated, tmp_path: Path,
+):
+    bsp, analysis, provenance, inventory = _stock_item_fixture(
+        generated,
+        tmp_path,
+        bsp_entities=[
+            ("worldspawn", {}),
+            ("info_player_deathmatch", {"origin": "0 0 0"}),
+            ("weapon_railgun", {"origin": "32 0 24"}),
+            ("ammo_grenades", {"origin": "64 0 24"}),
+            ("item_quad", {"origin": "96 0 24"}),
+        ],
+        objectives=[
+            _objective_record(1, "info_player_deathmatch"),
+            _objective_record(2, "weapon_railgun"),
+            _objective_record(4, "item_quad"),
+        ],
+        omissions=[{
+            "classname": "ammo_grenades",
+            "entity_id": 3,
+            "nearest_distance_milliunits": 228_090,
+            "reason": OBJECTIVE_OMISSION_BEYOND_FENCE,
+        }],
+        item_classes={"weapon_railgun": 1, "ammo_grenades": 1, "item_quad": 1},
+    )
+
+    report = validate_stock_analysis(
+        bsp, analysis, stock_provenance_path=provenance,
+        stock_inventory_path=inventory,
+    )
+
+    assert report["passed"] is True
+    assert report["criteria"]["stock_objective_accounting"]["passed"] is True
+    assert report["criteria"]["stock_objective_accounting"]["checked_count"] == 3
+
+
+def test_stock_objective_accounting_zero_omission_empty_items_is_green(
+    generated, tmp_path: Path,
+):
+    bsp, analysis, provenance, inventory = _stock_fixture(generated, tmp_path)
+    report = validate_stock_analysis(
+        bsp, analysis, stock_provenance_path=provenance,
+        stock_inventory_path=inventory,
+    )
+    assert report["passed"] is True
+    assert report["criteria"]["stock_objective_accounting"] == {
+        "passed": True,
+        "checked_count": 0,
+        "failures": [],
+    }
+    guideposts = json.loads(analysis.read_text())["compiled_world"][
+        "objective_guideposts"
+    ]
+    assert guideposts == ZERO_OBJECTIVE_GUIDEPOSTS
+
+
+@pytest.mark.parametrize(
+    "mutation,fragment",
+    [
+        ("drop_emitted", "dropped BSP item entity IDs: 2"),
+        ("drop_omission", "dropped BSP item entity IDs: 3"),
+        ("duplicate_omitted", "omissions are not unique by entity_id"),
+        ("wrong_classname", "classname differs for entity IDs: 2"),
+        ("unknown_id", "unknown BSP item entity IDs: 99"),
+        ("count_drift", "dropped BSP item entity IDs: 4"),
+        ("missing_guideposts", "objective guidepost analysis must be an object"),
+        ("spawn_in_omission", "must not be spawn_egress"),
+        ("overlap", "not disjoint for entity IDs: 2"),
+        ("bad_distance", "nearest_distance_milliunits must be at least 0"),
+        ("unsorted_omissions", "omissions are not sorted by entity_id"),
+    ],
+)
+def test_stock_objective_accounting_rejects_meaningful_mutations(
+    generated, tmp_path: Path, mutation: str, fragment: str,
+):
+    base_entities = [
+        ("worldspawn", {}),
+        ("info_player_deathmatch", {"origin": "0 0 0"}),
+        ("weapon_railgun", {"origin": "32 0 24"}),
+        ("ammo_grenades", {"origin": "64 0 24"}),
+    ]
+    base_objectives = [
+        _objective_record(1, "info_player_deathmatch"),
+        _objective_record(2, "weapon_railgun"),
+    ]
+    base_omissions = [{
+        "classname": "ammo_grenades",
+        "entity_id": 3,
+        "nearest_distance_milliunits": 228_090,
+        "reason": OBJECTIVE_OMISSION_BEYOND_FENCE,
+    }]
+    item_classes = {"weapon_railgun": 1, "ammo_grenades": 1}
+
+    objectives = list(base_objectives)
+    omissions = list(base_omissions)
+    entities = list(base_entities)
+    if mutation == "drop_emitted":
+        objectives = [_objective_record(1, "info_player_deathmatch")]
+    elif mutation == "drop_omission":
+        omissions = []
+    elif mutation == "duplicate_omitted":
+        omissions = base_omissions + [{
+            "classname": "ammo_grenades",
+            "entity_id": 3,
+            "reason": OBJECTIVE_OMISSION_NO_TARGET,
+        }]
+    elif mutation == "wrong_classname":
+        objectives = [
+            _objective_record(1, "info_player_deathmatch"),
+            _objective_record(2, "ammo_bullets"),
+        ]
+    elif mutation == "unknown_id":
+        objectives = base_objectives + [_objective_record(99, "item_quad")]
+    elif mutation == "count_drift":
+        entities = base_entities + [("item_quad", {"origin": "96 0 24"})]
+        item_classes = {
+            "weapon_railgun": 1, "ammo_grenades": 1, "item_quad": 1,
+        }
+    elif mutation == "spawn_in_omission":
+        omissions = [{
+            "classname": "info_player_deathmatch",
+            "entity_id": 1,
+            "reason": OBJECTIVE_OMISSION_NO_TARGET,
+        }]
+    elif mutation == "overlap":
+        # Sorted by entity_id so schema validation reaches the union check.
+        omissions = [
+            {
+                "classname": "weapon_railgun",
+                "entity_id": 2,
+                "reason": OBJECTIVE_OMISSION_BEYOND_FENCE,
+            },
+            base_omissions[0],
+        ]
+    elif mutation == "bad_distance":
+        omissions = [{
+            "classname": "ammo_grenades",
+            "entity_id": 3,
+            "nearest_distance_milliunits": -1,
+            "reason": OBJECTIVE_OMISSION_BEYOND_FENCE,
+        }]
+    elif mutation == "unsorted_omissions":
+        entities = base_entities + [("item_quad", {"origin": "96 0 24"})]
+        item_classes = {
+            "weapon_railgun": 1, "ammo_grenades": 1, "item_quad": 1,
+        }
+        omissions = [
+            {
+                "classname": "item_quad",
+                "entity_id": 4,
+                "reason": OBJECTIVE_OMISSION_NO_TARGET,
+            },
+            {
+                "classname": "ammo_grenades",
+                "entity_id": 3,
+                "reason": OBJECTIVE_OMISSION_BEYOND_FENCE,
+            },
+        ]
+
+    bsp, analysis, provenance, inventory = _stock_item_fixture(
+        generated,
+        tmp_path,
+        bsp_entities=entities,
+        objectives=objectives,
+        omissions=omissions,
+        item_classes=item_classes,
+    )
+    if mutation == "missing_guideposts":
+        _mutate_analysis(
+            analysis,
+            lambda value: value["compiled_world"].pop("objective_guideposts", None),
+        )
+
+    report = validate_stock_analysis(
+        bsp, analysis, stock_provenance_path=provenance,
+        stock_inventory_path=inventory,
+    )
+    assert report["passed"] is False
+    failures = "\n".join(
+        report["criteria"]["stock_objective_accounting"]["failures"]
+        + report["criteria"]["analysis_quality"]["failures"]
+        + report["criteria"]["artifact_authority"]["failures"]
+    )
+    assert fragment in failures
+
+
+def test_generated_promotion_rejects_nonzero_objective_omissions(
+    generated, tmp_path: Path,
+):
+    map_path, claims, analysis_path = generated
+
+    def add_omission(value: dict) -> None:
+        value["compiled_world"]["objective_guideposts"] = {
+            "schema": OBJECTIVE_GUIDEPOST_ANALYSIS_SCHEMA,
+            "admitted_count": 0,
+            "omitted_count": 1,
+            "omissions": [{
+                "classname": "ammo_grenades",
+                "entity_id": 45,
+                "nearest_distance_milliunits": 228_090,
+                "reason": OBJECTIVE_OMISSION_BEYOND_FENCE,
+            }],
+        }
+
+    _reseal_analysis(map_path, analysis_path, add_omission)
+    report = validate_generated_map(map_path, analysis_path)
+    assert report["passed"] is False
+    assert any(
+        "must omit zero objectives" in failure
+        for failure in report["criteria"]["analysis_quality"]["failures"]
+    )
+
+
+def test_objective_guidepost_schema_rejects_bad_reason_and_distance(
+    generated, tmp_path: Path,
+):
+    bsp, analysis, provenance, inventory = _stock_fixture(generated, tmp_path)
+
+    def bad_reason(value: dict) -> None:
+        value["compiled_world"]["objective_guideposts"] = {
+            "schema": OBJECTIVE_GUIDEPOST_ANALYSIS_SCHEMA,
+            "admitted_count": 0,
+            "omitted_count": 1,
+            "omissions": [{
+                "classname": "ammo_grenades",
+                "entity_id": 3,
+                "reason": "not_a_real_reason",
+            }],
+        }
+
+    _reseal_analysis(bsp, analysis, bad_reason)
+    report = validate_stock_analysis(
+        bsp, analysis, stock_provenance_path=provenance,
+        stock_inventory_path=inventory,
+    )
+    assert report["passed"] is False
+    assert any(
+        "reason is not admitted" in failure
+        for failure in report["criteria"]["analysis_quality"]["failures"]
+    )
 
 
 @pytest.mark.parametrize("mutation", ["bsp", "meta", "candidate", "materialization"])

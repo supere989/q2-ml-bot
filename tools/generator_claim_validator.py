@@ -41,6 +41,13 @@ from harness.hook_claims_v4 import (  # noqa: E402
 from harness.atlas_source_closure import (  # noqa: E402
     atlas_analyzer_authority_sha256,
 )
+from harness.ibsp38 import (  # noqa: E402
+    BspLimits,
+    BspValidationError,
+    _lump_bytes as _bsp_lump_bytes,
+    _parse_entities as _parse_bsp_entities,
+    _parse_lumps as _parse_bsp_lumps,
+)
 from tools.validate_maps import (  # noqa: E402
     POINT_RE,
     _origin,
@@ -81,6 +88,15 @@ OBJECTIVE_CLASSES = frozenset({
     "weapon", "ammunition", "health", "armor", "powerup", "rune",
     "control", "spawn_egress",
 })
+OBJECTIVE_GUIDEPOST_ANALYSIS_SCHEMA = "q2-atlas-objective-guidepost-analysis-v1"
+# Frozen identical to harness.atlas_analyzer omission reason constants.
+OBJECTIVE_OMISSION_BEYOND_FENCE = "beyond_objective_target_max_distance"
+OBJECTIVE_OMISSION_NO_TARGET = "no_admitted_supported_passable_l1"
+OBJECTIVE_OMISSION_REASONS = frozenset({
+    OBJECTIVE_OMISSION_BEYOND_FENCE,
+    OBJECTIVE_OMISSION_NO_TARGET,
+})
+MAX_OBJECTIVE_NEAREST_DISTANCE_MILLIUNITS = 2**63 - 1
 STOCK_PROVENANCE = ROOT / "docs/multires/stock-q2dm1-q2dm8.provenance.json"
 STOCK_INVENTORY = ROOT / "tests/fixtures/corpus/stock-q2dm1-q2dm8.json"
 CLAIM_ID_RE = re.compile(r"^[a-z0-9:_-]{1,127}$")
@@ -969,6 +985,274 @@ def _validate_objective_artifact(
     return document, len(records)
 
 
+def _validate_objective_guideposts(
+    value: object,
+    *,
+    require_zero_omissions: bool = False,
+    admitted_count: int | None = None,
+) -> Mapping[str, Any]:
+    """Validate compiled_world.objective_guideposts fail-closed evidence.
+
+    Omission records are explicit stock/authored accounting evidence. Generated
+    promotion requires ``omitted_count == 0`` so no supported objective can be
+    silently dropped outside the strict L1 fence.
+    """
+
+    guideposts = _mapping(value, "objective guidepost analysis")
+    _exact_keys(guideposts, {
+        "admitted_count", "omitted_count", "omissions", "schema",
+    }, "objective guidepost analysis")
+    if guideposts.get("schema") != OBJECTIVE_GUIDEPOST_ANALYSIS_SCHEMA:
+        raise ClaimValidationError(
+            "objective guidepost analysis schema is not "
+            f"{OBJECTIVE_GUIDEPOST_ANALYSIS_SCHEMA}"
+        )
+    admitted = _integer(
+        guideposts.get("admitted_count"),
+        "objective guidepost admitted_count", minimum=0,
+    )
+    omitted = _integer(
+        guideposts.get("omitted_count"),
+        "objective guidepost omitted_count", minimum=0,
+    )
+    if admitted_count is not None and admitted != admitted_count:
+        raise ClaimValidationError(
+            "objective guidepost admitted_count differs from objectives artifact"
+        )
+    if require_zero_omissions and omitted != 0:
+        raise ClaimValidationError(
+            "generated objective guidepost analysis must omit zero objectives"
+        )
+    omissions = _list(guideposts.get("omissions"), "objective guidepost omissions")
+    if omitted != len(omissions):
+        raise ClaimValidationError(
+            "objective guidepost omitted_count differs from omissions length"
+        )
+    previous_entity_id = -1
+    seen_ids: set[int] = set()
+    for ordinal, raw_record in enumerate(omissions):
+        record = _mapping(raw_record, f"objective omission {ordinal}")
+        keys = set(record)
+        if keys == {
+            "classname", "entity_id", "nearest_distance_milliunits", "reason",
+        }:
+            _bounded_integer(
+                record.get("nearest_distance_milliunits"),
+                f"objective omission {ordinal} nearest_distance_milliunits",
+                minimum=0,
+                maximum=MAX_OBJECTIVE_NEAREST_DISTANCE_MILLIUNITS,
+            )
+        elif keys != {"classname", "entity_id", "reason"}:
+            raise ClaimValidationError(
+                f"objective omission {ordinal} keys differ from admitted shape"
+            )
+        entity_id = _bounded_integer(
+            record.get("entity_id"), f"objective omission {ordinal} entity_id",
+            minimum=0, maximum=0xFFFF_FFFF,
+        )
+        if entity_id in seen_ids or entity_id == previous_entity_id:
+            raise ClaimValidationError(
+                "objective guidepost omissions are not unique by entity_id"
+            )
+        if entity_id < previous_entity_id:
+            raise ClaimValidationError(
+                "objective guidepost omissions are not sorted by entity_id"
+            )
+        seen_ids.add(entity_id)
+        previous_entity_id = entity_id
+        classname = record.get("classname")
+        if (
+            not isinstance(classname, str)
+            or re.fullmatch(r"[a-z0-9_]{1,128}", classname) is None
+            or _objective_class_for_classname(classname) is None
+        ):
+            raise ClaimValidationError(
+                f"objective omission {entity_id} classname is not canonical"
+            )
+        reason = record.get("reason")
+        if reason not in OBJECTIVE_OMISSION_REASONS:
+            raise ClaimValidationError(
+                f"objective omission {entity_id} reason is not admitted"
+            )
+    return guideposts
+
+
+def _bsp_objective_item_entities(bsp_path: Path) -> list[tuple[int, str]]:
+    """Parse non-spawn objective-class item entities from a pinned BSP."""
+
+    try:
+        data = bsp_path.read_bytes()
+        if len(data) > MAX_INPUT_BYTES:
+            raise ClaimValidationError("BSP exceeds the admitted input byte limit")
+        lumps = _parse_bsp_lumps(data)
+        entities = _parse_bsp_entities(
+            _bsp_lump_bytes(data, lumps, "entities"), BspLimits(),
+        )
+    except (BspValidationError, OSError, struct.error, UnicodeError) as error:
+        raise ClaimValidationError(
+            f"stock BSP entity parse failed for objective accounting: {error}"
+        ) from error
+    items: list[tuple[int, str]] = []
+    for entity in entities:
+        classname = entity.classname.casefold()
+        objective_class = _objective_class_for_classname(classname)
+        if objective_class is None or objective_class == "spawn_egress":
+            continue
+        items.append((entity.index, classname))
+    items.sort(key=lambda item: item[0])
+    ids = [entity_id for entity_id, _classname in items]
+    if len(ids) != len(set(ids)):
+        raise ClaimValidationError(
+            "stock BSP objective-class item entity IDs are not unique"
+        )
+    return items
+
+
+def _stock_objective_item_accounting(
+    bsp_path: Path,
+    analysis: Mapping[str, Any],
+    analysis_path: Path,
+) -> dict[str, Any]:
+    """Prove emitted + omitted non-spawn items equal BSP objective-class items.
+
+    Spawn-egress remains under compiled spawn gates and is excluded from this
+    union so DM spawn accounting never pollutes item completeness.
+    """
+
+    failures: list[str] = []
+    checked = 0
+    try:
+        compiled, _identity = _analysis_sections(analysis)
+        guideposts = _validate_objective_guideposts(
+            compiled.get("objective_guideposts"),
+            require_zero_omissions=False,
+        )
+        map_id = bsp_path.stem
+        objective_path = analysis_path.parent / f"{map_id}.objectives.json"
+        grid = _mapping(analysis.get("grid"), "analysis grid")
+        identity = _mapping(analysis.get("identity"), "analysis identity")
+        document, _objective_count = _validate_objective_artifact(
+            objective_path,
+            map_id=map_id,
+            bsp_sha256=identity.get("bsp_sha256"),
+            atlas_sha256=identity.get("atlas_sha256"),
+            origin=grid.get("origin"),
+        )
+        admitted = _integer(
+            guideposts.get("admitted_count"),
+            "objective guidepost admitted_count", minimum=0,
+        )
+        if admitted != _objective_count:
+            failures.append(
+                "objective guidepost admitted_count differs from objectives artifact"
+            )
+
+        emitted: dict[int, str] = {}
+        for raw_record in _list(document.get("objectives"), "objective records"):
+            record = _mapping(raw_record, "stock objective record")
+            classname = record.get("classname")
+            if not isinstance(classname, str):
+                failures.append("stock objective classname is not a string")
+                continue
+            objective_class = _objective_class_for_classname(classname)
+            if objective_class is None:
+                failures.append(
+                    f"stock objective {record.get('objective_id')} classname "
+                    "is not an admitted objective class"
+                )
+                continue
+            if objective_class == "spawn_egress":
+                continue
+            objective_id = _integer(
+                record.get("objective_id"), "stock objective ID", minimum=0,
+            )
+            if objective_id in emitted:
+                failures.append(
+                    f"stock emitted objective ID {objective_id} is duplicated"
+                )
+                continue
+            emitted[objective_id] = classname
+
+        omitted: dict[int, str] = {}
+        for ordinal, raw_record in enumerate(
+            _list(guideposts.get("omissions"), "objective guidepost omissions")
+        ):
+            record = _mapping(raw_record, f"stock objective omission {ordinal}")
+            entity_id = _integer(
+                record.get("entity_id"),
+                f"stock objective omission {ordinal} entity_id", minimum=0,
+            )
+            classname = record.get("classname")
+            if not isinstance(classname, str):
+                failures.append(
+                    f"stock objective omission {entity_id} classname is not a string"
+                )
+                continue
+            objective_class = _objective_class_for_classname(classname)
+            if objective_class is None:
+                failures.append(
+                    f"stock objective omission {entity_id} classname is not admitted"
+                )
+                continue
+            if objective_class == "spawn_egress":
+                failures.append(
+                    f"stock objective omission {entity_id} must not be spawn_egress"
+                )
+                continue
+            if entity_id in omitted:
+                failures.append(
+                    f"stock objective omission ID {entity_id} is duplicated"
+                )
+                continue
+            omitted[entity_id] = classname
+
+        overlap = sorted(set(emitted) & set(omitted))
+        if overlap:
+            failures.append(
+                "stock objective accounting is not disjoint for entity IDs: "
+                + ",".join(str(value) for value in overlap)
+            )
+
+        bsp_items = _bsp_objective_item_entities(bsp_path)
+        bsp_by_id = {entity_id: classname for entity_id, classname in bsp_items}
+        checked = len(bsp_items)
+        accounted = dict(emitted)
+        for entity_id, classname in omitted.items():
+            accounted[entity_id] = classname
+
+        if set(accounted) != set(bsp_by_id):
+            missing = sorted(set(bsp_by_id) - set(accounted))
+            unknown = sorted(set(accounted) - set(bsp_by_id))
+            if missing:
+                failures.append(
+                    "stock objective accounting dropped BSP item entity IDs: "
+                    + ",".join(str(value) for value in missing)
+                )
+            if unknown:
+                failures.append(
+                    "stock objective accounting references unknown BSP item "
+                    "entity IDs: "
+                    + ",".join(str(value) for value in unknown)
+                )
+        classname_mismatches = sorted(
+            entity_id for entity_id, classname in accounted.items()
+            if entity_id in bsp_by_id and bsp_by_id[entity_id] != classname
+        )
+        if classname_mismatches:
+            failures.append(
+                "stock objective accounting classname differs for entity IDs: "
+                + ",".join(str(value) for value in classname_mismatches)
+            )
+        if len(accounted) != len(bsp_by_id):
+            failures.append(
+                "stock objective accounting count differs from BSP objective-"
+                f"class items ({len(accounted)} vs {len(bsp_by_id)})"
+            )
+    except ClaimValidationError as error:
+        failures.append(str(error))
+    return _criterion(sorted(set(failures)), checked)
+
+
 def _full_cold_authority(
     analysis: Mapping[str, Any], analysis_path: Path,
 ) -> tuple[dict[str, Any], Mapping[str, Any]]:
@@ -1134,6 +1418,11 @@ def _full_cold_authority(
             bsp_sha256=identity.get("bsp_sha256"),
             atlas_sha256=identity.get("atlas_sha256"),
             origin=grid.get("origin"),
+        )
+        compiled_world = _mapping(analysis.get("compiled_world"), "compiled_world")
+        _validate_objective_guideposts(
+            compiled_world.get("objective_guideposts"),
+            admitted_count=objective_count,
         )
 
         atlas = _mapping(artifacts.get("atlas"), "analysis Atlas artifact")
@@ -1340,7 +1629,14 @@ def _analysis_quality(
     confidence = analysis.get("confidence")
     if confidence not in {"high", "complete"}:
         failures.append("analysis confidence is not complete/high")
-    return _criterion(failures, 8), compiled
+    try:
+        _validate_objective_guideposts(
+            compiled.get("objective_guideposts"),
+            require_zero_omissions=claims_sha256 is not None,
+        )
+    except ClaimValidationError as exc:
+        failures.append(str(exc))
+    return _criterion(failures, 9), compiled
 
 
 def _validate_spawns(
@@ -2115,12 +2411,16 @@ def validate_stock_analysis(
                 hazard_failures.append(
                     "stock omitted exact-lethal candidate count differs from replay summary"
                 )
+    objective_accounting = _stock_objective_item_accounting(
+        bsp_path, analysis, analysis_path,
+    )
     criteria = {
         "analysis_quality": quality,
         "artifact_authority": artifact_authority,
         "stock_provenance": _criterion(provenance_failures, 1),
         "stock_reachable_spawns": _criterion(failures[len(quality["failures"]):], len(spawns)),
         "stock_structural_inventory": _criterion(structural_failures, 2),
+        "stock_objective_accounting": objective_accounting,
         "stock_hazard_classification": _criterion(hazard_failures, 1),
     }
     all_failures = sorted(
@@ -2210,7 +2510,7 @@ def validate_report(value: object) -> dict[str, Any]:
         else {
             "analysis_quality", "artifact_authority", "stock_provenance",
             "stock_reachable_spawns", "stock_structural_inventory",
-            "stock_hazard_classification",
+            "stock_objective_accounting", "stock_hazard_classification",
         }
     )
     _exact_keys(criteria, expected_criteria, "claim-validation criteria")

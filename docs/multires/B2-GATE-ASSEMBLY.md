@@ -729,11 +729,18 @@ tests, and assembly. Every item below comes from fresh final-cohort roots.
   claims emits only objective guideposts bound to an admitted
   supported/passable L1 target within 160 units; unbound objectives are
   omitted with deterministic `compiled_world.objective_guideposts` evidence
-  and never rebound beyond the fence. Generated analysis with generator
-  claims remains strict and still fails closed on any unbound supported
-  objective. The `.objectives.json` schema and Rust 160-unit validator are
-  unchanged; stock item completeness continues to use pinned BSP inventory
-  and design-signature multisets, not guidepost emission completeness.
+  (`q2-atlas-objective-guidepost-analysis-v1`) and never rebound beyond the
+  fence. Stock validation then proves a complete disjoint union: every
+  non-spawn objective-class BSP entity ID/classname equals the union of
+  emitted `.objectives.json` IDs/classnames and manifest omission
+  IDs/classnames, catching silent drops, duplicates, wrong classnames,
+  unknown IDs, count drift, and missing omission evidence. Spawn-egress stays
+  under compiled spawn gates and is excluded from that item union. Generated
+  analysis with generator claims remains strict, still fails closed on any
+  unbound supported objective, and requires `omitted_count == 0`. The
+  `.objectives.json` schema and Rust 160-unit validator are unchanged; stock
+  item-class multiset and design-signature checks remain in addition to the
+  entity-ID union.
 - `tools/q2-dyn-evidence` runs on `DESKTOP-RTX2080` WSL and atomically writes
   its report plus four real `Q2LAT002` snapshots. Its selected map would have to
   be a member of an admitted population. The assembler binds it to the exact
