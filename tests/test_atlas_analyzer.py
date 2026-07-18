@@ -54,6 +54,7 @@ from harness.atlas_analyzer import (
     _objective_artifact,
     _objective_guidepost_analysis,
     _process_tree_rss_bytes,
+    _project_generated_hurt_chunks,
     _run_measured_process,
     _surface_candidate_scope,
     _surface_request_upper_bound,
@@ -64,6 +65,12 @@ from harness.atlas_analyzer import (
 )
 from harness.atlas_entity_semantics import Aabb, L0BudgetState
 from harness.ibsp38 import EntityMetadata
+from maps.generator import (
+    KILL_PLANE_DROP,
+    KILL_PLANE_MARGIN,
+    WALL_T,
+    MapGenerator,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1169,6 +1176,105 @@ def test_generated_hurt_scope_uses_only_lethal_edge_floor_strips() -> None:
         + [(x, 15, 7) for x in range(16, 24)]
     )
     assert len(chunks) == 16
+
+
+def _generator_kill_plane_linked_bounds(generator: MapGenerator) -> Aabb:
+    minimum_floor = min(room.floor_z for room in generator.rooms)
+    return Aabb(
+        (
+            min(room.wx for room in generator.rooms) - KILL_PLANE_MARGIN - 2,
+            min(room.wy for room in generator.rooms) - KILL_PLANE_MARGIN - 2,
+            minimum_floor - 256 + WALL_T - 2,
+        ),
+        (
+            max(room.wx + room.w for room in generator.rooms)
+            + KILL_PLANE_MARGIN + 2,
+            max(room.wy + room.d for room in generator.rooms)
+            + KILL_PLANE_MARGIN + 2,
+            minimum_floor - KILL_PLANE_DROP + 2,
+        ),
+    )
+
+
+def test_towers_71812102_retains_raised_edge_sparse_hurt_evidence() -> None:
+    """Reproduce the sole failed member of qualification 71812000."""
+
+    generator = MapGenerator(seed=71_812_102, style="towers")
+    generator.generate(5)
+    safety = {"lethal_edges": generator.lethal_edges}
+    origin = (0, 0, -512)
+    historical = _claimed_hurt_boundary_chunks(safety, origin)
+    linked = _generator_kill_plane_linked_bounds(generator)
+
+    assert min(room.floor_z for room in generator.rooms) == 0
+    assert {edge["segment"][4] for edge in generator.lethal_edges} == {96}
+    assert {chunk[2] for chunk in historical} == {8}
+    projected = _project_generated_hurt_chunks(historical, linked, origin)
+    assert {chunk[2] for chunk in projected} == {4, 5, 6, 7}
+
+    trigger = EntityMetadata(
+        index=1,
+        classname="trigger_hurt",
+        properties=(("model", "*1"), ("spawnflags", "12")),
+    )
+    metadata = SimpleNamespace(
+        entities=(trigger,),
+        models=(
+            SimpleNamespace(mins=(0, 0, 0), maxs=(0, 0, 0)),
+            SimpleNamespace(
+                mins=(0.0, 0.0, -240.0),
+                maxs=(3584.0, 3584.0, -64.0),
+            ),
+        ),
+        entity_catalog=SimpleNamespace(brush_submodels=(
+            {"entity_index": 1, "model_index": 1},
+        )),
+    )
+    semantics: dict[str, int] = {}
+    chunks = _l0_chunks(
+        {}, [], origin,
+        metadata=metadata,
+        semantic_summary=semantics,
+        generated_safety=safety,
+    )
+
+    assert semantics["hurt:1:raw"] > 0
+    assert semantics["hurt:1:expanded"] > 0
+    assert {
+        tuple(chunk["key"])[2]
+        for chunk in chunks
+        if chunk["bits"].get("hurt")
+    } == {4, 5, 6, 7}
+
+
+@pytest.mark.parametrize(
+    ("style", "seed"),
+    tuple(
+        (style, 71_812_000 + style_index * 100 + member)
+        for style_index, style in enumerate((
+            "open", "towers", "canyon", "pits",
+            "arena_open", "arena_vertical", "arena_lanes",
+        ))
+        for member in range(4)
+    ),
+)
+def test_71812000_campaign_has_nonvacuous_projected_hurt_scope(
+    style: str, seed: int,
+) -> None:
+    generator = MapGenerator(seed=seed, style=style)
+    generator.generate(5)
+    origin = (0, 0, -512)
+    historical = _claimed_hurt_boundary_chunks(
+        {"lethal_edges": generator.lethal_edges}, origin,
+    )
+    projected = _project_generated_hurt_chunks(
+        historical, _generator_kill_plane_linked_bounds(generator), origin,
+    )
+
+    assert projected, f"{style}/{seed} retained no sparse hurt chunks"
+    assert {(x, y) for x, y, _z in projected} == {
+        (x, y) for x, y, _z in historical
+    }
 
 
 def test_generated_hurt_scope_rejects_malformed_or_empty_edges() -> None:

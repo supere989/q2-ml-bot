@@ -712,6 +712,27 @@ may add an immutable, disjoint 71454 declaration, update the schema, and set
 active authority. No green gate, declaration, cohort run, deployment, or
 training authority exists yet.
 
+Backend-correct qualification `b2q26_ede2bff_71812000`, plan SHA-256
+`57ee59f442d2ccb0b545b1f18988ab8aba57bf7be762c73f16cb6dc24ddddcdf`,
+completed all 28 source, compile, compiled-CM, materialization, and claims
+rows, all eight infrastructure checks, and 27/28 Atlas/promotion rows. Its
+report SHA-256 is
+`84c72c24628a4b64e335d62fcd70d30bac63dc633f46c19e8008be003668cd48`.
+Although this is generic green under the normative 20-map qualification
+threshold, it is explicitly insufficient for the stricter 71454 final lane
+and cannot authorize that declaration. The failed member
+`b2q26_ede2bff_71812000_towers_71812102` had raised lethal-edge witnesses at
+Z=96 while the compiled global kill-plane trigger occupied Z=-240..-64; the
+historical one-chunk-lower sparse permit therefore had no vertical
+intersection and emitted no retained hurt evidence. The correction preserves
+the exact lethal-edge XY permit and projects it only through the compiled
+trigger's exact linked Z range, never through the intervening air gap. The
+original failed BSP completes a real Atlas build with the correction. Final
+assembly now independently requires a 28/28 qualification, while the generic
+disposable-qualification threshold remains unchanged. A new implementation
+commit and wholly fresh qualification ID, workspace, and seed range are
+required.
+
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
 proved ancestry, the exact qualified commit/tree and report binding,

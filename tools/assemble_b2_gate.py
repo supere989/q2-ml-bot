@@ -266,6 +266,13 @@ class ActiveFinalAuthority:
 # passed a completely fresh disposable qualification.
 ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
 
+# The reusable disposable-qualification contract remains green at 20/28, as
+# required by the normative plan.  Final-cohort assembly is intentionally
+# stricter: the activated 71454 successor may consume only a complete 28/28
+# qualification.  Keeping this check in the final gate prevents an operator
+# from mistaking a generic-green partial qualification for cutover authority.
+FINAL_QUALIFICATION_END_TO_END_PASSES = 28
+
 
 def _require_active_final_authority() -> ActiveFinalAuthority:
     authority = ACTIVE_FINAL_AUTHORITY
@@ -780,6 +787,18 @@ def _validate_qualification_report(
     _require(
         report["normative_documents"] == normative,
         "B2 qualification normative document binding differs",
+    )
+    end_to_end = _mapping(
+        report.get("end_to_end"), "B2 final qualification end-to-end result"
+    )
+    _require(
+        end_to_end.get("pass_count") == FINAL_QUALIFICATION_END_TO_END_PASSES
+        and end_to_end.get("failed_count") == 0
+        and len(_list(
+            end_to_end.get("passed_maps"),
+            "B2 final qualification passed maps",
+        )) == FINAL_QUALIFICATION_END_TO_END_PASSES,
+        "B2 final cohort requires a complete 28/28 qualification",
     )
     relation = _validate_qualification_successor(
         paths.repo_root, report["implementation"], implementation, authority
@@ -3298,7 +3317,9 @@ def validate_gate(value: object) -> dict[str, Any]:
         qualification.get("schema") == QUALIFICATION_SCHEMA
         and qualification.get("non_admissible") is True
         and qualification.get("retryable") is True
-        and qualification.get("final_cohort_authorized") is False,
+        and qualification.get("final_cohort_authorized") is False
+        and qualification.get("end_to_end_pass_count")
+        == FINAL_QUALIFICATION_END_TO_END_PASSES,
         "B2 toolchain qualification disposition differs",
     )
     generated = _mapping(gate["generated_cohort"], "generated cohort")

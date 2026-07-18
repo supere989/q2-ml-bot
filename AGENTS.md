@@ -113,6 +113,19 @@ imported `__init__.py` and `backend_c` paths plus the fixed version/digests,
 and replays that complete binding during validation and resume. Any successor
 qualification must use a fresh ID, workspace, and disjoint seed range.
 
+Backend-correct disposable qualification `b2q26_ede2bff_71812000` completed
+27/28 maps end to end and all eight infrastructure checks. That is generic
+green under the normative 20-map toolchain threshold, but it is deliberately
+insufficient for the stricter 71454 final lane and is marked `DO-NOT-USE`.
+Its sole failed member, `towers_71812102`, exposed a raised-terrace kill-plane
+projection bug: lethal-edge witnesses supplied the correct sparse XY columns
+at the terrace height, but none intersected the compiled trigger_hurt below
+the global lowest floor. The analyzer now preserves those exact sparse XY
+columns while projecting Z only through the compiled trigger's linked AABB;
+it does not admit the intervening air gap or widen the hurt region. The exact
+failed BSP now completes a real Atlas build under the correction. A new clean
+commit and fresh 28/28 qualification remain mandatory before 71454 activation.
+
 ## Training Topology
 
 Training runs on the Windows RTX 2080 box (DESKTOP-RTX2080), inside WSL.

@@ -343,6 +343,42 @@ def test_assembles_20_of_28_non_admissible_qualification(
     assert gate.validate_qualification(report) == report
 
 
+def test_final_gate_rejects_generic_green_27_of_28_qualification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _inputs(tmp_path, monkeypatch, pass_count=27)
+    report = gate.assemble_qualification(args)
+    assert report["status"] == "green"
+    assert report["end_to_end"]["pass_count"] == 27
+    report_path = _write(tmp_path / "qualification.json", report)
+    monkeypatch.setattr(
+        final_gate,
+        "replay_qualification",
+        lambda *_args, **_kwargs: report,
+    )
+
+    with pytest.raises(
+        final_gate.B2GateError,
+        match="complete 28/28 qualification",
+    ):
+        final_gate._validate_qualification_report(
+            SimpleNamespace(
+                qualification_report=report_path,
+                repo_root=gate.ROOT,
+            ),
+            report["normative_documents"],
+            report["implementation"],
+            final_gate.ActiveFinalAuthority(
+                cohort_id="b2g26_final_71454",
+                declaration_sha256="ab" * 32,
+                immutable_declaration_path="fixture-declaration.json",
+                qualification_successor_paths=frozenset(
+                    {"fixture-declaration.json"}
+                ),
+            ),
+        )
+
+
 def test_hand_authored_summary_forgery_validates_but_replay_and_final_gate_reject(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
