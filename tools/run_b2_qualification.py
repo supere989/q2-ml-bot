@@ -18,6 +18,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tools.b2_qualification_runtime_authority import (
+    PINNED_PYTHON,
+    PINNED_PYTHON_SHA256,
+    PINNED_PYTHON_VERSION,
+    PINNED_ZSTANDARD_BACKEND_SHA256,
+    PINNED_ZSTANDARD_INIT_SHA256,
+    PINNED_ZSTANDARD_VERSION,
+)
 from tools.materialize_generated_cohort import MaterializeCohortError
 from tools.preflight_b2_materialization_authorities import (
     preflight as preflight_materialization_authorities,
@@ -31,6 +39,7 @@ INFRASTRUCTURE_SCHEMA = "q2-b2-qualification-infrastructure-v2"
 QUALIFICATION_SCHEMA = "q2-b2-toolchain-qualification-v1"
 QUALIFICATION_ID = re.compile(r"^b2q26_[a-z0-9][a-z0-9_-]*$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+RUNTIME_IDENTITY_TIMEOUT_SECONDS = 30
 TOOLCHAIN_MANIFEST = Path("docs/multires/B2-QUALIFICATION-TOOLCHAIN-AUTHORITY.json")
 TOOLCHAIN_MANIFEST_SHA256 = (
     "44961966343c9d1979def8afdf302202d82a98f8489ba252564e7f26a8170645"
@@ -105,6 +114,127 @@ def _same_file_bytes(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
     )
 
 
+def _probe_zstandard_modules(
+    python: Path, *, runner: Callable[..., Any] = subprocess.run,
+) -> dict[str, Any]:
+    """Identify the zstandard modules imported by the supplied runtime."""
+
+    identity_script = (
+        "import json,pathlib,sys,zstandard,zstandard.backend_c as backend;"
+        "print(json.dumps({'python_version':list(sys.version_info[:3]),"
+        "'zstandard_version':zstandard.__version__,'zstandard_init':"
+        "str(pathlib.Path(zstandard.__file__).resolve()),"
+        "'zstandard_backend':str(pathlib.Path(backend.__file__).resolve())},"
+        "sort_keys=True,separators=(',',':')))"
+    )
+    command = [str(python), "-I", "-B", "-c", identity_script]
+    try:
+        completed = runner(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=RUNTIME_IDENTITY_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise QualificationDriverError(
+            f"cannot identify pinned zstandard modules: {error}"
+        ) from error
+    if completed.returncode != 0 or completed.stderr != b"":
+        raise QualificationDriverError(
+            "pinned zstandard module identity probe failed"
+        )
+    try:
+        raw = bytes(completed.stdout)
+        identity = json.loads(raw)
+    except (TypeError, UnicodeError, json.JSONDecodeError) as error:
+        raise QualificationDriverError(
+            f"pinned zstandard module identity is invalid: {error}"
+        ) from error
+    if (
+        not isinstance(identity, Mapping)
+        or set(identity) != {
+            "python_version", "zstandard_version",
+            "zstandard_init", "zstandard_backend",
+        }
+        or raw != _canonical(identity)
+    ):
+        raise QualificationDriverError(
+            "pinned zstandard module identity is non-canonical"
+        )
+    python_version = identity["python_version"]
+    zstandard_version = identity["zstandard_version"]
+    if (
+        not isinstance(python_version, list)
+        or any(not isinstance(item, int) for item in python_version)
+        or not isinstance(zstandard_version, str)
+    ):
+        raise QualificationDriverError(
+            "pinned zstandard module version identity differs"
+        )
+    result: dict[str, Any] = {
+        "python_version": python_version,
+        "zstandard_version": zstandard_version,
+    }
+    for name in ("zstandard_init", "zstandard_backend"):
+        value = identity[name]
+        if not isinstance(value, str) or not Path(value).is_absolute():
+            raise QualificationDriverError(
+                f"pinned {name} import path is not absolute"
+            )
+        result[name] = _absolute(Path(value))
+    return result
+
+
+def _validate_fixed_runtime_authority(
+    python: Path, identity: Mapping[str, Any],
+    records: Mapping[str, Mapping[str, Any]],
+) -> None:
+    if python != PINNED_PYTHON:
+        raise QualificationDriverError("pinned Python path differs")
+    if identity.get("python_version") != PINNED_PYTHON_VERSION:
+        raise QualificationDriverError("pinned Python version differs")
+    if identity.get("zstandard_version") != PINNED_ZSTANDARD_VERSION:
+        raise QualificationDriverError("pinned zstandard version differs")
+    expected_hashes = {
+        "python": PINNED_PYTHON_SHA256,
+        "zstandard_init": PINNED_ZSTANDARD_INIT_SHA256,
+        "zstandard_backend": PINNED_ZSTANDARD_BACKEND_SHA256,
+    }
+    for name, expected in expected_hashes.items():
+        if records[name].get("sha256") != expected:
+            raise QualificationDriverError(
+                f"fixed {name} authority bytes differ"
+            )
+
+
+def _runtime_input_records(
+    *, python: Path, zstandard_init: Path, zstandard_backend: Path,
+) -> dict[str, dict[str, Any]]:
+    """Bind caller inputs to the modules actually imported by pinned Python."""
+
+    pinned_python = _absolute(python)
+    supplied = {
+        "zstandard_init": _absolute(zstandard_init),
+        "zstandard_backend": _absolute(zstandard_backend),
+    }
+    python_record = _file_record(pinned_python)
+    identity = _probe_zstandard_modules(pinned_python)
+    for name in ("zstandard_init", "zstandard_backend"):
+        if supplied[name] != identity[name]:
+            raise QualificationDriverError(
+                f"supplied {name} differs from pinned Python import"
+            )
+    records = {
+        "python": python_record,
+        "zstandard_init": _file_record(identity["zstandard_init"]),
+        "zstandard_backend": _file_record(identity["zstandard_backend"]),
+    }
+    _validate_fixed_runtime_authority(pinned_python, identity, records)
+    return records
+
+
 def _step(stage: str, command: Sequence[str], report: Path) -> dict[str, Any]:
     return {"stage": stage, "command": list(command), "report": str(report)}
 
@@ -112,7 +242,12 @@ def _step(stage: str, command: Sequence[str], report: Path) -> dict[str, Any]:
 def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     workspace = _absolute(args.workspace)
     repo = _absolute(args.repo_root)
-    python = _absolute(Path(sys.executable))
+    runtime_inputs = _runtime_input_records(
+        python=args.pinned_python,
+        zstandard_init=args.zstandard_init,
+        zstandard_backend=args.zstandard_backend,
+    )
+    python = Path(runtime_inputs["python"]["path"])
     reports = workspace / "reports"
     declaration = workspace / "qualification-declaration.json"
     source = workspace / "source"
@@ -144,11 +279,6 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     toolchain_authority = _file_record(repo / TOOLCHAIN_MANIFEST)
     if toolchain_authority["sha256"] != TOOLCHAIN_MANIFEST_SHA256:
         raise QualificationDriverError("fixed toolchain authority digest differs")
-    runtime_inputs = {
-        "python": _file_record(args.pinned_python),
-        "zstandard_init": _file_record(args.zstandard_init),
-        "zstandard_backend": _file_record(args.zstandard_backend),
-    }
     pinned_inputs = {
         name: _file_record(path)
         for name, path in {
@@ -410,13 +540,19 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
         "python", "zstandard_init", "zstandard_backend",
     }:
         raise QualificationDriverError("pinned runtime inputs are incomplete")
-    for name, record in runtime.items():
-        if (
-            not isinstance(record, Mapping)
-            or not isinstance(record.get("path"), str)
-            or dict(record) != _file_record(Path(record["path"]))
-        ):
-            raise QualificationDriverError(f"pinned runtime input drifted: {name}")
+    if any(
+        not isinstance(record, Mapping)
+        or not isinstance(record.get("path"), str)
+        for record in runtime.values()
+    ):
+        raise QualificationDriverError("pinned runtime input record differs")
+    replayed_runtime = _runtime_input_records(
+        python=Path(str(runtime["python"]["path"])),
+        zstandard_init=Path(str(runtime["zstandard_init"]["path"])),
+        zstandard_backend=Path(str(runtime["zstandard_backend"]["path"])),
+    )
+    if runtime != replayed_runtime:
+        raise QualificationDriverError("pinned runtime input binding drifted")
     pinned = plan.get("pinned_inputs")
     expected_pinned = {
         "design", "execution_plan", "b1_gate", "boundary_proof",

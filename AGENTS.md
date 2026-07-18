@@ -103,6 +103,16 @@ activate a fresh disjoint 71454 declaration. Gate publication, deployment,
 trainer, and TensorBoard remain forbidden until that successor and every
 B2-B6 cutover gate pass.
 
+Disposable qualification `b2q26_825984f_71811000` and seed range beginning
+at `71811000` are also permanently forensic-only and must not be resumed or
+reused. Its plan bound zstandard's inactive `_cffi` extension even though the
+materializer imports `zstandard.backend_c`; the run was stopped during compile
+with no qualification report or final authority. The qualification driver now
+probes the pinned interpreter before workspace creation, requires the exact
+imported `__init__.py` and `backend_c` paths plus the fixed version/digests,
+and replays that complete binding during validation and resume. Any successor
+qualification must use a fresh ID, workspace, and disjoint seed range.
+
 ## Training Topology
 
 Training runs on the Windows RTX 2080 box (DESKTOP-RTX2080), inside WSL.

@@ -793,6 +793,17 @@ That runtime supplies zstandard 0.19.0 through `__init__.py` SHA-256
 `8a65cd4ab44112e1433a097daee7ce8600047995f3289f13d758bb001c06a553`
 and the active C backend SHA-256
 `40ece7fa91097e53ee4785cef01baae3f220f8dc891e20d94d4e07a1d77c9120`.
+The active backend is specifically
+`zstandard/backend_c.cpython-311-x86_64-linux-gnu.so`; the neighboring
+`zstandard/_cffi.cpython-311-x86_64-linux-gnu.so` is not an admissible
+substitute. Disposable qualification `b2q26_825984f_71811000` bound that
+inactive `_cffi` file and was stopped during compile, before qualification
+assembly or any final authorization. Its workspace and seed range beginning
+at `71811000` are forensic-only and must never be resumed or reused. The
+qualification driver now imports `zstandard` and `zstandard.backend_c` with
+the pinned interpreter before it may create a workspace, requires the supplied
+paths and bytes to equal those exact fixed authorities, and repeats the probe
+when validating or resuming a plan.
 The neighboring `/home/raymond/miniconda3/bin/python` convenience symlink
 resolves to the same executable but is not an admissible input; the gate binds
 the regular `python3.11` file directly.

@@ -25,6 +25,10 @@ from tools.run_b2_qualification import (
 )
 
 
+_REAL_ZSTANDARD_PROBE = qualification._probe_zstandard_modules
+_REAL_FIXED_RUNTIME_VALIDATOR = qualification._validate_fixed_runtime_authority
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -98,7 +102,7 @@ def _args(tmp_path: Path) -> argparse.Namespace:
 
 
 @pytest.fixture(autouse=True)
-def _stub_final_materialization_authority_preflight(monkeypatch) -> None:
+def _stub_external_preflights(monkeypatch) -> None:
     gate = Path(__file__).resolve().parents[1] / "docs/multires/B1-GATE.json"
 
     def fake_preflight(**kwargs):
@@ -132,6 +136,22 @@ def _stub_final_materialization_authority_preflight(monkeypatch) -> None:
 
     monkeypatch.setattr(
         qualification, "preflight_materialization_authorities", fake_preflight
+    )
+
+    def fake_zstandard_probe(python: Path) -> dict[str, object]:
+        return {
+            "python_version": [3, 11, 4],
+            "zstandard_version": "0.19.0",
+            "zstandard_init": python.parent / "zstandard-init.py",
+            "zstandard_backend": python.parent / "zstandard-backend.so",
+        }
+
+    monkeypatch.setattr(
+        qualification, "_probe_zstandard_modules", fake_zstandard_probe
+    )
+    monkeypatch.setattr(
+        qualification, "_validate_fixed_runtime_authority",
+        lambda _python, _identity, _records: None,
     )
 
 
@@ -261,6 +281,170 @@ def test_command_plan_is_sequential_and_dry_to_build(tmp_path: Path) -> None:
     assert plan["schema"] == "q2-b2-qualification-driver-plan-v2"
     assert len(plan["pinned_inputs"]) == 17
     assert plan["materialization_authority_preflight"]["passed"] is True
+    assert plan["commands"][0]["command"][0] == str(args.pinned_python)
+    assert plan["runtime_inputs"] == {
+        "python": {
+            "path": str(args.pinned_python),
+            "bytes": args.pinned_python.stat().st_size,
+            "sha256": _sha(args.pinned_python),
+        },
+        "zstandard_init": {
+            "path": str(args.zstandard_init),
+            "bytes": args.zstandard_init.stat().st_size,
+            "sha256": _sha(args.zstandard_init),
+        },
+        "zstandard_backend": {
+            "path": str(args.zstandard_backend),
+            "bytes": args.zstandard_backend.stat().st_size,
+            "sha256": _sha(args.zstandard_backend),
+        },
+    }
+
+
+def test_zstandard_probe_imports_backend_c_and_requires_canonical_identity(
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / "pinned-python"
+    backend = tmp_path / "backend_c.so"
+    init = tmp_path / "__init__.py"
+    calls = []
+
+    def fake_runner(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_canonical({
+                "python_version": [3, 11, 4],
+                "zstandard_version": "0.19.0",
+                "zstandard_init": str(init),
+                "zstandard_backend": str(backend),
+            }),
+            stderr=b"",
+        )
+
+    assert _REAL_ZSTANDARD_PROBE(python, runner=fake_runner) == {
+        "python_version": [3, 11, 4],
+        "zstandard_version": "0.19.0",
+        "zstandard_init": init,
+        "zstandard_backend": backend,
+    }
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[:4] == [str(python), "-I", "-B", "-c"]
+    assert "zstandard.backend_c as backend" in command[4]
+    assert kwargs["stdin"] is qualification.subprocess.DEVNULL
+    assert kwargs["stdout"] is qualification.subprocess.PIPE
+    assert kwargs["stderr"] is qualification.subprocess.PIPE
+    assert kwargs["check"] is False
+
+
+def test_zstandard_probe_rejects_nonempty_stderr(tmp_path: Path) -> None:
+    identity = _canonical({
+        "python_version": [3, 11, 4],
+        "zstandard_version": "0.19.0",
+        "zstandard_init": str(tmp_path / "__init__.py"),
+        "zstandard_backend": str(tmp_path / "backend_c.so"),
+    })
+
+    def warning_runner(_command, **_kwargs):
+        return SimpleNamespace(
+            returncode=0, stdout=identity, stderr=b"unexpected warning\n"
+        )
+
+    with pytest.raises(
+        QualificationDriverError,
+        match="module identity probe failed",
+    ):
+        _REAL_ZSTANDARD_PROBE(tmp_path / "python", runner=warning_runner)
+
+
+@pytest.mark.parametrize(
+    ("drifted", "message"),
+    [
+        ("python", "fixed python authority bytes differ"),
+        ("zstandard_init", "fixed zstandard_init authority bytes differ"),
+        ("zstandard_backend", "fixed zstandard_backend authority bytes differ"),
+    ],
+)
+def test_fixed_runtime_authority_rejects_byte_drift(
+    drifted: str, message: str,
+) -> None:
+    records = {
+        "python": {"sha256": qualification.PINNED_PYTHON_SHA256},
+        "zstandard_init": {
+            "sha256": qualification.PINNED_ZSTANDARD_INIT_SHA256,
+        },
+        "zstandard_backend": {
+            "sha256": qualification.PINNED_ZSTANDARD_BACKEND_SHA256,
+        },
+    }
+    records[drifted]["sha256"] = "0" * 64
+    with pytest.raises(QualificationDriverError, match=message):
+        _REAL_FIXED_RUNTIME_VALIDATOR(
+            qualification.PINNED_PYTHON,
+            {
+                "python_version": qualification.PINNED_PYTHON_VERSION,
+                "zstandard_version": qualification.PINNED_ZSTANDARD_VERSION,
+            },
+            records,
+        )
+
+
+def test_supplied_cffi_backend_is_rejected_before_workspace(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    cffi = tmp_path / "_cffi.cpython-311-x86_64-linux-gnu.so"
+    cffi.write_bytes(b"fixture:wrong-zstandard-backend\n")
+    args.zstandard_backend = cffi
+    with pytest.raises(
+        QualificationDriverError,
+        match="supplied zstandard_backend differs from pinned Python import",
+    ):
+        build_plan(args)
+    assert not args.workspace.exists()
+
+
+def test_symlinked_pinned_python_is_rejected_before_identity_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _args(tmp_path)
+    symlink = tmp_path / "pinned-python-symlink"
+    symlink.symlink_to(args.pinned_python)
+    args.pinned_python = symlink
+    calls = []
+    monkeypatch.setattr(
+        qualification,
+        "_probe_zstandard_modules",
+        lambda _python: calls.append(_python),
+    )
+    with pytest.raises(QualificationDriverError, match="absent or a symlink"):
+        build_plan(args)
+    assert calls == []
+    assert not args.workspace.exists()
+
+
+def test_imported_backend_identity_drift_invalidates_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _args(tmp_path)
+    plan = build_plan(args)
+    cffi = tmp_path / "_cffi.cpython-311-x86_64-linux-gnu.so"
+    cffi.write_bytes(b"fixture:wrong-zstandard-backend\n")
+    monkeypatch.setattr(
+        qualification,
+        "_probe_zstandard_modules",
+        lambda _python: {
+            "python_version": [3, 11, 4],
+            "zstandard_version": "0.19.0",
+            "zstandard_init": args.zstandard_init,
+            "zstandard_backend": cffi,
+        },
+    )
+    with pytest.raises(
+        QualificationDriverError,
+        match="supplied zstandard_backend differs from pinned Python import",
+    ):
+        qualification._validate_plan(plan)
+    assert not args.workspace.exists()
 
 
 def test_build_plan_runs_exact_final_authority_preflight_before_workspace(
@@ -416,7 +600,7 @@ def test_resume_rejects_pinned_runtime_byte_drift(tmp_path: Path) -> None:
     plan = build_plan(args)
     run_plan(plan, resume=False, runner=FakeTools(plan))
     args.zstandard_backend.write_bytes(b"drifted backend\n")
-    with pytest.raises(QualificationDriverError, match="runtime input drifted"):
+    with pytest.raises(QualificationDriverError, match="runtime input binding drifted"):
         run_plan(plan, resume=True, runner=FakeTools(plan))
 
 
