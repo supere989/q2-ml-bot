@@ -183,6 +183,11 @@ def generate_fresh_map_blocking(mapgen) -> str:
 
 
 def main() -> int:
+    print(
+        "retired: the in-process ONNX bot runtime has no operational selector",
+        file=sys.stderr,
+    )
+    return 2
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--onnx", required=True, help="exported policy .onnx path")
     parser.add_argument("--map_name", default="mltrain_00005207")

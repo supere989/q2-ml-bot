@@ -17,9 +17,11 @@ import json
 import math
 import os
 from pathlib import Path
+import platform
 import random
 import re
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -32,6 +34,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from harness.multires_contract import DYN, POLICY_GENERATION  # noqa: E402
+from harness.causal_protocol import CAUSAL_TELEMETRY_SIZE  # noqa: E402
+from harness.client_protocol import (  # noqa: E402
+    CLIENT_TELEMETRY_HEADER_SIZE,
+    CLIENT_TELEMETRY_SIZE,
+)
+from harness.protocol import ACT_SIZE, OBS_SIZE  # noqa: E402
 from harness.multires_lineage import (  # noqa: E402
     CHECKPOINT_FORMAT,
     LineageError,
@@ -74,6 +82,9 @@ RETIREMENT_SCHEMA = "q2-multires-runtime-retirement-v1"
 RUNTIME_CONFIG_NAME = "multires-one-run.json"
 RUNTIME_MANIFEST_NAME = "runtime-manifest.json"
 NETWORK_BARRIER_SCHEMA = "q2-network-client-frame-barrier-qualification-v1"
+B6_CAMPAIGN_MODE = "b6-wsl-g1-no-update"
+DETERMINISM_MODE = "determinism-proof"
+MAX_B6_BOUNDARY_ROUNDS = 64
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_NAME = re.compile(r"[A-Za-z0-9_.-]{1,63}\Z")
 _TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{32,63}\Z")
@@ -99,6 +110,82 @@ def _sha256(path: Path) -> str:
 
 def _valid_sha256(value: object) -> bool:
     return isinstance(value, str) and bool(_SHA256.fullmatch(value)) and value != "0" * 64
+
+
+def _machine_identity_sha256(path: Path = Path("/etc/machine-id")) -> str:
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise OneRunError("one-run machine identity is unavailable") from error
+    identity = raw[:-1] if raw.endswith(b"\n") else raw
+    if len(raw) not in (32, 33) or (len(raw) == 33 and raw[-1:] != b"\n"):
+        raise OneRunError("one-run machine identity is malformed")
+    if re.fullmatch(rb"[0-9a-f]{32}", identity) is None:
+        raise OneRunError("one-run machine identity is malformed")
+    return hashlib.sha256(identity).hexdigest()
+
+
+def _state_sha256(value: Any) -> str:
+    """Canonical tensor/state identity without torch-save container variance."""
+    try:
+        import torch
+    except ImportError as error:
+        raise OneRunError("PyTorch is required for no-update state attestation") from error
+
+    def normalize(item: Any) -> Any:
+        if isinstance(item, torch.Tensor):
+            tensor = item.detach().cpu().contiguous()
+            return {
+                "dtype": str(tensor.dtype),
+                "shape": list(tensor.shape),
+                "sha256": hashlib.sha256(tensor.numpy().tobytes()).hexdigest(),
+            }
+        if isinstance(item, Mapping):
+            return {str(key): normalize(item[key]) for key in sorted(item, key=str)}
+        if isinstance(item, (list, tuple)):
+            return [normalize(child) for child in item]
+        if item is None or type(item) in (bool, int, float, str):
+            return item
+        raise OneRunError(f"state contains unsupported {type(item).__name__}")
+
+    return hashlib.sha256(_canonical_bytes(normalize(value))).hexdigest()
+
+
+def _owned_udp_ports(config: Mapping[str, Any]) -> list[dict[str, Any]]:
+    count = int(config["client_count"])
+    records = [
+        {"role": "q2ded", "address": "127.0.0.1", "port": int(config["server_port"])},
+        {"role": "telemetry", "address": "127.0.0.1", "port": int(config["telemetry_port"])},
+    ]
+    records.extend({
+        "role": f"harness-{index:02d}", "address": "127.0.0.1",
+        "port": int(config["harness_port_base"]) + index,
+    } for index in range(count))
+    return [{**record, "transport": "udp"} for record in records]
+
+
+def _qport_identities(config: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Record Quake protocol qports without representing them as UDP binds."""
+    return [
+        {"client_index": index, "qport": int(config["qport_base"]) + index}
+        for index in range(int(config["client_count"]))
+    ]
+
+
+def _prove_udp_ports_released(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    proven = []
+    for record in records:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.bind((str(record["address"]), int(record["port"])))
+        except OSError as error:
+            raise OneRunError(
+                f"owned UDP port was not released: {record['role']}:{record['port']}"
+            ) from error
+        finally:
+            probe.close()
+        proven.append({**dict(record), "available_after_teardown": True})
+    return proven
 
 
 def _file(path: Path, label: str, *, executable: bool = False) -> Path:
@@ -372,6 +459,9 @@ def preflight(args: argparse.Namespace) -> OneRunAdmission:
         raise OneRunError("seed, game seed, policy version, and map epoch must be nonnegative")
     if args.transition_count < 1:
         raise OneRunError("transition_count must be positive")
+    campaign_mode = str(getattr(args, "campaign_mode", DETERMINISM_MODE))
+    if campaign_mode not in (DETERMINISM_MODE, B6_CAMPAIGN_MODE):
+        raise OneRunError("campaign_mode is not an admitted no-update mode")
     if not _valid_sha256(args.expected_atlas_sha256) or not _valid_sha256(
         args.expected_runtime_manifest_sha256
     ):
@@ -419,11 +509,10 @@ def preflight(args: argparse.Namespace) -> OneRunAdmission:
         max(harness_ports) > 65535
         or max(qports) > 65535
         or ports["server_port"] == ports["telemetry_port"]
-        or ports["server_port"] in harness_ports | qports
-        or ports["telemetry_port"] in harness_ports | qports
-        or harness_ports & qports
+        or ports["server_port"] in harness_ports
+        or ports["telemetry_port"] in harness_ports
     ):
-        raise OneRunError("runtime server/telemetry/client port ranges overlap")
+        raise OneRunError("runtime server/telemetry/harness socket ranges overlap")
     for field, maximum in (
         ("client_id_prefix", 60), ("name_prefix", 12), ("game", 63)
     ):
@@ -453,7 +542,16 @@ def preflight(args: argparse.Namespace) -> OneRunAdmission:
     if (
         type(config["max_rejected_echoes"]) is not int
         or config["max_rejected_echoes"] < 0
-        or config["maximum_boundary_rounds"] != 0
+        or type(config["maximum_boundary_rounds"]) is not int
+        or config["maximum_boundary_rounds"] < 0
+        or (
+            campaign_mode == DETERMINISM_MODE
+            and config["maximum_boundary_rounds"] != 0
+        )
+        or (
+            campaign_mode == B6_CAMPAIGN_MODE
+            and config["maximum_boundary_rounds"] > MAX_B6_BOUNDARY_ROUNDS
+        )
         or type(config["debug_clients"]) is not bool
     ):
         raise OneRunError("runtime echo/boundary/debug settings are invalid")
@@ -492,8 +590,8 @@ def preflight(args: argparse.Namespace) -> OneRunAdmission:
     training_manifest = _file(args.training_manifest, "training_manifest")
     runtime_evidence_path = _file(args.runtime_evidence, "runtime_evidence")
     out = Path(args.out)
-    if not out.is_absolute() or out.is_symlink():
-        raise OneRunError("out must be an absolute non-symlink path")
+    if not out.is_absolute() or out.is_symlink() or out.exists():
+        raise OneRunError("out must be an absent absolute non-symlink path")
     _directory(out.parent, "out parent")
 
     bundle = _json(bundle_manifest, "bundle_manifest")
@@ -524,10 +622,8 @@ def preflight(args: argparse.Namespace) -> OneRunAdmission:
     ):
         raise OneRunError("raw Atlas differs from the admitted Atlas manifest")
 
-    objectives_document = _json(objectives, "objectives")
-    objective_identity = objectives_document.get(
-        "objective_identity_sha256", _sha256(objectives)
-    )
+    _json(objectives, "objectives")
+    objective_identity = _sha256(objectives)
     if not _valid_sha256(objective_identity):
         raise OneRunError("objective identity is invalid")
     training_configuration, training_sha256, _training_body = (
@@ -858,6 +954,30 @@ def _records(rollout: Any, admission: OneRunAdmission) -> tuple[list[dict[str, A
             )
             item = record.to_mapping()
             item["rust_features"] = [float(value) for value in rust_features]
+            if str(getattr(args, "campaign_mode", DETERMINISM_MODE)) == B6_CAMPAIGN_MODE:
+                requested_vertical = int(round(float(item["action"][4])))
+                echoed_vertical = info.get("action_debug_vertical_intent")
+                applied_upmove = info.get("action_debug_applied_upmove")
+                water_mode = info.get("action_debug_water_vertical_mode")
+                echo_valid = info.get("causal_echo_valid")
+                trainable = info.get("trainable_transition")
+                if (
+                    requested_vertical not in (0, 1, 2)
+                    or type(echoed_vertical) is not int
+                    or type(applied_upmove) is not int
+                    or type(water_mode) is not bool
+                    or type(echo_valid) is not bool
+                    or type(trainable) is not bool
+                ):
+                    raise OneRunError("B6 transition lacks exact vertical/echo audit facts")
+                item["transport_audit"] = {
+                    "authoritative_echo_valid": echo_valid,
+                    "trainable_transition": trainable,
+                    "requested_vertical": requested_vertical,
+                    "echoed_vertical": echoed_vertical,
+                    "applied_upmove": applied_upmove,
+                    "water_vertical_mode": water_mode,
+                }
             built.append(record)
             emitted.append(item)
             index += 1
@@ -865,6 +985,7 @@ def _records(rollout: Any, admission: OneRunAdmission) -> tuple[list[dict[str, A
 
 
 def execute(admission: OneRunAdmission) -> dict[str, Any]:
+    started_at_unix_ns = time.time_ns()
     # Heavy imports occur only after the pure artifact preflight succeeded.
     import numpy as np
     import torch
@@ -927,6 +1048,19 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
             "one-run qualification requires an attested fresh random step-zero lineage"
         )
 
+    checkpoint_before_sha256 = _sha256(Path(args.checkpoint))
+    policy_before_sha256 = _state_sha256(runtime.policy.state_dict())
+    optimizer_before_sha256 = _state_sha256(optimizer.state_dict())
+    counters = {"policy_updates": 0, "optimizer_steps": 0, "backward_calls": 0}
+    original_optimizer_step = optimizer.step
+
+    def counted_optimizer_step(*step_args, **step_kwargs):
+        counters["optimizer_steps"] += 1
+        return original_optimizer_step(*step_args, **step_kwargs)
+
+    gradient_hooks: list[Any] = []
+    optimizer_step_wrapped = False
+
     extension = _load_extension(admission.rust_extension)
     artifacts = RustMapArtifacts(
         bundle_manifest_path=admission.bundle_manifest,
@@ -971,6 +1105,7 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
     batch = None
     records: list[dict[str, Any]] | None = None
     trajectory = ""
+    rollout = None
     metrics = None
     cleanup_error: Exception | None = None
     try:
@@ -1021,21 +1156,46 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
             ),
             deterministic_collection=True,
         )
+        original_train_update = trainer.train_update
+
+        def counted_train_update(*update_args, **update_kwargs):
+            counters["policy_updates"] += 1
+            return original_train_update(*update_args, **update_kwargs)
+
+        trainer.train_update = counted_train_update  # type: ignore[method-assign]
+        optimizer.step = counted_optimizer_step  # type: ignore[method-assign]
+        optimizer_step_wrapped = True
+        gradient_hooks = [
+            parameter.register_hook(
+                lambda gradient: counters.__setitem__(
+                    "backward_calls", counters["backward_calls"] + 1
+                )
+            )
+            for parameter in runtime.policy.parameters()
+            if parameter.requires_grad
+        ]
         initial_observations, initial_infos = batch.reset()
         _capture_client_process_records(batch, process_records)
         trainer.collector.prime(initial_observations, initial_infos)
         rollout = trainer.collector.collect(policy_version=args.policy_version)
-        if rollout.boundary_rounds != 0:
+        campaign_mode = str(getattr(args, "campaign_mode", DETERMINISM_MODE))
+        if campaign_mode == DETERMINISM_MODE and rollout.boundary_rounds != 0:
             raise OneRunError("proof run encountered a resync/boundary admission")
-        metrics = batch.metrics
-        for field in (
-            "stale_policy_rounds_rejected", "stale_echoes_rejected",
-            "mismatched_echoes_rejected", "map_epoch_resyncs",
-            "telemetry_gap_resyncs", "realtime_catchup_resyncs",
-            "action_state_resyncs",
+        if (
+            campaign_mode == B6_CAMPAIGN_MODE
+            and rollout.boundary_rounds > int(config["maximum_boundary_rounds"])
         ):
-            if int(getattr(metrics, field)) != 0:
-                raise OneRunError(f"proof run transport metric {field} is nonzero")
+            raise OneRunError("B6 run exceeded its declared resync bound")
+        metrics = batch.metrics
+        if campaign_mode == DETERMINISM_MODE:
+            for field in (
+                "stale_policy_rounds_rejected", "stale_echoes_rejected",
+                "mismatched_echoes_rejected", "map_epoch_resyncs",
+                "telemetry_gap_resyncs", "realtime_catchup_resyncs",
+                "action_state_resyncs",
+            ):
+                if int(getattr(metrics, field)) != 0:
+                    raise OneRunError(f"proof run transport metric {field} is nonzero")
         records, trajectory = _records(rollout, admission)
     finally:
         if batch is not None:
@@ -1052,6 +1212,10 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
             _stop_server(server)
         except Exception as error:
             cleanup_error = cleanup_error or error
+        for handle in gradient_hooks:
+            handle.remove()
+        if optimizer_step_wrapped:
+            optimizer.step = original_optimizer_step  # type: ignore[method-assign]
         launch_cfg.unlink(missing_ok=True)
 
     orphans = [
@@ -1063,11 +1227,24 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
         raise OneRunError(
             f"scoped teardown failed cleanup={cleanup_error!r} orphans={orphans!r}"
         )
+    if rollout is None or metrics is None:
+        raise OneRunError("run ended without rollout/transport metrics")
     if records is None or len(records) != args.transition_count:
         raise OneRunError("run ended without the exact requested records")
     if len(process_records) != 1 + int(config["client_count"]):
         raise OneRunError("run lacks exact q2ded/client PID start-tick evidence")
     launched_pids = [int(record["pid"]) for record in process_records]
+    checkpoint_after_sha256 = _sha256(Path(args.checkpoint))
+    policy_after_sha256 = _state_sha256(runtime.policy.state_dict())
+    optimizer_after_sha256 = _state_sha256(optimizer.state_dict())
+    if (
+        checkpoint_before_sha256 != checkpoint_after_sha256
+        or policy_before_sha256 != policy_after_sha256
+        or optimizer_before_sha256 != optimizer_after_sha256
+        or any(counters.values())
+    ):
+        raise OneRunError("no-update campaign mutated policy/checkpoint/optimizer state")
+    owned_ports = _prove_udp_ports_released(_owned_udp_ports(config))
 
     received = {
         "seed": args.seed,
@@ -1089,12 +1266,16 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
         "launch_id": args.launch_id,
         "expected_atlas_sha256": args.expected_atlas_sha256,
         "expected_runtime_manifest_sha256": args.expected_runtime_manifest_sha256,
+        "campaign_mode": str(getattr(args, "campaign_mode", DETERMINISM_MODE)),
     }
-    return {
+    completed_at_unix_ns = time.time_ns()
+    result = {
         "schema": ONE_RUN_SCHEMA,
         "protocol_version": ONE_RUN_PROTOCOL_VERSION,
         "synthetic": False,
         "legacy": False,
+        "started_at_unix_ns": started_at_unix_ns,
+        "completed_at_unix_ns": completed_at_unix_ns,
         "collector": COLLECTOR_CLASS_NAME,
         "python_collector_schema": PYTHON_COLLECTOR_SCHEMA,
         "spatial_provider": SPATIAL_PROVIDER_CLASS_NAME,
@@ -1110,12 +1291,24 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
         "objective_identity_sha256": admission.objective_identity_sha256,
         "training_manifest_sha256": admission.training_manifest_sha256,
         "checkpoint_sha256": admission.checkpoint_sha256,
+        "bundle_manifest_sha256": _sha256(admission.bundle_manifest),
+        "retirement_manifest_sha256": admission.retirement_manifest_sha256,
+        "network_barrier_execution_evidence_sha256": (
+            admission.network_barrier_execution_evidence_sha256
+        ),
+        "source_repositories": _current_source_repositories(),
+        "campaign_mode": str(getattr(args, "campaign_mode", DETERMINISM_MODE)),
         "received_inputs": received,
         "transition_count": args.transition_count,
         "trajectory_sha256": trajectory,
         "partial_admissions": 0,
         "stale_admissions": 0,
-        "resync_admissions": 0,
+        "resync_admissions": (
+            int(rollout.boundary_rounds)
+            if str(getattr(args, "campaign_mode", DETERMINISM_MODE))
+            == B6_CAMPAIGN_MODE
+            else 0
+        ),
         "seed": args.seed,
         "game_seed": args.game_seed,
         "policy_version": args.policy_version,
@@ -1127,9 +1320,73 @@ def execute(admission: OneRunAdmission) -> dict[str, Any]:
         "process_records": process_records,
         "terminated_process_records": process_records,
         "orphan_processes_after_teardown": 0,
+        "owned_ports": owned_ports,
+        "qport_identities": _qport_identities(config),
+        "host": {
+            "hostname": platform.node(),
+            "kernel_release": platform.release(),
+            "architecture": platform.machine(),
+            "machine_identity_sha256": _machine_identity_sha256(),
+        },
+        "no_update": {
+            "mode": "collect-only-no-update-v1",
+            "checkpoint_sha256_before": checkpoint_before_sha256,
+            "checkpoint_sha256_after": checkpoint_after_sha256,
+            "policy_state_sha256_before": policy_before_sha256,
+            "policy_state_sha256_after": policy_after_sha256,
+            "optimizer_state_sha256_before": optimizer_before_sha256,
+            "optimizer_state_sha256_after": optimizer_after_sha256,
+            **counters,
+        },
+        "transport_metrics": {
+            **metrics.as_dict(),
+            "boundary_rounds": int(rollout.boundary_rounds),
+            "declared_resync_limit": int(config["maximum_boundary_rounds"]),
+            "protocol_payload_accounting": {
+                "basis": "wire-abi-struct-calcsize-v1",
+                "accepted_packet_samples": int(args.transition_count),
+                "client_telemetry_bytes": CLIENT_TELEMETRY_SIZE,
+                "action_packet_bytes": ACT_SIZE,
+                "telemetry_components": {
+                    "header_bytes": CLIENT_TELEMETRY_HEADER_SIZE,
+                    "engine_observation_bytes": OBS_SIZE,
+                    "causal_telemetry_bytes": CAUSAL_TELEMETRY_SIZE,
+                },
+                "atlas_wire_fields": 0,
+                "atlas_wire_bytes_per_frame": 0,
+                "dyn_wire_fields": 0,
+                "dyn_wire_bytes_per_frame": 0,
+            },
+        },
         "checkpoint_training_step": checkpoint_manifest.training_step,
         "records": records,
     }
+    result["evidence_sha256"] = hashlib.sha256(_canonical_bytes(result)).hexdigest()
+    return result
+
+
+def _publish_exclusive(destination: Path, payload: Mapping[str, Any]) -> None:
+    """Publish complete evidence atomically without replacing prior evidence."""
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    if destination.exists() or destination.is_symlink() or temporary.exists():
+        raise OneRunError("one-run output or exclusive temporary path already exists")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(_canonical_bytes(payload))
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, destination, follow_symlinks=False)
+        except FileExistsError as error:
+            raise OneRunError("one-run output already exists") from error
+        parent = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -1153,6 +1410,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--launch_id", required=True)
     parser.add_argument("--expected_atlas_sha256", required=True)
     parser.add_argument("--expected_runtime_manifest_sha256", required=True)
+    parser.add_argument(
+        "--campaign_mode",
+        choices=(DETERMINISM_MODE, B6_CAMPAIGN_MODE),
+        default=DETERMINISM_MODE,
+    )
     return parser.parse_args(argv)
 
 
@@ -1162,9 +1424,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         admission = preflight(args)
         payload = execute(admission)
         destination = Path(args.out)
-        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
-        temporary.write_bytes(_canonical_bytes(payload))
-        os.replace(temporary, destination)
+        _publish_exclusive(destination, payload)
         print(json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
         return 0
     except Exception as error:

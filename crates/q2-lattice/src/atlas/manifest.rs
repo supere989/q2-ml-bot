@@ -6,7 +6,8 @@ use sha2::{Digest, Sha256};
 use super::admission::validate_digest;
 use super::{
     ATLAS_CELL_SIZES, ATLAS_MAGIC, ATLAS_SCHEMA_VERSION, AtlasArtifact, AtlasError, AtlasLevel,
-    AtlasLimits, AtlasOrigin, AtlasResult, OracleAdmissions,
+    AtlasLimits, AtlasOrigin, AtlasResult, HOOK_RECOVERY_WALK_BUDGET_TICKS, OracleAdmissions,
+    RECOVERY_GAME_TICK_HZ, RECOVERY_WALK_SPEED_Q8_PER_SECOND,
 };
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -182,6 +183,26 @@ pub struct ManifestBudgets {
     pub max_build_rss_bytes: u64,
 }
 
+/// Physics/cadence identity required by the teacher-only hook-necessity
+/// evaluator. Mixed or missing values make the Atlas inadmissible.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryPhysicsManifest {
+    pub hook_walk_budget_ticks: u32,
+    pub game_tick_hz: u32,
+    pub walk_speed_q8_per_second: u32,
+}
+
+impl Default for RecoveryPhysicsManifest {
+    fn default() -> Self {
+        Self {
+            hook_walk_budget_ticks: HOOK_RECOVERY_WALK_BUDGET_TICKS,
+            game_tick_hz: RECOVERY_GAME_TICK_HZ,
+            walk_speed_q8_per_second: RECOVERY_WALK_SPEED_Q8_PER_SECOND,
+        }
+    }
+}
+
 impl From<&AtlasLimits> for ManifestBudgets {
     fn from(limits: &AtlasLimits) -> Self {
         Self {
@@ -204,6 +225,7 @@ pub struct AtlasManifest {
     pub bsp: BspIdentity,
     pub analyzer: ToolIdentity,
     pub oracles: OracleAdmissions,
+    pub recovery_physics: RecoveryPhysicsManifest,
     pub generator: Option<ToolIdentity>,
     pub grid: GridManifest,
     pub player_hulls: Vec<HullManifest>,
@@ -275,6 +297,26 @@ impl AtlasManifest {
         validate_digest("BSP provenance", &self.bsp.provenance_sha256)?;
         self.analyzer.validate("analyzer")?;
         self.oracles.admit(&self.bsp)?;
+        if self.recovery_physics != RecoveryPhysicsManifest::default() {
+            return Err(AtlasError::InvalidFormat(
+                "manifest recovery physics/cadence identity differs".to_owned(),
+            ));
+        }
+        let pmove = self.oracles.pmove_oracle.as_ref().ok_or_else(|| {
+            AtlasError::InvalidFormat(
+                "manifest recovery physics requires Pmove authority".to_owned(),
+            )
+        })?;
+        if !pmove
+            .parameters
+            .constants
+            .split(';')
+            .any(|item| item == "maxspeed=300")
+        {
+            return Err(AtlasError::InvalidFormat(
+                "manifest recovery walk speed differs from Pmove maxspeed".to_owned(),
+            ));
+        }
         if let Some(generator) = &self.generator {
             generator.validate("generator")?;
         }

@@ -11,8 +11,10 @@ defect, without retiring a cohort or invoking source generation.
 Dry-run is the default.  Mutating stages never execute until the full plan has
 passed validation and an unambiguous mutating-execution acknowledgement is
 supplied.  Validation itself never creates or authorizes a cohort.
-Configuration defects do not consume authorization and do not weaken the
-immutable no-retry contract for real cohort artifact failures.
+Configuration defects rejected during pre-authorization do not consume
+authorization. If source was already executed by an older or bypassed runner,
+however, any later failure is terminal regardless of defect class; the
+immutable no-retry contract cannot leave a consumed declaration dangling.
 
 Retired cohort/map/seed identity is enforced via the authoritative
 ``tools.retired_cohort_registry`` used by the other B2 producers — not by
@@ -38,11 +40,16 @@ if str(ROOT) not in sys.path:
 from tools.materialize_generated_cohort import (  # noqa: E402
     MAX_MATERIALIZER_TIMEOUT_SECONDS,
 )
+from tools.compile_generated_cohort import MAX_MAP_TIMEOUT_SECONDS  # noqa: E402
+import tools.assemble_b2_gate as b2_gate  # noqa: E402
 from tools.retired_cohort_registry import (  # noqa: E402
     RetiredCohortRegistryError,
     require_unretired_declaration,
 )
-from tools.run_compiled_cm_preflight import MAX_JOBS as CM_PREFLIGHT_MAX_JOBS  # noqa: E402
+from tools.run_compiled_cm_preflight import (  # noqa: E402
+    MAX_JOBS as CM_PREFLIGHT_MAX_JOBS,
+    MAX_ORACLE_BATCH_TIMEOUT_SECONDS,
+)
 from tools.run_generator_cohort import (  # noqa: E402
     GeneratorCohortError,
     canonical_bytes,
@@ -52,6 +59,10 @@ from tools.run_generator_cohort import (  # noqa: E402
 
 PLAN_SCHEMA = "q2-b2-final-cohort-preauthorization-plan-v1"
 EVIDENCE_SCHEMA = "q2-b2-final-cohort-preauthorization-evidence-v1"
+SOURCE_AUTHORIZATION_SCHEMA = "q2-b2-source-authorization-consumed-v1"
+SOURCE_AUTHORIZATION_STATE_ROOT = (
+    Path.home() / ".local/state/q2-ml-bot/final-cohort-authorizations"
+)
 HEX64 = __import__("re").compile(r"^[0-9a-f]{64}$")
 
 # Normative final-lane order through compiled promotion (design/plan lifecycle).
@@ -69,8 +80,8 @@ DRIVER_STAGES = (
 # Per-stage CLI argument domains accepted by the real final tools.
 # Bounds that stage tools publish as module constants are imported and bound
 # below so plan domains cannot silently drift from producer code.
-ORACLE_BATCH_TIMEOUT_MAX = 60.0
-COMPILE_TIMEOUT_MAX = 86400.0
+ORACLE_BATCH_TIMEOUT_MAX = float(MAX_ORACLE_BATCH_TIMEOUT_SECONDS)
+COMPILE_TIMEOUT_MAX = float(MAX_MAP_TIMEOUT_SECONDS)
 MATERIALIZE_TIMEOUT_MIN = 1
 MATERIALIZE_TIMEOUT_MAX = int(MAX_MATERIALIZER_TIMEOUT_SECONDS)
 CM_JOBS_MIN = 1
@@ -199,6 +210,133 @@ def _file_sha256(path: Path) -> str:
 
 def _canonical(value: object) -> bytes:
     return canonical_bytes(value)
+
+
+def _source_authorization_marker(plan: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Persist the one-shot source boundary before the source runner starts."""
+
+    workspace = _absolute(Path(str(plan.get("workspace", ""))))
+    if not workspace.parent.is_dir() or workspace.parent.is_symlink():
+        raise FinalCohortPlanError(
+            "source authorization workspace parent is absent or a symlink",
+            check_id="source-authorization-journal",
+        )
+    if workspace.exists():
+        if workspace.is_symlink() or not workspace.is_dir():
+            raise FinalCohortPlanError(
+                "source authorization workspace is invalid",
+                check_id="source-authorization-journal",
+            )
+    else:
+        try:
+            workspace.mkdir(mode=0o700)
+        except OSError as error:
+            raise FinalCohortPlanError(
+                "source authorization workspace could not be created",
+                check_id="source-authorization-journal",
+            ) from error
+    declaration = plan.get("declaration")
+    declaration_sha256 = (
+        declaration.get("sha256") if isinstance(declaration, Mapping) else None
+    )
+    if not isinstance(declaration_sha256, str) or HEX64.fullmatch(
+        declaration_sha256
+    ) is None:
+        raise FinalCohortPlanError(
+            "source authorization declaration identity is malformed",
+            check_id="source-authorization-journal",
+        )
+    state_root = _absolute(SOURCE_AUTHORIZATION_STATE_ROOT)
+    try:
+        state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as error:
+        raise FinalCohortPlanError(
+            "source authorization state root could not be created",
+            check_id="source-authorization-journal",
+        ) from error
+    if state_root.is_symlink() or not state_root.is_dir():
+        raise FinalCohortPlanError(
+            "source authorization state root is invalid",
+            check_id="source-authorization-journal",
+        )
+    marker = state_root / f"{declaration_sha256}.json"
+    body = {
+        "schema": SOURCE_AUTHORIZATION_SCHEMA,
+        "status": "source-authorization-consumed",
+        "cohort_id": plan.get("cohort_id"),
+        "declaration_sha256": declaration_sha256,
+        "plan_sha256": _sha256(_canonical(plan)),
+        "workspace": str(workspace),
+        "stage_started": "source",
+        "immutable_no_retry": True,
+    }
+    payload = _canonical(body)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(marker, flags, 0o600)
+    except FileExistsError:
+        if marker.is_symlink() or not marker.is_file():
+            raise FinalCohortPlanError(
+                "declaration-scoped source authorization tombstone is invalid",
+                defect_class=DEFECT_COHORT_ARTIFACT,
+                check_id="source-authorization-already-consumed",
+            )
+        existing = marker.read_bytes()
+        try:
+            loaded = json.loads(existing)
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise FinalCohortPlanError(
+                "declaration-scoped source authorization tombstone is unreadable",
+                defect_class=DEFECT_COHORT_ARTIFACT,
+                check_id="source-authorization-already-consumed",
+            ) from error
+        if (
+            existing != _canonical(loaded)
+            or not isinstance(loaded, Mapping)
+            or loaded.get("schema") != SOURCE_AUTHORIZATION_SCHEMA
+            or loaded.get("status") != "source-authorization-consumed"
+            or loaded.get("cohort_id") != plan.get("cohort_id")
+            or loaded.get("declaration_sha256") != declaration_sha256
+            or loaded.get("immutable_no_retry") is not True
+        ):
+            raise FinalCohortPlanError(
+                "declaration-scoped source authorization tombstone differs",
+                defect_class=DEFECT_COHORT_ARTIFACT,
+                check_id="source-authorization-already-consumed",
+            )
+        return {
+            "path": str(marker),
+            "sha256": _sha256(existing),
+            "bytes": len(existing),
+        }, False
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(marker, 0o600)
+        directory_fd = os.open(state_root, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException as error:
+        # O_EXCL has already consumed this declaration.  Never unlink a short,
+        # partially written, or not-yet-directory-synced journal: its continued
+        # presence is the fail-closed tombstone that prevents a second source
+        # invocation after an I/O or process failure at this boundary.
+        raise FinalCohortPlanError(
+            "source authorization journal creation was incomplete; declaration remains consumed",
+            defect_class=DEFECT_COHORT_ARTIFACT,
+            check_id="source-authorization-journal-incomplete",
+        ) from error
+    return {
+        "path": str(marker),
+        "sha256": _sha256(payload),
+        "bytes": len(payload),
+    }, True
 
 
 def _arg(command: list[str], name: str, value: Path | str | int | float) -> None:
@@ -346,6 +484,16 @@ def _assert_domain_constant_binding() -> None:
             "compiled-cm jobs domain drifted from CM preflight constant",
             check_id="domain-binding",
         )
+    if COMPILE_TIMEOUT_MAX != float(MAX_MAP_TIMEOUT_SECONDS):
+        raise FinalCohortPlanError(
+            "compile timeout domain drifted from compiler constant",
+            check_id="domain-binding",
+        )
+    if ORACLE_BATCH_TIMEOUT_MAX != float(MAX_ORACLE_BATCH_TIMEOUT_SECONDS):
+        raise FinalCohortPlanError(
+            "compiled-cm timeout domain drifted from preflight constant",
+            check_id="domain-binding",
+        )
 
 
 def _stage_parser(stage: str) -> argparse.ArgumentParser:
@@ -489,6 +637,30 @@ def _require_unretired(
         ) from error
 
 
+def _require_active_declaration(
+    declaration_path: Path,
+    declaration_obj: Mapping[str, Any],
+    declaration_sha256: str,
+) -> None:
+    """Bind the one-shot executor to the exact committed activation authority."""
+
+    try:
+        authority = b2_gate._require_active_final_authority()
+    except b2_gate.B2GateError as error:
+        raise FinalCohortPlanError(
+            f"active final authority denied execution planning: {error}",
+            check_id="active-authority",
+        ) from error
+    authority_path = _absolute(ROOT / authority.immutable_declaration_path)
+    _require(
+        declaration_path == authority_path
+        and declaration_obj.get("cohort_id") == authority.cohort_id
+        and declaration_sha256 == authority.declaration_sha256,
+        "declaration path/cohort/digest differs from the active final authority",
+        check_id="active-authority",
+    )
+
+
 def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     """Build the full final-lane command plan without executing any stage."""
 
@@ -583,6 +755,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         check_id="declaration-binding",
     )
     _require_unretired(declaration, declaration_obj, declaration_sha256)
+    _require_active_declaration(declaration, declaration_obj, declaration_sha256)
 
     pinned_inputs = {
         "declaration": declaration_record,
@@ -948,6 +1121,18 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         record(error.check_id, False, str(error))
 
     try:
+        _require_active_declaration(
+            declaration_path, declaration_obj, declaration_sha256
+        )
+        record(
+            "active-authority",
+            True,
+            "declaration path/cohort/digest equals the active final authority",
+        )
+    except FinalCohortPlanError as error:
+        record(error.check_id, False, str(error))
+
+    try:
         _assert_domain_constant_binding()
         record(
             "domain-binding",
@@ -1222,6 +1407,7 @@ def build_evidence(
     dry_run: bool,
     mutating_stages_executed: Sequence[str],
     failure: Mapping[str, Any] | None = None,
+    source_authorization_marker: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Emit canonical pre-authorization evidence."""
 
@@ -1232,13 +1418,19 @@ def build_evidence(
     elif not passed:
         defect_class = DEFECT_RUNNER_CONFIGURATION
 
-    # Configuration defects never consume the immutable source authorization.
+    # Pre-authorization configuration defects never consume the immutable
+    # source authorization. Once source ran, the authorization was already
+    # consumed and every failed execution path is terminal, including a
+    # configuration defect that an older or bypassed runner allowed through.
     authorization_consumed = bool(mutating_stages_executed) and "source" in set(
         mutating_stages_executed
     )
-    if defect_class == DEFECT_RUNNER_CONFIGURATION:
+    if failure is not None and authorization_consumed:
+        cohort_retirement_triggered = True
+        retry_under_same_declaration_allowed = False
+    elif defect_class == DEFECT_RUNNER_CONFIGURATION:
         cohort_retirement_triggered = False
-        retry_under_same_declaration_allowed = not authorization_consumed
+        retry_under_same_declaration_allowed = True
     elif defect_class == DEFECT_COHORT_ARTIFACT:
         cohort_retirement_triggered = authorization_consumed
         retry_under_same_declaration_allowed = False
@@ -1258,6 +1450,10 @@ def build_evidence(
         "declaration": plan.get("declaration"),
         "checks": list(checks),
         "mutating_stages_executed": list(mutating_stages_executed),
+        "source_authorization_marker": (
+            dict(source_authorization_marker)
+            if source_authorization_marker is not None else None
+        ),
         "failure": failure,
         "defect_class": defect_class,
         "authorization": {
@@ -1351,10 +1547,74 @@ def run_plan(
             failure=failure,
         )
 
+    # This list is deliberately write-ahead: entering a mutating stage consumes
+    # its one-shot authorization before the runner can create its first byte.
+    # Recording only after return would make a crash during source generation
+    # appear pre-source and incorrectly reopen the immutable declaration.
     executed: list[str] = []
+    authorization_marker: Mapping[str, Any] | None = None
     for step in plan["commands"]:
         stage = str(step["stage"])
-        completed = runner(list(step["command"]), stage=stage, plan=plan)
+        if stage == "source":
+            try:
+                authorization_marker, created = _source_authorization_marker(plan)
+            except FinalCohortPlanError as error:
+                current_declaration_consumed = (
+                    error.check_id == "source-authorization-journal-incomplete"
+                )
+                return build_evidence(
+                    plan,
+                    checks,
+                    dry_run=False,
+                    # Source has not been invoked yet. Claim consumption only
+                    # when O_EXCL left a durable marker/tombstone on disk.
+                    mutating_stages_executed=(
+                        ["source"] if current_declaration_consumed else []
+                    ),
+                    failure={
+                        "defect_class": error.defect_class,
+                        "check_id": error.check_id,
+                        "message": str(error),
+                        "stage": "source",
+                    },
+                )
+            if not created:
+                return build_evidence(
+                    plan,
+                    checks,
+                    dry_run=False,
+                    mutating_stages_executed=["source"],
+                    failure={
+                        "defect_class": DEFECT_COHORT_ARTIFACT,
+                        "check_id": "source-authorization-already-consumed",
+                        "message": "source authorization marker already exists",
+                        "stage": "source",
+                    },
+                    source_authorization_marker=authorization_marker,
+                )
+        executed.append(stage)
+        try:
+            completed = runner(list(step["command"]), stage=stage, plan=plan)
+        except BaseException as error:
+            defect = (
+                DEFECT_COHORT_ARTIFACT
+                if "source" in executed
+                else DEFECT_RUNNER_CONFIGURATION
+            )
+            return build_evidence(
+                plan,
+                checks,
+                dry_run=False,
+                mutating_stages_executed=executed,
+                failure={
+                    "defect_class": defect,
+                    "check_id": f"stage-exception:{stage}",
+                    "message": f"stage {stage} raised {type(error).__name__}",
+                    "stage": stage,
+                    "exception_type": type(error).__name__,
+                },
+                source_authorization_marker=authorization_marker,
+            )
         returncode = getattr(completed, "returncode", completed)
         if int(returncode) != 0:
             # After source has run, a non-zero exit is a consumed no-retry failure.
@@ -1363,7 +1623,6 @@ def run_plan(
                 if "source" in executed or stage == "source"
                 else DEFECT_RUNNER_CONFIGURATION
             )
-            executed.append(stage)
             return build_evidence(
                 plan,
                 checks,
@@ -1376,14 +1635,15 @@ def run_plan(
                     "stage": stage,
                     "returncode": int(returncode),
                 },
+                source_authorization_marker=authorization_marker,
             )
-        executed.append(stage)
 
     return build_evidence(
         plan,
         checks,
         dry_run=False,
         mutating_stages_executed=executed,
+        source_authorization_marker=authorization_marker,
     )
 
 

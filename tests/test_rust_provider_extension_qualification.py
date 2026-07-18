@@ -482,6 +482,32 @@ def _provider(rust_extension, artifact: dict, client_index: int):
     )
 
 
+def test_actual_extension_exposes_private_manifest_bound_hook_necessity(
+    rust_extension, real_provider_artifacts,
+):
+    artifact = real_provider_artifacts["qualmap0"]
+    directory = Path(artifact["directory"])
+    name = str(artifact["map_name"])
+    runtime = rust_extension.AtlasRuntime(
+        (directory / f"{name}.atlas.manifest.json").read_bytes(),
+        f"{name}.atlas.bin",
+        (directory / f"{name}.atlas.bin").read_bytes(),
+        f"{name}.objectives.json",
+        (directory / f"{name}.objectives.json").read_bytes(),
+        (directory / f"{name}.bsp").read_bytes(),
+        name,
+        int(artifact["map_epoch"]),
+    )
+    evidence = dict(runtime.hook_necessity([0, 0, -2], int(artifact["map_epoch"])))
+    assert evidence["walking_budget_ticks"] == 15
+    assert isinstance(evidence["evaluated_hook_edges"], int)
+    assert set(evidence) == {
+        "walking_budget_ticks", "evaluated_hook_edges",
+        "walking_reaches_safety_within_budget", "hook_path_reaches_safety",
+        "hook_lowers_recovery_cost", "hook_was_necessary",
+    }
+
+
 def test_actual_extension_four_clients_ingest_query_and_isolate_dyn(
     rust_extension, real_provider_artifacts
 ):

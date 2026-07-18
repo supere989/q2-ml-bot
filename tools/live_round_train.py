@@ -331,6 +331,12 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    print(
+        "retired: use train.multires_primary with the attested network-client "
+        "lattice runtime",
+        file=sys.stderr,
+    )
+    return 2
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default="")
     parser.add_argument("--map_name", default="mltrain_00000000")

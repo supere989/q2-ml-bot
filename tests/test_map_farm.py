@@ -213,7 +213,7 @@ def test_bundle_v3_is_isolated_by_default_and_explicitly_admitted(tmp_path, monk
     )
 
 
-def test_bundle_v3_rejects_missing_or_mismatched_analysis(tmp_path, monkeypatch):
+def test_bundle_v3_rejects_missing_analysis(tmp_path, monkeypatch):
     monkeypatch.setenv("Q2_ROOT", str(tmp_path / "runtime"))
     generator = FarmMapGenerator(
         "http://map-farm.test:32510", allow_bundle_v3=True,
@@ -227,6 +227,14 @@ def test_bundle_v3_rejects_missing_or_mismatched_analysis(tmp_path, monkeypatch)
     generator._fetch()
     assert generator._result is None
     assert "archive member set is invalid" in generator._error
+    assert not (tmp_path / "runtime" / "baseq2" / "maps").exists()
+
+
+def test_bundle_v3_rejects_mismatched_analysis(tmp_path, monkeypatch):
+    monkeypatch.setenv("Q2_ROOT", str(tmp_path / "runtime"))
+    generator = FarmMapGenerator(
+        "http://map-farm.test:32510", allow_bundle_v3=True,
+    )
 
     monkeypatch.setattr(
         "urllib.request.urlopen",
@@ -238,6 +246,17 @@ def test_bundle_v3_rejects_missing_or_mismatched_analysis(tmp_path, monkeypatch)
     assert generator._result is None
     assert "checksum mismatch" in generator._error
     assert not (tmp_path / "runtime" / "baseq2" / "maps").exists()
+
+
+def test_farm_health_reports_analysis_failure_without_vps_fallback(tmp_path):
+    farm = MapFarm(tmp_path / "queue", tmp_path / "runtime", depth=2)
+    farm.report_analysis_failure("Atlas analysis authority unavailable")
+
+    status = farm.status()
+
+    assert status["analysis_status"] == "failed"
+    assert status["analysis_error"] == "Atlas analysis authority unavailable"
+    assert status["vps_compilation_fallback_enabled"] is False
 
 
 def test_bundle_v3_mid_publication_failure_restores_prior_generation(

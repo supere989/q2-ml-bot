@@ -375,7 +375,19 @@ def test_hand_authored_summary_forgery_validates_but_replay_and_final_gate_rejec
         qualification_report=forged_path, repo_root=gate.ROOT,
     )
     with pytest.raises(final_gate.B2GateError, match="qualification rejected"):
-        final_gate._validate_qualification_report(paths, {}, {})
+        final_gate._validate_qualification_report(
+            paths,
+            {},
+            {},
+            final_gate.ActiveFinalAuthority(
+                cohort_id="b2g99_final_99999",
+                declaration_sha256="ab" * 32,
+                immutable_declaration_path="fixture-declaration.json",
+                qualification_successor_paths=frozenset(
+                    {"fixture-declaration.json"}
+                ),
+            ),
+        )
 
 
 def test_retained_replay_can_bind_the_qualified_predecessor_implementation(

@@ -9,6 +9,13 @@ use super::{
 
 pub const RECOVERY_FEATURE_WIDTH: usize = 16;
 pub const RECOVERY_REPAIR_NODE_LIMIT: usize = 4096;
+/// Frozen teacher/debug walking horizon at the authoritative 10 Hz cadence.
+/// This value never enters the public recovery feature block or static solve.
+pub const HOOK_RECOVERY_WALK_BUDGET_TICKS: u32 = 15;
+pub const RECOVERY_GAME_TICK_HZ: u32 = 10;
+pub const RECOVERY_WALK_SPEED_Q8_PER_SECOND: u32 = 300 * 256;
+pub const RECOVERY_WALK_DISTANCE_Q8_PER_TICK: u32 =
+    RECOVERY_WALK_SPEED_Q8_PER_SECOND / RECOVERY_GAME_TICK_HZ;
 /// "Current two-L2-cell neighborhood" is frozen as a Chebyshev radius of two
 /// L2 cells around the query cell. Sparse enumeration still hard-fails above
 /// the independent 4096-node work ceiling.
@@ -113,6 +120,18 @@ pub struct RecoveryEvidence {
     /// Deterministic Atlas hazard basin. Zero means no reachable static hazard.
     pub hazard_component_id: u32,
     pub confidence: u16,
+}
+
+/// Private teacher/debug result for one admitted L1 recovery pose.  The
+/// policy never receives this structure or a derived ``must_hook`` bit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HookNecessityEvidence {
+    pub walking_budget_ticks: u32,
+    pub evaluated_hook_edges: u32,
+    pub walking_reaches_safety_within_budget: bool,
+    pub hook_path_reaches_safety: bool,
+    pub hook_lowers_recovery_cost: bool,
+    pub hook_was_necessary: bool,
 }
 
 impl RecoveryEvidence {
@@ -256,6 +275,221 @@ pub fn solve_static_costs(graph: &L1Graph) -> AtlasResult<Vec<u32>> {
 pub fn install_static_costs(graph: &mut L1Graph) -> AtlasResult<()> {
     let costs = solve_static_costs(graph)?;
     graph.set_costs_to_safety(&costs)
+}
+
+/// Evaluate the frozen hook-necessity teacher label without changing the
+/// public walking-only solve.  A label is true only when ordinary admitted
+/// movement cannot reach a safe node within the Q8 distance available over 15
+/// ticks at the manifest-bound 10 Hz/300 unit-per-second physics identity, an
+/// admitted current hook action can reach safety, and that route has lower Q8
+/// cost than the best ordinary route (or the ordinary route is unreachable).
+pub fn evaluate_hook_necessity(
+    graph: &L1Graph,
+    current: usize,
+    overlay: &RecoveryOverlay,
+) -> AtlasResult<HookNecessityEvidence> {
+    overlay.validate()?;
+    let current_node = graph.nodes().get(current).ok_or_else(|| {
+        AtlasError::InvalidFormat("hook-necessity L1 ordinal is invalid".to_owned())
+    })?;
+    if overlay.blocked_nodes.contains(&current_node.index) {
+        return Err(AtlasError::InvalidFormat(
+            "hook-necessity pose is dynamically blocked".to_owned(),
+        ));
+    }
+    let evaluated_hook_edges = graph
+        .outgoing(current)
+        .into_iter()
+        .flatten()
+        .filter(|edge| edge.edge_type == EdgeType::Hook && edge.blocker == 0)
+        .count();
+    let evaluated_hook_edges = u32::try_from(evaluated_hook_edges).map_err(|_| {
+        AtlasError::LimitExceeded("hook-necessity edge count exceeds u32".to_owned())
+    })?;
+    let walking_route = shortest_recovery_route(graph, current, overlay)?;
+    let walking_distance = shortest_walking_distance_q8(graph, current, overlay)?;
+    let walking_budget_q8 =
+        u64::from(HOOK_RECOVERY_WALK_BUDGET_TICKS) * u64::from(RECOVERY_WALK_DISTANCE_Q8_PER_TICK);
+    let walking_reaches_safety_within_budget =
+        walking_distance.is_some_and(|distance| distance <= walking_budget_q8);
+    let hook_route = shortest_current_hook_route(graph, current, overlay)?;
+    let hook_path_reaches_safety = hook_route.is_some();
+    let hook_lowers_recovery_cost =
+        hook_route.is_some_and(|hook| walking_route.is_none_or(|walking| hook.0 < walking.0));
+    let hook_was_necessary = !walking_reaches_safety_within_budget
+        && hook_path_reaches_safety
+        && hook_lowers_recovery_cost;
+    Ok(HookNecessityEvidence {
+        walking_budget_ticks: HOOK_RECOVERY_WALK_BUDGET_TICKS,
+        evaluated_hook_edges,
+        walking_reaches_safety_within_budget,
+        hook_path_reaches_safety,
+        hook_lowers_recovery_cost,
+        hook_was_necessary,
+    })
+}
+
+/// Return `(repaired_cost_q8, traversal_distance_q8)` for the deterministic
+/// least-repaired-cost ordinary route. Traversal distance is accumulated from
+/// the graph's frozen Q8 world-distance cost without dynamic hazard penalty;
+/// the 10 Hz conversion is therefore not inferred from edge count.
+fn shortest_recovery_route(
+    graph: &L1Graph,
+    current: usize,
+    overlay: &RecoveryOverlay,
+) -> AtlasResult<Option<(u64, u64)>> {
+    let mut best = vec![(u64::MAX, u64::MAX); graph.nodes().len()];
+    let mut pending = BinaryHeap::new();
+    best[current] = (0, 0);
+    pending.push(Reverse((
+        0_u64,
+        0_u64,
+        source_sort_index(graph, current),
+        current,
+    )));
+    while let Some(Reverse((cost, distance, _index, source))) = pending.pop() {
+        if best[source] != (cost, distance) {
+            continue;
+        }
+        if graph.nodes()[source].flags & NodeFlags::SAFE_TO_STAND != 0 {
+            return Ok(Some((cost, distance)));
+        }
+        for edge in graph.outgoing(source).into_iter().flatten() {
+            if !runtime_edge(edge, overlay) || edge.cost == COST_INFINITY {
+                continue;
+            }
+            let target = edge.target as usize;
+            if target >= graph.nodes().len() {
+                return Err(AtlasError::InvalidFormat(
+                    "hook-necessity edge target is invalid".to_owned(),
+                ));
+            }
+            if overlay.blocked_nodes.contains(&graph.nodes()[target].index) {
+                continue;
+            }
+            let penalty = overlay
+                .dynamic_penalty_q8
+                .get(&graph.nodes()[source].index)
+                .copied()
+                .unwrap_or(0);
+            let Some(candidate_cost) = cost
+                .checked_add(u64::from(edge.cost))
+                .and_then(|value| value.checked_add(u64::from(penalty)))
+            else {
+                continue;
+            };
+            let Some(candidate_distance) = distance.checked_add(u64::from(edge.cost)) else {
+                continue;
+            };
+            if (candidate_cost, candidate_distance) < best[target] {
+                best[target] = (candidate_cost, candidate_distance);
+                pending.push(Reverse((
+                    candidate_cost,
+                    candidate_distance,
+                    source_sort_index(graph, target),
+                    target,
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn shortest_walking_distance_q8(
+    graph: &L1Graph,
+    current: usize,
+    overlay: &RecoveryOverlay,
+) -> AtlasResult<Option<u64>> {
+    let mut best = vec![u64::MAX; graph.nodes().len()];
+    let mut pending = BinaryHeap::new();
+    best[current] = 0;
+    pending.push(Reverse((0_u64, source_sort_index(graph, current), current)));
+    while let Some(Reverse((distance, _index, source))) = pending.pop() {
+        if best[source] != distance {
+            continue;
+        }
+        if graph.nodes()[source].flags & NodeFlags::SAFE_TO_STAND != 0 {
+            return Ok(Some(distance));
+        }
+        for edge in graph.outgoing(source).into_iter().flatten() {
+            if !runtime_edge(edge, overlay) || edge.cost == COST_INFINITY {
+                continue;
+            }
+            let target = edge.target as usize;
+            if target >= graph.nodes().len() {
+                return Err(AtlasError::InvalidFormat(
+                    "hook-necessity edge target is invalid".to_owned(),
+                ));
+            }
+            if overlay.blocked_nodes.contains(&graph.nodes()[target].index) {
+                continue;
+            }
+            let Some(candidate) = distance.checked_add(u64::from(edge.cost)) else {
+                continue;
+            };
+            if candidate < best[target] {
+                best[target] = candidate;
+                pending.push(Reverse((
+                    candidate,
+                    source_sort_index(graph, target),
+                    target,
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Evaluate only an admissible hook action available at the current pose.
+/// Lookahead hook edges cannot manufacture a positive label for the current
+/// action. After the first hook, the remainder is ordinary recovery.
+fn shortest_current_hook_route(
+    graph: &L1Graph,
+    current: usize,
+    overlay: &RecoveryOverlay,
+) -> AtlasResult<Option<(u64, u64)>> {
+    let source_penalty = overlay
+        .dynamic_penalty_q8
+        .get(&graph.nodes()[current].index)
+        .copied()
+        .unwrap_or(0);
+    let mut candidates = Vec::new();
+    for edge in graph.outgoing(current).into_iter().flatten() {
+        if edge.edge_type != EdgeType::Hook || edge.blocker != 0 || edge.cost == COST_INFINITY {
+            continue;
+        }
+        let target = edge.target as usize;
+        if target >= graph.nodes().len() {
+            return Err(AtlasError::InvalidFormat(
+                "hook-necessity edge target is invalid".to_owned(),
+            ));
+        }
+        if overlay.blocked_nodes.contains(&graph.nodes()[target].index) {
+            continue;
+        }
+        let continuation = shortest_recovery_route(graph, target, overlay)?;
+        let Some((continuation_cost, continuation_distance)) = continuation else {
+            continue;
+        };
+        let Some(cost) = continuation_cost
+            .checked_add(u64::from(edge.cost))
+            .and_then(|value| value.checked_add(u64::from(source_penalty)))
+        else {
+            continue;
+        };
+        let Some(distance) = continuation_distance.checked_add(u64::from(edge.cost)) else {
+            continue;
+        };
+        candidates.push((cost, distance, graph.nodes()[target].index));
+    }
+    candidates.sort_unstable();
+    Ok(candidates
+        .first()
+        .map(|candidate| (candidate.0, candidate.1)))
+}
+
+fn source_sort_index(graph: &L1Graph, ordinal: usize) -> GridIndex {
+    graph.nodes()[ordinal].index
 }
 
 /// Deterministic signed distance to the nearest hazard/safe boundary over the

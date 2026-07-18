@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "q2-multires-b6-wsl-g1-v1.schema.json",
+  "title": "Multires B6 WSL no-update G1 transport campaign",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "tool", "status", "host", "source_repositories", "bindings",
+    "raw_evidence", "g1", "no_update", "performance", "public_state",
+    "teardown", "gate_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "q2-multires-b6-wsl-g1-v1"},
+    "tool": {"const": "assemble_b6_wsl_g1_campaign"},
+    "status": {"const": "green"},
+    "host": {"$ref": "#/$defs/wsl_host"},
+    "source_repositories": {
+      "type": "object", "additionalProperties": {"type": "object"},
+      "required": ["bot", "client", "game"]
+    },
+    "bindings": {"type": "object", "minProperties": 20},
+    "raw_evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "one_run", "one_run_evidence_sha256", "fault_probe", "fault_execution",
+        "fault_probe_evidence_sha256", "public_pre_probe", "public_post_probe",
+        "controller_ledger", "controller_plan", "controller_ledger_sha256"
+      ],
+      "properties": {
+        "one_run": {"$ref": "#/$defs/file"},
+        "one_run_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "fault_probe": {"$ref": "#/$defs/file"},
+        "fault_execution": {"$ref": "#/$defs/file"},
+        "fault_probe_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "public_pre_probe": {"$ref": "#/$defs/file"},
+        "public_post_probe": {"$ref": "#/$defs/file"},
+        "controller_ledger": {"$ref": "#/$defs/file"},
+        "controller_plan": {"$ref": "#/$defs/file"},
+        "controller_ledger_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "g1": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "accepted_transitions", "echo_attempts", "authoritative_echo_accept_rate",
+        "vertical_samples", "vertical_matches", "vertical_match_rate",
+        "water_samples", "land_samples", "water_projection_mismatches",
+        "land_projection_mismatches", "water_land_projection_skew",
+        "failed_rounds", "echo_timeouts", "declared_resyncs",
+        "declared_resync_limit", "accepted_frame_discontinuities",
+        "trajectory_sha256",
+        "map_epoch_recovery_exercised", "telemetry_gap_recovery_exercised",
+        "partial_client_timeout_fatal"
+      ],
+      "properties": {
+        "accepted_transitions": {"const": 16384},
+        "echo_attempts": {"type": "integer", "minimum": 16384},
+        "authoritative_echo_accept_rate": {"type": "number", "minimum": 0.97, "maximum": 1},
+        "vertical_samples": {"const": 16384},
+        "vertical_matches": {"type": "integer", "minimum": 0, "maximum": 16384},
+        "vertical_match_rate": {"type": "number", "minimum": 0.99, "maximum": 1},
+        "water_samples": {"type": "integer", "minimum": 1},
+        "land_samples": {"type": "integer", "minimum": 1},
+        "water_projection_mismatches": {"const": 0},
+        "land_projection_mismatches": {"const": 0},
+        "water_land_projection_skew": {"const": 0},
+        "failed_rounds": {"const": 0},
+        "echo_timeouts": {"const": 0},
+        "declared_resyncs": {"type": "integer", "minimum": 0},
+        "declared_resync_limit": {"type": "integer", "minimum": 0, "maximum": 64},
+        "accepted_frame_discontinuities": {
+          "type": "array", "maxItems": 64,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["accepted_round", "prior_frame", "current_frame", "delta"],
+            "properties": {
+              "accepted_round": {"type": "integer", "minimum": 1},
+              "prior_frame": {"type": "integer", "minimum": 0},
+              "current_frame": {"type": "integer", "minimum": 1},
+              "delta": {"type": "integer", "minimum": 2}
+            }
+          }
+        },
+        "trajectory_sha256": {"$ref": "#/$defs/sha256"},
+        "map_epoch_recovery_exercised": {"const": true},
+        "telemetry_gap_recovery_exercised": {"const": true},
+        "partial_client_timeout_fatal": {"const": true}
+      }
+    },
+    "no_update": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "mode", "checkpoint_sha256_before", "checkpoint_sha256_after",
+        "policy_state_sha256_before", "policy_state_sha256_after",
+        "optimizer_state_sha256_before", "optimizer_state_sha256_after",
+        "policy_updates", "optimizer_steps", "backward_calls"
+      ],
+      "properties": {
+        "mode": {"const": "collect-only-no-update-v1"},
+        "checkpoint_sha256_before": {"$ref": "#/$defs/sha256"},
+        "checkpoint_sha256_after": {"$ref": "#/$defs/sha256"},
+        "policy_state_sha256_before": {"$ref": "#/$defs/sha256"},
+        "policy_state_sha256_after": {"$ref": "#/$defs/sha256"},
+        "optimizer_state_sha256_before": {"$ref": "#/$defs/sha256"},
+        "optimizer_state_sha256_after": {"$ref": "#/$defs/sha256"},
+        "policy_updates": {"const": 0},
+        "optimizer_steps": {"const": 0},
+        "backward_calls": {"const": 0}
+      }
+    },
+    "performance": {"type": "object", "minProperties": 7},
+    "public_state": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "host", "authority", "pre_state_sha256", "post_state_sha256",
+        "run_nonce", "launch_id", "attestation_key_id",
+        "pre_evidence_sha256", "post_evidence_sha256",
+        "controller_ledger_sha256", "ordering_basis", "modified"
+      ],
+      "properties": {
+        "host": {"type": "object"},
+        "authority": {
+          "type": "object", "additionalProperties": false,
+          "required": ["bytes", "sha256", "authority_sha256"],
+          "properties": {
+            "bytes": {"type": "integer", "minimum": 1},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "authority_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "pre_state_sha256": {"$ref": "#/$defs/sha256"},
+        "post_state_sha256": {"$ref": "#/$defs/sha256"},
+        "run_nonce": {"$ref": "#/$defs/sha256"},
+        "launch_id": {"type": "string", "pattern": "^b6-[0-9a-f]{60}$"},
+        "attestation_key_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{7,63}$"},
+        "pre_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "post_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "controller_ledger_sha256": {"$ref": "#/$defs/sha256"},
+        "ordering_basis": {"const": "signed-hash-chain-plus-controller-monotonic-ns-v1"},
+        "modified": {"const": false}
+      }
+    },
+    "teardown": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "process_records", "terminated_process_records",
+        "orphan_processes_after_teardown", "owned_ports", "qport_identities"
+      ],
+      "properties": {
+        "process_records": {"type": "array", "minItems": 5, "maxItems": 5},
+        "terminated_process_records": {"type": "array", "minItems": 5, "maxItems": 5},
+        "orphan_processes_after_teardown": {"const": 0},
+        "owned_ports": {"type": "array", "minItems": 6, "maxItems": 6},
+        "qport_identities": {"type": "array", "minItems": 4, "maxItems": 4}
+      }
+    },
+    "gate_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "wsl_host": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hostname", "kernel_release", "architecture", "machine_identity_sha256"],
+      "properties": {
+        "hostname": {"const": "DESKTOP-RTX2080"},
+        "kernel_release": {"type": "string", "pattern": "microsoft-standard-WSL2"},
+        "architecture": {"const": "x86_64"},
+        "machine_identity_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

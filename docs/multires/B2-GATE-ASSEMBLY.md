@@ -267,7 +267,7 @@ salvaged, substituted, or admitted. A successor requires the transactional
 lava/reward fix, deterministic rejection-path coverage, and a fresh green
 non-admissible qualification before a new immutable declaration.
 
-## Authorized 71446 final attempt
+## Retired 71446 final attempt
 
 The transactional lava/reward fix and its deterministic rejection-path test
 are committed at `a05ddb7037774c1b246a6b13972b228570acb8ef`, tree
@@ -285,28 +285,56 @@ SHA-256 is
 It remains explicitly non-admissible and supplies no artifact, map, seed,
 Dyn evidence, or passing subset to the final lane.
 
-Exactly one immutable/no-retry final producer attempt is authorized for
-`b2g26_final_71446`. The current canonical alias and immutable named
+Exactly one immutable/no-retry final producer attempt was authorized for
+`b2g26_final_71446`. The historical current-path alias and immutable named
 `B2-GENERATED-COHORT-71446-DECLARATION.json` are byte-identical with SHA-256
 `58d52bd958249a70bf8115ab1c442fb6888a6d69b290a636303986f69acb658f`.
 They declare exactly 28 fresh rows, four per concrete style in declaration
 order, using seed blocks 71446000..71446003 through 71446600..71446603.
-No 71446 producer may run until the declaration-bearing commit is clean and
-every pre-source authority check below is green.
+No 71446 producer was permitted to run until the declaration-bearing commit
+was clean and every pre-source authority check below was green.
 
-The first source-generation invocation consumes the sole 71446
-authorization. Any source or later-stage failure permanently retires 71446;
+The first source-generation invocation consumed the sole 71446
+authorization. Its later-stage failure permanently retired 71446;
 there is no resume, retry, repair, repeated invocation, replacement member,
 passing subset, salvage, or reuse under this declaration. Qualification
 artifacts and every retired 71426..71445 byte remain forbidden inputs.
 
-The declaration-bearing 71446 producer commit must be a strict successor of
+That terminal condition occurred at the sole compiled-CM preflight. Source
+generation and its independent cold rebuild passed all 28 maps, publishing the
+exact 140-file source stage. Real q2tool compilation, exact 168-file compiled
+membership, and compiled static validation also passed all 28. Their canonical
+report SHA-256 values are respectively
+`0c76c40ab9ceda61d5b6476bd0edcbefbf756e4209c6b775472f949539d9d78a`,
+`cd7622c922a958ac8ecd54f78edb4b0de3e3fc3316346a2926b8ede083272d82`,
+`11ffd5a3ba6904706a243eabdf56d8a865d7b3cbc5d3873a189b0b05bbcb5b40`,
+and `a8044e99b1ac7f25bb2b7635ae202b3f0ae00726e779280c4b5e59baf9aaa2d9`.
+
+The compiled-CM invocation then supplied `3600` to
+`--oracle-batch-timeout-seconds`, whose accepted domain is finite `(0, 60]`.
+The validator rejected that operator argument with exit code 2 before any map
+oracle ran and before a compiled-CM report could be published. This was an
+argument-domain preflight failure, not a 3,600-second runtime timeout.
+Its terminal diagnostic was `oracle batch timeout must be finite and in (0, 60]`.
+`B2-GENERATED-COHORT-71446-FAILURE.json` is the canonical terminal authority,
+SHA-256
+`4b26c670ed54585787505cf7dfbb35bdc1830fdfbd42585a16d0484622ea306f`.
+
+Cohort 71446 is permanently retired. None of its source, compiled, report,
+log, WSL, or producer-snapshot bytes may be retried, resumed, reused, copied
+forward, salvaged, substituted, or admitted. No compiled-CM, materialization,
+claims, analysis, Dyn, final tests, assembled gate, deployment, or training
+action ran. A successor requires a fresh implementation leaf, fresh B1 seal,
+fresh disposable qualification, and a separately committed immutable
+declaration; there is currently no active final cohort.
+
+The declaration-bearing 71446 producer commit was required to be a strict successor of
 qualified commit `a05ddb7037774c1b246a6b13972b228570acb8ef`. Gate replay
 must prove that ancestry, the exact qualified commit/tree and report binding,
 byte-identical generator/routes/Atlas-analyzer authority fields, and a complete
 Git delta equal to the frozen 71446 declaration/gate/schema/direct-test
-authorization path set. Any producer, analyzer, validator, physics,
-toolchain, or unrelated committed change rejects the qualification.
+authorization path set. That relation is historical and cannot authorize a
+future cohort.
 
 The declaration-bearing 71445 producer commit was required to be a strict successor of
 qualified commit `3b17223ab32e20152aead1eb32a79e239d6f4d8a`. Gate replay
@@ -386,9 +414,10 @@ while the infrastructure producer and materializer remain bound to the
 separate CPython 3.11.4 executable and zstandard module digests above. The
 syntax report must never be required to identify the execution runtime.
 
-The assembler must reject declarations for retired cohorts 71426 through
-71445 before reading campaign evidence. Only the exact fresh 71446 declaration
-is eligible for the one final attempt authorized above.
+The assembler rejects declarations for retired cohorts 71426 through 71446
+before reading campaign evidence. The 71446 immutable declaration and its
+current-path alias are historical inputs only and cannot assemble or validate
+a green gate. There is no active eligible final declaration.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -423,7 +452,7 @@ and qualified implementation commit/tree
 the fixed toolchain only; its authorization was consumed by the terminal
 71445 source attempt and cannot authorize a successor.
 
-The active 71446 prerequisite is the independent green 28/28 qualification
+The retired 71446 prerequisite was the independent green 28/28 qualification
 `b2q26_a05ddb7_71626100`, report SHA-256
 `69e2b1979feae22c706839dc24f8923b60e34d5b623c8f03b0e5ebb51181a549`,
 bound to fresh B1 gate SHA-256
@@ -431,8 +460,8 @@ bound to fresh B1 gate SHA-256
 and qualified implementation commit/tree
 `a05ddb7037774c1b246a6b13972b228570acb8ef` /
 `01c27fc60da4ae6f2aedd6138c50dabfcd866525`. It is non-admissible proof
-only; the separate immutable 71446 declaration consumes its sole successor
-authorization.
+only; the separate immutable 71446 declaration consumed its sole successor
+authorization, and the terminal failure revoked all future use.
 
 The disposable campaign is orchestrated by
 `tools/run_b2_qualification.py`. Driver-plan schema v2 hash-binds every
@@ -494,7 +523,10 @@ tests, and assembly. Every item below comes from fresh final-cohort roots.
   its report plus four real `Q2LAT002` snapshots. Its selected map would have to
   be a member of an admitted population. The assembler binds it to the exact
   local Atlas manifest, raw Atlas, BSP, analyzer authority, crate commit, WSL
-  identity, snapshot bytes, negative fences, and p99 measurement. Build the
+  identity (including SHA-256 of the canonical 32-lowercase-hex
+  `/etc/machine-id` value with at most one trailing LF excluded and all other
+  whitespace rejected), snapshot bytes, negative
+  fences, and p99 measurement. Build the
   producer once from the clean committed root, retain that exact executable,
   and copy those same executable bytes to WSL. The gate independently decodes
   every header and zstd payload, validates the payload digest/cells/derived L3,
@@ -583,10 +615,23 @@ reuse of any retired cohort byte.
 
 All values are exact paths. `OUT` must not exist and must be outside the
 implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. The current alias names fresh cohort 71446 and can
-execute this template. The command shape below becomes executable only after a
-fresh final population completes every preceding stage and supplies the exact
-71446 evidence paths.
+clean-tree authority. This template is intentionally non-executable now:
+`tools/assemble_b2_gate.py` has `ACTIVE_FINAL_AUTHORITY = None`, the current
+alias still names retired 71446 bytes, and both the named declaration and alias
+fail before evidence is read. No evidence path substitution can activate it.
+
+A later successor activation requires one fresh implementation leaf, a fresh
+B1 seal, and a fresh green but non-admissible qualification. From that exact
+qualified parent, a separate clean commit must add a new immutable declaration
+without reusing any retired byte, update the current-path alias byte-for-byte,
+construct `ACTIVE_FINAL_AUTHORITY` with the new cohort ID, declaration SHA-256,
+immutable declaration path, and exact declaration-only qualification delta,
+and replace the gate schema's no-active `"not": {}` sentinel with a cohort pin
+plus tests for that same authority. Activation and
+the new declaration must be reviewed and committed together before the sole
+source invocation. No successor has been declared or inferred yet. Only after
+those steps and every subsequent producer stage passes may this command shape
+be populated with the successor's fresh evidence paths.
 
 ```sh
 python tools/assemble_b2_gate.py \

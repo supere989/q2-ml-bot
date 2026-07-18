@@ -53,6 +53,9 @@ FAILURE_71444 = (
 FAILURE_71445 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71445-FAILURE.json"
 )
+FAILURE_71446 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71446-FAILURE.json"
+)
 RETIRED_DECLARATIONS = (
     NAMED_71438,
     NAMED_71439,
@@ -62,6 +65,7 @@ RETIRED_DECLARATIONS = (
     NAMED_71443,
     NAMED_71444,
     NAMED_71445,
+    NAMED_71446,
 )
 
 
@@ -267,7 +271,7 @@ def test_alias_and_named_71441_are_retired(declaration_path: Path) -> None:
         )
 
 
-def test_current_alias_71446_is_fresh_and_matches_named_declaration() -> None:
+def test_current_alias_71446_is_historical_and_retired() -> None:
     current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
 
     assert current["cohort_id"] == "b2g26_final_71446"
@@ -275,12 +279,42 @@ def test_current_alias_71446_is_fresh_and_matches_named_declaration() -> None:
     assert current_sha256 == (
         "58d52bd958249a70bf8115ab1c442fb6888a6d69b290a636303986f69acb658f"
     )
-    assert (
+    with pytest.raises(
+        registry.RetiredCohortRegistryError,
+        match="71446.*permanently retired",
+    ):
         registry.require_unretired_declaration(
             CURRENT_ALIAS, current, current_sha256
         )
-        is None
+
+
+def test_71446_terminal_failure_authority_is_canonical_and_exact() -> None:
+    payload = FAILURE_71446.read_bytes()
+    authority = json.loads(payload)
+
+    assert payload == cohort.canonical_bytes(authority)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "4b26c670ed54585787505cf7dfbb35bdc1830fdfbd42585a16d0484622ea306f"
     )
+    assert authority["schema"] == registry.FAILURE_SCHEMA
+    assert authority["status"] == (
+        "permanently-failed-compiled-cm-operator-preflight"
+    )
+    assert authority["cohort_id"] == "b2g26_final_71446"
+    assert authority["failure"]["phase"] == (
+        "compiled-cm-operator-timeout-preflight"
+    )
+    cm = authority["evidence"]["compiled_cm_preflight"]
+    assert cm["requested_oracle_batch_timeout_seconds"] == 3600
+    assert cm["accepted_timeout_range"] == {
+        "minimum_exclusive_seconds": 0,
+        "maximum_inclusive_seconds": 60,
+    }
+    assert cm["map_oracle_invocation_count"] == 0
+    assert cm["output_report_exists"] is False
+    assert authority["admission"]["source_stage_published"] is True
+    assert authority["admission"]["compiled_stage_published"] is True
+    assert authority["admission"]["retry_under_same_declaration_allowed"] is False
 
 
 def test_71445_terminal_failure_authority_is_canonical_and_exact() -> None:

@@ -1016,6 +1016,54 @@ mod python {
             Ok((PyArray1::from_slice(py, &block.values), evidence))
         }
 
+        /// Teacher/debug-only. This result is never packed into public policy
+        /// observations and cannot alter the walking-only recovery solve.
+        #[pyo3(signature = (
+            l1_index,
+            map_epoch,
+            blocked_nodes=Vec::new(),
+            dynamic_penalties=Vec::new(),
+            enabled_mover_blockers=Vec::new()
+        ))]
+        fn hook_necessity<'py>(
+            &self,
+            py: Python<'py>,
+            l1_index: [i32; 3],
+            map_epoch: u64,
+            blocked_nodes: Vec<[i32; 3]>,
+            dynamic_penalties: Vec<([i32; 3], u32)>,
+            enabled_mover_blockers: Vec<u32>,
+        ) -> PyResult<Bound<'py, PyDict>> {
+            let overlay =
+                recovery_overlay(blocked_nodes, dynamic_penalties, enabled_mover_blockers);
+            let evidence = py
+                .detach(|| {
+                    self.inner.hook_necessity(
+                        map_epoch,
+                        crate::atlas::GridIndex::new(l1_index[0], l1_index[1], l1_index[2]),
+                        &overlay,
+                    )
+                })
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            let result = PyDict::new(py);
+            result.set_item("walking_budget_ticks", evidence.walking_budget_ticks)?;
+            result.set_item("evaluated_hook_edges", evidence.evaluated_hook_edges)?;
+            result.set_item(
+                "walking_reaches_safety_within_budget",
+                evidence.walking_reaches_safety_within_budget,
+            )?;
+            result.set_item(
+                "hook_path_reaches_safety",
+                evidence.hook_path_reaches_safety,
+            )?;
+            result.set_item(
+                "hook_lowers_recovery_cost",
+                evidence.hook_lowers_recovery_cost,
+            )?;
+            result.set_item("hook_was_necessary", evidence.hook_was_necessary)?;
+            Ok(result)
+        }
+
         fn guide_features<'py>(
             &self,
             py: Python<'py>,

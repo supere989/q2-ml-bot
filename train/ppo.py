@@ -14,6 +14,7 @@ import io
 import os
 import json
 import random
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 import argparse
@@ -2529,10 +2530,9 @@ def train(cfg: dict):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    for k, v in DEFAULT.items():
-        p.add_argument(f"--{k}", type=type(v), default=v)
-    p.add_argument("--resume", action="store_true",
-                   help="Load latest checkpoints/policy_*.pt and continue from its step count")
-    args = p.parse_args()
-    train(vars(args))
+    print(
+        "retired: use train.multires_primary with the attested network-client "
+        "lattice runtime",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)

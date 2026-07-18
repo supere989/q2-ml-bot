@@ -24,11 +24,43 @@ ML_CLIENT_FRAME_BARRIER_CAPABILITY = 0x00000001
 ML_CLIENT_TELEM_MAGIC = 0x54434D51
 ML_CLIENT_ID_SIZE = 40
 
+# Passive demonstration samples are a physically different datagram emitted
+# by game.so to the teacher receiver.  They must never be treated as merely a
+# malformed public packet: seeing this identity on a public harness socket is
+# a privilege-boundary failure and terminates collection.
+ML_TEACHER_MAGIC = 0x5154345A
+ML_TEACHER_VERSION = 4
+TEACHER_SAMPLE_SIZE = 1224
+
 CLIENT_TELEMETRY_HEADER_FMT = "<10I40s32s"
 CLIENT_TELEMETRY_HEADER_SIZE = struct.calcsize(CLIENT_TELEMETRY_HEADER_FMT)
 CLIENT_TELEMETRY_SIZE = (
     CLIENT_TELEMETRY_HEADER_SIZE + OBS_SIZE + CAUSAL_TELEMETRY_SIZE
 )
+
+
+class PublicTelemetryPrivilegeViolation(RuntimeError):
+    """Teacher-formatted bytes were delivered to the public policy conduit."""
+
+
+def _reject_teacher_datagram(data: bytes) -> None:
+    """Fail closed on the teacher packet identity before public parsing.
+
+    Magic is sufficient to make this fatal.  Version and size are included in
+    the error only as bounded diagnostics; a truncated or future teacher packet
+    must not evade the privilege fence by failing its own schema validation.
+    """
+    if len(data) < 4:
+        return
+    magic = struct.unpack_from("<I", data)[0]
+    if magic != ML_TEACHER_MAGIC:
+        return
+    version = struct.unpack_from("<I", data, 4)[0] if len(data) >= 8 else None
+    packet_size = struct.unpack_from("<I", data, 8)[0] if len(data) >= 12 else None
+    raise PublicTelemetryPrivilegeViolation(
+        "teacher datagram on public conduit "
+        f"(version={version!r}, declared_size={packet_size!r}, bytes={len(data)})"
+    )
 
 
 @dataclass(frozen=True)
@@ -47,6 +79,7 @@ class ClientTelemetry:
 
 
 def parse_client_telemetry(data: bytes) -> Optional[ClientTelemetry]:
+    _reject_teacher_datagram(data)
     if len(data) != CLIENT_TELEMETRY_SIZE:
         return None
     (magic, version, packet_size, sequence, client_slot, server_frame,

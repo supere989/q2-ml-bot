@@ -5,8 +5,9 @@ use std::time::Instant;
 use super::guide::{GUIDE_FEATURE_NAMES, GUIDE_FEATURE_WIDTH, GuideFeatureBlock};
 use super::objective::{AtlasObjectives, OBJECTIVE_MEDIA_TYPE, ObjectiveBelief, ObjectiveGuide};
 use super::recovery::{
-    HazardComponentField, RECOVERY_FEATURE_NAMES, RECOVERY_FEATURE_WIDTH, RecoveryFeatureBlock,
-    RecoveryQuery, recovery_features_at, resolve_recovery_node, validate_static_costs,
+    HazardComponentField, HookNecessityEvidence, RECOVERY_FEATURE_NAMES, RECOVERY_FEATURE_WIDTH,
+    RecoveryFeatureBlock, RecoveryOverlay, RecoveryQuery, evaluate_hook_necessity,
+    recovery_features_at, resolve_recovery_node, validate_static_costs,
     validate_static_hazard_clearances,
 };
 use super::{
@@ -303,6 +304,23 @@ impl AtlasRuntime {
             current,
             query,
         )
+    }
+
+    /// Teacher/debug-only hook-necessity query. It is deliberately separate
+    /// from Recovery16 and advisory policy features.
+    pub fn hook_necessity(
+        &self,
+        expected_map_epoch: u64,
+        l1_index: super::GridIndex,
+        overlay: &RecoveryOverlay,
+    ) -> AtlasResult<HookNecessityEvidence> {
+        self.check_epoch(expected_map_epoch)?;
+        let current = self.artifact.l1.node_ordinal(l1_index).ok_or_else(|| {
+            AtlasError::InvalidFormat(format!(
+                "hook-necessity pose has no exact L1 node {l1_index:?}"
+            ))
+        })?;
+        evaluate_hook_necessity(&self.artifact.l1, current, overlay)
     }
 
     pub fn guide(

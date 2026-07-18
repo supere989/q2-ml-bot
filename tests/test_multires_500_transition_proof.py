@@ -84,6 +84,7 @@ from tools.run_multires_500_transition_proof import (
 )
 from tools.verify_multires_integration import (
     DETERMINISTIC_TRANSITION_COUNT,
+    EvidenceError,
     _check_deterministic_transitions,
 )
 
@@ -197,7 +198,7 @@ def test_production_rejects_callback_injection(tmp_path):
         admit_production_config(config2)
 
 
-def test_verifier_evidence_is_consumable_by_verify_multires_integration():
+def test_synthetic_verifier_evidence_is_rejected_by_integration_gate():
     report = run_proof(_synthetic_config(), transport=_transport())
     evidence = report["verifier_evidence"]
     assert evidence["transition_count"] == DETERMINISTIC_TRANSITION_COUNT
@@ -207,9 +208,13 @@ def test_verifier_evidence_is_consumable_by_verify_multires_integration():
     assert evidence["runs"][1]["fresh_subprocess"] is True
     assert evidence["runs"][0]["collector"] == COLLECTOR_CLASS_NAME
     assert evidence["runs"][1]["spatial_provider"] == SPATIAL_PROVIDER_CLASS_NAME
-    _check_deterministic_transitions(evidence, context={})
+    with pytest.raises(EvidenceError, match="admissible production proof"):
+        _check_deterministic_transitions(evidence, context={})
 
     rebuilt = build_verifier_evidence(
+        mode="production",
+        admissible=True,
+        production_pass=True,
         transition_count=REQUIRED_TRANSITION_COUNT,
         run_a=type("R", (), {
             "transition_count": report["runs"][0]["transition_count"],
@@ -720,10 +725,10 @@ FAKE_TRAINER_SCRIPT = textwrap.dedent(
                 Path(pid_file).write_text(
                     str(reported_live_child.pid), encoding="utf-8"
                 )
-        objectives = json.loads(Path(args.objectives).read_text(encoding="utf-8"))
+        json.loads(Path(args.objectives).read_text(encoding="utf-8"))
         training = json.loads(Path(args.training_manifest).read_text(encoding="utf-8"))
         runtime_ev = json.loads(Path(args.runtime_evidence).read_text(encoding="utf-8"))
-        objective_identity = objectives.get("objective_identity_sha256") or file_sha256(args.objectives)
+        objective_identity = file_sha256(args.objectives)
         training_sha = training.get("sha256") or hashlib.sha256(canonical_bytes(training)).hexdigest()
         checkpoint_sha = file_sha256(args.checkpoint)
         atlas_sha = args.expected_atlas_sha256

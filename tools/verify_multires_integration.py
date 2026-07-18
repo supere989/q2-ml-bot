@@ -38,11 +38,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import struct
 import sys
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 from harness.multires_contract import (
     ACTION_DIM,
@@ -64,6 +66,10 @@ from harness.multires_lineage import (
     CHECKPOINT_FORMAT,
     LineageError,
 )
+from harness.causal_protocol import CAUSAL_TELEMETRY_SIZE
+from harness.client_protocol import CLIENT_TELEMETRY_HEADER_SIZE, CLIENT_TELEMETRY_SIZE
+from harness import client_protocol as public_wire
+from harness.protocol import ACT_SIZE, OBS_SIZE
 from harness.multires_reward import CausalRewardFrame, RewardAdmissionError
 from harness.multires_runtime import (
     B4_ACTION_MAGIC,
@@ -361,6 +367,110 @@ def _check_b4_wire_generation(
     atlas_sha256 = _require_digest(evidence, "atlas_sha256")
     _cross_check(context, "atlas_sha256", atlas_sha256, "B4 wire generation")
     violations = _require_int(evidence, "public_teacher_field_violations")
+    separation = _require(evidence, "public_privilege_separation")
+    if not isinstance(separation, Mapping):
+        raise EvidenceError("public_privilege_separation must be an object")
+    source_abi = _require(separation, "source_abi")
+    normal = _require(separation, "normal_run_audit")
+    negative = _require(separation, "negative_probe")
+    if not all(isinstance(value, Mapping) for value in (source_abi, normal, negative)):
+        raise EvidenceError("public privilege proof components must be objects")
+    public_abi = _require(source_abi, "public")
+    teacher_abi = _require(source_abi, "teacher")
+    if not isinstance(public_abi, Mapping) or not isinstance(teacher_abi, Mapping):
+        raise EvidenceError("public/teacher source ABIs must be objects")
+    if dict(public_abi) != {
+        "magic": public_wire.ML_CLIENT_TELEM_MAGIC,
+        "packet_bytes": public_wire.CLIENT_TELEMETRY_SIZE,
+        "pod": "ml_client_telemetry_t",
+        "packing_path": "ml_client_telemetry.c:ML_ClientTelemetryFrame",
+        "fields": ["public_header", "ml_obs_t", "ml_causal_telemetry_t"],
+        "teacher_action_tail_present": False,
+    } or dict(teacher_abi) != {
+        "magic": public_wire.ML_TEACHER_MAGIC,
+        "version": public_wire.ML_TEACHER_VERSION,
+        "packet_bytes": public_wire.TEACHER_SAMPLE_SIZE,
+        "pod": "ml_teacher_sample_t",
+        "packing_path": "ml_bridge.c:ML_TeacherSend",
+        "fields": [
+            "teacher_header", "ml_obs_t", "ml_causal_telemetry_t", "ml_action_t",
+        ],
+    }:
+        raise EvidenceError("public/teacher packing ABI is not physically distinct")
+    if (
+        _require(source_abi, "yamagi_teacher_identity_present") is not False
+        or _require(source_abi, "qualification_teacher_enabled") is not False
+        or _require(source_abi, "public_and_teacher_magic_distinct") is not True
+        or _require(source_abi, "public_and_teacher_size_distinct") is not True
+    ):
+        raise EvidenceError("public source contains or aliases teacher wire identity")
+
+    if _require(normal, "derivation") != (
+        "sealed-baseline-cold-1-public-datagram-accounting-v1"
+    ):
+        raise EvidenceError("public normal-run audit derivation differs")
+    scenario_proof = _require(normal, "scenario_proof")
+    if not isinstance(scenario_proof, Mapping):
+        raise EvidenceError("public normal-run scenario proof is absent")
+    _require_digest(scenario_proof, "raw_evidence_sha256")
+    clients = _require(normal, "clients")
+    totals = _require(normal, "totals")
+    counter_names = (
+        "datagrams_seen", "public_packets_decoded", "routed_packets_accepted",
+        "malformed_packets_rejected", "foreign_client_packets_rejected",
+        "stale_packets_rejected", "teacher_packets_detected",
+    )
+    if not isinstance(clients, list) or len(clients) != 4 or not isinstance(
+        totals, Mapping
+    ):
+        raise EvidenceError("public normal-run audit roster/totals differ")
+    computed = {name: 0 for name in counter_names}
+    for slot, record in enumerate(clients):
+        if not isinstance(record, Mapping) or record.get("client_id") != f"qual-{slot:02d}":
+            raise EvidenceError("public normal-run audit client roster differs")
+        counters = {name: _require_int(record, name) for name in counter_names}
+        if any(value < 0 for value in counters.values()):
+            raise EvidenceError("public normal-run audit contains a negative counter")
+        if counters["datagrams_seen"] != (
+            counters["public_packets_decoded"]
+            + counters["malformed_packets_rejected"]
+            + counters["teacher_packets_detected"]
+        ) or counters["public_packets_decoded"] != (
+            counters["routed_packets_accepted"]
+            + counters["foreign_client_packets_rejected"]
+            + counters["stale_packets_rejected"]
+        ):
+            raise EvidenceError("public normal-run datagram accounting is not exhaustive")
+        if counters["datagrams_seen"] <= 0 or counters["routed_packets_accepted"] <= 0:
+            raise EvidenceError("public normal-run datagram proof is vacuous")
+        for name, value in counters.items():
+            computed[name] += value
+    if dict(totals) != computed or computed["teacher_packets_detected"] != violations:
+        raise EvidenceError("public teacher violation count is not derived from raw audit")
+
+    packet = bytearray(public_wire.TEACHER_SAMPLE_SIZE)
+    struct.pack_into(
+        "<III", packet, 0, public_wire.ML_TEACHER_MAGIC,
+        public_wire.ML_TEACHER_VERSION, public_wire.TEACHER_SAMPLE_SIZE,
+    )
+    if (
+        _require(negative, "injection")
+        != "exact-teacher-magic-version-size-zero-body"
+        or _require_int(negative, "packet_magic") != public_wire.ML_TEACHER_MAGIC
+        or _require_int(negative, "packet_version") != public_wire.ML_TEACHER_VERSION
+        or _require_int(negative, "packet_bytes") != len(packet)
+        or _require_digest(negative, "packet_sha256")
+        != hashlib.sha256(packet).hexdigest()
+        or _require(negative, "public_parser_result")
+        != "fatal-public-privilege-violation"
+    ):
+        raise EvidenceError("teacher-on-public negative injection proof differs")
+    try:
+        public_wire.parse_client_telemetry(bytes(packet))
+    except public_wire.PublicTelemetryPrivilegeViolation:
+        pass
+    else:
+        raise EvidenceError("current public parser does not fatally reject teacher bytes")
     try:
         runtime_evidence = adapt_b4_observation_descriptor(
             descriptor,
@@ -436,7 +546,12 @@ def _check_lineage_attestation(
 def _check_legacy_selector_deactivation(
     evidence: Mapping[str, Any], context: dict[str, Any]
 ) -> None:
-    _require_digest(evidence, "retirement_manifest_sha256")
+    retirement_sha256 = _require_digest(evidence, "retirement_manifest_sha256")
+    _cross_check(
+        context, "retirement_manifest_sha256", retirement_sha256,
+        "legacy selector deactivation",
+    )
+    context["retirement_manifest_sha256"] = retirement_sha256
     selectors = _require(evidence, "selectors")
     if not isinstance(selectors, list) or not selectors:
         raise EvidenceError(
@@ -479,11 +594,49 @@ def _check_legacy_selector_deactivation(
             f"active rollout schemas {schemas!r} include a non-B4 schema"
             f" (legacy is {LEGACY_ROLLOUT_SCHEMA!r})"
         )
+    retired_entrypoints = (
+        "tools/live_round_train.py",
+        "tools/live_match_onnx.py",
+        "tools/ml_vs_ml.py",
+        "tools/behavior_clone_aim.py",
+        "train/ppo.py",
+    )
+    for relative in retired_entrypoints:
+        source = ROOT / relative
+        if source.is_symlink() or not source.is_file():
+            raise EvidenceError(f"retired entrypoint source is absent: {relative}")
+        text = source.read_text(encoding="utf-8")
+        if "retired:" not in text or not (
+            "return 2" in text or "raise SystemExit(2)" in text
+        ):
+            raise EvidenceError(
+                f"retired entrypoint is still operational: {relative}"
+            )
+    client_source = ROOT / "harness/client_env.py"
+    if client_source.is_symlink() or not client_source.is_file():
+        raise EvidenceError("client environment source is absent")
+    client_text = client_source.read_text(encoding="utf-8")
+    if (
+        "VoxelSpatialReward" in client_text
+        or "vector policy input requires an attested multires provider" not in client_text
+        or "spatial_seed belongs to the retired legacy reward path" not in client_text
+    ):
+        raise EvidenceError(
+            "client environment retains a legacy spatial fallback or lacks fail-closed admission"
+        )
 
 
 def _check_deterministic_transitions(
     evidence: Mapping[str, Any], context: dict[str, Any]
 ) -> None:
+    if (
+        _require(evidence, "mode") != "production"
+        or _require(evidence, "admissible") is not True
+        or _require(evidence, "production_pass") is not True
+    ):
+        raise EvidenceError(
+            "deterministic transitions do not come from an admissible production proof"
+        )
     count = _require_int(evidence, "transition_count")
     if count != DETERMINISTIC_TRANSITION_COUNT:
         raise EvidenceError(
@@ -580,54 +733,316 @@ def _check_deterministic_transitions(
 def _check_wsl_b6_campaign(
     evidence: Mapping[str, Any], context: dict[str, Any]
 ) -> None:
-    host_platform = _require(evidence, "host_platform")
-    if not isinstance(host_platform, str) or "wsl" not in host_platform.lower():
-        raise EvidenceError(
-            f"host_platform={host_platform!r}: B6 evidence must come from the"
-            " isolated WSL staging host"
-        )
-    for gate in ("g0_identity_pass", "g1_transport_pass"):
-        if _require(evidence, gate) is not True:
-            raise EvidenceError(f"B6 precondition {gate} did not pass")
-    atlas_sha256 = _require_digest(evidence, "atlas_sha256")
+    for legacy in (
+        "host_platform", "g0_identity_pass", "g1_transport_pass",
+        "public_services_modified", "accepted_transitions",
+    ):
+        if legacy in evidence:
+            raise EvidenceError(f"legacy summary field {legacy!r} is forbidden in B6")
+    if (
+        _require(evidence, "schema") != "q2-multires-b6-wsl-g1-v1"
+        or _require(evidence, "tool") != "assemble_b6_wsl_g1_campaign"
+        or _require(evidence, "status") != "green"
+    ):
+        raise EvidenceError("B6 campaign schema/tool/status differs")
+    seal = _require_digest(evidence, "gate_sha256")
+    body = dict(evidence)
+    body.pop("gate_sha256", None)
+    expected_seal = hashlib.sha256(_canonical_bytes({
+        "domain": "q2-multires-b6-wsl-g1-v1", "gate": body,
+    })).hexdigest()
+    if seal != expected_seal:
+        raise EvidenceError("B6 campaign seal differs")
+
+    host = _require(evidence, "host")
+    if (
+        not isinstance(host, Mapping)
+        or host.get("hostname") != "DESKTOP-RTX2080"
+        or "microsoft-standard-WSL2" not in str(host.get("kernel_release"))
+        or host.get("architecture") != "x86_64"
+    ):
+        raise EvidenceError("B6 campaign is not from DESKTOP-RTX2080 WSL2")
+    _require_digest(host, "machine_identity_sha256")
+
+    bindings = _require(evidence, "bindings")
+    if not isinstance(bindings, Mapping):
+        raise EvidenceError("B6 bindings must be an object")
+    atlas_sha256 = _require_digest(bindings, "atlas_sha256")
     _cross_check(context, "atlas_sha256", atlas_sha256, "B6 campaign")
-    accepted = _require_int(evidence, "accepted_transitions")
-    if accepted < MIN_ACCEPTED_TRANSITIONS_B6:
+    runtime_sha256 = _require_digest(
+        bindings, "runtime_manifest_identity_sha256"
+    )
+    _cross_check(context, "runtime_manifest_sha256", runtime_sha256, "B6 campaign")
+    retirement = _require(bindings, "retirement_manifest")
+    if not isinstance(retirement, Mapping):
+        raise EvidenceError("B6 retirement manifest binding is absent")
+    retirement_sha256 = _require_digest(retirement, "sha256")
+    _cross_check(
+        context, "retirement_manifest_sha256", retirement_sha256, "B6 campaign"
+    )
+    for name in (
+        "runtime_manifest", "checkpoint", "training_manifest", "objectives",
+        "bundle_manifest", "atlas", "atlas_manifest", "b2_gate", "b3_gate",
+        "b4_evidence", "b5_gate",
+        "lineage_evidence", "retirement_evidence",
+    ):
+        record = _require(bindings, name)
+        if not isinstance(record, Mapping):
+            raise EvidenceError(f"B6 binding {name!r} is absent")
+        _require_digest(record, "sha256")
+        if _require_int(record, "bytes") <= 0:
+            raise EvidenceError(f"B6 binding {name!r} is empty")
+    for name in (
+        "b3_gate_sha256", "b4_evidence_sha256", "b5_gate_sha256",
+        "training_config_sha256",
+        "objective_identity_sha256", "network_barrier_execution_evidence_sha256",
+    ):
+        _require_digest(bindings, name)
+    if _require(bindings, "hook_necessity_runtime") != {
+        "hook_walk_budget_ticks": 15,
+        "game_tick_hz": 10,
+        "walk_speed_q8_per_second": 76800,
+    }:
+        raise EvidenceError("B6 hook-necessity budget/cadence binding differs")
+    rust_extension = _require(bindings, "rust_extension")
+    if not isinstance(rust_extension, Mapping) or _require_int(
+        rust_extension, "bytes"
+    ) <= 0:
+        raise EvidenceError("B6 Rust extension binding is absent")
+    for name in (
+        "sha256", "source_closure_sha256", "qualification_commands_sha256"
+    ):
+        _require_digest(rust_extension, name)
+
+    raw = _require(evidence, "raw_evidence")
+    if not isinstance(raw, Mapping):
+        raise EvidenceError("B6 raw evidence bindings are absent")
+    for name in (
+        "one_run", "fault_probe", "fault_execution", "public_pre_probe",
+        "public_post_probe", "controller_ledger", "controller_plan",
+    ):
+        record = _require(raw, name)
+        if not isinstance(record, Mapping) or _require_int(record, "bytes") <= 0:
+            raise EvidenceError(f"B6 raw record {name!r} is invalid")
+        _require_digest(record, "sha256")
+    _require_digest(raw, "one_run_evidence_sha256")
+    _require_digest(raw, "fault_probe_evidence_sha256")
+    controller_ledger_sha256 = _require_digest(
+        raw, "controller_ledger_sha256"
+    )
+
+    g1 = _require(evidence, "g1")
+    if not isinstance(g1, Mapping):
+        raise EvidenceError("B6 G1 derivation is absent")
+    accepted = _require_int(g1, "accepted_transitions")
+    if accepted != MIN_ACCEPTED_TRANSITIONS_B6:
         raise EvidenceError(
-            f"accepted_transitions={accepted} is below the"
-            f" {MIN_ACCEPTED_TRANSITIONS_B6} G1 minimum"
+            f"accepted_transitions={accepted} is not the distinct"
+            f" {MIN_ACCEPTED_TRANSITIONS_B6}-transition B6 soak"
         )
-    if _require_int(evidence, "failed_rounds") != 0:
+    attempts = _require_int(g1, "echo_attempts")
+    if attempts < accepted:
+        raise EvidenceError("B6 echo attempts are below accepted transitions")
+    echo_rate = _require_number(g1, "authoritative_echo_accept_rate")
+    if abs(echo_rate - accepted / attempts) > 1e-12 or echo_rate < 0.97:
+        raise EvidenceError("B6 authoritative echo acceptance derivation differs")
+    vertical_samples = _require_int(g1, "vertical_samples")
+    vertical_matches = _require_int(g1, "vertical_matches")
+    vertical_rate = _require_number(g1, "vertical_match_rate")
+    if (
+        vertical_samples != accepted
+        or not 0 <= vertical_matches <= vertical_samples
+        or abs(vertical_rate - vertical_matches / vertical_samples) > 1e-12
+        or vertical_rate < 0.99
+    ):
+        raise EvidenceError("B6 vertical echo match derivation differs")
+    water = _require_int(g1, "water_samples")
+    land = _require_int(g1, "land_samples")
+    if (
+        water <= 0 or land <= 0 or water + land != accepted
+        or _require_int(g1, "water_projection_mismatches") != 0
+        or _require_int(g1, "land_projection_mismatches") != 0
+        or _require_int(g1, "water_land_projection_skew") != 0
+    ):
+        raise EvidenceError("B6 water/land projection evidence differs")
+    if _require_int(g1, "failed_rounds") != 0:
         raise EvidenceError("B6 campaign recorded failed rounds")
-    if _require_int(evidence, "echo_timeouts") != 0:
+    if _require_int(g1, "echo_timeouts") != 0:
         raise EvidenceError("B6 campaign recorded echo timeouts")
-    p99 = _require_number(evidence, "feature_assembly_p99_ms")
-    if p99 <= 0.0:
-        raise EvidenceError(
-            "feature_assembly_p99_ms is not a positive measurement; a zero"
-            " latency is placeholder evidence"
+    declared_resyncs = _require_int(g1, "declared_resyncs")
+    declared_limit = _require_int(g1, "declared_resync_limit")
+    if declared_resyncs < 0 or declared_limit > 64 or declared_resyncs > declared_limit:
+        raise EvidenceError("B6 declared resyncs exceed the bound")
+    discontinuities = _require(g1, "accepted_frame_discontinuities")
+    if (
+        not isinstance(discontinuities, list)
+        or len(discontinuities) > declared_resyncs
+        or any(
+            not isinstance(item, Mapping)
+            or set(item) != {
+                "accepted_round", "prior_frame", "current_frame", "delta"
+            }
+            or type(item["accepted_round"]) is not int
+            or item["accepted_round"] < 1
+            or type(item["prior_frame"]) is not int
+            or type(item["current_frame"]) is not int
+            or type(item["delta"]) is not int
+            or item["delta"] < 2
+            or item["current_frame"] - item["prior_frame"] != item["delta"]
+            for item in discontinuities
         )
-    if p99 >= FEATURE_ASSEMBLY_P99_BUDGET_MS:
-        raise EvidenceError(
-            f"feature_assembly_p99_ms={p99} breaches the"
-            f" {FEATURE_ASSEMBLY_P99_BUDGET_MS} ms budget"
-        )
-    resident = _require_int(evidence, "resident_atlas_bytes")
+    ):
+        raise EvidenceError("B6 accepted-frame discontinuities differ")
+    for name in (
+        "map_epoch_recovery_exercised", "telemetry_gap_recovery_exercised",
+        "partial_client_timeout_fatal",
+    ):
+        if _require(g1, name) is not True:
+            raise EvidenceError(f"B6 G1 predicate {name!r} is not proven")
+    _require_digest(g1, "trajectory_sha256")
+
+    no_update = _require(evidence, "no_update")
+    if not isinstance(no_update, Mapping) or no_update.get("mode") != "collect-only-no-update-v1":
+        raise EvidenceError("B6 no-update mode differs")
+    for prefix in ("checkpoint", "policy_state", "optimizer_state"):
+        before = _require_digest(no_update, f"{prefix}_sha256_before")
+        after = _require_digest(no_update, f"{prefix}_sha256_after")
+        if before != after:
+            raise EvidenceError(f"B6 {prefix} changed during the soak")
+    if no_update["checkpoint_sha256_before"] != bindings["checkpoint"]["sha256"]:
+        raise EvidenceError("B6 no-update checkpoint differs from its binding")
+    for name in ("policy_updates", "optimizer_steps", "backward_calls"):
+        if _require_int(no_update, name) != 0:
+            raise EvidenceError(f"B6 no-update counter {name!r} is nonzero")
+
+    performance = _require(evidence, "performance")
+    if not isinstance(performance, Mapping):
+        raise EvidenceError("B6 performance evidence is absent")
+    p99_ns = _require_int(performance, "four_client_feature_assembly_p99_ns")
+    if not 0 < p99_ns < int(FEATURE_ASSEMBLY_P99_BUDGET_MS * 1_000_000):
+        raise EvidenceError("B6 feature assembly p99 is zero or out of budget")
+    if _require_digest(performance, "machine_identity_sha256") != host[
+        "machine_identity_sha256"
+    ]:
+        raise EvidenceError("B6 performance and soak machine identities differ")
+    resident = _require_int(performance, "atlas_resident_bytes")
     if not 0 < resident <= RESIDENT_ATLAS_BUDGET_BYTES:
         raise EvidenceError(
             f"resident_atlas_bytes={resident} is outside (0,"
             f" {RESIDENT_ATLAS_BUDGET_BYTES}]"
         )
-    dyn_bytes = _require_int(evidence, "dyn_payload_bytes_combined")
-    if not 0 < dyn_bytes <= DYN_PAYLOAD_HARD_LIMIT_BYTES:
+    dyn_bytes = _require_int(performance, "four_dyn_resident_bytes")
+    if not 0 < dyn_bytes < DYN_PAYLOAD_HARD_LIMIT_BYTES:
         raise EvidenceError(
             f"dyn_payload_bytes_combined={dyn_bytes} is outside (0,"
-            f" {DYN_PAYLOAD_HARD_LIMIT_BYTES}]"
+            f" {DYN_PAYLOAD_HARD_LIMIT_BYTES})"
         )
-    if _require(evidence, "public_services_modified") is not False:
+    build_rss = _require_int(performance, "atlas_build_peak_rss_bytes")
+    if not 0 < build_rss <= 512 * 1024 * 1024:
+        raise EvidenceError("B6 Atlas build peak RSS is zero or out of budget")
+    payload = _require(performance, "lan_payload")
+    if not isinstance(payload, Mapping) or dict(payload) != {
+        "basis": "wire-abi-struct-calcsize-v1",
+        "accepted_packet_samples": MIN_ACCEPTED_TRANSITIONS_B6,
+        "client_telemetry_bytes": CLIENT_TELEMETRY_SIZE,
+        "action_packet_bytes": ACT_SIZE,
+        "telemetry_components": {
+            "header_bytes": CLIENT_TELEMETRY_HEADER_SIZE,
+            "engine_observation_bytes": OBS_SIZE,
+            "causal_telemetry_bytes": CAUSAL_TELEMETRY_SIZE,
+        },
+        "atlas_wire_fields": 0,
+        "atlas_wire_bytes_per_frame": 0,
+        "dyn_wire_fields": 0,
+        "dyn_wire_bytes_per_frame": 0,
+    }:
+        raise EvidenceError("B6 wire-ABI payload accounting differs")
+
+    public = _require(evidence, "public_state")
+    if not isinstance(public, Mapping) or _require(public, "modified") is not False:
         raise EvidenceError("a public/teacher service was modified during B6")
-    if _require_int(evidence, "orphan_processes_after_teardown") != 0:
+    if _require_digest(public, "pre_state_sha256") != _require_digest(
+        public, "post_state_sha256"
+    ):
+        raise EvidenceError("B6 public pre/post state differs")
+    run_nonce = _require_digest(public, "run_nonce")
+    launch_id = _require(public, "launch_id")
+    if (
+        not isinstance(launch_id, str)
+        or not launch_id.startswith("b6-")
+        or len(launch_id) != 63
+        or any(character not in "0123456789abcdef" for character in launch_id[3:])
+        or _require(public, "ordering_basis")
+        != "signed-hash-chain-plus-controller-monotonic-ns-v1"
+        or _require_digest(public, "controller_ledger_sha256")
+        != controller_ledger_sha256
+    ):
+        raise EvidenceError("B6 signed controller ordering binding differs")
+    _require_digest(public, "pre_evidence_sha256")
+    _require_digest(public, "post_evidence_sha256")
+    key_id = _require(public, "attestation_key_id")
+    if not isinstance(key_id, str) or len(key_id) < 8:
+        raise EvidenceError("B6 public attestation key ID differs")
+    public_host = _require(public, "host")
+    if not isinstance(public_host, Mapping):
+        raise EvidenceError("B6 public probe host binding is absent")
+    _require_digest(public_host, "machine_identity_sha256")
+    authority_path = (
+        Path(__file__).resolve().parents[1]
+        / "docs/multires/B6-PUBLIC-HOST-AUTHORITY.json"
+    )
+    try:
+        authority_bytes = authority_path.read_bytes()
+        authority = json.loads(authority_bytes)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise EvidenceError("B6 public host authority is unavailable") from error
+    if not isinstance(authority, dict):
+        raise EvidenceError("B6 public host authority is malformed")
+    authority_seal = authority.pop("authority_sha256", None)
+    authority_record = _require(public, "authority")
+    if (
+        not isinstance(authority_record, Mapping)
+        or authority_record.get("bytes") != len(authority_bytes)
+        or authority_record.get("sha256")
+        != hashlib.sha256(authority_bytes).hexdigest()
+        or authority_record.get("authority_sha256") != authority_seal
+        or not isinstance(authority_seal, str)
+        or authority_seal != hashlib.sha256(_canonical_bytes(authority)).hexdigest()
+        or public_host.get("hostname") != authority.get("hostname")
+        or public_host.get("architecture") != authority.get("architecture")
+        or public_host.get("machine_identity_sha256")
+        != authority.get("machine_identity_sha256")
+        or key_id != authority.get("probe_attestation", {}).get("key_id")
+    ):
+        raise EvidenceError("B6 public host authority binding differs")
+
+    teardown = _require(evidence, "teardown")
+    if not isinstance(teardown, Mapping):
+        raise EvidenceError("B6 teardown evidence is absent")
+    if _require_int(teardown, "orphan_processes_after_teardown") != 0:
         raise EvidenceError("staging teardown left orphan client/server processes")
+    processes = _require(teardown, "process_records")
+    if not isinstance(processes, list) or len(processes) != 5:
+        raise EvidenceError("B6 teardown lacks exact five-process ownership")
+    if _require(teardown, "terminated_process_records") != processes:
+        raise EvidenceError("B6 terminated process records differ")
+    for process in processes:
+        if not isinstance(process, Mapping) or _require_int(process, "pid") < 2 \
+                or _require_int(process, "start_ticks") < 1:
+            raise EvidenceError("B6 process PID/start-tick record differs")
+    ports = _require(teardown, "owned_ports")
+    if not isinstance(ports, list) or len(ports) != 6:
+        raise EvidenceError("B6 teardown lacks six owned socket records")
+    if any(
+        not isinstance(port, Mapping)
+        or port.get("available_after_teardown") is not True
+        or port.get("transport") != "udp"
+        for port in ports
+    ):
+        raise EvidenceError("B6 owned sockets were not proven released")
+    qports = _require(teardown, "qport_identities")
+    if not isinstance(qports, list) or len(qports) != 4:
+        raise EvidenceError("B6 protocol qport identity inventory differs")
 
 
 _GATE_CHECKS: dict[str, Callable[[Mapping[str, Any], dict[str, Any]], None]] = {

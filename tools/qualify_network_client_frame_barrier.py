@@ -160,6 +160,19 @@ def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _machine_identity_sha256(path: Path = Path("/etc/machine-id")) -> str:
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise QualificationError("execution machine identity is unavailable") from error
+    identity = raw[:-1] if raw.endswith(b"\n") else raw
+    if len(raw) not in (32, 33) or (len(raw) == 33 and raw[-1:] != b"\n"):
+        raise QualificationError("execution machine identity is malformed")
+    if re.fullmatch(rb"[0-9a-f]{32}", identity) is None:
+        raise QualificationError("execution machine identity is malformed")
+    return _sha256_bytes(identity)
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -303,6 +316,10 @@ def scenario_plan(seed: int) -> tuple[ScenarioSpec, ...]:
         ScenarioSpec("conflicting-action", seed, 1, "fatal", "conflict"),
         ScenarioSpec("brief-drop-recovery", seed, 1, "completed", "brief-drop"),
         ScenarioSpec(
+            "whole-batch-telemetry-gap-recovery", seed, 1, "completed",
+            "whole-telemetry-gap",
+        ),
+        ScenarioSpec(
             "load-delay-before-bootstrap", seed, 1, "completed", "load-delay"
         ),
         ScenarioSpec(
@@ -311,6 +328,10 @@ def scenario_plan(seed: int) -> tuple[ScenarioSpec, ...]:
         ScenarioSpec("death-respawn-lifecycle", seed, 1, "completed", "death"),
         ScenarioSpec("same-life-teleport-hold", seed, 1, "completed", "same-life-hold"),
         ScenarioSpec("sustained-drop-timeout", seed, 1, "fatal", "sustained-drop"),
+        ScenarioSpec(
+            "partial-client-telemetry-timeout", seed, 1, "fatal",
+            "partial-telemetry-timeout",
+        ),
         ScenarioSpec("one-client-sigkill", seed, 1, "fatal", "sigkill"),
         ScenarioSpec(
             "disconnect-during-drain", seed, 1, "fatal", "drain-sigkill"
@@ -1074,6 +1095,253 @@ class _PortAllocator:
             cls._leased.difference_update(values)
 
 
+class _TelemetryFaultRelay:
+    """Qualification-only, byte-preserving UDP fault boundary.
+
+    The embedded client sends public telemetry to this loopback endpoint. The
+    relay forwards ordinary traffic unchanged, but can hold exactly one
+    server-to-harness datagram and release those identical bytes after the
+    collector deadline. Actions take the reverse path to the already learned
+    client endpoint. No receive method or parsed telemetry object is replaced.
+    """
+
+    QUEUE_LIMIT = 1
+
+    def __init__(
+        self, *, relay_port: int, downstream_port: int, client_id: str,
+        hold_seconds: float,
+    ) -> None:
+        from harness.client_protocol import parse_client_telemetry
+
+        if not 0.0 < hold_seconds < 60.0:
+            raise QualificationError("relay hold duration is invalid")
+        self.client_id = client_id
+        self.relay_endpoint = ("127.0.0.1", int(relay_port))
+        self.downstream_endpoint = ("127.0.0.1", int(downstream_port))
+        self.hold_ns = int(hold_seconds * 1_000_000_000)
+        self._parse = parse_client_telemetry
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket.bind(self.relay_endpoint)
+        self._socket.settimeout(0.01)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._armed = False
+        self._fired = False
+        self._held: tuple[bytes, dict[str, Any], int] | None = None
+        self._record: dict[str, Any] | None = None
+        self._upstream_endpoint: tuple[str, int] | None = None
+        self._error: str | None = None
+        self._forwarded_to_harness = 0
+        self._forwarded_to_client = 0
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"telemetry-fault-relay-{client_id}",
+            daemon=False,
+        )
+        self._thread.start()
+
+    @staticmethod
+    def _endpoint(value: tuple[str, int]) -> str:
+        return f"{value[0]}:{value[1]}"
+
+    def arm(self) -> None:
+        with self._lock:
+            self._raise_locked()
+            if self._armed or self._fired or self._held is not None:
+                raise QualificationError(
+                    f"relay for {self.client_id} cannot be armed twice"
+                )
+            if self._upstream_endpoint is None:
+                raise QualificationError(
+                    f"relay for {self.client_id} has no learned client endpoint"
+                )
+            self._armed = True
+
+    def _raise_locked(self) -> None:
+        if self._error is not None:
+            raise QualificationError(
+                f"relay for {self.client_id} failed: {self._error}"
+            )
+
+    def _fail(self, detail: str) -> None:
+        with self._lock:
+            if self._error is None:
+                self._error = detail[:512]
+
+    def _release_due(self, now_ns: int) -> None:
+        with self._lock:
+            held = self._held
+            if held is None or now_ns < held[2]:
+                return
+            data, base, _ = held
+            self._held = None
+        sent = self._socket.sendto(data, self.downstream_endpoint)
+        released_ns = time.monotonic_ns()
+        with self._lock:
+            if sent != len(data):
+                self._error = "held telemetry datagram was not released in full"
+                return
+            forwarded_during_hold = (
+                self._forwarded_to_harness
+                - base["forwarded_to_harness_before_hold"]
+            )
+            self._forwarded_to_harness += 1
+            self._record = {
+                **base,
+                "released_monotonic_ns": released_ns,
+                "hold_duration_ns": released_ns - base["held_monotonic_ns"],
+                "released_datagram_sha256": _sha256_bytes(data),
+                "released_packets": 1,
+                "forwarded_to_harness_during_hold": forwarded_during_hold,
+            }
+
+    def _run(self) -> None:
+        try:
+            while not self._stop.is_set():
+                self._release_due(time.monotonic_ns())
+                try:
+                    data, source = self._socket.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                if source == self.downstream_endpoint:
+                    with self._lock:
+                        upstream = self._upstream_endpoint
+                    if upstream is None:
+                        self._fail("action arrived before the client endpoint")
+                        continue
+                    if self._socket.sendto(data, upstream) != len(data):
+                        self._fail("action datagram was not forwarded in full")
+                    else:
+                        with self._lock:
+                            self._forwarded_to_client += 1
+                    continue
+
+                telemetry = self._parse(data)
+                if telemetry is None or telemetry.client_id != self.client_id:
+                    self._fail("unknown or malformed upstream telemetry datagram")
+                    continue
+                with self._lock:
+                    if self._upstream_endpoint is None:
+                        self._upstream_endpoint = source
+                    elif source != self._upstream_endpoint:
+                        self._error = "upstream client endpoint changed"
+                        continue
+                    armed = self._armed
+                    if self._held is not None:
+                        _, base, _ = self._held
+                        prior_digest = bytes.fromhex(
+                            base["additional_suppressed_rolling_sha256"]
+                        )
+                        base["additional_suppressed_packets"] += 1
+                        base["additional_suppressed_bytes"] += len(data)
+                        base["additional_suppressed_rolling_sha256"] = (
+                            _sha256_bytes(prior_digest + data)
+                        )
+                        if base["additional_first_sequence"] is None:
+                            base["additional_first_sequence"] = int(
+                                telemetry.sequence
+                            )
+                            base["additional_first_server_frame"] = int(
+                                telemetry.server_frame
+                            )
+                        base["additional_last_sequence"] = int(
+                            telemetry.sequence
+                        )
+                        base["additional_last_server_frame"] = int(
+                            telemetry.server_frame
+                        )
+                        continue
+                    if armed:
+                        self._armed = False
+                        if self._held is not None or self._fired:
+                            self._error = "bounded relay queue overflow"
+                            continue
+                        held_ns = time.monotonic_ns()
+                        release_ns = held_ns + self.hold_ns
+                        base = {
+                            "event": "udp_telemetry_held_and_released",
+                            "client_id": self.client_id,
+                            "client_slot": int(telemetry.client_slot),
+                            "server_frame": int(telemetry.server_frame),
+                            "applied_action_tick": int(
+                                telemetry.applied_action_tick
+                            ),
+                            "sequence": int(telemetry.sequence),
+                            "datagram_bytes": len(data),
+                            "held_datagram_sha256": _sha256_bytes(data),
+                            "relay_endpoint": self._endpoint(
+                                self.relay_endpoint
+                            ),
+                            "upstream_endpoint": self._endpoint(source),
+                            "downstream_endpoint": self._endpoint(
+                                self.downstream_endpoint
+                            ),
+                            "held_monotonic_ns": held_ns,
+                            "scheduled_release_monotonic_ns": release_ns,
+                            "queue_limit": self.QUEUE_LIMIT,
+                            "queue_high_water": 1,
+                            "queue_overflows": 0,
+                            "held_packets": 1,
+                            "additional_suppressed_packets": 0,
+                            "additional_suppressed_bytes": 0,
+                            "additional_suppressed_rolling_sha256": (
+                                _sha256_bytes(b"")
+                            ),
+                            "additional_first_sequence": None,
+                            "additional_last_sequence": None,
+                            "additional_first_server_frame": None,
+                            "additional_last_server_frame": None,
+                            "forwarded_to_harness_before_hold": (
+                                self._forwarded_to_harness
+                            ),
+                        }
+                        self._held = (bytes(data), base, release_ns)
+                        self._fired = True
+                        continue
+                if self._socket.sendto(data, self.downstream_endpoint) != len(data):
+                    self._fail("telemetry datagram was not forwarded in full")
+                else:
+                    with self._lock:
+                        self._forwarded_to_harness += 1
+        except Exception as error:  # pragma: no cover - surfaced by audit().
+            self._fail(f"{type(error).__name__}: {error}")
+
+    def wait_released(self, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                self._raise_locked()
+                if self._record is not None:
+                    return
+            time.sleep(0.005)
+        raise QualificationError(
+            f"relay for {self.client_id} did not release its held datagram"
+        )
+
+    def audit(self) -> dict[str, Any]:
+        with self._lock:
+            self._raise_locked()
+            if self._record is None or self._held is not None:
+                raise QualificationError(
+                    f"relay for {self.client_id} lacks a completed hold/release"
+                )
+            return {
+                **self._record,
+                "forwarded_to_harness": self._forwarded_to_harness,
+                "forwarded_to_client": self._forwarded_to_client,
+                "relay_thread_alive": self._thread.is_alive(),
+            }
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+        self._socket.close()
+        if self._thread.is_alive():
+            raise QualificationError(
+                f"relay for {self.client_id} did not terminate"
+            )
+
+
 class FullNetworkExecutor:
     """Real loopback process executor; no child-result injection surface."""
 
@@ -1376,7 +1644,7 @@ class FullNetworkExecutor:
         spec: ScenarioSpec,
         action_table: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        ports = _PortAllocator.reserve(CLIENT_COUNT * 2 + 4)
+        ports = _PortAllocator.reserve(CLIENT_COUNT * 3 + 4)
         try:
             return self._run_with_ports(spec, action_table, ports)
         finally:
@@ -1392,20 +1660,25 @@ class FullNetworkExecutor:
         from harness.client_env import Q2NetworkClientEnv
 
         config = self.configuration
-        if len(ports) != CLIENT_COUNT * 2 + 4:
+        if len(ports) != CLIENT_COUNT * 3 + 4:
             raise QualificationError("scenario loopback port lease is incomplete")
         server_port, telemetry_port = ports[:2]
         harness_ports = ports[2:2 + CLIENT_COUNT + 1]
         qports = ports[3 + CLIENT_COUNT:4 + CLIENT_COUNT * 2]
+        relay_ports = ports[4 + CLIENT_COUNT * 2:4 + CLIENT_COUNT * 3]
         token = secrets.token_urlsafe(32)
         if _TOKEN.fullmatch(token) is None:
             raise QualificationError("generated conduit token is malformed")
         server = None
         batch = None
         extra_env = None
+        envs: list[Any] = []
+        relays: list[_TelemetryFaultRelay] = []
         trajectory = []
         death_lifecycle_boundary_rows = []
         action_hold_boundary_rows = []
+        transport_fault_events: list[dict[str, Any]] = []
+        fault_process_liveness: list[dict[str, Any]] = []
         routed_role_preflight: list[dict[str, Any]] = []
         accepted_rounds = 0
         boundary_rounds = 0
@@ -1431,11 +1704,23 @@ class FullNetworkExecutor:
                 time.sleep(config.server_warmup_seconds)
                 if server.poll() is not None:
                     raise QualificationError("q2ded exited before roster launch")
-                envs = []
+                server_timeout_seconds = config.timeout_ms / 1000.0
+                collector_timeout = max(0.35, server_timeout_seconds * 0.35)
+                relay_hold_seconds = server_timeout_seconds * 0.60
+                if not collector_timeout < relay_hold_seconds < server_timeout_seconds:
+                    raise QualificationError(
+                        "relay timing does not fit inside the server timeout"
+                    )
                 for index in range(CLIENT_COUNT):
                     deterministic = not (
                         spec.injected_fault == "mixed-cvar" and index == 3
                     )
+                    relays.append(_TelemetryFaultRelay(
+                        relay_port=relay_ports[index],
+                        downstream_port=harness_ports[index],
+                        client_id=f"qual-{index:02d}",
+                        hold_seconds=relay_hold_seconds,
+                    ))
                     envs.append(Q2NetworkClientEnv(
                         server=f"127.0.0.1:{server_port}",
                         telemetry_server=f"127.0.0.1:{telemetry_port}",
@@ -1445,6 +1730,8 @@ class FullNetworkExecutor:
                         client_data_root=str(runtime_root / "clients"),
                         harness_host="127.0.0.1",
                         harness_port=harness_ports[index],
+                        harness_route_host="127.0.0.1",
+                        harness_route_port=relay_ports[index],
                         qport=qports[index],
                         client_id=f"qual-{index:02d}",
                         name=f"qual-{index:02d}",
@@ -1459,7 +1746,13 @@ class FullNetworkExecutor:
                 batch = Q2NetworkClientBatch(
                     envs,
                     vector=False,
-                    round_timeout=max(1.0, config.timeout_ms / 1000.0 + 0.5),
+                    round_timeout=(
+                        collector_timeout
+                        if spec.injected_fault in (
+                            "whole-telemetry-gap", "partial-telemetry-timeout"
+                        )
+                        else max(1.0, config.timeout_ms / 1000.0 + 0.5)
+                    ),
                     deterministic_frame_barrier=(spec.injected_fault != "mixed-cvar"),
                 )
                 probe_rejected = False
@@ -1528,10 +1821,19 @@ class FullNetworkExecutor:
                         )
                 else:
                     attempt = 0
+                    relay_fault_armed = False
                     epoch_drain_observed = False
                     drain_victim_killed = False
                     while accepted_rounds < FRAME_COUNT and attempt < FRAME_COUNT + 64:
                         row = action_table["rows"][accepted_rounds]
+                        if accepted_rounds == 4 and not relay_fault_armed:
+                            if spec.injected_fault == "whole-telemetry-gap":
+                                for relay in relays:
+                                    relay.arm()
+                                relay_fault_armed = True
+                            elif spec.injected_fault == "partial-telemetry-timeout":
+                                relays[0].arm()
+                                relay_fault_armed = True
                         if spec.injected_fault == "sigkill" and accepted_rounds == 4:
                             victim = envs[0]._process
                             if victim is None:
@@ -1770,6 +2072,41 @@ class FullNetworkExecutor:
                         attempt += 1
                     if accepted_rounds == FRAME_COUNT:
                         outcome = "completed"
+                if spec.injected_fault in (
+                    "whole-telemetry-gap", "partial-telemetry-timeout"
+                ):
+                    selected_relays = (
+                        relays if spec.injected_fault == "whole-telemetry-gap"
+                        else relays[:1]
+                    )
+                    for relay in selected_relays:
+                        relay.wait_released(server_timeout_seconds)
+                    transport_fault_events = [
+                        relay.audit() for relay in selected_relays
+                    ]
+                    processes = [("server", "q2ded", server)] + [
+                        ("client", str(env.client_id), env._process)
+                        for env in envs
+                    ]
+                    for role, identity, process in processes:
+                        if process is None:
+                            raise QualificationError(
+                                f"{role} {identity} lacks a live process"
+                            )
+                        try:
+                            stat = Path(f"/proc/{process.pid}/stat").read_text()
+                            start_ticks = int(stat.rsplit(") ", 1)[1].split()[19])
+                        except (OSError, ValueError, IndexError) as error:
+                            raise QualificationError(
+                                f"cannot bind live process {identity}: {error}"
+                            ) from error
+                        fault_process_liveness.append({
+                            "role": role,
+                            "identity": identity,
+                            "pid": int(process.pid),
+                            "start_ticks": start_ticks,
+                            "alive": process.poll() is None,
+                        })
             except Exception as error:
                 if isinstance(error, QualificationError):
                     raise
@@ -1788,6 +2125,11 @@ class FullNetworkExecutor:
                 if batch is not None:
                     try:
                         batch.close()
+                    except Exception:
+                        pass
+                for relay in relays:
+                    try:
+                        relay.close()
                     except Exception:
                         pass
                 log_stream.flush()
@@ -1837,6 +2179,38 @@ class FullNetworkExecutor:
                 "action_state_resyncs": (
                     0 if batch is None else batch.metrics.action_state_resyncs
                 ),
+                "public_telemetry_audit": [
+                    {
+                        "client_id": str(env.client_id),
+                        **env.public_telemetry_audit.as_dict(),
+                    }
+                    for env in envs
+                ],
+                "transport_fault_events": transport_fault_events,
+                "fault_process_liveness": fault_process_liveness,
+                "transport_metrics": {
+                    "rounds_dispatched": (
+                        0 if batch is None else batch.metrics.rounds_dispatched
+                    ),
+                    "actions_dispatched": (
+                        0 if batch is None else batch.metrics.actions_dispatched
+                    ),
+                    "transitions_accepted": (
+                        0 if batch is None else batch.metrics.transitions_accepted
+                    ),
+                    "failed_rounds": (
+                        0 if batch is None else batch.metrics.failed_rounds
+                    ),
+                    "echo_timeouts": (
+                        0 if batch is None else batch.metrics.echo_timeouts
+                    ),
+                    "telemetry_gap_resyncs": (
+                        0 if batch is None else batch.metrics.telemetry_gap_resyncs
+                    ),
+                    "realtime_catchup_resyncs": (
+                        0 if batch is None else batch.metrics.realtime_catchup_resyncs
+                    ),
+                },
                 "structured_events": events,
                 "structured_events_sha256": _sha256_bytes(
                     _canonical_bytes(events)
@@ -1887,6 +2261,107 @@ def _require_raw(
         for name, wanted in expected.items()
         if value.get(name) != wanted
     }
+    public_audit = value.get("public_telemetry_audit")
+    audit_counter_names = {
+        "datagrams_seen", "public_packets_decoded", "routed_packets_accepted",
+        "malformed_packets_rejected", "foreign_client_packets_rejected",
+        "stale_packets_rejected", "teacher_packets_detected",
+    }
+    if (
+        not isinstance(public_audit, list)
+        or len(public_audit) != CLIENT_COUNT
+        or [
+            record.get("client_id") if isinstance(record, Mapping) else None
+            for record in public_audit
+        ] != [f"qual-{slot:02d}" for slot in range(CLIENT_COUNT)]
+    ):
+        mismatches["public_telemetry_audit"] = (
+            public_audit, "one ordered audit for each public client",
+        )
+        public_audit = []
+    for index, record in enumerate(public_audit):
+        if not isinstance(record, Mapping):
+            continue
+        counters = {name: record.get(name) for name in audit_counter_names}
+        if (
+            set(record) != {"client_id", *audit_counter_names}
+            or any(type(counter) is not int or counter < 0
+                   for counter in counters.values())
+        ):
+            mismatches[f"public_telemetry_audit_{index}"] = (
+                record, "exact nonnegative public datagram counters",
+            )
+            continue
+        if counters["datagrams_seen"] != (
+            counters["public_packets_decoded"]
+            + counters["malformed_packets_rejected"]
+            + counters["teacher_packets_detected"]
+        ):
+            mismatches[f"public_telemetry_accounting_{index}"] = (
+                counters, "seen = decoded + malformed + teacher",
+            )
+        if counters["public_packets_decoded"] != (
+            counters["routed_packets_accepted"]
+            + counters["foreign_client_packets_rejected"]
+            + counters["stale_packets_rejected"]
+        ):
+            mismatches[f"public_route_accounting_{index}"] = (
+                counters, "decoded = routed + foreign + stale",
+            )
+        if (
+            counters["datagrams_seen"] <= 0
+            or counters["routed_packets_accepted"] <= 0
+            or counters["teacher_packets_detected"] != 0
+        ):
+            mismatches[f"public_privilege_boundary_{index}"] = (
+                counters, "nonempty public route with zero teacher packets",
+            )
+    transport_fault_events = value.get("transport_fault_events")
+    if not isinstance(transport_fault_events, list) or any(
+        not isinstance(event, Mapping) for event in transport_fault_events
+    ):
+        mismatches["transport_fault_events"] = (
+            transport_fault_events, "list of mappings",
+        )
+        transport_fault_events = []
+    transport_metrics = value.get("transport_metrics")
+    metric_names = {
+        "rounds_dispatched", "actions_dispatched", "transitions_accepted",
+        "failed_rounds", "echo_timeouts", "telemetry_gap_resyncs",
+        "realtime_catchup_resyncs",
+    }
+    if (
+        not isinstance(transport_metrics, Mapping)
+        or set(transport_metrics) != metric_names
+        or any(type(transport_metrics.get(name)) is not int
+               or transport_metrics[name] < 0 for name in metric_names)
+    ):
+        mismatches["transport_metrics"] = (
+            transport_metrics, "exact nonnegative batch metrics",
+        )
+        transport_metrics = {}
+    whole_gap_binding: tuple[int, int] | None = None
+    if spec.injected_fault == "whole-telemetry-gap" and len(
+        transport_fault_events
+    ) == CLIENT_COUNT:
+        held_frames = {event.get("server_frame") for event in transport_fault_events}
+        held_ticks = {
+            event.get("applied_action_tick") for event in transport_fault_events
+        }
+        additional_last_frames = {
+            event.get("additional_last_server_frame")
+            for event in transport_fault_events
+            if event.get("additional_last_server_frame") is not None
+        }
+        if (
+            len(held_frames) == 1 and len(held_ticks) == 1
+            and type(next(iter(held_frames))) is int
+            and type(next(iter(held_ticks))) is int
+            and additional_last_frames.issubset(held_frames)
+        ):
+            whole_gap_binding = (
+                int(next(iter(held_frames))), int(next(iter(held_ticks)))
+            )
     # Rejection cases may fail before the exact four-client roster exists.
     # Every completed/fatal scenario, however, can dispatch only after this
     # action-free role seal has passed.
@@ -1933,6 +2408,7 @@ def _require_raw(
             map_names_by_epoch: dict[int, str] = {}
             life_epoch_changes: list[tuple[str, int, int, int]] = []
             death_frame_gaps = 0
+            transport_frame_gaps = 0
             lifecycle_rows = value.get(
                 "death_lifecycle_boundary_rows"
                 if spec.injected_fault == "death"
@@ -2014,8 +2490,17 @@ def _require_raw(
                                 1 if spec.injected_fault == "death" else 0
                             )
                         )
+                        allowed_transport_gap = (
+                            spec.injected_fault == "whole-telemetry-gap"
+                            and whole_gap_binding is not None
+                            and index == whole_gap_binding[1] - 1
+                            and prior_frame == whole_gap_binding[0] - 1
+                            and frame == whole_gap_binding[0] + 1
+                        )
                         if allowed_death_gap:
                             death_frame_gaps += 1
+                        elif allowed_transport_gap:
+                            transport_frame_gaps += 1
                         else:
                             mismatches[f"frame_delta_{index}"] = (
                                 frame - prior_frame, 1,
@@ -2139,6 +2624,12 @@ def _require_raw(
                     mismatches["lifecycle_frame_gap_count"] = (
                         death_frame_gaps, 1,
                     )
+            if spec.injected_fault == "whole-telemetry-gap" and (
+                transport_frame_gaps != 1
+            ):
+                mismatches["transport_frame_gap_count"] = (
+                    transport_frame_gaps, 1,
+                )
             if (
                 spec.injected_fault not in ("death", "same-life-hold")
                 and life_epoch_changes
@@ -2196,12 +2687,211 @@ def _require_raw(
             mismatches["action_free_bootstrap_frames"] = (
                 value.get("action_free_bootstrap_frames"), 1,
             )
-        if type(value.get("fault_event_count")) is not int or value[
+        expected_server_faults = (
+            0 if spec.injected_fault == "partial-telemetry-timeout" else None
+        )
+        if expected_server_faults is not None and value.get(
             "fault_event_count"
-        ] < 1:
+        ) != expected_server_faults:
+            mismatches["fault_event_count"] = (
+                value.get("fault_event_count"), expected_server_faults,
+            )
+        elif expected_server_faults is None and (
+            type(value.get("fault_event_count")) is not int
+            or value["fault_event_count"] < 1
+        ):
             mismatches["fault_event_count"] = (
                 value.get("fault_event_count"), ">=1",
             )
+
+    relay_event_keys = {
+        "event", "client_id", "client_slot", "server_frame",
+        "applied_action_tick", "sequence", "datagram_bytes",
+        "held_datagram_sha256", "released_datagram_sha256",
+        "relay_endpoint", "upstream_endpoint",
+        "downstream_endpoint", "held_monotonic_ns",
+        "scheduled_release_monotonic_ns", "released_monotonic_ns",
+        "hold_duration_ns", "queue_limit", "queue_high_water",
+        "queue_overflows", "held_packets", "released_packets",
+        "additional_suppressed_packets", "additional_suppressed_bytes",
+        "additional_suppressed_rolling_sha256",
+        "additional_first_sequence", "additional_last_sequence",
+        "additional_first_server_frame", "additional_last_server_frame",
+        "forwarded_to_harness_before_hold",
+        "forwarded_to_harness_during_hold",
+        "forwarded_to_harness", "forwarded_to_client",
+        "relay_thread_alive",
+    }
+    relay_clients: list[str] = []
+    relay_endpoints: set[str] = set()
+    for index, event in enumerate(transport_fault_events):
+        client_id = event.get("client_id")
+        held_ns = event.get("held_monotonic_ns")
+        scheduled_ns = event.get("scheduled_release_monotonic_ns")
+        released_ns = event.get("released_monotonic_ns")
+        duration_ns = event.get("hold_duration_ns")
+        expected_hold_ns = timeout_ms * 600_000
+        endpoint_values = [
+            event.get("relay_endpoint"), event.get("upstream_endpoint"),
+            event.get("downstream_endpoint"),
+        ]
+        if (
+            set(event) != relay_event_keys
+            or event.get("event") != "udp_telemetry_held_and_released"
+            or client_id != f"qual-{event.get('client_slot', -1):02d}"
+            or type(event.get("client_slot")) is not int
+            or not 0 <= event["client_slot"] < CLIENT_COUNT
+            or type(event.get("server_frame")) is not int
+            or event["server_frame"] != event.get("applied_action_tick", -2) + 1
+            or type(event.get("sequence")) is not int
+            or event["sequence"] < 1
+            or event.get("datagram_bytes") != TELEMETRY_BYTES
+            or not _valid_sha256(event.get("held_datagram_sha256"))
+            or event.get("released_datagram_sha256")
+            != event.get("held_datagram_sha256")
+            or any(
+                not isinstance(endpoint, str)
+                or re.fullmatch(r"127\.0\.0\.1:[1-9][0-9]{0,4}", endpoint) is None
+                for endpoint in endpoint_values
+            )
+            or len(set(endpoint_values)) != 3
+            or any(type(value) is not int or value <= 0 for value in (
+                held_ns, scheduled_ns, released_ns, duration_ns,
+            ))
+            or scheduled_ns - held_ns != expected_hold_ns
+            or released_ns < scheduled_ns
+            or duration_ns != released_ns - held_ns
+            or not expected_hold_ns <= duration_ns < timeout_ms * 1_000_000
+            or event.get("queue_limit") != 1
+            or event.get("queue_high_water") != 1
+            or event.get("queue_overflows") != 0
+            or event.get("held_packets") != 1
+            or event.get("released_packets") != 1
+            or type(event.get("additional_suppressed_packets")) is not int
+            or event["additional_suppressed_packets"] < 0
+            or type(event.get("additional_suppressed_bytes")) is not int
+            or event["additional_suppressed_bytes"] != (
+                event["additional_suppressed_packets"] * TELEMETRY_BYTES
+            )
+            or not _valid_sha256(
+                event.get("additional_suppressed_rolling_sha256")
+            )
+            or (
+                event["additional_suppressed_packets"] == 0
+                and any(event.get(name) is not None for name in (
+                    "additional_first_sequence", "additional_last_sequence",
+                    "additional_first_server_frame", "additional_last_server_frame",
+                ))
+            )
+            or (
+                event["additional_suppressed_packets"] > 0
+                and any(type(event.get(name)) is not int for name in (
+                    "additional_first_sequence", "additional_last_sequence",
+                    "additional_first_server_frame", "additional_last_server_frame",
+                ))
+            )
+            or type(event.get("forwarded_to_harness_before_hold")) is not int
+            or event["forwarded_to_harness_before_hold"] < 1
+            or event.get("forwarded_to_harness_during_hold") != 0
+            or type(event.get("forwarded_to_harness")) is not int
+            or event["forwarded_to_harness"] < 2
+            or type(event.get("forwarded_to_client")) is not int
+            or event["forwarded_to_client"] < 1
+            or event.get("relay_thread_alive") is not True
+        ):
+            mismatches[f"relay_fault_event_{index}"] = (
+                event, "exact byte-preserving bounded UDP hold/release",
+            )
+        if isinstance(client_id, str):
+            relay_clients.append(client_id)
+        if isinstance(event.get("relay_endpoint"), str):
+            relay_endpoints.add(event["relay_endpoint"])
+
+    liveness = value.get("fault_process_liveness")
+    if not isinstance(liveness, list):
+        mismatches["fault_process_liveness"] = (liveness, "list")
+        liveness = []
+    if spec.injected_fault in (
+        "whole-telemetry-gap", "partial-telemetry-timeout"
+    ):
+        wanted_identities = ["q2ded"] + [
+            f"qual-{slot:02d}" for slot in range(CLIENT_COUNT)
+        ]
+        if (
+            len(liveness) != CLIENT_COUNT + 1
+            or [item.get("identity") if isinstance(item, Mapping) else None
+                for item in liveness] != wanted_identities
+            or any(
+                not isinstance(item, Mapping)
+                or set(item) != {"role", "identity", "pid", "start_ticks", "alive"}
+                or item.get("role") != ("server" if index == 0 else "client")
+                or type(item.get("pid")) is not int or item["pid"] < 2
+                or type(item.get("start_ticks")) is not int
+                or item["start_ticks"] < 1 or item.get("alive") is not True
+                for index, item in enumerate(liveness)
+            )
+        ):
+            mismatches["fault_process_liveness"] = (
+                liveness, "one live q2ded plus four live client processes",
+            )
+    elif liveness:
+        mismatches["unexpected_fault_process_liveness"] = (liveness, [])
+    if spec.injected_fault == "whole-telemetry-gap":
+        expected_metrics = {
+            "rounds_dispatched": 33,
+            "actions_dispatched": 132,
+            "transitions_accepted": 128,
+            "failed_rounds": 0,
+            "echo_timeouts": 0,
+            "telemetry_gap_resyncs": 1,
+        }
+        if (
+            sorted(relay_clients)
+            != [f"qual-{slot:02d}" for slot in range(CLIENT_COUNT)]
+            or len(relay_endpoints) != CLIENT_COUNT
+            or whole_gap_binding is None
+        ):
+            mismatches["whole_batch_timeout_events"] = (
+                transport_fault_events, "one ordered timeout per exact client",
+            )
+        for name, expected_metric in expected_metrics.items():
+            if transport_metrics.get(name) != expected_metric:
+                mismatches[f"whole_gap_metric_{name}"] = (
+                    transport_metrics.get(name), expected_metric,
+                )
+        if value.get("boundary_rounds") != 1:
+            mismatches["whole_gap_boundary_rounds"] = (
+                value.get("boundary_rounds"), 1,
+            )
+    elif spec.injected_fault == "partial-telemetry-timeout":
+        expected_metrics = {
+            "rounds_dispatched": 5,
+            "actions_dispatched": 20,
+            "transitions_accepted": 16,
+            "failed_rounds": 1,
+            "echo_timeouts": 1,
+            "telemetry_gap_resyncs": 0,
+        }
+        if (
+            relay_clients != ["qual-00"]
+            or len(transport_fault_events) != 1
+        ):
+            mismatches["partial_timeout_events"] = (
+                transport_fault_events, "one live qual-00 receive timeout",
+            )
+        for name, expected_metric in expected_metrics.items():
+            if transport_metrics.get(name) != expected_metric:
+                mismatches[f"partial_timeout_metric_{name}"] = (
+                    transport_metrics.get(name), expected_metric,
+                )
+        if value.get("exception") != "AuthoritativeEchoError":
+            mismatches["partial_timeout_exception"] = (
+                value.get("exception"), "AuthoritativeEchoError",
+            )
+    elif transport_fault_events:
+        mismatches["unexpected_transport_fault_events"] = (
+            transport_fault_events, [],
+        )
     events = value.get("structured_events")
     if not isinstance(events, list) or value.get("structured_events_sha256") != (
         _sha256_bytes(_canonical_bytes(events)) if isinstance(events, list) else None
@@ -2707,6 +3397,12 @@ def produce_execution_evidence(
     raw_records = _publish_raw_evidence(destination, results)
     payload = {
         "schema": EXECUTION_SCHEMA,
+        "execution_host": {
+            "hostname": os.uname().nodename,
+            "kernel_release": os.uname().release,
+            "architecture": os.uname().machine,
+            "machine_identity_sha256": _machine_identity_sha256(),
+        },
         "mode": MODE,
         "protocol_version": PROTOCOL_VERSION,
         "test_mode": test_mode,
@@ -2831,6 +3527,20 @@ def _validate_execution_evidence(
         or execution.get("frames_per_successful_scenario") != FRAME_COUNT
     ):
         raise QualificationError("execution evidence mode or topology differs")
+    host = execution.get("execution_host")
+    if (
+        not isinstance(host, Mapping)
+        or set(host) != {
+            "hostname", "kernel_release", "architecture",
+            "machine_identity_sha256",
+        }
+        or not all(
+            isinstance(host.get(name), str) and bool(host.get(name))
+            for name in ("hostname", "kernel_release", "architecture")
+        )
+        or not _valid_sha256(host.get("machine_identity_sha256"))
+    ):
+        raise QualificationError("execution host identity differs")
     launch_cvars = execution.get("launch_cvars")
     if (
         not isinstance(launch_cvars, Mapping)

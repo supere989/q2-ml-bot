@@ -70,6 +70,7 @@ ESCAPE_STEP_UNITS = 16
 SUPPORT_DEPTH_UNITS = 96
 MILLIUNITS = 1000
 MAX_JOBS = 32
+MAX_ORACLE_BATCH_TIMEOUT_SECONDS = 60.0
 HAZARD_SAMPLE_FRACTIONS = (
     (0.5, 0.5, 0.5),
     (0.25, 0.5, 0.5),
@@ -842,7 +843,7 @@ def build_report(
     if not 1 <= jobs <= MAX_JOBS:
         raise CompiledCmPreflightError(f"jobs must be in [1, {MAX_JOBS}]")
     if not math.isfinite(oracle_batch_timeout_seconds) or not (
-        0 < oracle_batch_timeout_seconds <= 60
+        0 < oracle_batch_timeout_seconds <= MAX_ORACLE_BATCH_TIMEOUT_SECONDS
     ):
         raise CompiledCmPreflightError(
             "oracle batch timeout must be finite and in (0, 60]"

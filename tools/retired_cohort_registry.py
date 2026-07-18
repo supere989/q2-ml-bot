@@ -400,3 +400,25 @@ def require_unretired_declaration(
             raise RetiredCohortRegistryError(
                 f"seed {seed} is permanently retired with {seeds[seed]}"
             )
+
+
+def require_unretired_identity(cohort_id: str, declaration_sha256: str) -> None:
+    """Reject an authority identity without trusting a gate's declaration body."""
+
+    if not isinstance(cohort_id, str) or not cohort_id:
+        raise RetiredCohortRegistryError("candidate cohort identity is malformed")
+    if (
+        not isinstance(declaration_sha256, str)
+        or HEX_RE.fullmatch(declaration_sha256) is None
+    ):
+        raise RetiredCohortRegistryError("candidate declaration identity is malformed")
+    cohorts, declarations, _maps, _seeds = _load_registry()
+    if cohort_id in cohorts:
+        raise RetiredCohortRegistryError(
+            f"cohort_id {cohort_id} is permanently retired by {cohorts[cohort_id]}"
+        )
+    if declaration_sha256 in declarations:
+        raise RetiredCohortRegistryError(
+            "declaration SHA-256 is permanently retired by "
+            f"{declarations[declaration_sha256]}"
+        )

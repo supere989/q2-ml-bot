@@ -1,10 +1,18 @@
+import struct
+
 import numpy as np
 import pytest
 
 from harness.causal_protocol import CausalFlags, CausalTelemetry
 from harness.client_batch import Q2NetworkClientBatch
 from harness.client_env import ClientTelemetryDrain, Q2NetworkClientEnv
-from harness.client_protocol import ClientTelemetry
+from harness.client_protocol import (
+    ClientTelemetry,
+    ML_TEACHER_MAGIC,
+    ML_TEACHER_VERSION,
+    PublicTelemetryPrivilegeViolation,
+    TEACHER_SAMPLE_SIZE,
+)
 from harness.multires_admission import (
     PRIVATE_CAUSAL_INFO_KEY,
     PRIVATE_SPATIAL_REWARD_INFO_KEY,
@@ -109,6 +117,36 @@ class Provider:
     def close(self):
         self.close_calls += 1
         self.closed = True
+
+
+def test_public_env_counts_and_propagates_teacher_privilege_violation():
+    env = Q2NetworkClientEnv(
+        server="127.0.0.1:27910",
+        telemetry_server="127.0.0.1:27911",
+        telemetry_token="token",
+        client_binary="/tmp/yquake2",
+        client_root="/tmp/q2",
+        multires_spatial_provider=Provider(),
+        expected_atlas_sha256=ATLAS,
+        expected_runtime_manifest_sha256=RUNTIME,
+    )
+    packet = bytearray(TEACHER_SAMPLE_SIZE)
+    struct.pack_into(
+        "<III", packet, 0, ML_TEACHER_MAGIC, ML_TEACHER_VERSION,
+        TEACHER_SAMPLE_SIZE,
+    )
+    with pytest.raises(PublicTelemetryPrivilegeViolation):
+        env._parse_public_datagram(bytes(packet))
+    assert env.public_telemetry_audit.as_dict() == {
+        "datagrams_seen": 1,
+        "public_packets_decoded": 0,
+        "routed_packets_accepted": 0,
+        "malformed_packets_rejected": 0,
+        "foreign_client_packets_rejected": 0,
+        "stale_packets_rejected": 0,
+        "teacher_packets_detected": 1,
+    }
+    env.close()
 
 
 def test_multires_selection_never_constructs_or_rewards_through_legacy(monkeypatch):

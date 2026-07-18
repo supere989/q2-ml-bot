@@ -71,7 +71,10 @@ only when all of the following are true:
 - both combined byte counts are strictly below `8388608`
 - `performance.resident_samples >= 2000`
 - `performance.total.p99_ns < performance.total_p99_limit_ns == 500000`
-- the host and kernel are the declared WSL evidence host
+- the host and kernel are the declared WSL evidence host, and
+  `host.machine_identity_sha256` is SHA-256 of the canonical
+  `/etc/machine-id` value: exactly 32 lowercase hexadecimal bytes after
+  excluding at most one trailing LF; all other whitespace is rejected
 
 The timed scope is one accepted resident transition across all four clients:
 an origin-indexed exact L2 aggregate lookup in the admitted Atlas followed by

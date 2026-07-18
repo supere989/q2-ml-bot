@@ -20,15 +20,18 @@ from harness.hook_claims_v4 import (
 import tools.assemble_b2_gate as b2_gate
 import tools.run_b2_test_suite as b2_test_suite
 from tools.assemble_b2_gate import (
+    ACTIVE_FINAL_AUTHORITY,
+    ActiveFinalAuthority,
     B2GateError,
     B2GatePaths,
-    EXPECTED_COHORT,
     EXPECTED_DESIGN_SHA256,
-    QUALIFICATION_SUCCESSOR_PATHS,
+    RETIRED_71446_QUALIFICATION_SUCCESSOR_PATHS,
+    RETIRED_COHORT_71446,
+    assemble_gate,
     _exact_directory_files,
     _decode_dyn_snapshot,
     _dyn_source_authority,
-    _expected_71446_rows,
+    _historical_71446_rows,
     _preflight_implementation_identity,
     _validate_compiled_cm_preflight,
     _validate_declaration,
@@ -40,6 +43,7 @@ from tools.assemble_b2_gate import (
     _validate_source_spawn_origin_binding_pass_count,
     _validate_test_report,
     _parser,
+    validate_gate,
 )
 from tools.run_generator_cohort import STAGE_SUFFIXES, canonical_bytes
 from tools.run_b2_test_suite import (
@@ -529,7 +533,7 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
     paths.claims_dir.mkdir()
     paths.analysis_dir.mkdir()
     paths.dyn_evidence_report.parent.mkdir()
-    map_id = _expected_71446_rows()[0]["map"]
+    map_id = _historical_71446_rows()[0]["map"]
 
     bsp = b"IBSP fixture"
     (paths.claims_dir / f"{map_id}.bsp").write_bytes(bsp)
@@ -615,6 +619,9 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
             "hostname": "DESKTOP-RTX2080",
             "kernel_release": "6.18.33.2-microsoft-standard-WSL2",
             "architecture": "x86_64",
+            "machine_identity_sha256": _sha256(
+                b"0123456789abcdef0123456789abcdef"
+            ),
         },
         "atlas": {
             "manifest": _file_evidence(str(atlas_manifest_path), atlas_manifest_bytes),
@@ -670,12 +677,15 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
         },
     }
     paths.dyn_evidence_report.write_bytes(canonical_bytes(report))
-    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71446_rows()}
+    declaration = {
+        "cohort_id": RETIRED_COHORT_71446,
+        "maps": _historical_71446_rows(),
+    }
     return paths, declaration, report
 
 
-def test_fresh_71446_identity_and_cli_contract_are_exact() -> None:
-    rows = _expected_71446_rows()
+def test_retired_71446_identity_remains_readable_and_cli_is_explicit() -> None:
+    rows = _historical_71446_rows()
     assert len(rows) == 28
     assert rows[0] == {
         "ordinal": 0,
@@ -733,6 +743,10 @@ def test_fresh_71446_identity_and_cli_contract_are_exact() -> None:
             ROOT / "docs/multires/B2-GENERATED-COHORT-71445-DECLARATION.json",
             "71445",
         ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71446-DECLARATION.json",
+            "71446",
+        ),
     ],
 )
 def test_gate_refuses_retired_declaration_before_evidence(
@@ -742,15 +756,36 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_gate_accepts_fresh_current_71446_alias() -> None:
-    declaration, _sha256 = _validate_declaration(
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
-    assert declaration["cohort_id"] == EXPECTED_COHORT
-    assert declaration["maps"] == _expected_71446_rows()
+def test_gate_refuses_historical_current_71446_alias() -> None:
+    with pytest.raises(B2GateError, match="71446.*permanently retired"):
+        _validate_declaration(
+            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+        )
 
 
-def test_qualification_successor_accepts_only_the_declared_authorization_delta(
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        ROOT / "docs/multires/B2-GENERATED-COHORT-71446-DECLARATION.json",
+        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
+    ],
+)
+def test_no_active_final_prevents_green_assembly_before_evidence(
+    tmp_path: Path, declaration: Path,
+) -> None:
+    assert ACTIVE_FINAL_AUTHORITY is None
+    paths = replace(_paths(tmp_path), declaration=declaration)
+    with pytest.raises(B2GateError, match="no active final cohort"):
+        assemble_gate(paths, implementation_binding=_implementation())
+
+
+def test_no_active_final_prevents_validation_of_any_green_gate() -> None:
+    assert ACTIVE_FINAL_AUTHORITY is None
+    with pytest.raises(B2GateError, match="no active final cohort"):
+        validate_gate({"status": "green"})
+
+
+def test_retired_71446_qualification_delta_remains_historically_readable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     qualified = _implementation()
@@ -759,7 +794,7 @@ def test_qualification_successor_accepts_only_the_declared_authorization_delta(
     current["repository_tree"] = "cd" * 20
     diff = "".join(
         f"{'A' if path.endswith('71446-DECLARATION.json') else 'M'}\t{path}\n"
-        for path in sorted(QUALIFICATION_SUCCESSOR_PATHS)
+        for path in sorted(RETIRED_71446_QUALIFICATION_SUCCESSOR_PATHS)
     ).encode("utf-8")
 
     def capture(_root: Path, arguments: list[str]):
@@ -768,9 +803,23 @@ def test_qualification_successor_accepts_only_the_declared_authorization_delta(
         return b2_gate.subprocess.CompletedProcess(arguments, 0, diff, b"")
 
     monkeypatch.setattr(b2_gate, "_git_capture", capture)
-    relation = _validate_qualification_successor(ROOT, qualified, current)
+    historical = ActiveFinalAuthority(
+        cohort_id=RETIRED_COHORT_71446,
+        declaration_sha256=(
+            "58d52bd958249a70bf8115ab1c442fb6888a6d69b290a636303986f69acb658f"
+        ),
+        immutable_declaration_path=(
+            "docs/multires/B2-GENERATED-COHORT-71446-DECLARATION.json"
+        ),
+        qualification_successor_paths=RETIRED_71446_QUALIFICATION_SUCCESSOR_PATHS,
+    )
+    relation = _validate_qualification_successor(
+        ROOT, qualified, current, historical
+    )
     assert relation["stable_authority_equal"] is True
-    assert relation["changed_paths"] == sorted(QUALIFICATION_SUCCESSOR_PATHS)
+    assert relation["changed_paths"] == sorted(
+        RETIRED_71446_QUALIFICATION_SUCCESSOR_PATHS
+    )
 
 
 def test_qualification_successor_rejects_unqualified_producer_change(
@@ -787,7 +836,17 @@ def test_qualification_successor_rejects_unqualified_producer_change(
         lambda *_args: pytest.fail("git must not run after authority drift"),
     )
     with pytest.raises(B2GateError, match="producer/analyzer authority differs"):
-        _validate_qualification_successor(ROOT, qualified, current)
+        _validate_qualification_successor(
+            ROOT,
+            qualified,
+            current,
+            ActiveFinalAuthority(
+                cohort_id="fixture",
+                declaration_sha256="00" * 32,
+                immutable_declaration_path="fixture.json",
+                qualification_successor_paths=frozenset({"fixture.json"}),
+            ),
+        )
 
 
 def _write_compiled_cm_gate_fixture(
@@ -808,7 +867,10 @@ def _write_compiled_cm_gate_fixture(
         b1_gate=b1_gate,
         compiled_cm_preflight_report=report_path,
     )
-    declaration = {"cohort_id": EXPECTED_COHORT, "maps": _expected_71446_rows()}
+    declaration = {
+        "cohort_id": RETIRED_COHORT_71446,
+        "maps": _historical_71446_rows(),
+    }
     membership = {"schema": "fixture-membership", "passed": True, "failures": []}
     monkeypatch.setattr(b2_gate, "verify_stage_membership", lambda *_args: membership)
     binaries = {
@@ -821,7 +883,7 @@ def _write_compiled_cm_gate_fixture(
         "stage": b2_gate.COMPILED_CM_PREFLIGHT_STAGE,
         "admission_status": b2_gate.COMPILED_CM_PREFLIGHT_STATUS,
         "promotion_authority": False,
-        "cohort_id": EXPECTED_COHORT,
+        "cohort_id": RETIRED_COHORT_71446,
         "declaration": {
             "path": str(declaration_path.absolute()),
             "sha256": SHA,
@@ -882,7 +944,11 @@ def test_compiled_cm_gate_rejects_old_report_without_hazard_and_lightdata(
     paths.compiled_cm_preflight_report.write_bytes(canonical_bytes(report))
     with pytest.raises(B2GateError, match="compiled-CM checks keys differ"):
         _validate_compiled_cm_preflight(
-            paths, {"cohort_id": EXPECTED_COHORT, "maps": _expected_71446_rows()},
+            paths,
+            {
+                "cohort_id": RETIRED_COHORT_71446,
+                "maps": _historical_71446_rows(),
+            },
             SHA, binaries,
         )
 
@@ -899,7 +965,11 @@ def test_compiled_cm_gate_rejects_unstable_input_before_map_evidence(
     paths.compiled_cm_preflight_report.write_bytes(canonical_bytes(report))
     with pytest.raises(B2GateError, match="input stability failed"):
         _validate_compiled_cm_preflight(
-            paths, {"cohort_id": EXPECTED_COHORT, "maps": _expected_71446_rows()},
+            paths,
+            {
+                "cohort_id": RETIRED_COHORT_71446,
+                "maps": _historical_71446_rows(),
+            },
             SHA, binaries,
         )
 
@@ -1101,6 +1171,9 @@ def test_canonical_dyn_fixture_binds_atlas_and_rejects_stale_authority(
         paths.dyn_evidence_report, _implementation(), declaration, paths
     )
     assert evidence["magic"] == "Q2LAT002"
+    assert evidence["machine_identity_sha256"] == report["host"][
+        "machine_identity_sha256"
+    ]
     assert budget["four_client_feature_assembly_p99_ns"] == 30
     report["authority"]["analyzer_authority_sha256"] = "ff" * 32
     paths.dyn_evidence_report.write_bytes(canonical_bytes(report))
@@ -1108,6 +1181,45 @@ def test_canonical_dyn_fixture_binds_atlas_and_rejects_stale_authority(
         _validate_dyn_evidence(
             paths.dyn_evidence_report, _implementation(), declaration, paths
         )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "keys differ"),
+        ("malformed", "lowercase SHA-256"),
+        ("placeholder", "placeholder"),
+    ],
+)
+def test_dyn_fixture_rejects_missing_or_forged_machine_identity(
+    tmp_path: Path, mutation: str, message: str,
+) -> None:
+    paths, declaration, report = _write_dyn_fixture(tmp_path)
+    if mutation == "missing":
+        report["host"].pop("machine_identity_sha256")
+    elif mutation == "malformed":
+        report["host"]["machine_identity_sha256"] = "A" * 64
+    else:
+        report["host"]["machine_identity_sha256"] = "0" * 64
+    paths.dyn_evidence_report.write_bytes(canonical_bytes(report))
+    with pytest.raises(B2GateError, match=message):
+        _validate_dyn_evidence(
+            paths.dyn_evidence_report, _implementation(), declaration, paths
+        )
+
+
+def test_dyn_fixture_records_changed_valid_machine_identity(tmp_path: Path) -> None:
+    paths, declaration, report = _write_dyn_fixture(tmp_path)
+    changed = _sha256(b"fedcba9876543210fedcba9876543210")
+    assert changed != report["host"]["machine_identity_sha256"]
+    report["host"]["machine_identity_sha256"] = changed
+    paths.dyn_evidence_report.write_bytes(canonical_bytes(report))
+
+    evidence, _budget = _validate_dyn_evidence(
+        paths.dyn_evidence_report, _implementation(), declaration, paths
+    )
+
+    assert evidence["machine_identity_sha256"] == changed
 
 
 def test_dyn_fixture_rejects_snapshot_substitution(tmp_path: Path) -> None:
@@ -1224,9 +1336,12 @@ def test_b2_gate_schemas_are_strict() -> None:
         (ROOT / "schemas/q2-b2-test-report-v1.schema.json").read_text()
     )
     assert gate_schema["additionalProperties"] is False
-    assert gate_schema["properties"]["generated_cohort"]["properties"][
+    assert gate_schema["not"] == {}
+    cohort_schema = gate_schema["properties"]["generated_cohort"]["properties"][
         "cohort_id"
-    ]["const"] == EXPECTED_COHORT
+    ]
+    assert "const" not in cohort_schema
+    assert cohort_schema["not"]["const"] == RETIRED_COHORT_71446
     assert gate_schema["properties"]["generated_cohort"]["properties"][
         "compiled_cm_preflight"
     ]["$ref"] == "#/$defs/compiled_cm_preflight_stage"
@@ -1242,7 +1357,7 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
         "implementation_successor"
     ]["properties"]["changed_paths"]["minItems"] == len(
-        QUALIFICATION_SUCCESSOR_PATHS
+        RETIRED_71446_QUALIFICATION_SUCCESSOR_PATHS
     )
     assert gate_schema["$defs"]["compiled_cm_preflight_stage"]["properties"][
         "pass_count"

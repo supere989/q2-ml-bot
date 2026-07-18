@@ -79,6 +79,14 @@ those identities include the synthetic parity BSP digest. The attestation binds
 their exact executable digests to the map-specific admitted tools and binds the
 map-independent hook physics identity directly.
 
+Every admitted runtime manifest also carries
+`recovery_physics.{hook_walk_budget_ticks,game_tick_hz,walk_speed_q8_per_second}`
+with the exact values `15`, `10`, and `76800` Q8 (300 world units/second).
+Admission rejects missing or mixed values and requires the Pmove authority to
+bind `maxspeed=300`. The private hook-necessity evaluator converts accumulated
+ordinary-edge Q8 traversal distance through this cadence identity; graph edges
+are never guessed to equal one tick.
+
 ## Objective authority and runtime guide derivation
 
 The sole objective artifact is canonical `<map>.objectives.json`, schema
@@ -147,6 +155,14 @@ The same admitted L1 query that emits normalized public Recovery16 also emits
 private raw `RecoveryEvidence`: L1 index, Q8 cost-to-safety (where `u32::MAX` is
 the valid unreachable sentinel), signed Q8 safety-boundary clearance, raw
 hazard type/severity, confidence, and `atlas_region_id`.
+
+The separate private `HookNecessityEvidence` evaluates only admitted hook edges
+available at the current L1 pose. It is true only when no ordinary recovery
+path reaches safety inside the frozen 15-tick distance budget, a current hook
+edge followed by ordinary recovery reaches safety, and that route lowers the
+repaired Q8 cost. A hook reachable only after an ordinary first step cannot
+label the current action. This debug/teacher result is not present in
+Recovery16, Guide60, or any public policy feature block.
 
 `hazard_component_id` is an additional static reward-space identity. Hazardous
 L1 nodes connected by admitted static adjacency form components. Components

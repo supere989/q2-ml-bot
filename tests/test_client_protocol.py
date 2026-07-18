@@ -1,5 +1,7 @@
 import struct
 
+import pytest
+
 from harness.causal_protocol import (
     CAUSAL_TELEMETRY_FMT,
     CAUSAL_TELEMETRY_SIZE,
@@ -12,6 +14,10 @@ from harness.client_protocol import (
     CLIENT_TELEMETRY_SIZE,
     ML_CLIENT_TELEM_MAGIC,
     ML_CLIENT_WIRE_VERSION,
+    ML_TEACHER_MAGIC,
+    ML_TEACHER_VERSION,
+    PublicTelemetryPrivilegeViolation,
+    TEACHER_SAMPLE_SIZE,
     parse_client_telemetry,
 )
 from harness.protocol import OBS_FMT, OBS_SIZE, ML_OBS_MAGIC
@@ -94,3 +100,15 @@ def test_rejects_missing_or_malformed_private_causal_tail():
     causal_offset = len(packet) - CAUSAL_TELEMETRY_SIZE
     struct.pack_into("<I", malformed, causal_offset, 0)
     assert parse_client_telemetry(bytes(malformed)) is None
+
+
+@pytest.mark.parametrize("packet_size", [12, TEACHER_SAMPLE_SIZE])
+def test_teacher_magic_is_a_fatal_public_privilege_violation(packet_size):
+    packet = bytearray(packet_size)
+    struct.pack_into(
+        "<III", packet, 0, ML_TEACHER_MAGIC, ML_TEACHER_VERSION, packet_size
+    )
+    with pytest.raises(
+        PublicTelemetryPrivilegeViolation, match="teacher datagram on public conduit"
+    ):
+        parse_client_telemetry(bytes(packet))

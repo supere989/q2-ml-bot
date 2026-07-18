@@ -65,22 +65,25 @@ The public `q2mlbot.service` uses `maxclients=6`; four network ML clients leave
 two slots available for human players. Do not assume fixed slot numbers because
 normal engine registration assigns whichever client slots are free.
 
-**Network-native client harness primary trainer (promoted 2026-07-13):** a separate
+**Network-native client harness successor architecture:** a separate
 Yamagi checkout at `/home/raymondj/q2-ml-client`, pushed to
 `supere989/yquake2` branch `feature/ml-client-harness`, now runs policies as
 real protocol-34 player connections. `game.so` supplies privileged state
 through a default-off, token-authenticated UDP conduit routed by the client's
 `ml_client_id`; each client receives only its own `ml_obs_t`. Python support
 is in `harness/client_{protocol,env}.py`; design and cutover gates are in
-`docs/NETWORK-CLIENT-HARNESS.md`. The conduit is now enabled only on the public
-VPS/Tailscale lane, and four headless clients plus PPO run from the pinned WSL
-staging checkout. Synchronous collection, action/policy-version admission,
-stale rejection, map-epoch recovery, and deterministic checks passed. This is
-the primary trainer; the old in-process public ONNX runtime is rollback-only.
+`docs/NETWORK-CLIENT-HARNESS.md`. The conduit is enabled only on the public
+VPS/Tailscale lane. The architecture has demonstrated synchronous collection,
+action/policy-version admission, stale rejection, map-epoch recovery, and
+deterministic checks, but there is currently no admitted or running trainer.
+Only a fresh B2-through-B6 evidence chain may authorize the next WSL trainer;
+passing component tests or an isolated staging checkout cannot. The old
+in-process public ONNX runtime is retired and has no operational selector or
+rollback role.
 
 ## Training Topology
 
-Training runs on the Windows RTX 2080 box (DESKTOP-KDLBAE7), inside WSL.
+Training runs on the Windows RTX 2080 box (DESKTOP-RTX2080), inside WSL.
 
 **SSH — use the direct WSL path** (`~/.ssh/config` has both entries):
 - `ssh wsl-box` → WSL's own tailscaled at `100.86.206.50` (preferred).

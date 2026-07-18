@@ -625,6 +625,12 @@ def train_bc(policy: Q2BotPolicy, obs: np.ndarray, actions: np.ndarray, device: 
 
 
 def main() -> int:
+    print(
+        "retired: behavior-clone aim checkpoints are not admitted by the "
+        "multires lineage",
+        file=sys.stderr,
+    )
+    return 2
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument(

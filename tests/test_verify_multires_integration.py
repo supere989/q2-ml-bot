@@ -5,7 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import struct
 from pathlib import Path
+
+import pytest
+import tools.verify_multires_integration as verifier
 
 from harness.multires_contract import (
     ACTION_DIM,
@@ -20,6 +24,7 @@ from harness.multires_contract import (
     RECOVERY_DIM,
 )
 from harness.multires_lineage import CHECKPOINT_FORMAT
+from harness import client_protocol as public_wire
 from harness.multires_runtime import (
     B4_ACTION_MAGIC,
     B4_CAUSAL_VERSION,
@@ -84,10 +89,268 @@ def _runtime_manifest_sha256() -> str:
     ).runtime_manifest_sha256
 
 
+def _public_privilege_separation() -> dict:
+    packet = bytearray(public_wire.TEACHER_SAMPLE_SIZE)
+    struct.pack_into(
+        "<III", packet, 0, public_wire.ML_TEACHER_MAGIC,
+        public_wire.ML_TEACHER_VERSION, public_wire.TEACHER_SAMPLE_SIZE,
+    )
+    clients = [
+        {
+            "client_id": f"qual-{slot:02d}",
+            "datagrams_seen": 33,
+            "public_packets_decoded": 33,
+            "routed_packets_accepted": 33,
+            "malformed_packets_rejected": 0,
+            "foreign_client_packets_rejected": 0,
+            "stale_packets_rejected": 0,
+            "teacher_packets_detected": 0,
+        }
+        for slot in range(4)
+    ]
+    return {
+        "source_abi": {
+            "public": {
+                "magic": public_wire.ML_CLIENT_TELEM_MAGIC,
+                "packet_bytes": public_wire.CLIENT_TELEMETRY_SIZE,
+                "pod": "ml_client_telemetry_t",
+                "packing_path": "ml_client_telemetry.c:ML_ClientTelemetryFrame",
+                "fields": ["public_header", "ml_obs_t", "ml_causal_telemetry_t"],
+                "teacher_action_tail_present": False,
+            },
+            "teacher": {
+                "magic": public_wire.ML_TEACHER_MAGIC,
+                "version": public_wire.ML_TEACHER_VERSION,
+                "packet_bytes": public_wire.TEACHER_SAMPLE_SIZE,
+                "pod": "ml_teacher_sample_t",
+                "packing_path": "ml_bridge.c:ML_TeacherSend",
+                "fields": [
+                    "teacher_header", "ml_obs_t", "ml_causal_telemetry_t",
+                    "ml_action_t",
+                ],
+            },
+            "yamagi_teacher_identity_present": False,
+            "qualification_teacher_enabled": False,
+            "public_and_teacher_magic_distinct": True,
+            "public_and_teacher_size_distinct": True,
+        },
+        "normal_run_audit": {
+            "derivation": "sealed-baseline-cold-1-public-datagram-accounting-v1",
+            "scenario_proof": {
+                "raw_evidence_sha256": hashlib.sha256(b"baseline-raw").hexdigest(),
+            },
+            "clients": clients,
+            "totals": {
+                "datagrams_seen": 132,
+                "public_packets_decoded": 132,
+                "routed_packets_accepted": 132,
+                "malformed_packets_rejected": 0,
+                "foreign_client_packets_rejected": 0,
+                "stale_packets_rejected": 0,
+                "teacher_packets_detected": 0,
+            },
+        },
+        "negative_probe": {
+            "injection": "exact-teacher-magic-version-size-zero-body",
+            "packet_magic": public_wire.ML_TEACHER_MAGIC,
+            "packet_version": public_wire.ML_TEACHER_VERSION,
+            "packet_bytes": len(packet),
+            "packet_sha256": hashlib.sha256(packet).hexdigest(),
+            "public_parser_result": "fatal-public-privilege-violation",
+        },
+    }
+
+
 def _guide_vector() -> list[float]:
     # Candidate 0 carries a live health objective; the rest are empty slots.
     candidate = [0.4, -0.1, 0.2, 1.75, 0.25, 0.9, 1.0, 0, 0, 1, 0, 0, 0, 0, 0]
     return [float(v) for v in candidate] + [0.0] * (GUIDE_DIM - 15)
+
+
+def _b6_evidence() -> dict:
+    digest = lambda name: hashlib.sha256(name.encode("utf-8")).hexdigest()
+    record = lambda name: {"bytes": len(name) + 1, "sha256": digest(name)}
+    checkpoint = record("checkpoint")
+    state_sha = digest("public-state")
+    authority_path = (
+        Path(__file__).resolve().parents[1]
+        / "docs/multires/B6-PUBLIC-HOST-AUTHORITY.json"
+    )
+    authority_bytes = authority_path.read_bytes()
+    authority = json.loads(authority_bytes)
+    value = {
+        "schema": "q2-multires-b6-wsl-g1-v1",
+        "tool": "assemble_b6_wsl_g1_campaign",
+        "status": "green",
+        "host": {
+            "hostname": "DESKTOP-RTX2080",
+            "kernel_release": "6.6.0-microsoft-standard-WSL2",
+            "architecture": "x86_64",
+            "machine_identity_sha256": digest("wsl-machine"),
+        },
+        "source_repositories": {},
+        "bindings": {
+            **{
+                name: record(name) for name in (
+                    "runtime_manifest", "training_manifest", "objectives",
+                    "bundle_manifest", "atlas", "atlas_manifest", "b2_gate",
+                    "b3_gate", "b4_evidence", "b5_gate", "lineage_evidence",
+                    "retirement_evidence",
+                )
+            },
+            "checkpoint": checkpoint,
+            "retirement_manifest": {"bytes": 10, "sha256": RETIREMENT_SHA},
+            "atlas_sha256": ATLAS_SHA,
+            "runtime_manifest_identity_sha256": _runtime_manifest_sha256(),
+            "training_config_sha256": digest("training-config"),
+            "objective_identity_sha256": OBJECTIVE_SHA,
+            "network_barrier_execution_evidence_sha256": digest("barrier-execution"),
+            "b3_gate_sha256": digest("b3-gate-seal"),
+            "b4_evidence_sha256": digest("b4-seal"),
+            "b5_gate_sha256": digest("b5-seal"),
+            "hook_necessity_runtime": {
+                "hook_walk_budget_ticks": 15,
+                "game_tick_hz": 10,
+                "walk_speed_q8_per_second": 76800,
+            },
+            "rust_extension": {
+                "path": "/isolated/q2_lattice_rs.so", "bytes": 4096,
+                "sha256": digest("rust-extension"),
+                "repository_tree": "a" * 40,
+                "source_closure_sha256": digest("rust-source"),
+                "qualification_commands_sha256": digest("rust-tests"),
+            },
+        },
+        "raw_evidence": {
+            **{
+                name: record(name) for name in (
+                    "one_run", "fault_probe", "fault_execution",
+                    "public_pre_probe", "public_post_probe",
+                    "controller_ledger", "controller_plan"
+                )
+            },
+            "one_run_evidence_sha256": digest("one-run-seal"),
+            "fault_probe_evidence_sha256": digest("fault-seal"),
+            "controller_ledger_sha256": digest("controller-ledger-seal"),
+        },
+        "g1": {
+            "accepted_transitions": 16384,
+            "echo_attempts": 16384,
+            "authoritative_echo_accept_rate": 1.0,
+            "vertical_samples": 16384,
+            "vertical_matches": 16384,
+            "vertical_match_rate": 1.0,
+            "water_samples": 8192,
+            "land_samples": 8192,
+            "water_projection_mismatches": 0,
+            "land_projection_mismatches": 0,
+            "water_land_projection_skew": 0,
+            "failed_rounds": 0,
+            "echo_timeouts": 0,
+            "declared_resyncs": 2,
+            "declared_resync_limit": 4,
+            "accepted_frame_discontinuities": [],
+            "trajectory_sha256": digest("b6-trajectory"),
+            "map_epoch_recovery_exercised": True,
+            "telemetry_gap_recovery_exercised": True,
+            "partial_client_timeout_fatal": True,
+        },
+        "no_update": {
+            "mode": "collect-only-no-update-v1",
+            "checkpoint_sha256_before": checkpoint["sha256"],
+            "checkpoint_sha256_after": checkpoint["sha256"],
+            "policy_state_sha256_before": digest("policy-state"),
+            "policy_state_sha256_after": digest("policy-state"),
+            "optimizer_state_sha256_before": digest("optimizer-state"),
+            "optimizer_state_sha256_after": digest("optimizer-state"),
+            "policy_updates": 0,
+            "optimizer_steps": 0,
+            "backward_calls": 0,
+        },
+        "performance": {
+            "four_client_feature_assembly_p99_ns": 310000,
+            "atlas_resident_bytes": 20 * 1024 * 1024,
+            "four_dyn_resident_bytes": 1024 * 1024,
+            "atlas_build_peak_rss_bytes": 256 * 1024 * 1024,
+            "host": "DESKTOP-RTX2080",
+            "kernel_release": "6.6.0-microsoft-standard-WSL2",
+            "machine_identity_sha256": digest("wsl-machine"),
+            "lan_payload": {
+                "basis": "wire-abi-struct-calcsize-v1",
+                "accepted_packet_samples": 16384,
+                "client_telemetry_bytes": 1248,
+                "action_packet_bytes": 28,
+                "telemetry_components": {
+                    "header_bytes": 112,
+                    "engine_observation_bytes": 1056,
+                    "causal_telemetry_bytes": 80,
+                },
+                "atlas_wire_fields": 0,
+                "atlas_wire_bytes_per_frame": 0,
+                "dyn_wire_fields": 0,
+                "dyn_wire_bytes_per_frame": 0,
+            },
+        },
+        "public_state": {
+            "host": {
+                "hostname": authority["hostname"],
+                "kernel_release": "6.12.0",
+                "architecture": authority["architecture"],
+                "machine_identity_sha256": authority[
+                    "machine_identity_sha256"
+                ],
+            },
+            "authority": {
+                "bytes": len(authority_bytes),
+                "sha256": hashlib.sha256(authority_bytes).hexdigest(),
+                "authority_sha256": authority["authority_sha256"],
+            },
+            "pre_state_sha256": state_sha,
+            "post_state_sha256": state_sha,
+            "run_nonce": digest("run-nonce"),
+            "launch_id": "b6-" + digest("launch")[:60],
+            "attestation_key_id": authority["probe_attestation"]["key_id"],
+            "pre_evidence_sha256": digest("public-pre-evidence"),
+            "post_evidence_sha256": digest("public-post-evidence"),
+            "controller_ledger_sha256": digest("controller-ledger-seal"),
+            "ordering_basis": "signed-hash-chain-plus-controller-monotonic-ns-v1",
+            "modified": False,
+        },
+        "teardown": {
+            "process_records": [
+                {"role": "q2ded" if i == 0 else f"network-client-{i-1:02d}",
+                 "pid": 100 + i, "start_ticks": 1000 + i}
+                for i in range(5)
+            ],
+            "orphan_processes_after_teardown": 0,
+            "owned_ports": [
+                {"role": f"socket-{i}", "address": "127.0.0.1", "port": 27000 + i,
+                 "transport": "udp", "available_after_teardown": True}
+                for i in range(6)
+            ],
+            "qport_identities": [
+                {"client_index": i, "qport": 28000 + i} for i in range(4)
+            ],
+        },
+        "gate_sha256": "",
+    }
+    value["teardown"]["terminated_process_records"] = value["teardown"]["process_records"]
+    body = dict(value)
+    body.pop("gate_sha256")
+    value["gate_sha256"] = hashlib.sha256(json.dumps(
+        {"domain": value["schema"], "gate": body},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+    return value
+
+
+def _reseal_b6(value: dict) -> None:
+    body = dict(value)
+    body.pop("gate_sha256", None)
+    value["gate_sha256"] = hashlib.sha256(json.dumps(
+        {"domain": value["schema"], "gate": body},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")).hexdigest()
 
 
 def _synthetic_evidence() -> dict[str, dict]:
@@ -131,6 +394,7 @@ def _synthetic_evidence() -> dict[str, dict]:
             "descriptor": _b4_descriptor(),
             "atlas_sha256": ATLAS_SHA,
             "public_teacher_field_violations": 0,
+            "public_privilege_separation": _public_privilege_separation(),
             "private_causal_facts": list(REQUIRED_PRIVATE_CAUSAL_FACTS),
         },
         "causal_reward_admission": {
@@ -187,6 +451,9 @@ def _synthetic_evidence() -> dict[str, dict]:
             "active_rollout_schemas": [B4_ROLLOUT_SCHEMA],
         },
         "deterministic_transitions": {
+            "mode": "production",
+            "admissible": True,
+            "production_pass": True,
             "transition_count": 500,
             "runs": [
                 {
@@ -238,20 +505,7 @@ def _synthetic_evidence() -> dict[str, dict]:
                 "resync_admissions": 0,
             },
         },
-        "wsl_b6_campaign": {
-            "host_platform": "wsl-ubuntu-22.04",
-            "g0_identity_pass": True,
-            "g1_transport_pass": True,
-            "atlas_sha256": ATLAS_SHA,
-            "accepted_transitions": 16384,
-            "failed_rounds": 0,
-            "echo_timeouts": 0,
-            "feature_assembly_p99_ms": 0.31,
-            "resident_atlas_bytes": 20 * 1024 * 1024,
-            "dyn_payload_bytes_combined": 1024 * 1024,
-            "public_services_modified": False,
-            "orphan_processes_after_teardown": 0,
-        },
+        "wsl_b6_campaign": _b6_evidence(),
     }
 
 
@@ -350,7 +604,7 @@ def test_universal_zero_guide_and_placeholder_evidence_fail(tmp_path):
     fixture = evidence["bundle_v3_atlas"]["objective_fixture"]
     fixture["guide_vector"] = [0.0] * GUIDE_DIM
     evidence["deterministic_transitions"]["runs"][0]["trajectory_sha256"] = "0" * 64
-    evidence["wsl_b6_campaign"]["host_platform"] = "TBD"
+    evidence["wsl_b6_campaign"]["host"]["hostname"] = "TBD"
     report = run_gates(_write_envelope(tmp_path, evidence))
     statuses = _statuses(report)
     assert statuses["bundle_v3_atlas"] == "fail"
@@ -362,10 +616,39 @@ def test_universal_zero_guide_and_placeholder_evidence_fail(tmp_path):
 
 def test_zero_p99_latency_is_placeholder_not_pass(tmp_path):
     evidence = _synthetic_evidence()
-    evidence["wsl_b6_campaign"]["feature_assembly_p99_ms"] = 0.0
+    evidence["wsl_b6_campaign"]["performance"][
+        "four_client_feature_assembly_p99_ns"
+    ] = 0
+    _reseal_b6(evidence["wsl_b6_campaign"])
     report = run_gates(_write_envelope(tmp_path, evidence))
     assert _statuses(report)["wsl_b6_campaign"] == "fail"
-    assert "positive measurement" in _reasons(report, "wsl_b6_campaign")
+    assert "zero or out of budget" in _reasons(report, "wsl_b6_campaign")
+
+
+def test_legacy_b6_summary_booleans_are_forbidden(tmp_path):
+    evidence = _synthetic_evidence()
+    evidence["wsl_b6_campaign"]["g1_transport_pass"] = True
+    report = run_gates(_write_envelope(tmp_path, evidence))
+    assert _statuses(report)["wsl_b6_campaign"] == "fail"
+    assert "legacy summary field" in _reasons(report, "wsl_b6_campaign")
+
+
+@pytest.mark.parametrize("mutation,reason", [
+    (lambda b: b["g1"].update(authoritative_echo_accept_rate=0.99), "acceptance derivation"),
+    (lambda b: b["no_update"].update(optimizer_state_sha256_after=hashlib.sha256(b"changed").hexdigest()), "optimizer_state changed"),
+    (lambda b: b["performance"].update(machine_identity_sha256=hashlib.sha256(b"other-host").hexdigest()), "machine identities differ"),
+    (lambda b: b["public_state"].update(post_state_sha256=hashlib.sha256(b"changed-public").hexdigest()), "pre/post state differs"),
+    (lambda b: b["bindings"].update(hook_necessity_runtime={"hook_walk_budget_ticks": 14, "game_tick_hz": 10, "walk_speed_q8_per_second": 76800}), "budget/cadence"),
+])
+def test_b6_recomputed_seal_does_not_hide_semantic_forgery(
+    tmp_path, mutation, reason
+):
+    evidence = _synthetic_evidence()
+    mutation(evidence["wsl_b6_campaign"])
+    _reseal_b6(evidence["wsl_b6_campaign"])
+    report = run_gates(_write_envelope(tmp_path, evidence))
+    assert _statuses(report)["wsl_b6_campaign"] == "fail"
+    assert reason in _reasons(report, "wsl_b6_campaign")
 
 
 def test_missing_private_causal_facts_fail(tmp_path):
@@ -392,6 +675,36 @@ def test_legacy_selection_fails(tmp_path):
     report = run_gates(_write_envelope(tmp_path / "wire", evidence))
     assert _statuses(report)["legacy_selector_deactivation"] == "fail"
     assert "non-B4 generation" in _reasons(report, "legacy_selector_deactivation")
+
+
+def test_retirement_gate_checks_live_entrypoint_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "source-root"
+    for relative in (
+        "tools/live_round_train.py",
+        "tools/live_match_onnx.py",
+        "tools/ml_vs_ml.py",
+        "tools/behavior_clone_aim.py",
+        "train/ppo.py",
+    ):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# retired:\nreturn 2\n", encoding="utf-8")
+    client = root / "harness/client_env.py"
+    client.parent.mkdir(parents=True, exist_ok=True)
+    client.write_text(
+        "# vector policy input requires an attested multires provider\n"
+        "# spatial_seed belongs to the retired legacy reward path\n",
+        encoding="utf-8",
+    )
+    (root / "tools/live_match_onnx.py").write_text(
+        "def main():\n    return 0\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(verifier, "ROOT", root)
+    report = run_gates(_write_envelope(tmp_path / "evidence", _synthetic_evidence()))
+    assert _statuses(report)["legacy_selector_deactivation"] == "fail"
+    assert "still operational" in _reasons(report, "legacy_selector_deactivation")
 
 
 def test_legacy_wire_descriptor_rejected(tmp_path):

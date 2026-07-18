@@ -87,6 +87,7 @@ struct HostEvidence {
     hostname: String,
     kernel_release: String,
     architecture: &'static str,
+    machine_identity_sha256: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1038,7 +1039,33 @@ fn host_evidence() -> AppResult<HostEvidence> {
         hostname: read_trimmed(Path::new("/proc/sys/kernel/hostname"), "hostname")?,
         kernel_release: read_trimmed(Path::new("/proc/sys/kernel/osrelease"), "kernel release")?,
         architecture: std::env::consts::ARCH,
+        machine_identity_sha256: machine_identity_sha256(Path::new("/etc/machine-id"))?,
     })
+}
+
+fn machine_identity_sha256(path: &Path) -> AppResult<String> {
+    let raw = fs::read(path)
+        .map_err(|error| format!("cannot read machine identity {}: {error}", path.display()))?;
+    let identity = match raw.as_slice() {
+        [identity @ .., b'\n'] if identity.len() == 32 => identity,
+        identity if identity.len() == 32 => identity,
+        _ => {
+            return Err(
+                "machine identity must be exactly 32 lowercase hexadecimal bytes with at most one trailing LF"
+                    .to_owned(),
+            )
+        }
+    };
+    if identity
+        .iter()
+        .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(byte))
+    {
+        return Err(
+            "machine identity must be exactly 32 lowercase hexadecimal bytes with at most one trailing LF"
+                .to_owned(),
+        );
+    }
+    Ok(sha256_hex(identity))
 }
 
 fn read_trimmed(path: &Path, label: &str) -> AppResult<String> {
@@ -1417,6 +1444,40 @@ mod tests {
         assert_eq!(parse_digest(&text, "test").unwrap(), [0xa5; 32]);
         assert!(parse_digest(&"A5".repeat(32), "test").is_err());
         assert!(parse_digest("00", "test").is_err());
+    }
+
+    #[test]
+    fn machine_identity_is_canonical_lowercase_hex_and_changes_are_distinct() {
+        let ordinal = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "q2-dyn-machine-id-test-{}-{ordinal}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("machine-id");
+        assert!(machine_identity_sha256(&path).is_err());
+        let identity = "0123456789abcdef0123456789abcdef";
+        fs::write(&path, format!("{identity}\n")).unwrap();
+        let first = machine_identity_sha256(&path).unwrap();
+        assert_eq!(first, sha256_hex(identity.as_bytes()));
+        let changed_identity = "fedcba9876543210fedcba9876543210";
+        fs::write(&path, format!("{changed_identity}\n")).unwrap();
+        let changed = machine_identity_sha256(&path).unwrap();
+        assert_eq!(changed, sha256_hex(changed_identity.as_bytes()));
+        assert_ne!(changed, first);
+        fs::write(&path, "0123456789ABCDEF0123456789ABCDEF\n").unwrap();
+        assert!(machine_identity_sha256(&path).is_err());
+        fs::write(&path, "0123456789abcdef\n").unwrap();
+        assert!(machine_identity_sha256(&path).is_err());
+        fs::write(&path, format!(" {identity}\n")).unwrap();
+        assert!(machine_identity_sha256(&path).is_err());
+        fs::write(&path, format!("{identity}\r\n")).unwrap();
+        assert!(machine_identity_sha256(&path).is_err());
+        fs::write(&path, format!("{identity}\n\n")).unwrap();
+        assert!(machine_identity_sha256(&path).is_err());
+        fs::write(&path, "\n").unwrap();
+        assert!(machine_identity_sha256(&path).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

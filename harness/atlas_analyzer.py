@@ -4263,6 +4263,11 @@ def _write_canonical_atlas_manifest(
             "sha256": analyzer_sha256,
         },
         "oracles": oracle_records,
+        "recovery_physics": {
+            "hook_walk_budget_ticks": 15,
+            "game_tick_hz": 10,
+            "walk_speed_q8_per_second": 300 * 256,
+        },
         "generator": None if generator_sha256 is None else {
             "name": "q2-map-generator",
             "version": "v6",

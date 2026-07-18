@@ -1441,10 +1441,8 @@ def admit_production_config(config: ProofConfig) -> ProductionAdmission:
     if not isinstance(map_name, str) or not map_name:
         raise Multires500ProofError("bundle_manifest is missing map name")
 
-    objectives_payload = _load_json_object(objectives, "objectives")
-    objective_identity = objectives_payload.get("objective_identity_sha256")
-    if not _valid_sha256(objective_identity):
-        objective_identity = _file_sha256(objectives)
+    _load_json_object(objectives, "objectives")
+    objective_identity = _file_sha256(objectives)
     if not _valid_sha256(objective_identity):
         raise Multires500ProofError("objective identity digest is invalid")
 
@@ -2358,6 +2356,9 @@ def finalize_launch_result(
 
 def build_verifier_evidence(
     *,
+    mode: str,
+    admissible: bool,
+    production_pass: bool,
     transition_count: int,
     run_a: LaunchResult,
     run_b: LaunchResult,
@@ -2387,6 +2388,9 @@ def build_verifier_evidence(
         }
 
     return {
+        "mode": mode,
+        "admissible": admissible,
+        "production_pass": production_pass,
         "transition_count": int(transition_count),
         "runs": [record(run_a), record(run_b)],
         "divergence_run": record(divergence_run),
@@ -2651,6 +2655,9 @@ def run_proof(
         production_pass = False
 
     verifier_evidence = build_verifier_evidence(
+        mode=mode,
+        admissible=admissible,
+        production_pass=production_pass,
         transition_count=REQUIRED_TRANSITION_COUNT,
         run_a=same_seed_a,
         run_b=same_seed_b,
@@ -2745,9 +2752,6 @@ def run_proof(
             "produce a production pass"
         )
 
-    if config.out_path is not None:
-        _write_evidence(config.out_path, report)
-
     if mode == MODE_PRODUCTION and failures:
         raise Multires500ProofError(
             "production 500-transition proof failed: " + "; ".join(failures)
@@ -2760,6 +2764,8 @@ def run_proof(
             and different_seed_diverges
             and not failures
         )
+    if config.out_path is not None:
+        _write_evidence(config.out_path, report)
     return report
 
 
@@ -2770,11 +2776,24 @@ def _write_evidence(path: Path, report: Mapping[str, Any]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(report)
     if target.name == f"{VERIFIER_GATE}.json" or target.name == "deterministic_transitions.json":
+        if (
+            report.get("mode") != MODE_PRODUCTION
+            or report.get("admissible") is not True
+            or report.get("production_pass") is not True
+        ):
+            raise Multires500ProofError(
+                "deterministic verifier evidence requires a passing production proof"
+            )
         body = _canonical_bytes(report["verifier_evidence"])
     else:
         body = _canonical_bytes(payload)
-        sibling = target.with_name(f"{VERIFIER_GATE}.json")
-        sibling.write_bytes(_canonical_bytes(report["verifier_evidence"]))
+        if (
+            report.get("mode") == MODE_PRODUCTION
+            and report.get("admissible") is True
+            and report.get("production_pass") is True
+        ):
+            sibling = target.with_name(f"{VERIFIER_GATE}.json")
+            sibling.write_bytes(_canonical_bytes(report["verifier_evidence"]))
     target.write_bytes(body)
 
 

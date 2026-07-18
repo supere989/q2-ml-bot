@@ -74,6 +74,7 @@ from tools.run_generator_cohort import (  # noqa: E402
 )
 from tools.retired_cohort_registry import (  # noqa: E402
     RetiredCohortRegistryError,
+    require_unretired_identity,
     require_unretired_declaration,
 )
 from tools.source_route_contract import ROUTE_CONTRACT_SCHEMA  # noqa: E402
@@ -81,7 +82,7 @@ from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
 
 
 GATE_SCHEMA = "q2-multires-b2-gate-v1"
-EXPECTED_COHORT = "b2g26_final_71446"
+RETIRED_COHORT_71446 = "b2g26_final_71446"
 EXPECTED_DESIGN_SHA256 = (
     "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
 )
@@ -116,7 +117,7 @@ QUALIFICATION_STABLE_IMPLEMENTATION_KEYS = frozenset({
     "git_clean",
     "routes_sha256",
 })
-QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+RETIRED_71446_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
     "docs/multires/B2-GATE-ASSEMBLY.md",
     "docs/multires/B2-GENERATED-COHORT-71446-DECLARATION.json",
@@ -133,6 +134,46 @@ QUALIFICATION_SUCCESSOR_PATHS = frozenset({
 
 class B2GateError(ValueError):
     """Raised before publication when any B2 evidence is inadmissible."""
+
+
+@dataclass(frozen=True)
+class ActiveFinalAuthority:
+    cohort_id: str
+    declaration_sha256: str
+    immutable_declaration_path: str
+    qualification_successor_paths: frozenset[str]
+
+
+# Fail closed after terminal retirement of 71446. A future activation commit
+# must construct this authority from a fresh post-qualification immutable
+# declaration; no declaration is inferred from the current-path alias.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
+
+
+def _require_active_final_authority() -> ActiveFinalAuthority:
+    authority = ACTIVE_FINAL_AUTHORITY
+    if authority is None:
+        raise B2GateError(
+            "B2 has no active final cohort; commit and explicitly activate a fresh "
+            "post-qualification successor declaration"
+        )
+    _require(
+        re.fullmatch(r"b2g[0-9]+_final_[0-9]+", authority.cohort_id) is not None,
+        "B2 active final cohort ID is malformed",
+    )
+    _digest(authority.declaration_sha256, "B2 active declaration")
+    try:
+        require_unretired_identity(
+            authority.cohort_id, authority.declaration_sha256
+        )
+    except RetiredCohortRegistryError as exc:
+        raise B2GateError(f"B2 active authority is retired: {exc}") from exc
+    _require(
+        authority.immutable_declaration_path
+        in authority.qualification_successor_paths,
+        "B2 active immutable declaration is outside the qualification delta",
+    )
+    return authority
 
 
 @dataclass(frozen=True)
@@ -499,7 +540,10 @@ def _validate_qualification_successor(
     repo_root: Path,
     qualified: Mapping[str, Any],
     current: Mapping[str, Any],
+    authority: ActiveFinalAuthority | None = None,
 ) -> dict[str, Any]:
+    if authority is None:
+        authority = _require_active_final_authority()
     expected_keys = QUALIFICATION_STABLE_IMPLEMENTATION_KEYS | {
         "repository_commit", "repository_tree"
     }
@@ -539,12 +583,12 @@ def _validate_qualification_successor(
         )
         changed[parts[1]] = parts[0]
     _require(
-        set(changed) == QUALIFICATION_SUCCESSOR_PATHS,
+        set(changed) == authority.qualification_successor_paths,
         "B2 qualification successor changed files differ from the declaration-only authority",
     )
     _require(
-        changed["docs/multires/B2-GENERATED-COHORT-71446-DECLARATION.json"] == "A",
-        "B2 qualification successor did not add the immutable 71446 declaration",
+        changed.get(authority.immutable_declaration_path) == "A",
+        "B2 qualification successor did not add its immutable active declaration",
     )
     return {
         "qualified_repository_commit": qualified_commit,
@@ -560,6 +604,7 @@ def _validate_qualification_report(
     paths: B2GatePaths,
     normative: Mapping[str, Any],
     implementation: Mapping[str, Any],
+    authority: ActiveFinalAuthority,
 ) -> dict[str, Any]:
     try:
         report = replay_qualification(
@@ -573,7 +618,7 @@ def _validate_qualification_report(
         "B2 qualification normative document binding differs",
     )
     relation = _validate_qualification_successor(
-        paths.repo_root, report["implementation"], implementation
+        paths.repo_root, report["implementation"], implementation, authority
     )
     b1_gate = _mapping(
         _load_json(paths.b1_gate, canonical=False), "B1 gate"
@@ -627,7 +672,7 @@ def _validate_qualification_report(
     }
 
 
-def _expected_71446_rows() -> list[dict[str, Any]]:
+def _historical_71446_rows() -> list[dict[str, Any]]:
     rows = []
     ordinal = 0
     for style_index, style in enumerate(CONCRETE_STYLES):
@@ -651,13 +696,14 @@ def _validate_declaration(path: Path) -> tuple[dict[str, Any], str]:
         require_unretired_declaration(path, declaration, digest)
     except RetiredCohortRegistryError as exc:
         raise B2GateError(f"B2 declaration admission refused: {exc}") from exc
+    authority = _require_active_final_authority()
     _require(
-        declaration["cohort_id"] == EXPECTED_COHORT,
-        "B2 gate accepts only cohort 71446",
+        declaration["cohort_id"] == authority.cohort_id,
+        "B2 declaration does not name the explicitly active final cohort",
     )
     _require(
-        declaration["maps"] == _expected_71446_rows(),
-        "71446 map/seed selection differs",
+        digest == authority.declaration_sha256,
+        "B2 declaration differs from the explicitly activated immutable bytes",
     )
     return declaration, digest
 
@@ -694,7 +740,7 @@ def _validate_source_freeze(
         "source-freeze report",
     )
     _require(report.get("schema") == "q2-b2-generated-source-freeze-v1", "source-freeze schema differs")
-    _require(report.get("cohort_id") == EXPECTED_COHORT, "source-freeze cohort differs")
+    _require(report.get("cohort_id") == declaration["cohort_id"], "source-freeze cohort differs")
     _require(report.get("declaration_sha256") == declaration_sha256, "source-freeze declaration differs")
     _require(report.get("implementation") == implementation, "source-freeze implementation is stale")
     _require(report.get("map_count") == 28, "source-freeze map count differs")
@@ -1650,7 +1696,7 @@ def _validate_prepare_report(
     )
     _require(report.get("schema") == CAMPAIGN_SCHEMA, "claims prepare schema differs")
     _require(report.get("phase") == "prepare_claims", "claims report phase differs")
-    _require(report.get("cohort_id") == EXPECTED_COHORT, "claims report cohort differs")
+    _require(report.get("cohort_id") == declaration["cohort_id"], "claims report cohort differs")
     _require(report.get("declaration_sha256") == declaration_sha256, "claims report declaration differs")
     _require(report.get("expected_count") == 28 and report.get("map_count") == 28, "claims report count differs")
     _require(report.get("pass_count") == 28 and report.get("passed") is True, "claims report is not green")
@@ -1750,7 +1796,7 @@ def _validate_generated_build_report(
         report.get("schema") == "q2-generated-atlas-build-campaign-v1",
         "generated Atlas build report schema differs",
     )
-    _require(report.get("cohort_id") == EXPECTED_COHORT, "generated build cohort differs")
+    _require(report.get("cohort_id") == declaration["cohort_id"], "generated build cohort differs")
     _require(report.get("declaration_sha256") == declaration_sha256, "generated build declaration differs")
     _require(report.get("implementation") == implementation, "generated build implementation is stale")
     claims_snapshot = {
@@ -2324,11 +2370,15 @@ def _validate_dyn_evidence(
     map_id = authority["canonical_map_id"]
     _require(
         map_id in {row["map"] for row in declaration["maps"]},
-        "Dyn map is outside cohort 71446",
+        "Dyn map is outside the active final cohort",
     )
 
     host = _mapping(report["host"], "Dyn host")
-    _exact_keys(host, {"hostname", "kernel_release", "architecture"}, "Dyn host")
+    _exact_keys(
+        host,
+        {"hostname", "kernel_release", "architecture", "machine_identity_sha256"},
+        "Dyn host",
+    )
     _require(host["hostname"] == "DESKTOP-RTX2080", "Dyn evidence host is not DESKTOP-RTX2080")
     _require(
         isinstance(host["kernel_release"], str)
@@ -2336,6 +2386,11 @@ def _validate_dyn_evidence(
         "Dyn evidence kernel is not WSL2",
     )
     _require(host["architecture"] == "x86_64", "Dyn evidence architecture differs")
+    machine_identity = _digest(
+        host["machine_identity_sha256"], "Dyn machine identity"
+    )
+    _require(machine_identity != "0" * 64,
+             "Dyn machine identity may not be a placeholder")
 
     analysis_path = paths.analysis_dir / f"{map_id}.analysis.manifest.json"
     atlas_manifest_path = paths.analysis_dir / f"{map_id}.atlas.manifest.json"
@@ -2540,6 +2595,7 @@ def _validate_dyn_evidence(
         "client_count": 4,
         "host": host["hostname"],
         "kernel_release": host["kernel_release"],
+        "machine_identity_sha256": host["machine_identity_sha256"],
     }
     return evidence, budget
 
@@ -2648,12 +2704,13 @@ def _validate_test_report(path: Path, implementation: Mapping[str, Any]) -> dict
 def assemble_gate(
     paths: B2GatePaths, *, implementation_binding: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
+    authority = _require_active_final_authority()
     normative = _validate_normative_documents(paths)
     implementation = _validate_implementation(paths, implementation_binding)
     b1, binaries = _validate_b1_and_oracles(paths, normative)
     declaration, declaration_sha256 = _validate_declaration(paths.declaration)
     qualification = _validate_qualification_report(
-        paths, normative, implementation
+        paths, normative, implementation, authority
     )
     source = _validate_source_freeze(
         paths, declaration, declaration_sha256, implementation
@@ -2694,7 +2751,7 @@ def assemble_gate(
         "b1_authority": b1,
         "toolchain_qualification": qualification,
         "generated_cohort": {
-            "cohort_id": EXPECTED_COHORT,
+            "cohort_id": authority.cohort_id,
             "declaration": _file_record(paths.declaration),
             "declaration_sha256": declaration_sha256,
             "source": source,
@@ -2738,6 +2795,7 @@ def assemble_gate(
 
 
 def validate_gate(value: object) -> dict[str, Any]:
+    authority = _require_active_final_authority()
     gate = _mapping(value, "B2 gate")
     _exact_keys(
         gate,
@@ -2764,7 +2822,14 @@ def validate_gate(value: object) -> dict[str, Any]:
         "B2 toolchain qualification disposition differs",
     )
     generated = _mapping(gate["generated_cohort"], "generated cohort")
-    _require(generated.get("cohort_id") == EXPECTED_COHORT, "B2 gate cohort differs")
+    _require(
+        generated.get("cohort_id") == authority.cohort_id,
+        "B2 gate cohort differs",
+    )
+    _require(
+        generated.get("declaration_sha256") == authority.declaration_sha256,
+        "B2 gate declaration differs from active authority",
+    )
     preflight = _mapping(
         generated.get("compiled_cm_preflight"), "B2 compiled-CM preflight"
     )

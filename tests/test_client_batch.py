@@ -1690,8 +1690,11 @@ def test_synchronized_pre_boundary_gap_waits_without_dispatch_or_failure():
         _FakeEnv(f"client-{slot}", slot, [], events)
         for slot in range(4)
     ]
+    for env in envs:
+        env.deterministic_frame_barrier = True
     batch = Q2NetworkClientBatch(
-        envs, round_timeout=0.01, max_rejected_echoes=0
+        envs, round_timeout=0.01, max_rejected_echoes=0,
+        deterministic_frame_barrier=True,
     )
     try:
         batch.reset()
@@ -1732,7 +1735,7 @@ def test_synchronized_pre_boundary_gap_waits_without_dispatch_or_failure():
                 env.slot,
                 3,
                 2,
-                echo_tick=2,
+                echo_tick=1,
                 accepted=1,
                 action_generation=1,
                 forward=0.4,
@@ -1958,7 +1961,7 @@ def test_client_launch_isolates_home_downloads_and_avoids_stdout_pipe(
         client_binary=str(tmp_path / "quake2"),
         client_root=str(tmp_path / "runtime"),
         client_data_root=str(tmp_path / "sandboxes"),
-        harness_port=0,
+        harness_port=39000,
         client_id="client-a",
     )
     monkeypatch.setattr(env, "_receive", lambda after_sequence: "started")

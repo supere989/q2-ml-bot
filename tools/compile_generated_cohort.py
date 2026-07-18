@@ -54,6 +54,7 @@ REQUIRED_PAK_MEMBER = "pics/colormap.pcx"
 AT_FDCWD = -100
 RENAME_NOREPLACE = 1
 DEFAULT_MAP_TIMEOUT_SECONDS = 3600.0
+MAX_MAP_TIMEOUT_SECONDS = 86400.0
 
 
 class CompileCohortError(RuntimeError):
@@ -376,10 +377,11 @@ def compile_generated_cohort(
             or not isinstance(timeout_seconds, (int, float))
             or not math.isfinite(timeout_seconds)
             or timeout_seconds <= 0
-            or timeout_seconds > 86400
+            or timeout_seconds > MAX_MAP_TIMEOUT_SECONDS
         ):
             raise CompileCohortError(
-                "timeout_seconds must be finite and in the range (0, 86400]"
+                "timeout_seconds must be finite and in the range "
+                f"(0, {MAX_MAP_TIMEOUT_SECONDS:g}]"
             )
         timeout_seconds = float(timeout_seconds)
         report["contract"]["per_map_timeout_seconds"] = timeout_seconds

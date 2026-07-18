@@ -225,7 +225,7 @@ mod tests {
             parameters: PmoveParameters {
                 gravity: 800,
                 airaccelerate_f32_bits: 0.0_f32.to_bits(),
-                constants: "fixture-pmove-constants".to_owned(),
+                constants: "stopspeed=100;maxspeed=300;duckspeed=100;accelerate=10;wateraccelerate=10;friction=6;waterfriction=1;waterspeed=400".to_owned(),
             },
             source: PmoveSourceClosure {
                 collision_sha256: collision.source.collision_sha256.clone(),
@@ -351,6 +351,7 @@ mod tests {
                 pmove_oracle: Some(pmove),
                 hook_oracle: None,
             },
+            recovery_physics: q2_lattice_rs::atlas::RecoveryPhysicsManifest::default(),
             generator: None,
             grid: GridManifest {
                 origin: [0, 0, 0],

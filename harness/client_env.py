@@ -14,7 +14,11 @@ import uuid
 
 import numpy as np
 
-from .client_protocol import ClientTelemetry, parse_client_telemetry
+from .client_protocol import (
+    ClientTelemetry,
+    PublicTelemetryPrivilegeViolation,
+    parse_client_telemetry,
+)
 from .multires_admission import (
     PRIVATE_CAUSAL_INFO_KEY,
     PRIVATE_SPATIAL_REWARD_INFO_KEY,
@@ -80,6 +84,30 @@ class ClientTelemetryDrain:
         return any(name != self.previous.map_name for name in self.map_names)
 
 
+@dataclass(frozen=True)
+class PublicTelemetryAudit:
+    """Exhaustive datagram accounting for one public harness socket."""
+
+    datagrams_seen: int
+    public_packets_decoded: int
+    routed_packets_accepted: int
+    malformed_packets_rejected: int
+    foreign_client_packets_rejected: int
+    stale_packets_rejected: int
+    teacher_packets_detected: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "datagrams_seen": self.datagrams_seen,
+            "public_packets_decoded": self.public_packets_decoded,
+            "routed_packets_accepted": self.routed_packets_accepted,
+            "malformed_packets_rejected": self.malformed_packets_rejected,
+            "foreign_client_packets_rejected": self.foreign_client_packets_rejected,
+            "stale_packets_rejected": self.stale_packets_rejected,
+            "teacher_packets_detected": self.teacher_packets_detected,
+        }
+
+
 def authoritative_reward(obs) -> float:
     """Reward channels emitted by game.so for this exact client_id."""
     return (
@@ -111,6 +139,8 @@ class Q2NetworkClientEnv:
         client_data_root: str | None = None,
         harness_host: str = "127.0.0.1",
         harness_port: int = 39000,
+        harness_route_host: str | None = None,
+        harness_route_port: int | None = None,
         qport: int | None = None,
         client_id: str | None = None,
         name: str | None = None,
@@ -137,6 +167,16 @@ class Q2NetworkClientEnv:
         )
         self.harness_host = harness_host
         self.harness_port = int(harness_port)
+        self.harness_route_host = (
+            harness_host if harness_route_host is None else harness_route_host
+        )
+        self.harness_route_port = int(
+            harness_port if harness_route_port is None else harness_route_port
+        )
+        if not (1 <= self.harness_port <= 65535):
+            raise ValueError("harness_port must be between 1 and 65535")
+        if not (1 <= self.harness_route_port <= 65535):
+            raise ValueError("harness_route_port must be between 1 and 65535")
         self.qport = int(qport if qport is not None else 10000 + harness_port % 50000)
         self.client_id = client_id or uuid.uuid4().hex
         try:
@@ -184,12 +224,15 @@ class Q2NetworkClientEnv:
                 raise TypeError("multires provider factory must implement create()")
             self._spatial = None
         else:
-            # The retired VoxelSpatialReward is imported and constructed only
-            # for an explicitly non-multires environment.  Selecting the new
-            # path cannot reach its module, dense rewards, or 24-float memory.
-            from .spatial import VoxelSpatialReward
-
-            self._spatial = VoxelSpatialReward.from_env(seed=spatial_seed)
+            # Unvectorized transport/registration probes may use the network
+            # client without a policy provider.  The retired dense voxel
+            # reward is no longer imported or constructed as an implicit
+            # fallback; any vector request below fails closed.
+            if spatial_seed is not None:
+                raise ValueError(
+                    "spatial_seed belongs to the retired legacy reward path"
+                )
+            self._spatial = None
         self._spatial_map: str | None = None
         self._multires_map_name: str | None = None
         self._multires_map_epoch = 0
@@ -205,6 +248,13 @@ class Q2NetworkClientEnv:
         self._process: subprocess.Popen | None = None
         self._client_address: tuple[str, int] | None = None
         self._last: ClientTelemetry | None = None
+        self._telemetry_datagrams_seen = 0
+        self._public_packets_decoded = 0
+        self._routed_packets_accepted = 0
+        self._malformed_packets_rejected = 0
+        self._foreign_client_packets_rejected = 0
+        self._stale_packets_rejected = 0
+        self._teacher_packets_detected = 0
         self._target_alignment_map: str | None = None
         self._target_was_aligned = False
         self._last_target_acquire_frame = -TARGET_ACQUIRE_COOLDOWN_FRAMES
@@ -253,7 +303,8 @@ class Q2NetworkClientEnv:
                 if self.deterministic_frame_barrier else ()
             ),
             "+set", "ml_telemetry_server", self.telemetry_server,
-            "+set", "ml_harness_addr", f"{self.harness_host}:{self.harness_port}",
+            "+set", "ml_harness_addr",
+            f"{self.harness_route_host}:{self.harness_route_port}",
             "+set", "s_enable", "0",
             "+set", "vid_renderer", "soft",
             "+connect", self.server,
@@ -271,6 +322,43 @@ class Q2NetworkClientEnv:
             text=self.debug,
         )
         return self._receive(after_sequence=None)
+
+    @property
+    def public_telemetry_audit(self) -> PublicTelemetryAudit:
+        return PublicTelemetryAudit(
+            datagrams_seen=self._telemetry_datagrams_seen,
+            public_packets_decoded=self._public_packets_decoded,
+            routed_packets_accepted=self._routed_packets_accepted,
+            malformed_packets_rejected=self._malformed_packets_rejected,
+            foreign_client_packets_rejected=self._foreign_client_packets_rejected,
+            stale_packets_rejected=self._stale_packets_rejected,
+            teacher_packets_detected=self._teacher_packets_detected,
+        )
+
+    def _parse_public_datagram(self, data: bytes) -> ClientTelemetry | None:
+        self._telemetry_datagrams_seen += 1
+        try:
+            telemetry = parse_client_telemetry(data)
+        except PublicTelemetryPrivilegeViolation:
+            self._teacher_packets_detected += 1
+            raise
+        if telemetry is None:
+            self._malformed_packets_rejected += 1
+            return None
+        self._public_packets_decoded += 1
+        return telemetry
+
+    def _route_public_telemetry(
+        self, telemetry: ClientTelemetry, *, after_sequence: int | None
+    ) -> bool:
+        if telemetry.client_id != self.client_id:
+            self._foreign_client_packets_rejected += 1
+            return False
+        if after_sequence is not None and telemetry.sequence <= after_sequence:
+            self._stale_packets_rejected += 1
+            return False
+        self._routed_packets_accepted += 1
+        return True
 
     def _receive(
         self,
@@ -291,10 +379,10 @@ class Q2NetworkClientEnv:
                 data, address = self._socket.recvfrom(65535)
             except socket.timeout:
                 continue
-            telemetry = parse_client_telemetry(data)
-            if telemetry is None or telemetry.client_id != self.client_id:
-                continue
-            if after_sequence is not None and telemetry.sequence <= after_sequence:
+            telemetry = self._parse_public_datagram(data)
+            if telemetry is None or not self._route_public_telemetry(
+                telemetry, after_sequence=after_sequence
+            ):
                 continue
             self._client_address = address
             self._last = telemetry
@@ -351,10 +439,10 @@ class Q2NetworkClientEnv:
                     data, address = self._socket.recvfrom(65535)
                 except (BlockingIOError, socket.timeout):
                     break
-                telemetry = parse_client_telemetry(data)
-                if telemetry is None or telemetry.client_id != self.client_id:
-                    continue
-                if telemetry.sequence <= latest.sequence:
+                telemetry = self._parse_public_datagram(data)
+                if telemetry is None or not self._route_public_telemetry(
+                    telemetry, after_sequence=latest.sequence
+                ):
                     continue
                 latest = telemetry
                 packet_count += 1
@@ -621,10 +709,10 @@ class Q2NetworkClientEnv:
         info = self._base_info(current)
         if not vector:
             return current.observation, info
-        self._spatial.reset(current.map_name, current.observation)
-        self._spatial_map = current.map_name
-        memory = self._spatial.memory_features(current.observation)
-        return current.observation.to_vector(memory), info
+        raise RuntimeError(
+            "vector policy input requires an attested multires provider; "
+            "the legacy spatial fallback is retired"
+        )
 
     def transition_result(
         self,
@@ -679,15 +767,10 @@ class Q2NetworkClientEnv:
             "spatial_bonus": 0.0,
         })
         if vector:
-            if current.map_name != self._spatial_map:
-                self._spatial.reset(current.map_name, obs)
-                self._spatial_map = current.map_name
-            spatial_bonus, spatial_info = self._spatial.update(obs)
-            memory = self._spatial.memory_features(obs)
-            info.update(spatial_info)
-            info["spatial_bonus"] = float(spatial_bonus)
-            obs_result = obs.to_vector(memory)
-            reward += spatial_bonus
+            raise RuntimeError(
+                "vector policy input requires an attested multires provider; "
+                "the legacy spatial fallback is retired"
+            )
         else:
             obs_result = obs
         return obs_result, reward, obs.is_terminal, False, info

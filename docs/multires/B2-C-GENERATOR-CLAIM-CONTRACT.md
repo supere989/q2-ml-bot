@@ -886,7 +886,7 @@ salvaged, substituted, or admitted. A successor requires the transactional
 lava/reward fix, deterministic rejection-path coverage, and a fresh green
 non-admissible qualification before a new immutable declaration.
 
-### Authorized 71446 final attempt
+### Retired 71446 final attempt
 
 The transactional lava/reward fix and deterministic rejection-path test are
 committed at `a05ddb7037774c1b246a6b13972b228570acb8ef`, tree
@@ -902,26 +902,54 @@ assembled qualification report SHA-256 is
 `69e2b1979feae22c706839dc24f8923b60e34d5b623c8f03b0e5ebb51181a549`.
 It remains explicitly non-admissible and supplies no final-lane bytes.
 
-Exactly one immutable/no-retry final producer attempt is authorized for
-`b2g26_final_71446`. The current canonical alias and immutable named
+Exactly one immutable/no-retry final producer attempt was authorized for
+`b2g26_final_71446`. The historical current-path alias and immutable named
 `B2-GENERATED-COHORT-71446-DECLARATION.json` are byte-identical with SHA-256
 `58d52bd958249a70bf8115ab1c442fb6888a6d69b290a636303986f69acb658f`.
 They declare exactly 28 fresh rows, four per concrete style in declaration
 order, using seed blocks 71446000..71446003 through 71446600..71446603.
-No producer may run before all clean-snapshot pre-source checks are green.
+No producer was permitted to run before all clean-snapshot pre-source checks
+were green.
 
-The first source-generation invocation consumes the sole 71446 authorization.
-Any source or later-stage failure permanently retires 71446; there is no
+The first source-generation invocation consumed the sole 71446 authorization.
+Its later-stage failure permanently retired 71446; there is no
 resume, retry, repair, repeated invocation, replacement member, passing
 subset, salvage, or reuse. Qualification artifacts and every retired
 71426..71445 byte remain forbidden inputs.
 
-The declaration-bearing 71446 producer commit must be a strict successor of
+That terminal condition occurred at the sole compiled-CM preflight. Source
+generation and the independent cold rebuild passed all 28 maps, real q2tool
+compilation published the exact 168-file stage, exact compiled membership
+passed, and compiled static validation passed 28/28. Their canonical report
+SHA-256 values are
+`0c76c40ab9ceda61d5b6476bd0edcbefbf756e4209c6b775472f949539d9d78a`,
+`cd7622c922a958ac8ecd54f78edb4b0de3e3fc3316346a2926b8ede083272d82`,
+`11ffd5a3ba6904706a243eabdf56d8a865d7b3cbc5d3873a189b0b05bbcb5b40`,
+and `a8044e99b1ac7f25bb2b7635ae202b3f0ae00726e779280c4b5e59baf9aaa2d9`.
+
+The compiled-CM invocation then supplied `3600` to
+`--oracle-batch-timeout-seconds`, although the accepted domain is finite
+`(0, 60]`. It exited 2 in argument validation, before any CM oracle ran and
+before any compiled-CM report was published. This was an operator
+argument-domain preflight failure, not a 3,600-second runtime timeout.
+Its terminal diagnostic was `oracle batch timeout must be finite and in (0, 60]`.
+`B2-GENERATED-COHORT-71446-FAILURE.json` is the canonical terminal authority,
+SHA-256
+`4b26c670ed54585787505cf7dfbb35bdc1830fdfbd42585a16d0484622ea306f`.
+
+Cohort 71446 is permanently retired. No compiled-CM, materialization, claims,
+analysis, Dyn, final tests, gate, deployment, or training action ran. None of
+its source, compiled, report, log, WSL, or producer-snapshot bytes may be
+retried, resumed, reused, copied forward, salvaged, substituted, or admitted.
+A successor requires a fresh implementation leaf, B1 seal, disposable
+qualification, and separately committed immutable declaration.
+
+The declaration-bearing 71446 producer commit was required to be a strict successor of
 qualified commit `a05ddb7037774c1b246a6b13972b228570acb8ef`. Gate replay
 must prove ancestry, the exact qualified commit/tree and report binding,
 byte-identical stable authority fields, and a complete Git delta equal to the
-frozen 71446 declaration/gate/schema/direct-test authorization path set. Any
-unrelated committed change rejects the qualification.
+frozen 71446 declaration/gate/schema/direct-test authorization path set. That
+relation is historical and cannot authorize a future cohort.
 
 The declaration-bearing 71445 producer commit was required to be a strict successor of
 qualified commit `3b17223ab32e20152aead1eb32a79e239d6f4d8a`. Gate replay
@@ -1001,9 +1029,11 @@ check.
 
 ## Offline workflow
 
-The active final `COHORT_ID` is `b2g26_final_71446`; the current alias and
-immutable named declaration are byte-identical. Commands must never name
-retired cohorts 71426 through 71445. No retired or qualification
+There is no active final `COHORT_ID`. The current alias is the byte-identical
+historical 71446 declaration and is rejected by the retirement registry.
+Commands in this section are templates only until root commits a separately
+qualified successor declaration and updates the alias. Commands must never
+name retired cohorts 71426 through 71446. No retired or qualification
 population, report, Dyn evidence, compiled byte, or passing subset may be
 copied into a successor root.
 

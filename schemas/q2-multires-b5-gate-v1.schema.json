@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "q2-multires-b5-gate-v1.schema.json",
+  "title": "Multires B5 pretraining gate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "tool", "status", "green", "source", "normative_documents",
+    "runtime_bindings", "evidence", "component_evidence", "campaigns", "proof",
+    "privilege", "predicates",
+    "predecessor",
+    "runtime_manifest_identity_sha256",
+    "failures", "gate_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "q2-multires-b5-gate-v1"},
+    "tool": {"const": "assemble_b5_gate"},
+    "status": {"const": "green"},
+    "green": {"const": true},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["clean", "commit", "tree"],
+      "properties": {
+        "clean": {"const": true},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "normative_documents": {"$ref": "#/$defs/file_map"},
+    "runtime_bindings": {"$ref": "#/$defs/file_map"},
+    "runtime_manifest_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "privilege": {"$ref": "#/$defs/b4Privilege"},
+    "predecessor": {"$ref": "#/$defs/predecessor"},
+    "evidence": {"$ref": "#/$defs/file_map"},
+    "component_evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["validation_report", "proof_report"],
+      "properties": {
+        "validation_report": {"type": "object"},
+        "proof_report": {"type": "object"}
+      }
+    },
+    "campaigns": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "campaign_count", "deterministic_pairs", "guide_scenario_identity_sha256"
+      ],
+      "properties": {
+        "campaign_count": {"const": 10},
+        "deterministic_pairs": {"const": 5},
+        "guide_scenario_identity_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "proof": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "transition_count", "same_seed_match", "different_seed_diverges",
+        "production_pass"
+      ],
+      "properties": {
+        "transition_count": {"const": 500},
+        "same_seed_match": {"const": true},
+        "different_seed_diverges": {"const": true},
+        "production_pass": {"const": true}
+      }
+    },
+    "predicates": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "repository_clean", "exact_source_and_runtime_bound",
+        "sealed_b4_public_privilege_evidence_bound",
+        "active_authority_b3_b4_predecessor_chain_bound",
+        "all_campaigns_deterministic", "guide_on_off_exercised",
+        "hazard_hook_exercised", "posture_water_crouch_exercised",
+        "aim_combat_holdout_exercised", "checkpoint_unchanged",
+        "policy_state_unchanged", "optimizer_state_unchanged",
+        "no_rate_reward_violations", "exact_500_transition_proof_passed"
+      ],
+      "properties": {
+        "repository_clean": {"const": true},
+        "exact_source_and_runtime_bound": {"const": true},
+        "sealed_b4_public_privilege_evidence_bound": {"const": true},
+        "active_authority_b3_b4_predecessor_chain_bound": {"const": true},
+        "all_campaigns_deterministic": {"const": true},
+        "guide_on_off_exercised": {"const": true},
+        "hazard_hook_exercised": {"const": true},
+        "posture_water_crouch_exercised": {"const": true},
+        "aim_combat_holdout_exercised": {"const": true},
+        "checkpoint_unchanged": {"const": true},
+        "policy_state_unchanged": {"const": true},
+        "optimizer_state_unchanged": {"const": true},
+        "no_rate_reward_violations": {"const": true},
+        "exact_500_transition_proof_passed": {"const": true}
+      }
+    },
+    "failures": {"type": "array", "maxItems": 0},
+    "gate_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string", "pattern": "^[0-9a-f]{64}$",
+      "not": {"const": "0000000000000000000000000000000000000000000000000000000000000000"}
+    },
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "file_map": {
+      "type": "object", "minProperties": 2,
+      "additionalProperties": {"$ref": "#/$defs/file"}
+    },
+    "b4Privilege": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "basis", "aggregate_evidence_sha256", "runtime_manifest_sha256",
+        "network_qualification_evidence_sha256", "datagrams_seen",
+        "public_packets_decoded", "teacher_packets_detected",
+        "negative_probe_result", "documents"
+        , "predecessor"
+      ],
+      "properties": {
+        "basis": {"const": "sealed-b4-real-public-datagram-audit-v1"},
+        "aggregate_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "runtime_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "network_qualification_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "datagrams_seen": {"type": "integer", "minimum": 1},
+        "public_packets_decoded": {"type": "integer", "minimum": 1},
+        "teacher_packets_detected": {"const": 0},
+        "negative_probe_result": {"const": "fatal-public-privilege-violation"},
+        "predecessor": {"$ref": "#/$defs/predecessor"},
+        "documents": {
+          "type": "object", "minProperties": 4, "maxProperties": 4,
+          "additionalProperties": {"$ref": "#/$defs/file"}
+        }
+      }
+    },
+    "predecessor": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "b3_gate", "b3_gate_sha256", "cohort_id",
+        "declaration_sha256", "atlas_set_sha256"
+      ],
+      "properties": {
+        "b3_gate": {"$ref": "#/$defs/file"},
+        "b3_gate_sha256": {"$ref": "#/$defs/sha256"},
+        "cohort_id": {
+          "type": "string", "pattern": "^b2g[0-9]+_final_[0-9]+$",
+          "not": {"const": "b2g26_final_71446"}
+        },
+        "declaration_sha256": {"$ref": "#/$defs/sha256"},
+        "atlas_set_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

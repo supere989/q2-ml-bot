@@ -8,6 +8,9 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import socket
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -178,17 +181,21 @@ def _common_events(rows, *, epoch=False, fault=""):
 
 
 def _trajectory(
-    table, *, lifecycle_boundaries=0, lifecycle_ordinal=3, death=False
+    table, *, lifecycle_boundaries=0, lifecycle_ordinal=3, death=False,
+    transport_gap_at=None,
 ):
     rows = []
     for row in table["rows"]:
         tick = row["ordinal"]
-        server_frame = tick + 1
+        action_tick = tick + int(
+            transport_gap_at is not None and tick >= transport_gap_at
+        )
+        server_frame = action_tick + 1
         if lifecycle_boundaries and tick >= lifecycle_ordinal:
             server_frame += lifecycle_boundaries + 2
         clients = []
         for slot, action in enumerate(row["clients"]):
-            generation = tick % 192 + 1
+            generation = action_tick % 192 + 1
             clients.append({
                 "client_id": f"qual-{slot:02d}",
                 "client_slot": slot,
@@ -196,15 +203,15 @@ def _trajectory(
                 "server_frame": server_frame,
                 "map_name": "q2dm1",
                 "map_epoch": 1,
-                "action_tick": tick,
-                "applied_action_tick": tick,
-                "echo_tick": tick,
+                "action_tick": action_tick,
+                "applied_action_tick": action_tick,
+                "echo_tick": action_tick,
                 "action_generation": generation,
                 "causal": {
                     "client_life_epoch": (
                         2 if death and slot == 0 and tick >= lifecycle_ordinal else 1
                     ),
-                    "echo_tick": tick, "action_generation": generation,
+                    "echo_tick": action_tick, "action_generation": generation,
                     "echo_valid": True, "facts_complete": True,
                     "transition_trainable": True,
                     "role_playing": True,
@@ -219,7 +226,7 @@ def _trajectory(
                 },
                 "observation": {
                     "slot": slot,
-                    "tick": tick + 1,
+                    "tick": server_frame,
                     "terminal_reason": 0,
                     "self_debug": [
                         slot + 1,
@@ -268,6 +275,58 @@ def _playing_role_preflight():
     ]
 
 
+def _relay_fault_event(slot, *, timeout_ms=1500):
+    held_ns = 1_000_000_000 + slot * 10_000
+    scheduled_ns = held_ns + timeout_ms * 600_000
+    released_ns = scheduled_ns + 1_000_000
+    digest = hashlib.sha256(f"relay-{slot}".encode()).hexdigest()
+    return {
+        "event": "udp_telemetry_held_and_released",
+        "client_id": f"qual-{slot:02d}",
+        "client_slot": slot,
+        "server_frame": 6,
+        "applied_action_tick": 5,
+        "sequence": 5,
+        "datagram_bytes": qualification.TELEMETRY_BYTES,
+        "held_datagram_sha256": digest,
+        "released_datagram_sha256": digest,
+        "relay_endpoint": f"127.0.0.1:{41000 + slot}",
+        "upstream_endpoint": f"127.0.0.1:{42000 + slot}",
+        "downstream_endpoint": f"127.0.0.1:{43000 + slot}",
+        "held_monotonic_ns": held_ns,
+        "scheduled_release_monotonic_ns": scheduled_ns,
+        "released_monotonic_ns": released_ns,
+        "hold_duration_ns": released_ns - held_ns,
+        "queue_limit": 1,
+        "queue_high_water": 1,
+        "queue_overflows": 0,
+        "held_packets": 1,
+        "released_packets": 1,
+        "additional_suppressed_packets": 0,
+        "additional_suppressed_bytes": 0,
+        "additional_suppressed_rolling_sha256": hashlib.sha256(b"").hexdigest(),
+        "additional_first_sequence": None,
+        "additional_last_sequence": None,
+        "additional_first_server_frame": None,
+        "additional_last_server_frame": None,
+        "forwarded_to_harness_before_hold": 1,
+        "forwarded_to_harness_during_hold": 0,
+        "forwarded_to_harness": 2,
+        "forwarded_to_client": 1,
+        "relay_thread_alive": True,
+    }
+
+
+def _fault_process_liveness():
+    return [{
+        "role": "server" if index == 0 else "client",
+        "identity": "q2ded" if index == 0 else f"qual-{index - 1:02d}",
+        "pid": 1000 + index,
+        "start_ticks": 2000 + index,
+        "alive": True,
+    } for index in range(5)]
+
+
 class FakeExecutor:
     def __init__(self, *, tamper=None):
         self.tamper = tamper
@@ -281,6 +340,9 @@ class FakeExecutor:
             _trajectory(
                 table, lifecycle_boundaries=lifecycle_count,
                 death=spec.injected_fault == "death",
+                transport_gap_at=(
+                    5 if spec.injected_fault == "whole-telemetry-gap" else None
+                ),
             )
             if spec.expected_outcome == "completed" else []
         )
@@ -408,6 +470,14 @@ class FakeExecutor:
                 "event": "admission_reject", "slot": "4",
                 "reason": "roster_or_capability",
             })
+        transport_fault_events = []
+        if spec.injected_fault == "whole-telemetry-gap":
+            transport_fault_events = [
+                _relay_fault_event(slot)
+                for slot in range(4)
+            ]
+        elif spec.injected_fault == "partial-telemetry-timeout":
+            transport_fault_events = [_relay_fault_event(0)]
         death_boundaries = []
         action_hold_boundaries = []
         phases = (
@@ -508,7 +578,9 @@ class FakeExecutor:
                 len(death_boundaries) if spec.injected_fault == "death"
                 else len(action_hold_boundaries)
                 if spec.injected_fault == "same-life-hold"
-                else 1 if spec.injected_fault == "epoch-drain" else 0
+                else 1 if spec.injected_fault in (
+                    "epoch-drain", "whole-telemetry-gap"
+                ) else 0
             ),
             "trajectory_sha256": hashlib.sha256(_canonical(rows)).hexdigest(),
             "trajectory_rows": rows,
@@ -516,12 +588,62 @@ class FakeExecutor:
             "action_hold_boundary_rows": action_hold_boundaries,
             "death_lifecycle_resyncs": len(death_boundaries),
             "action_state_resyncs": len(action_hold_boundaries),
+            "public_telemetry_audit": [
+                {
+                    "client_id": f"qual-{slot:02d}",
+                    "datagrams_seen": 33,
+                    "public_packets_decoded": 33,
+                    "routed_packets_accepted": 33,
+                    "malformed_packets_rejected": 0,
+                    "foreign_client_packets_rejected": 0,
+                    "stale_packets_rejected": 0,
+                    "teacher_packets_detected": 0,
+                }
+                for slot in range(4)
+            ],
+            "transport_fault_events": transport_fault_events,
+            "fault_process_liveness": (
+                _fault_process_liveness()
+                if spec.injected_fault in (
+                    "whole-telemetry-gap", "partial-telemetry-timeout"
+                ) else []
+            ),
+            "transport_metrics": {
+                "rounds_dispatched": (
+                    33 if spec.injected_fault in (
+                        "whole-telemetry-gap", "epoch-drain"
+                    ) else 32 + lifecycle_count if rows else 5
+                ),
+                "actions_dispatched": (
+                    132 if spec.injected_fault in (
+                        "whole-telemetry-gap", "epoch-drain"
+                    ) else (32 + lifecycle_count) * 4 if rows else 20
+                ),
+                "transitions_accepted": 128 if rows else 16,
+                "failed_rounds": int(
+                    spec.injected_fault == "partial-telemetry-timeout"
+                ),
+                "echo_timeouts": int(
+                    spec.injected_fault == "partial-telemetry-timeout"
+                ),
+                "telemetry_gap_resyncs": int(
+                    spec.injected_fault == "whole-telemetry-gap"
+                ),
+                "realtime_catchup_resyncs": (
+                    1 if spec.injected_fault in (
+                        "whole-telemetry-gap", "epoch-drain"
+                    ) else lifecycle_count
+                ),
+            },
             "structured_events": events,
             "structured_events_sha256": hashlib.sha256(_canonical(events)).hexdigest(),
             "fault_event_count": sum(
                 event.get("event") == "fatal" for event in events
             ),
-            "exception": None,
+            "exception": (
+                "AuthoritativeEchoError"
+                if spec.injected_fault == "partial-telemetry-timeout" else None
+            ),
             "epoch_drains": 1 if spec.injected_fault == "epoch-drain" else 0,
             "new_epoch_bootstrap_frames": (
                 1 if spec.injected_fault == "epoch-drain" else 0
@@ -628,6 +750,131 @@ def _validated_fault_raw(fault):
         spec, raw, table, test_mode=True, timeout_ms=1500
     )
     return spec, table, raw
+
+
+def test_whole_gap_is_a_distinct_real_transport_scenario():
+    names = {spec.name: spec.injected_fault for spec in qualification.scenario_plan(41)}
+    assert names["brief-drop-recovery"] == "brief-drop"
+    assert names["whole-batch-telemetry-gap-recovery"] == "whole-telemetry-gap"
+    assert names["partial-client-telemetry-timeout"] == "partial-telemetry-timeout"
+    assert names["one-client-sigkill"] == "sigkill"
+
+
+def test_fault_relay_holds_the_real_datagram_and_releases_identical_bytes():
+    downstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    downstream.bind(("127.0.0.1", 0))
+    downstream.settimeout(0.04)
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.bind(("127.0.0.1", 0))
+    relay_port = probe.getsockname()[1]
+    probe.close()
+    upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    upstream.bind(("127.0.0.1", 0))
+    relay = qualification._TelemetryFaultRelay(
+        relay_port=relay_port,
+        downstream_port=downstream.getsockname()[1],
+        client_id="qual-00",
+        hold_seconds=0.12,
+    )
+    parsed = iter((
+        SimpleNamespace(
+            client_id="qual-00", client_slot=0, server_frame=1,
+            applied_action_tick=0, sequence=1,
+        ),
+        SimpleNamespace(
+            client_id="qual-00", client_slot=0, server_frame=2,
+            applied_action_tick=1, sequence=2,
+        ),
+        SimpleNamespace(
+            client_id="qual-00", client_slot=0, server_frame=2,
+            applied_action_tick=1, sequence=3,
+        ),
+        SimpleNamespace(
+            client_id="qual-00", client_slot=0, server_frame=2,
+            applied_action_tick=1, sequence=4,
+        ),
+    ))
+    relay._parse = lambda data: next(parsed)
+    try:
+        upstream.sendto(b"bootstrap", ("127.0.0.1", relay_port))
+        assert downstream.recvfrom(65535)[0] == b"bootstrap"
+        relay.arm()
+        held = b"exact-held-telemetry-bytes"
+        upstream.sendto(held, ("127.0.0.1", relay_port))
+        upstream.sendto(b"suppressed-telemetry-one", ("127.0.0.1", relay_port))
+        upstream.sendto(b"suppressed-telemetry-two", ("127.0.0.1", relay_port))
+        with pytest.raises(socket.timeout):
+            downstream.recvfrom(65535)
+        relay.wait_released(0.5)
+        downstream.settimeout(0.5)
+        assert downstream.recvfrom(65535)[0] == held
+        audit = relay.audit()
+        digest = hashlib.sha256(held).hexdigest()
+        assert audit["held_datagram_sha256"] == digest
+        assert audit["released_datagram_sha256"] == digest
+        assert audit["forwarded_to_harness_during_hold"] == 0
+        assert audit["queue_high_water"] == 1
+        assert audit["additional_suppressed_packets"] == 2
+        assert audit["additional_suppressed_bytes"] == (
+            len(b"suppressed-telemetry-one") + len(b"suppressed-telemetry-two")
+        )
+        assert audit["additional_first_sequence"] == 3
+        assert audit["additional_last_sequence"] == 4
+    finally:
+        relay.close()
+        upstream.close()
+        downstream.close()
+
+
+def test_whole_gap_rejects_forged_resync_metric():
+    spec, table, raw = _validated_fault_raw("whole-telemetry-gap")
+    payload = dict(raw)
+    payload.pop("evidence_sha256")
+    payload["transport_metrics"] = dict(payload["transport_metrics"])
+    payload["transport_metrics"]["telemetry_gap_resyncs"] = 0
+    with pytest.raises(qualification.QualificationError, match="whole_gap_metric"):
+        qualification._require_raw(
+            spec, qualification._seal(payload), table,
+            test_mode=True, timeout_ms=1500,
+        )
+
+
+def test_partial_timeout_rejects_disconnect_relabel():
+    spec, table, raw = _validated_fault_raw("partial-telemetry-timeout")
+    payload = dict(raw)
+    payload.pop("evidence_sha256")
+    payload["transport_fault_events"] = [{
+        "event": "disconnect", "client_id": "qual-00",
+        "scope": "partial-client", "after_sequence": 5,
+    }]
+    with pytest.raises(qualification.QualificationError, match="relay_fault_event"):
+        qualification._require_raw(
+            spec, qualification._seal(payload), table,
+            test_mode=True, timeout_ms=1500,
+        )
+
+
+def test_public_teacher_detection_cannot_be_relabelled_as_malformed():
+    spec = next(
+        item for item in qualification.scenario_plan(41)
+        if item.name == "baseline-cold-1"
+    )
+    table = qualification.build_action_table(spec.seed)
+    raw = FakeExecutor().run(spec, table)
+    payload = dict(raw)
+    payload.pop("evidence_sha256")
+    payload["public_telemetry_audit"] = [
+        dict(record) for record in payload["public_telemetry_audit"]
+    ]
+    payload["public_telemetry_audit"][0]["teacher_packets_detected"] = 1
+    payload["public_telemetry_audit"][0]["datagrams_seen"] += 1
+    with pytest.raises(
+        qualification.QualificationError, match="public_privilege_boundary"
+    ):
+        qualification._require_raw(
+            spec, qualification._seal(payload), table,
+            test_mode=True, timeout_ms=1500,
+        )
 
 
 def test_same_life_hold_fixture_proves_settle_prime_and_startup_offset():
@@ -1002,7 +1249,7 @@ def test_test_only_executor_exercises_schema_but_cannot_pass(tmp_path):
     assert execution["schema"] == qualification.EXECUTION_SCHEMA
     assert execution["test_mode"] is True
     assert execution["full_network_executed"] is False
-    assert len(execution["scenario_evidence"]) == 19
+    assert len(execution["scenario_evidence"]) == 21
     manifest = tmp_path / "runtime-manifest.json"
     runtime_digest = _manifest(
         manifest, identity, execution["execution_evidence_sha256"]
@@ -1033,7 +1280,7 @@ def test_test_only_executor_exercises_schema_but_cannot_pass(tmp_path):
     assert artifact["execution_evidence"]["same_seed_byte_identical"] is True
     assert artifact["execution_evidence"]["different_seed_diverged"] is True
     assert output.is_file()
-    assert len(list((tmp_path / "execution.evidence").glob("*.json"))) == 19
+    assert len(list((tmp_path / "execution.evidence").glob("*.json"))) == 21
     assert list(tmp_path.rglob("*.tmp")) == []
     decoded = json.loads(output.read_text(encoding="utf-8"))
     digest = decoded.pop("evidence_sha256")
@@ -1122,7 +1369,7 @@ def test_full_network_executor_releases_port_lease_on_failure():
         before = set(qualification._PortAllocator._leased)
 
     def fail(_spec, _action_table, ports):
-        assert len(ports) == qualification.CLIENT_COUNT * 2 + 4
+        assert len(ports) == qualification.CLIENT_COUNT * 3 + 4
         raise RuntimeError("synthetic executor failure")
 
     executor._run_with_ports = fail

@@ -282,6 +282,7 @@ class Q2NetworkClientBatch:
         # barrier. Treat only a whole-batch timeout as this fail-closed gap;
         # partial timeouts remain fatal transport failures.
         self._telemetry_gap_pending = False
+        self._telemetry_gap_resumed_clients: set[str] = set()
         # Death closes the current trajectory.  Deterministic clients still
         # submit commands while the corpse/respawn clock advances, but those
         # commands are not policy transitions.  The causal life epoch is the
@@ -805,24 +806,39 @@ class Q2NetworkClientBatch:
     ) -> BatchRound:
         """Hold dispatch while a synchronized conduit/download gap persists."""
         samples = list(drains)
-        if not any(drain.advanced for drain in samples):
+        self._telemetry_gap_resumed_clients.update(
+            drain.latest.client_id for drain in samples if drain.advanced
+        )
+        pending_indices = [
+            index for index, drain in enumerate(samples)
+            if drain.latest.client_id not in self._telemetry_gap_resumed_clients
+        ]
+        if pending_indices:
             deadline = time.monotonic() + self.round_timeout
-            futures = [
-                self._executor.submit(
+            futures = {
+                index: self._executor.submit(
                     self._wait_for_telemetry_progress,
-                    env,
-                    drain.latest,
+                    self.envs[index],
+                    samples[index].latest,
                     deadline,
                 )
-                for env, drain in zip(self.envs, samples)
-            ]
-            samples = [future.result() for future in futures]
+                for index in pending_indices
+            }
+            for index, future in futures.items():
+                samples[index] = future.result()
+            self._telemetry_gap_resumed_clients.update(
+                drain.latest.client_id for drain in samples if drain.advanced
+            )
         map_boundary_seen = any(
             drain.map_changed or self._is_intermission(drain.latest)
             for drain in samples
         )
-        if all(drain.advanced for drain in samples) or map_boundary_seen:
+        all_clients_resumed = self._telemetry_gap_resumed_clients == {
+            env.client_id for env in self.envs
+        }
+        if all_clients_resumed or map_boundary_seen:
             self._telemetry_gap_pending = False
+            self._telemetry_gap_resumed_clients.clear()
         return self._preflight_boundary(
             samples,
             round_id=round_id,
@@ -1048,6 +1064,7 @@ class Q2NetworkClientBatch:
             # The explicit map-epoch barrier now owns synchronization; do not
             # leave the earlier pre-boundary gap latched after it completes.
             self._telemetry_gap_pending = False
+            self._telemetry_gap_resumed_clients.clear()
             self._begin_map_epoch(next(iter(source_maps)))
             return self._pending_map_boundary(
                 drains,
@@ -1367,17 +1384,21 @@ class Q2NetworkClientBatch:
                 )
 
             if synchronized_gap:
-                if self.deterministic_frame_barrier:
-                    self._failed_rounds += 1
-                    raise AuthoritativeEchoError(
-                        "deterministic frame barrier timed out",
-                        timed_out=True,
-                    )
                 self._telemetry_gap_pending = True
+                self._telemetry_gap_resumed_clients.clear()
                 self._telemetry_gap_resyncs += 1
                 boundary_drains = [
                     env.drain_latest_telemetry() for env in self.envs
                 ]
+                self._telemetry_gap_resumed_clients.update(
+                    drain.latest.client_id
+                    for drain in boundary_drains if drain.advanced
+                )
+                if self._telemetry_gap_resumed_clients == {
+                    env.client_id for env in self.envs
+                }:
+                    self._telemetry_gap_pending = False
+                    self._telemetry_gap_resumed_clients.clear()
                 return self._preflight_boundary(
                     boundary_drains,
                     round_id=round_id,

@@ -2,6 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:q2-ml:q2-multires-b2-gate-v1",
   "title": "Fail-closed multi-resolution Atlas Batch B2 gate",
+  "$comment": "No final cohort is active. The empty-schema negation intentionally makes every green gate invalid until a committed successor activation replaces this sentinel and pins its authority.",
+  "not": {},
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -95,7 +97,12 @@
         "analysis"
       ],
       "properties": {
-        "cohort_id": {"const": "b2g26_final_71446"},
+        "cohort_id": {
+          "type": "string",
+          "pattern": "^b2g[0-9]+_final_[0-9]+$",
+          "not": {"const": "b2g26_final_71446"},
+          "$comment": "Structural shape only while no final cohort is active; tools/assemble_b2_gate.py requires an explicit committed authority."
+        },
         "declaration": {"$ref": "#/$defs/file"},
         "declaration_sha256": {"$ref": "#/$defs/sha256"},
         "source": {"$ref": "#/$defs/source_stage"},
@@ -161,7 +168,7 @@
     "dyn_evidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["report", "executable", "source_authority", "magic", "client_count", "host", "kernel_release"],
+      "required": ["report", "executable", "source_authority", "magic", "client_count", "host", "kernel_release", "machine_identity_sha256"],
       "properties": {
         "report": {"$ref": "#/$defs/file"},
         "executable": {"$ref": "#/$defs/file"},
@@ -177,7 +184,8 @@
         "magic": {"const": "Q2LAT002"},
         "client_count": {"const": 4},
         "host": {"const": "DESKTOP-RTX2080"},
-        "kernel_release": {"type": "string", "pattern": "microsoft-standard-WSL2"}
+        "kernel_release": {"type": "string", "pattern": "microsoft-standard-WSL2"},
+        "machine_identity_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
     "tests": {

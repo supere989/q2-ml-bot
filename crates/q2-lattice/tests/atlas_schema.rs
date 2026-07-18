@@ -12,15 +12,16 @@ use q2_lattice_rs::atlas::{
     FallOracleAdmission, FallParameters, FallSourceClosure, GUIDE_FEATURE_WIDTH, GridIndex,
     GridManifest, HAZARD_CLEARANCE_UNREACHABLE_HAZARD, HAZARD_CLEARANCE_UNREACHABLE_SAFE,
     HOOK_ORACLE_NAME, HOOK_ORACLE_SCHEMA, HOOK_PARITY_CASES_V1, HOOK_PARITY_NAME,
-    HOOK_PARITY_SCHEMA, HazardComponentField, HookOracleAdmission, HookParameters,
-    HookParityAttestation, HookSourceClosure, HullManifest, L0Address, L0BitPlane, L0Chunk,
-    L0ScalarPlane, L1Graph, L1Node, MASK_PLAYERSOLID_V1, MASK_SHOT_V1, ManifestBudgets, NodeFlags,
-    OBJECTIVE_MEDIA_TYPE, ORACLE_SEMANTIC_VERSION, ObjectiveBelief, ObjectiveClass,
+    HOOK_PARITY_SCHEMA, HOOK_RECOVERY_WALK_BUDGET_TICKS, HazardComponentField, HookOracleAdmission,
+    HookParameters, HookParityAttestation, HookSourceClosure, HullManifest, L0Address, L0BitPlane,
+    L0Chunk, L0ScalarPlane, L1Graph, L1Node, MASK_PLAYERSOLID_V1, MASK_SHOT_V1, ManifestBudgets,
+    NodeFlags, OBJECTIVE_MEDIA_TYPE, ORACLE_SEMANTIC_VERSION, ObjectiveBelief, ObjectiveClass,
     OracleAdmissions, OracleBspBinding, OracleToolIdentity, PMOVE_ORACLE_NAME, PMOVE_ORACLE_SCHEMA,
     PmoveOracleAdmission, PmoveParameters, PmoveSourceClosure, PolicyHazardBits,
     RECOVERY_EVIDENCE_FIELD_NAMES, RECOVERY_FEATURE_WIDTH, RECOVERY_REPAIR_NODE_LIMIT,
-    RecoveryOverlay, RecoveryQuery, SparseL0, Stance, ToolIdentity, advisory_spatial_feature_names,
-    aggregate_conservative, decode_zstd_envelope, encode_zstd_envelope, install_static_costs,
+    RecoveryOverlay, RecoveryPhysicsManifest, RecoveryQuery, SparseL0, Stance, ToolIdentity,
+    advisory_spatial_feature_names, aggregate_conservative, decode_zstd_envelope,
+    encode_zstd_envelope, evaluate_hook_necessity, install_static_costs,
     install_static_hazard_clearances, recovery_features, sha256_hex, solve_static_costs,
     solve_static_hazard_clearances, validate_static_costs, validate_static_hazard_clearances,
 };
@@ -994,6 +995,7 @@ fn manifest(payload: &[u8], compressed_size: u64) -> AtlasManifest {
         bsp: bsp.clone(),
         analyzer: identity("q2-atlas", 1),
         oracles: oracle_admissions(&bsp, true, true),
+        recovery_physics: RecoveryPhysicsManifest::default(),
         generator: None,
         grid: GridManifest {
             origin: [-256, 0, 256],
@@ -1048,9 +1050,24 @@ fn manifest_is_canonical_bound_and_strict() {
     let bytes = source.canonical_json(&limits).unwrap();
     assert_eq!(
         sha256_hex(&bytes),
-        "cfc926130a3c14de223bccfd0175a57b0c9ceedc5b217b264caf43bcb3b74a60"
+        "e2429eb003cd8f3135a535ebdbdfcac0f0f557a1abf41531fb10e3484ac06879"
     );
     let restored = AtlasManifest::from_canonical_json(&bytes, &limits).unwrap();
+    let mut mixed_cadence = restored.clone();
+    mixed_cadence.recovery_physics.game_tick_hz = 20;
+    assert!(mixed_cadence.canonical_json(&limits).is_err());
+    let mut missing_cadence: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    missing_cadence
+        .as_object_mut()
+        .unwrap()
+        .remove("recovery_physics");
+    assert!(
+        AtlasManifest::from_canonical_json(
+            &serde_json::to_vec(&missing_cadence).unwrap(),
+            &limits,
+        )
+        .is_err()
+    );
     assert_eq!(restored.channels[0].level, 0);
     assert_eq!(
         restored.limitations,
@@ -1578,6 +1595,126 @@ fn b3_public_recovery_excludes_hook_and_enables_only_identified_movers() {
     .unwrap();
     assert_eq!(&with_mover.values[9..12], &[0.0, -1.0, 0.0]);
     assert_eq!(&with_mover.values[12..15], &[0.0; 3]);
+}
+
+#[test]
+fn b3_hook_necessity_is_non_vacuous_deterministic_and_teacher_only() {
+    assert_eq!(HOOK_RECOVERY_WALK_BUDGET_TICKS, 15);
+    let limits = AtlasLimits::default();
+    let bsp = bsp_identity();
+    let admission = oracle_admissions(&bsp, true, true).admit(&bsp).unwrap();
+    let build = |reverse: bool| {
+        let indices = (0..=30)
+            .map(|x| GridIndex::new(x, 0, 0))
+            .collect::<Vec<_>>();
+        let mut nodes = indices.iter().map(|index| node(*index)).collect::<Vec<_>>();
+        for item in nodes.iter_mut().filter(|item| item.index.x < 30) {
+            item.flags &= !NodeFlags::SAFE_TO_STAND;
+            item.hazard_types = PolicyHazardBits::VOID_OR_LETHAL_DROP;
+            item.hazard_severity = 255;
+        }
+        let mut edges = indices
+            .windows(2)
+            .map(|pair| {
+                let mut value = edge(pair[0], pair[1], EdgeType::Walk);
+                value.cost = 16 * 256;
+                value
+            })
+            .collect::<Vec<_>>();
+        let mut hook = edge(indices[0], indices[30], EdgeType::Hook);
+        hook.cost = 64;
+        edges.push(hook);
+        if reverse {
+            nodes.reverse();
+            edges.reverse();
+        }
+        let mut graph = L1Graph::build(nodes, edges, &admission, &limits).unwrap();
+        install_static_costs(&mut graph).unwrap();
+        install_static_hazard_clearances(&mut graph).unwrap();
+        graph
+    };
+    let graph = build(false);
+    let rebuilt = build(true);
+    let start = GridIndex::new(0, 0, 0);
+    let empty = RecoveryOverlay::default();
+    let evidence =
+        evaluate_hook_necessity(&graph, graph.node_ordinal(start).unwrap(), &empty).unwrap();
+    let rebuilt_evidence =
+        evaluate_hook_necessity(&rebuilt, rebuilt.node_ordinal(start).unwrap(), &empty).unwrap();
+    assert_eq!(evidence, rebuilt_evidence);
+    assert_eq!(evidence.evaluated_hook_edges, 1);
+    assert!(!evidence.walking_reaches_safety_within_budget);
+    assert!(evidence.hook_path_reaches_safety);
+    assert!(evidence.hook_lowers_recovery_cost);
+    assert!(evidence.hook_was_necessary);
+    let distance_bound_not_edge_count = evaluate_hook_necessity(
+        &graph,
+        graph.node_ordinal(GridIndex::new(2, 0, 0)).unwrap(),
+        &empty,
+    )
+    .unwrap();
+    assert!(distance_bound_not_edge_count.walking_reaches_safety_within_budget);
+    assert_eq!(distance_bound_not_edge_count.evaluated_hook_edges, 0);
+
+    // A one-tick ordinary shortcut suppresses the teacher label even though
+    // the cheaper hook remains available. Public Recovery16 remains purely
+    // walking-derived in the separate exclusion test above.
+    let mut shortcut = edge(start, GridIndex::new(30, 0, 0), EdgeType::Walk);
+    shortcut.cost = 128;
+    let mut nodes = graph.nodes().to_vec();
+    let mut inputs = (0..30)
+        .map(|x| {
+            let mut value = edge(
+                GridIndex::new(x, 0, 0),
+                GridIndex::new(x + 1, 0, 0),
+                EdgeType::Walk,
+            );
+            value.cost = 16 * 256;
+            value
+        })
+        .collect::<Vec<_>>();
+    inputs.push(shortcut);
+    let mut hook = edge(start, GridIndex::new(30, 0, 0), EdgeType::Hook);
+    hook.cost = 64;
+    inputs.push(hook);
+    let mut with_shortcut =
+        L1Graph::build(std::mem::take(&mut nodes), inputs, &admission, &limits).unwrap();
+    install_static_costs(&mut with_shortcut).unwrap();
+    install_static_hazard_clearances(&mut with_shortcut).unwrap();
+    let suppressed = evaluate_hook_necessity(
+        &with_shortcut,
+        with_shortcut.node_ordinal(start).unwrap(),
+        &empty,
+    )
+    .unwrap();
+    assert!(suppressed.walking_reaches_safety_within_budget);
+    assert!(suppressed.hook_lowers_recovery_cost);
+    assert!(!suppressed.hook_was_necessary);
+
+    // A hook reachable only after an ordinary first step is not a label for
+    // the current hook action.
+    let current = GridIndex::new(0, 1, 0);
+    let lookahead = GridIndex::new(1, 1, 0);
+    let safe = GridIndex::new(30, 1, 0);
+    let mut current_node = node(current);
+    current_node.flags &= !NodeFlags::SAFE_TO_STAND;
+    let mut lookahead_node = node(lookahead);
+    lookahead_node.flags &= !NodeFlags::SAFE_TO_STAND;
+    let mut first = edge(current, lookahead, EdgeType::Walk);
+    first.cost = 16 * 256;
+    let hook = edge(lookahead, safe, EdgeType::Hook);
+    let graph = L1Graph::build(
+        vec![current_node, lookahead_node, node(safe)],
+        vec![first, hook],
+        &admission,
+        &limits,
+    )
+    .unwrap();
+    let current_evidence =
+        evaluate_hook_necessity(&graph, graph.node_ordinal(current).unwrap(), &empty).unwrap();
+    assert_eq!(current_evidence.evaluated_hook_edges, 0);
+    assert!(!current_evidence.hook_path_reaches_safety);
+    assert!(!current_evidence.hook_was_necessary);
 }
 
 #[test]

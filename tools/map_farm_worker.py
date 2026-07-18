@@ -35,6 +35,7 @@ SEED_RANGES = {
     "mllive": (10_000_000, 49_999_999),
     "mlteacher": (50_000_000, 99_999_999),
 }
+VPS_COMPILATION_FALLBACK_ENABLED = False
 
 
 class MapFarm:
@@ -65,6 +66,17 @@ class MapFarm:
         self.stop = threading.Event()
         self.building = ""
         self.last_error = ""
+        self.analysis_status = "not_attempted"
+        self.analysis_error = ""
+
+    def report_analysis_failure(self, error: str) -> None:
+        """Expose isolated analysis failure without enabling local fallback."""
+
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError("analysis failure must include a nonempty error")
+        with self.lock:
+            self.analysis_status = "failed"
+            self.analysis_error = error.strip()
 
     def ready(self) -> list[Path]:
         return sorted(self.queue_dir.glob(f"{self.prefix}_*.zip"))
@@ -92,6 +104,9 @@ class MapFarm:
                 "prefix": self.prefix,
                 "building": self.building,
                 "last_error": self.last_error,
+                "analysis_status": self.analysis_status,
+                "analysis_error": self.analysis_error,
+                "vps_compilation_fallback_enabled": VPS_COMPILATION_FALLBACK_ENABLED,
             }
 
     def _build_one(self) -> None:

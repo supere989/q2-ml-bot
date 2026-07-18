@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "q2-multires-b6-g1-fault-probe-v1.schema.json",
+  "title": "B6 G1 raw full-network fault derivation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "tool", "synthetic", "host", "source_repositories",
+    "bindings", "full_network_execution", "scenarios", "evidence_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "q2-multires-b6-g1-fault-probe-v1"},
+    "tool": {"const": "assemble_b6_g1_fault_probe"},
+    "synthetic": {"const": false},
+    "host": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hostname", "kernel_release", "architecture", "machine_identity_sha256"],
+      "properties": {
+        "hostname": {"const": "DESKTOP-RTX2080"},
+        "kernel_release": {"type": "string", "pattern": "microsoft-standard-WSL2"},
+        "architecture": {"const": "x86_64"},
+        "machine_identity_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "source_repositories": {"type": "object", "required": ["bot", "client", "game"]},
+    "bindings": {"type": "object", "minProperties": 14},
+    "full_network_execution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256", "execution_evidence_sha256"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "execution_evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "scenarios": {
+      "type": "array", "minItems": 3, "maxItems": 3,
+      "items": {"oneOf": [
+        {"$ref": "#/$defs/map_epoch_scenario"},
+        {"$ref": "#/$defs/whole_gap_scenario"},
+        {"$ref": "#/$defs/partial_timeout_scenario"}
+      ]}
+    },
+    "evidence_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256", "evidence_sha256"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "transport_metrics": {
+      "type": "object",
+      "required": ["telemetry_gap_resyncs", "failed_rounds", "echo_timeouts"],
+      "properties": {
+        "telemetry_gap_resyncs": {"type": "integer", "minimum": 0},
+        "failed_rounds": {"type": "integer", "minimum": 0},
+        "echo_timeouts": {"type": "integer", "minimum": 0}
+      }
+    },
+    "map_epoch_scenario": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "name", "source_scenario", "source", "observed_outcome",
+        "epoch_drains", "new_epoch_bootstrap_frames",
+        "actions_dispatched_during_epoch_drain", "boundary_rounds",
+        "accepted_after_recovery", "recovered_map_epoch"
+      ],
+      "properties": {
+        "name": {"const": "map-epoch-recovery"},
+        "source_scenario": {"const": "epoch-drain"},
+        "source": {"$ref": "#/$defs/source"},
+        "observed_outcome": {"const": "completed"},
+        "epoch_drains": {"const": 1},
+        "new_epoch_bootstrap_frames": {"const": 1},
+        "actions_dispatched_during_epoch_drain": {"const": 0},
+        "boundary_rounds": {"type": "integer", "minimum": 1},
+        "accepted_after_recovery": {"const": 4},
+        "recovered_map_epoch": {"type": "integer", "minimum": 1}
+      }
+    },
+    "frame_discontinuity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["prior_frame", "current_frame", "delta", "trajectory_ordinal"],
+      "properties": {
+        "prior_frame": {"type": "integer", "minimum": 0},
+        "current_frame": {"type": "integer", "minimum": 2},
+        "delta": {"const": 2},
+        "trajectory_ordinal": {"type": "integer", "minimum": 2}
+      }
+    },
+    "whole_gap_scenario": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "name", "source_scenario", "source", "observed_outcome",
+        "boundary_rounds", "accepted_synchronized_frames", "fault_event_count",
+        "accepted_after_recovery", "frame_discontinuities", "timeout_client_ids",
+        "relay_event_count", "relay_events_sha256", "transport_metrics"
+      ],
+      "properties": {
+        "name": {"const": "whole-batch-telemetry-gap-recovery"},
+        "source_scenario": {"const": "whole-batch-telemetry-gap-recovery"},
+        "source": {"$ref": "#/$defs/source"},
+        "observed_outcome": {"const": "completed"},
+        "boundary_rounds": {"const": 1},
+        "accepted_synchronized_frames": {"const": 32},
+        "fault_event_count": {"const": 0},
+        "accepted_after_recovery": {"const": 4},
+        "frame_discontinuities": {
+          "type": "array", "minItems": 1, "maxItems": 1,
+          "items": {"$ref": "#/$defs/frame_discontinuity"}
+        },
+        "timeout_client_ids": {
+          "type": "array", "prefixItems": [
+            {"const": "qual-00"}, {"const": "qual-01"},
+            {"const": "qual-02"}, {"const": "qual-03"}
+          ], "items": false, "minItems": 4, "maxItems": 4
+        },
+        "relay_event_count": {"const": 4},
+        "relay_events_sha256": {"$ref": "#/$defs/sha256"},
+        "transport_metrics": {"$ref": "#/$defs/transport_metrics"}
+      }
+    },
+    "partial_timeout_scenario": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "name", "source_scenario", "source", "observed_outcome",
+        "fault_event_count", "exception", "accepted_synchronized_frames",
+        "timeout_client_ids", "relay_event_count", "relay_events_sha256",
+        "transport_metrics"
+      ],
+      "properties": {
+        "name": {"const": "partial-client-timeout-fatal"},
+        "source_scenario": {"const": "partial-client-telemetry-timeout"},
+        "source": {"$ref": "#/$defs/source"},
+        "observed_outcome": {"const": "fatal"},
+        "fault_event_count": {"const": 0},
+        "exception": {"const": "AuthoritativeEchoError"},
+        "accepted_synchronized_frames": {"type": "integer", "minimum": 1},
+        "timeout_client_ids": {
+          "type": "array", "prefixItems": [{"const": "qual-00"}],
+          "items": false, "minItems": 1, "maxItems": 1
+        },
+        "relay_event_count": {"const": 1},
+        "relay_events_sha256": {"$ref": "#/$defs/sha256"},
+        "transport_metrics": {"$ref": "#/$defs/transport_metrics"}
+      }
+    }
+  }
+}

@@ -244,6 +244,28 @@ def test_in_process_collector_is_deterministic_and_excludes_boundaries():
     )
 
 
+def test_repeated_whole_batch_boundaries_fail_closed_at_livelock_cap():
+    class AlwaysBoundaryBatch(FakeBatch):
+        def collect_round(self, actions, *, policy_version):
+            self.round = 0
+            return super().collect_round(actions, policy_version=policy_version)
+
+    collector = MultiresSynchronousCollector(
+        AlwaysBoundaryBatch(), FakePolicy(),
+        observation_transform=lambda observations, _infos, _version: observations,
+        reward_function=lambda _client_id, _frame: CausalRewardResult(
+            reward=0.0, metrics={}
+        ),
+        config=CollectorConfig(
+            transitions_per_client=1, maximum_boundary_rounds=2
+        ),
+    )
+    with pytest.raises(
+        CollectorAdmissionError, match="too many non-trainable boundary rounds"
+    ):
+        collector.collect(policy_version=7)
+
+
 def test_collector_continues_without_resetting_live_clients():
     batch = FakeBatch(boundary_first=False)
     reducers = {}

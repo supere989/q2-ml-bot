@@ -104,7 +104,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "da27e96b3fe8c3719a7ff1593e37b4ac768f53a36f38c877566af495a6b551bf",
         "71444000..71444003",
         "71444600..71444603",
-        "Exactly one immutable/no-retry final producer attempt is authorized",
+        "Exactly one immutable/no-retry final producer attempt was authorized",
         "The first source-generation invocation consumes the sole authorization",
         "B2-GENERATED-COHORT-71444-FAILURE.json",
         "Cohort 71444 is permanently retired",
@@ -134,6 +134,11 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
         "58d52bd958249a70bf8115ab1c442fb6888a6d69b290a636303986f69acb658f",
         "71446000..71446003",
         "71446600..71446603",
+        "B2-GENERATED-COHORT-71446-FAILURE.json",
+        "Cohort 71446 is permanently retired",
+        "4b26c670ed54585787505cf7dfbb35bdc1830fdfbd42585a16d0484622ea306f",
+        "oracle batch timeout must be finite and in (0, 60]",
+        "not a 3,600-second runtime timeout",
         "b709b038772e349583de4eea549ec16d6180ac820ea9ff1a4e382a0ec14ccf01",
         "0986e0c70e04c7d1a70427c0218e079b885f2bbe269b3280a81a4245c2c7c098",
         "2a93eb8782c488768eb1c81bade03872eced3e64ad65de16eec948d614986e33",
@@ -167,10 +172,32 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert "Retired 71445 final attempt" in text
     assert "Cohort 71445 is permanently retired" in text
     assert "b2g26_final_71446" in text
-    assert "Authorized 71446 final attempt" in text
-    assert "Exactly one immutable/no-retry final producer attempt" in text
+    assert "Retired 71446 final attempt" in text
+    assert "Cohort 71446 is permanently retired" in text
+    assert "Exactly one immutable/no-retry final producer attempt was authorized" in text
     assert "future-only" not in text
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
+
+
+def test_current_gate_contract_has_no_active_final_and_documents_activation() -> None:
+    text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
+        encoding="utf-8"
+    )
+    for required in (
+        "There is no active eligible final declaration",
+        "ACTIVE_FINAL_AUTHORITY = None",
+        "separate clean commit",
+        "new immutable declaration",
+        "declaration SHA-256",
+        "No successor has been declared or inferred yet",
+    ):
+        assert required in text
+    for stale_claim in (
+        "Only the exact fresh 71446 declaration is eligible",
+        "The active 71446 prerequisite",
+        "current alias names fresh cohort 71446 and can execute",
+    ):
+        assert stale_claim not in text
 
 
 def test_contract_replaces_the_hand_run_single_map_materializer() -> None:
