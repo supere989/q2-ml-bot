@@ -1028,10 +1028,10 @@ and status `permanently-failed-atlas-build-b1-client-release-closure`.
 Cohort 71448 is permanently retired. None of its source, compiled,
 materialized, claims, analysis-diagnostic, report, log, build, WSL,
 authorization, or producer-snapshot bytes may be retried, resumed, reused,
-copied forward, salvaged, substituted, or admitted. `ACTIVE_FINAL_AUTHORITY =
-None`; there is currently no active final cohort. A successor requires the
-pre-source closure fix below, a fresh green disposable qualification, and a
-separately committed immutable declaration before any producer may run.
+copied forward, salvaged, substituted, or admitted. The authority was cleared
+to `None` after that terminal failure. A successor required the pre-source
+closure fix below, a fresh green disposable qualification, and a separately
+committed immutable declaration before any producer could run.
 
 Final preauthorization must now require and digest the canonical client
 release CM and Pmove oracles beneath `CLIENT_ROOT/release`, the canonical
@@ -1042,6 +1042,38 @@ supplied B1 authorities before source generation, exactly as the disposable
 qualification driver already does.
 Forwarding `--client-root` and `--lithium-root` without validating those
 canonical release placements is forbidden.
+
+### Active 71449 final cohort
+
+The closure-corrected implementation was qualified at commit/tree
+`7c3463c28e8913e340d77f182e52752be3381999` /
+`a4f03036315cd930c0f853c85882b9fa39b33f6a`. Fresh disposable
+qualification `b2q26_7c3463c_71806000` passed all seven executable stages
+28/28 and all six infrastructure checks, including Atlas construction through
+the canonical client release closure. Its canonical green, non-admissible
+report SHA-256 is
+`874e1936ccbcf235c781e906904e021c8f4b3fea966bb96d40a22bc1db5c3875`;
+it binds the immutable `055c6930-r2` B1 authority whose canonical gate
+SHA-256 is
+`055c693027a4091178705331d1bf6c64a81638995f041e978aaf95e33effd354`.
+
+`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71449`, immutable
+declaration `B2-GENERATED-COHORT-71449-DECLARATION.json`, declaration
+SHA-256
+`7d36a6a634b81db0c293dff3e7daa5c3dfa284f931a2a4202187c56a75f2f5f6`,
+and the exact eleven-path declaration/gate/schema/direct-test successor
+delta. The current alias is byte-identical. The declaration uses fresh,
+disjoint seed blocks 71449000..71449003 through 71449600..71449603.
+Exactly one fresh, strictly sequential, immutable/no-retry producer lifecycle
+is authorized. This activation does not admit qualification artifacts,
+retired bytes, passing subsets, deployment, or training.
+
+The declaration-bearing 71449 producer commit must be a strict successor of
+qualified commit `7c3463c28e8913e340d77f182e52752be3381999`. Gate replay
+must prove ancestry, the exact qualified commit/tree and report binding,
+byte-identical stable generator/routes/Atlas-analyzer authority fields, and a
+complete Git delta equal to the frozen 71449
+declaration/gate/schema/direct-test authorization path set.
 
 The declaration-bearing 71446 producer commit was required to be a strict successor of
 qualified commit `a05ddb7037774c1b246a6b13972b228570acb8ef`. Gate replay
@@ -1128,12 +1160,13 @@ check.
 
 ## Offline workflow
 
-`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort.
-Cohort `b2g26_final_71448` is terminally retired under
-`B2-GENERATED-COHORT-71448-FAILURE.json`. Every command template in this
-section is historical and non-executable until a successor activation: it
-records the required producer shape only and must not be run against any
-retired, qualification, or 71448 path.
+`ACTIVE_FINAL_AUTHORITY` now pins `b2g26_final_71449`. The command
+templates in this section are executable only from the exact clean activated
+snapshot, after the no-write final preauthorization closes every pinned
+runtime input, and only against the fresh 71449 root. Cohort
+`b2g26_final_71448` remains terminally retired under
+`B2-GENERATED-COHORT-71448-FAILURE.json`; no command may name any retired,
+qualification, or 71448 path.
 Commands must never name retired cohorts 71426 through 71448. No retired or
 qualification population, report,
 Dyn evidence, compiled byte, or passing subset may be copied into a future

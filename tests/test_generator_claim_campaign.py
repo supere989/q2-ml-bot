@@ -228,9 +228,18 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "release/q2-pmove-oracle",
         "Cohort 71447 is permanently retired",
         "Cohort 71448 is permanently retired",
-        "`ACTIVE_FINAL_AUTHORITY = None`",
-        "there is currently no active final cohort",
-        "historical and non-executable until a successor activation",
+        "Active 71449 final cohort",
+        "b2g26_final_71449",
+        "B2-GENERATED-COHORT-71449-DECLARATION.json",
+        "7d36a6a634b81db0c293dff3e7daa5c3dfa284f931a2a4202187c56a75f2f5f6",
+        "71449000..71449003",
+        "71449600..71449603",
+        "b2q26_7c3463c_71806000",
+        "874e1936ccbcf235c781e906904e021c8f4b3fea966bb96d40a22bc1db5c3875",
+        "7c3463c28e8913e340d77f182e52752be3381999",
+        "a4f03036315cd930c0f853c85882b9fa39b33f6a",
+        "`ACTIVE_FINAL_AUTHORITY` explicitly pins",
+        "exact eleven-path declaration/gate/schema/direct-test successor",
         "Lithium hook oracle",
         "byte identity of the CM, Pmove, and hook oracles",
         "separately committed immutable declaration",
@@ -275,8 +284,9 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
     for stale_claim in (
         "Active 71448 final cohort",
         "The active final `COHORT_ID` is `b2g26_final_71448`",
-        "`ACTIVE_FINAL_AUTHORITY` explicitly pins",
         "Commands must never name retired cohorts 71426 through 71447",
+        "`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort",
+        "historical and non-executable until a successor activation",
     ):
         assert stale_claim not in contract
 

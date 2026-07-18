@@ -196,7 +196,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
 
-def test_current_gate_contract_retires_71448_and_clears_active_authority() -> None:
+def test_current_gate_contract_retires_71448_and_activates_71449() -> None:
     text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
         encoding="utf-8"
     )
@@ -225,9 +225,18 @@ def test_current_gate_contract_retires_71448_and_clears_active_authority() -> No
         "release/q2-cm-oracle",
         "release/q2-pmove-oracle",
         "Cohort 71448 is permanently retired",
-        "`ACTIVE_FINAL_AUTHORITY = None`",
-        "there is currently no active final cohort",
-        "historical and non-executable until a successor activation",
+        "Active 71449 final cohort",
+        "b2g26_final_71449",
+        "B2-GENERATED-COHORT-71449-DECLARATION.json",
+        "7d36a6a634b81db0c293dff3e7daa5c3dfa284f931a2a4202187c56a75f2f5f6",
+        "71449000..71449003",
+        "71449600..71449603",
+        "b2q26_7c3463c_71806000",
+        "874e1936ccbcf235c781e906904e021c8f4b3fea966bb96d40a22bc1db5c3875",
+        "7c3463c28e8913e340d77f182e52752be3381999",
+        "a4f03036315cd930c0f853c85882b9fa39b33f6a",
+        "`ACTIVE_FINAL_AUTHORITY` explicitly pins",
+        "exact eleven-path declaration/gate/schema/direct-test successor",
         "Lithium hook oracle",
         "byte identity of the CM, Pmove, and hook oracles",
         "separately committed immutable declaration",
@@ -242,10 +251,10 @@ def test_current_gate_contract_retires_71448_and_clears_active_authority() -> No
         "The active final `COHORT_ID` is `b2g26_final_71447`",
         "The active final `COHORT_ID` is `b2g26_final_71448`",
         "Active 71448 final cohort",
-        "`ACTIVE_FINAL_AUTHORITY` explicitly pins",
         "sole active eligible declaration pair",
-        "This activation authorizes",
         "The active authority and schema both pin 71448",
+        "`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort",
+        "historical and non-executable until a successor activation",
     ):
         assert stale_claim not in text
 

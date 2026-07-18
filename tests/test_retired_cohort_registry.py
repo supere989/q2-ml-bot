@@ -50,6 +50,9 @@ NAMED_71447 = (
 NAMED_71448 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71448-DECLARATION.json"
 )
+NAMED_71449 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71449-DECLARATION.json"
+)
 FAILURE_71443 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71443-FAILURE.json"
 )
@@ -301,14 +304,10 @@ def test_named_71447_is_retired(declaration_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("declaration_path", [CURRENT_ALIAS, NAMED_71448])
-def test_current_alias_and_named_71448_are_retired(
-    declaration_path: Path,
-) -> None:
-    current, current_sha256 = cohort.load_declaration(declaration_path)
+def test_named_71448_is_retired() -> None:
+    current, current_sha256 = cohort.load_declaration(NAMED_71448)
 
     assert current["cohort_id"] == "b2g26_final_71448"
-    assert CURRENT_ALIAS.read_bytes() == NAMED_71448.read_bytes()
     assert current_sha256 == (
         "0b48462a8cd8dfb752a73b711954616dd22d45d857748d316505bd17c976262a"
     )
@@ -316,8 +315,21 @@ def test_current_alias_and_named_71448_are_retired(
         registry.RetiredCohortRegistryError, match="71448.*permanently retired"
     ):
         registry.require_unretired_declaration(
-            declaration_path, current, current_sha256
+            NAMED_71448, current, current_sha256
         )
+
+
+def test_current_alias_and_named_71449_are_active_and_unretired() -> None:
+    current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
+
+    assert current["cohort_id"] == "b2g26_final_71449"
+    assert CURRENT_ALIAS.read_bytes() == NAMED_71449.read_bytes()
+    assert current_sha256 == (
+        "7d36a6a634b81db0c293dff3e7daa5c3dfa284f931a2a4202187c56a75f2f5f6"
+    )
+    registry.require_unretired_declaration(
+        CURRENT_ALIAS, current, current_sha256
+    )
 
 
 def test_71448_terminal_failure_authority_is_canonical_and_exact() -> None:

@@ -415,10 +415,10 @@ and status `permanently-failed-atlas-build-b1-client-release-closure`.
 Cohort 71448 is permanently retired. None of its source, compiled,
 materialized, claims, analysis-diagnostic, report, log, build, WSL,
 authorization, or producer-snapshot bytes may be retried, resumed, reused,
-copied forward, salvaged, substituted, or admitted. `ACTIVE_FINAL_AUTHORITY =
-None`; there is currently no active final cohort. A successor requires the
-pre-source closure fix below, a fresh green disposable qualification, and a
-separately committed immutable declaration before any producer may run.
+copied forward, salvaged, substituted, or admitted. The authority was cleared
+to `None` after that terminal failure. A successor required the pre-source
+closure fix below, a fresh green disposable qualification, and a separately
+committed immutable declaration before any producer could run.
 
 Final preauthorization must now require and digest the canonical client
 release CM and Pmove oracles beneath `CLIENT_ROOT/release`, the canonical
@@ -429,6 +429,35 @@ supplied B1 authorities before source generation, exactly as the disposable
 qualification driver already does.
 Forwarding `--client-root` and `--lithium-root` without validating those
 canonical release placements is forbidden.
+
+### Active 71449 final cohort
+
+The closure-corrected implementation was qualified at commit/tree
+`7c3463c28e8913e340d77f182e52752be3381999` /
+`a4f03036315cd930c0f853c85882b9fa39b33f6a`. Fresh qualification
+`b2q26_7c3463c_71806000` passed all seven executable stages 28/28 and all
+six infrastructure checks, including Atlas construction through the canonical
+client release closure. Its canonical green, non-admissible report SHA-256 is
+`874e1936ccbcf235c781e906904e021c8f4b3fea966bb96d40a22bc1db5c3875`.
+It binds immutable B1 authority `055c6930-r2`, canonical gate SHA-256
+`055c693027a4091178705331d1bf6c64a81638995f041e978aaf95e33effd354`.
+
+`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71449`, immutable
+declaration `B2-GENERATED-COHORT-71449-DECLARATION.json`, declaration
+SHA-256
+`7d36a6a634b81db0c293dff3e7daa5c3dfa284f931a2a4202187c56a75f2f5f6`,
+and the exact eleven-path declaration/gate/schema/direct-test successor
+delta. The current alias is byte-identical and declares fresh, disjoint seed
+blocks 71449000..71449003 through 71449600..71449603. This activation
+authorizes exactly one fresh, strictly sequential, no-retry final producer
+lifecycle. It does not admit qualification artifacts, retired bytes, passing
+subsets, deployment, or training.
+
+The declaration-bearing 71449 producer commit must be a strict successor of
+qualified commit `7c3463c28e8913e340d77f182e52752be3381999`. Gate replay
+must prove ancestry, the exact qualified commit/tree and report binding,
+byte-identical stable authority fields, and a complete Git delta equal to the
+frozen 71449 declaration/gate/schema/direct-test authorization path set.
 
 The declaration-bearing 71447 producer commit was a strict successor of
 qualified commit `74628f1bc04c7012903b30d44afa61566f0ff38d`. Its exact
@@ -727,24 +756,22 @@ reuse of any retired cohort byte.
 
 ## Assembly template
 
-This template is historical and non-executable until a successor activation:
-cohort 71448 is terminally retired, `ACTIVE_FINAL_AUTHORITY = None`, and
-there is currently no active final cohort. It records the required assembler
-shape only and must not be run against any retired, qualification, or 71448
-path. All values are exact paths. `OUT` must not exist and must be outside
-the implementation repository so publishing the gate cannot invalidate its
-own clean-tree authority. At activation, the authority and schema both pinned
-71448 and its declaration digest, and the then-current alias was
-byte-identical to the immutable 71448 declaration.
+This template applies only to the active 71449 lifecycle and must not be run
+against any retired, qualification, or 71448 path. All values are exact
+paths. `OUT` must not exist and must be outside the implementation
+repository so publishing the gate cannot invalidate its own clean-tree
+authority. The authority and schema both pin 71449 and its declaration
+digest, and the current alias is byte-identical to the immutable 71449
+declaration.
 
-The qualified parent was commit `ae41232662213342aba72823bfdfe68d0ebe475c`.
-Qualification `b2q26_ae41232_71805000` passed all seven stages 28/28 and six
+The qualified parent is commit `7c3463c28e8913e340d77f182e52752be3381999`.
+Qualification `b2q26_7c3463c_71806000` passed all seven stages 28/28 and six
 infrastructure checks; its green non-admissible report SHA-256 is
-`c7a623eed20eea7c115c6167391158be90bb70bd4914e1d591ecee9c1f2ff3d8`.
-Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. That
-consumed activation authorized one no-retry final producer lifecycle and
-could not admit qualification artifacts, passing subsets, retired bytes,
-deployment, or training.
+`874e1936ccbcf235c781e906904e021c8f4b3fea966bb96d40a22bc1db5c3875`.
+Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. This
+activation authorizes one no-retry final producer lifecycle and cannot admit
+qualification artifacts, passing subsets, retired bytes, deployment, or
+training.
 
 ```sh
 python tools/assemble_b2_gate.py \

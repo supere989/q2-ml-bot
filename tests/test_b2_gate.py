@@ -20,6 +20,7 @@ from harness.hook_claims_v4 import (
 import tools.assemble_b2_gate as b2_gate
 import tools.run_b2_test_suite as b2_test_suite
 from tools.assemble_b2_gate import (
+    ACTIVE_71449_QUALIFICATION_SUCCESSOR_PATHS,
     ACTIVE_FINAL_AUTHORITY,
     ActiveFinalAuthority,
     B2GateError,
@@ -769,10 +770,20 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_71448_is_retired_and_no_final_authority_is_active() -> None:
-    assert ACTIVE_FINAL_AUTHORITY is None
-    with pytest.raises(B2GateError, match="no active final cohort"):
-        _require_active_final_authority()
+def test_active_final_71449_authority_is_exact_and_explicit() -> None:
+    authority = _require_active_final_authority()
+    assert authority is ACTIVE_FINAL_AUTHORITY
+    assert authority.cohort_id == "b2g26_final_71449"
+    assert authority.declaration_sha256 == (
+        "7d36a6a634b81db0c293dff3e7daa5c3dfa284f931a2a4202187c56a75f2f5f6"
+    )
+    assert authority.immutable_declaration_path == (
+        "docs/multires/B2-GENERATED-COHORT-71449-DECLARATION.json"
+    )
+    assert (
+        authority.qualification_successor_paths
+        == ACTIVE_71449_QUALIFICATION_SUCCESSOR_PATHS
+    )
     assert RETIRED_COHORT_71448 == "b2g26_final_71448"
     assert (
         "docs/multires/B2-GENERATED-COHORT-71448-DECLARATION.json"
@@ -785,11 +796,12 @@ def test_71448_is_retired_and_no_final_authority_is_active() -> None:
     )
 
 
-def test_gate_refuses_retired_71448_current_alias() -> None:
-    with pytest.raises(B2GateError, match="71448.*permanently retired"):
-        _validate_declaration(
-            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-        )
+def test_gate_accepts_only_explicit_active_71449_declaration() -> None:
+    declaration, digest = _validate_declaration(
+        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+    )
+    assert declaration["cohort_id"] == "b2g26_final_71449"
+    assert digest == ACTIVE_FINAL_AUTHORITY.declaration_sha256
 
 
 def test_retired_71446_qualification_delta_remains_historically_readable(
@@ -1382,11 +1394,11 @@ def test_b2_gate_schemas_are_strict() -> None:
     cohort_schema = gate_schema["properties"]["generated_cohort"]["properties"][
         "cohort_id"
     ]
-    assert cohort_schema["const"] == "b2g26_final_71448"
+    assert cohort_schema["const"] == "b2g26_final_71449"
     assert gate_schema["properties"]["generated_cohort"]["properties"][
         "declaration_sha256"
     ]["const"] == (
-        "0b48462a8cd8dfb752a73b711954616dd22d45d857748d316505bd17c976262a"
+        "7d36a6a634b81db0c293dff3e7daa5c3dfa284f931a2a4202187c56a75f2f5f6"
     )
     assert gate_schema["properties"]["generated_cohort"]["properties"][
         "compiled_cm_preflight"
@@ -1403,7 +1415,7 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
         "implementation_successor"
     ]["properties"]["changed_paths"]["minItems"] == len(
-        RETIRED_71448_QUALIFICATION_SUCCESSOR_PATHS
+        ACTIVE_71449_QUALIFICATION_SUCCESSOR_PATHS
     )
     assert gate_schema["$defs"]["compiled_cm_preflight_stage"]["properties"][
         "pass_count"
