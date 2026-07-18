@@ -71,6 +71,9 @@ FAILURE_71447 = (
 FAILURE_71448 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71448-FAILURE.json"
 )
+FAILURE_71449 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71449-FAILURE.json"
+)
 RETIRED_DECLARATIONS = (
     NAMED_71438,
     NAMED_71439,
@@ -83,6 +86,7 @@ RETIRED_DECLARATIONS = (
     NAMED_71446,
     NAMED_71447,
     NAMED_71448,
+    NAMED_71449,
 )
 
 
@@ -319,16 +323,56 @@ def test_named_71448_is_retired() -> None:
         )
 
 
-def test_current_alias_and_named_71449_are_active_and_unretired() -> None:
-    current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
+@pytest.mark.parametrize("declaration_path", [CURRENT_ALIAS, NAMED_71449])
+def test_current_alias_and_named_71449_are_retired(
+    declaration_path: Path,
+) -> None:
+    current, current_sha256 = cohort.load_declaration(declaration_path)
 
     assert current["cohort_id"] == "b2g26_final_71449"
     assert CURRENT_ALIAS.read_bytes() == NAMED_71449.read_bytes()
     assert current_sha256 == (
         "7d36a6a634b81db0c293dff3e7daa5c3dfa284f931a2a4202187c56a75f2f5f6"
     )
-    registry.require_unretired_declaration(
-        CURRENT_ALIAS, current, current_sha256
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71449.*permanently retired"
+    ):
+        registry.require_unretired_declaration(
+            declaration_path, current, current_sha256
+        )
+
+
+def test_71449_terminal_failure_authority_is_canonical_and_exact() -> None:
+    payload = FAILURE_71449.read_bytes()
+    authority = json.loads(payload)
+
+    assert payload == cohort.canonical_bytes(authority)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "64eb7995394e0a1456bc054241e551bd815602abd007d9f6fb9c7e52e961c0e5"
+    )
+    assert authority["schema"] == registry.FAILURE_SCHEMA
+    assert authority["status"] == (
+        "permanently-failed-dyn-operator-argv-parse"
+    )
+    assert authority["cohort_id"] == "b2g26_final_71449"
+    assert authority["failure"]["phase"] == "dyn-operator-argv-parse"
+    dyn = authority["evidence"]["dyn"]
+    assert dyn["attempted"] is True
+    assert dyn["passed"] is False
+    assert dyn["exit_code"] == 64
+    assert dyn["invoked_flag"] == "--expected-origin=-512,-512,-512"
+    assert dyn["parse_arguments_rejected"] is True
+    assert dyn["staging_created"] is False
+    assert dyn["report_published"] is False
+    assert dyn["snapshots_published"] is False
+    assert dyn["executable_sha256"] == (
+        "7552f9948bf51c8fec9228cf5db0f42d407cced76b9b4a88fa83c7359b4da5f8"
+    )
+    assert authority["evidence"]["source_authorization"]["consumed"] is True
+    assert authority["admission"]["retry_under_same_declaration_allowed"] is False
+    assert authority["operator_transcript"]["exit_code"] == 64
+    assert authority["operator_transcript"]["stderr_first_line"] == (
+        "q2-dyn-evidence: unknown flag --expected-origin=-512,-512,-512"
     )
 
 

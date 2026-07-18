@@ -1043,7 +1043,7 @@ qualification driver already does.
 Forwarding `--client-root` and `--lithium-root` without validating those
 canonical release placements is forbidden.
 
-### Active 71449 final cohort
+### Retired 71449 final attempt
 
 The closure-corrected implementation was qualified at commit/tree
 `7c3463c28e8913e340d77f182e52752be3381999` /
@@ -1057,23 +1057,50 @@ it binds the immutable `055c6930-r2` B1 authority whose canonical gate
 SHA-256 is
 `055c693027a4091178705331d1bf6c64a81638995f041e978aaf95e33effd354`.
 
-`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71449`, immutable
+At activation, the authority constant pinned `b2g26_final_71449`, immutable
 declaration `B2-GENERATED-COHORT-71449-DECLARATION.json`, declaration
 SHA-256
 `7d36a6a634b81db0c293dff3e7daa5c3dfa284f931a2a4202187c56a75f2f5f6`,
 and the exact eleven-path declaration/gate/schema/direct-test successor
-delta. The current alias is byte-identical. The declaration uses fresh,
-disjoint seed blocks 71449000..71449003 through 71449600..71449603.
-Exactly one fresh, strictly sequential, immutable/no-retry producer lifecycle
-is authorized. This activation does not admit qualification artifacts,
-retired bytes, passing subsets, deployment, or training.
+delta. The then-current alias was byte-identical. The declaration uses seed
+blocks 71449000..71449003 through 71449600..71449603; those seeds and map
+IDs are now retired. Exactly one fresh, strictly sequential, immutable/no-retry
+producer lifecycle was authorized; no qualification artifact, retired byte,
+passing subset, deployment, or training was admitted by that activation.
 
-The declaration-bearing 71449 producer commit must be a strict successor of
-qualified commit `7c3463c28e8913e340d77f182e52752be3381999`. Gate replay
-must prove ancestry, the exact qualified commit/tree and report binding,
-byte-identical stable generator/routes/Atlas-analyzer authority fields, and a
-complete Git delta equal to the frozen 71449
-declaration/gate/schema/direct-test authorization path set.
+The sole 71449 lifecycle consumed its source authorization and passed source
+freeze, real q2tool compilation, compiled static validation, compiled-CM
+preflight, materialization, claims preparation, Atlas construction, and
+generated promotion for all 28 declared maps. The sole Dyn invocation then
+supplied the equals-glued operator flag
+`--expected-origin=-512,-512,-512`. `q2-dyn-evidence` `parse_arguments`
+accepts only the separate-token form `--expected-origin X,Y,Z`, so it rejected
+the flag as unknown before `execute` or `StagingDirectory::create`, exited 64
+with first stderr line
+`q2-dyn-evidence: unknown flag --expected-origin=-512,-512,-512` plus usage,
+and left Dyn output/staging absent with the repository unchanged. No Dyn
+report or snapshots exist. No test campaign, gate, deployment, or training
+action ran. `B2-GENERATED-COHORT-71449-FAILURE.json` is the canonical terminal
+authority, SHA-256
+`64eb7995394e0a1456bc054241e551bd815602abd007d9f6fb9c7e52e961c0e5`,
+with terminal phase `dyn-operator-argv-parse` and status
+`permanently-failed-dyn-operator-argv-parse`.
+
+Cohort 71449 is permanently retired. None of its source, compiled,
+materialized, claims, analysis, promotion, report, log, build, WSL,
+authorization, or producer-snapshot bytes may be retried, resumed, reused,
+copied forward, salvaged, substituted, or admitted. `ACTIVE_FINAL_AUTHORITY =
+None`; there is currently no active final cohort. A successor requires a Dyn
+CLI argv preflight that proves the separate-token `--expected-origin X,Y,Z`
+form (and refuses equals-glued flags) before any final Dyn invocation, a fresh
+green disposable qualification, and a separately committed immutable
+declaration before any producer may run. That preflight is not implemented in
+this retirement commit.
+
+The declaration-bearing 71449 producer commit was a strict successor of
+qualified commit `7c3463c28e8913e340d77f182e52752be3381999`. Its exact
+declaration/gate/schema/direct-test delta remains historical proof only and
+cannot authorize a future cohort.
 
 The declaration-bearing 71446 producer commit was required to be a strict successor of
 qualified commit `a05ddb7037774c1b246a6b13972b228570acb8ef`. Gate replay
@@ -1160,14 +1187,13 @@ check.
 
 ## Offline workflow
 
-`ACTIVE_FINAL_AUTHORITY` now pins `b2g26_final_71449`. The command
-templates in this section are executable only from the exact clean activated
-snapshot, after the no-write final preauthorization closes every pinned
-runtime input, and only against the fresh 71449 root. Cohort
-`b2g26_final_71448` remains terminally retired under
-`B2-GENERATED-COHORT-71448-FAILURE.json`; no command may name any retired,
-qualification, or 71448 path.
-Commands must never name retired cohorts 71426 through 71448. No retired or
+`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort.
+Cohort `b2g26_final_71449` is terminally retired under
+`B2-GENERATED-COHORT-71449-FAILURE.json`. Every command template in this
+section is historical and non-executable until a successor activation: it
+records the required producer shape only and must not be run against any
+retired, qualification, or 71449 path.
+Commands must never name retired cohorts 71426 through 71449. No retired or
 qualification population, report,
 Dyn evidence, compiled byte, or passing subset may be copied into a future
 cohort root. For any future cohort, the first source invocation consumes its
