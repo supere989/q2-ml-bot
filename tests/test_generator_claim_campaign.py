@@ -317,6 +317,18 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "seven retained checks",
         "dyn-phase-b-atlas-manifest-binding",
         "rejects retired cohort identities",
+        "Active 71453 final cohort",
+        "b2g26_final_71453",
+        "B2-GENERATED-COHORT-71453-DECLARATION.json",
+        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810",
+        "71453000..71453003",
+        "71453600..71453603",
+        "b2q26_14dfc40_71810000",
+        "30e9e6e044ef49ec6b3352b7c57580833ff182b11cfddc909c32b840c3297d0d",
+        "14dfc409b047611cb0722e53cad57d8c8584acb5",
+        "725815ca68b1a44cbb8699656e214f4d19e60409",
+        "28/28",
+        "exact twelve-path",
         "4b26c670ed54585787505cf7dfbb35bdc1830fdfbd42585a16d0484622ea306f",
         "oracle batch timeout must be finite and in (0, 60]",
         "not a 3,600-second runtime timeout",
@@ -372,6 +384,8 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "The active authority and schema both pin 71451",
         "Active 71452 final cohort",
         "`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71452`",
+        "there is currently no active final cohort",
+        "No final cohort is active",
     ):
         assert stale_claim not in contract
 

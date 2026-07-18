@@ -218,6 +218,20 @@ RETIRED_71452_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
+ACTIVE_71453_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+    "AGENTS.md",
+    "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
+    "docs/multires/B2-GATE-ASSEMBLY.md",
+    "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json",
+    "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
+    "schemas/q2-multires-b2-gate-v1.schema.json",
+    "tests/test_b2_gate.py",
+    "tests/test_b2_operational_docs.py",
+    "tests/test_generator_claim_campaign.py",
+    "tests/test_generator_cohort.py",
+    "tests/test_retired_cohort_registry.py",
+    "tools/assemble_b2_gate.py",
+})
 
 
 class B2GateError(ValueError):
@@ -232,11 +246,21 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Cohort 71452 consumed source authorization and passed promotion before the
-# sole Phase-B bind exposed a deterministic Atlas writer/loader byte-contract
-# defect. A separately committed post-correction, post-qualification successor
-# is required before this may become non-None; the current alias is forensic.
-ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
+# Corrective commit 14dfc409b047611cb0722e53cad57d8c8584acb5 passed a
+# completely fresh disposable qualification 28/28 with all seven retained
+# infrastructure checks. Cohort 71453 is the separately committed, disjoint,
+# one-shot successor; qualification bytes and retired 71452 bytes remain
+# inadmissible.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
+    cohort_id="b2g26_final_71453",
+    declaration_sha256=(
+        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810"
+    ),
+    immutable_declaration_path=(
+        "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
+    ),
+    qualification_successor_paths=ACTIVE_71453_QUALIFICATION_SUCCESSOR_PATHS,
+)
 
 
 def _require_active_final_authority() -> ActiveFinalAuthority:

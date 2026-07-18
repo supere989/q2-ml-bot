@@ -35,9 +35,12 @@ DECLARATION_71451 = (
 DECLARATION_71452 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71452-DECLARATION.json"
 )
+DECLARATION_71453 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
+)
 HISTORICAL_DECLARATIONS = tuple(
     ROOT / f"docs/multires/B2-GENERATED-COHORT-{number}-DECLARATION.json"
-    for number in range(71427, 71452)
+    for number in range(71427, 71453)
 )
 HEX64 = "a" * 64
 GIT40 = "b" * 40
@@ -197,22 +200,22 @@ def static_pass(map_path: Path) -> dict[str, object]:
     return {"map": map_path.stem, "static_ok": True}
 
 
-def test_historical_71452_alias_is_canonical_balanced_and_retired() -> None:
+def test_authoritative_71453_alias_is_canonical_balanced_and_fresh() -> None:
     declaration, digest = cohort.load_declaration(AUTHORITATIVE_DECLARATION)
     declaration_bytes = AUTHORITATIVE_DECLARATION.read_bytes()
-    assert declaration_bytes == DECLARATION_71452.read_bytes()
+    assert declaration_bytes == DECLARATION_71453.read_bytes()
     assert declaration_bytes == cohort.canonical_bytes(declaration)
     assert hashlib.sha256(declaration_bytes).hexdigest() == (
-        "eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf"
+        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810"
     )
     style_bases = (
-        ("open", 71452000),
-        ("towers", 71452100),
-        ("canyon", 71452200),
-        ("pits", 71452300),
-        ("arena_open", 71452400),
-        ("arena_vertical", 71452500),
-        ("arena_lanes", 71452600),
+        ("open", 71453000),
+        ("towers", 71453100),
+        ("canyon", 71453200),
+        ("pits", 71453300),
+        ("arena_open", 71453400),
+        ("arena_vertical", 71453500),
+        ("arena_lanes", 71453600),
     )
     expected = [
         {
@@ -228,7 +231,7 @@ def test_historical_71452_alias_is_canonical_balanced_and_retired() -> None:
     ]
 
     assert len(digest) == 64
-    assert declaration["cohort_id"] == "b2g26_final_71452"
+    assert declaration["cohort_id"] == "b2g26_final_71453"
     assert declaration["maps"] == expected
     assert declaration["selection"] == {
         "timing": "declared-before-generation",
@@ -258,21 +261,18 @@ def test_historical_71452_alias_is_canonical_balanced_and_retired() -> None:
     assert {row["map"] for row in declaration["maps"]}.isdisjoint(
         row["map"] for row in historical_rows
     )
+    registry.require_unretired_declaration(
+        AUTHORITATIVE_DECLARATION, declaration, digest
+    )
+
+
+def test_named_71452_declaration_remains_permanently_retired() -> None:
+    declaration, digest = cohort.load_declaration(DECLARATION_71452)
     with pytest.raises(
         registry.RetiredCohortRegistryError, match="71452.*permanently retired"
     ):
         registry.require_unretired_declaration(
-            AUTHORITATIVE_DECLARATION, declaration, digest
-        )
-
-
-def test_named_71451_declaration_remains_permanently_retired() -> None:
-    declaration, digest = cohort.load_declaration(DECLARATION_71451)
-    with pytest.raises(
-        registry.RetiredCohortRegistryError, match="71451.*permanently retired"
-    ):
-        registry.require_unretired_declaration(
-            DECLARATION_71451, declaration, digest
+            DECLARATION_71452, declaration, digest
         )
 
 

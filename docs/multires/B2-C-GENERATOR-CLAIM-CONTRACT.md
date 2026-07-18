@@ -1311,6 +1311,30 @@ digests sealed in that map's promotion evidence, and re-derives snapped origin
 from `model0_mins`. Final Phase B also rejects retired cohort identities
 before artifact binding.
 
+### Active 71453 final cohort
+
+Corrective commit `14dfc409b047611cb0722e53cad57d8c8584acb5`, tree
+`725815ca68b1a44cbb8699656e214f4d19e60409`, passed the completely fresh
+disposable qualification `b2q26_14dfc40_71810000` 28/28 end to end with all
+seven infrastructure checks green. Its canonical non-admissible qualification
+report SHA-256 is
+`30e9e6e044ef49ec6b3352b7c57580833ff182b11cfddc909c32b840c3297d0d`.
+The qualification proved the production compact Atlas loader against real
+writer bytes and replayed both manifest seals through Phase B; qualification
+maps and artifacts remain forbidden as final inputs.
+
+The separately committed immutable
+`B2-GENERATED-COHORT-71453-DECLARATION.json` and current alias are
+byte-identical with SHA-256
+`5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810`.
+They name `b2g26_final_71453`; its 28 disjoint members use seed blocks
+71453000..71453003 through 71453600..71453603. `ACTIVE_FINAL_AUTHORITY`
+explicitly pins only that identity, digest, immutable path, and the
+exact twelve-path declaration/gate/schema/direct-test/agent-guidance successor
+delta. Cohort 71453 has exactly one immutable source authorization and no
+repair, resume, salvage, substitution, or retry lane after consumption.
+Retired 71452 and qualification bytes cannot cross into its final root.
+
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
 proved ancestry, the exact qualified commit/tree and report binding,

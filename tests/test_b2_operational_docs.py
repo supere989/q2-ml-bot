@@ -196,7 +196,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
 
-def test_current_gate_contract_retires_71452_and_clears_authority() -> None:
+def test_current_gate_contract_retires_71452_and_activates_71453() -> None:
     text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
         encoding="utf-8"
     )
@@ -316,6 +316,19 @@ def test_current_gate_contract_retires_71452_and_clears_authority() -> None:
         "seven retained checks",
         "dyn-phase-b-atlas-manifest-binding",
         "refuses any identity",
+        "Active 71453 final cohort",
+        "b2g26_final_71453",
+        "B2-GENERATED-COHORT-71453-DECLARATION.json",
+        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810",
+        "71453000..71453003",
+        "71453600..71453603",
+        "b2q26_14dfc40_71810000",
+        "30e9e6e044ef49ec6b3352b7c57580833ff182b11cfddc909c32b840c3297d0d",
+        "14dfc409b047611cb0722e53cad57d8c8584acb5",
+        "725815ca68b1a44cbb8699656e214f4d19e60409",
+        "28/28",
+        "exact twelve-path",
+        "The active authority and schema pin only 71453",
     ):
         assert required in text
     for stale_claim in (
@@ -340,6 +353,8 @@ def test_current_gate_contract_retires_71452_and_clears_authority() -> None:
         "Active 71452 final cohort",
         "`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71452`",
         "The active authority and schema pin only 71452",
+        "there is currently no active final cohort",
+        "No final cohort is active",
     ):
         assert stale_claim not in text
 

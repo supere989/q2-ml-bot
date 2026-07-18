@@ -81,29 +81,21 @@ passing component tests or an isolated staging checkout cannot. The old
 in-process public ONNX runtime is retired and has no operational selector or
 rollback role.
 
-**Current B2 authority (updated 2026-07-18):** final cohort 71452 is
-permanently retired. Its sole lifecycle consumed source authorization and
-passed all eight source-through-promotion stages 28/28. Phase A correctly
-deferred origin, but the first post-promotion Phase-B bind rejected the real
-Atlas manifest because the binder incorrectly required sorted canonical JSON;
-the Atlas writer and promotion contract require compact insertion-order JSON
-plus LF. No binding report or Dyn output was published. The absence of those
-outputs does not reopen a retry lane after source consumption. Canonical
-failure authority is
-`docs/multires/B2-GENERATED-COHORT-71452-FAILURE.json`; no 71452 byte may be
-retried, repaired, or reused. `ACTIVE_FINAL_AUTHORITY = None`, so no gate,
-deployment, trainer, or TensorBoard may start. The dedicated Atlas compact
-loader and writer-shaped regression must pass a completely fresh disposable
-qualification, including Phase-B binding, before a separately committed
-disjoint successor can be activated. Sorted compact Atlas rewrites are
-detected by the digest chain, not by the compactness predicate: every
-compiled-promotion row seals the exact `atlas_manifest_sha256` and
-`analysis_manifest_sha256` bytes consumed by Phase B.
-Qualification infrastructure now requires seven retained checks; the new
-`dyn-phase-b-atlas-manifest-binding` check drives every promoted qualification
-manifest through the production Phase-B loader, replays the exact manifest
-digests sealed by that map's promotion evidence, and re-derives its origin.
-Phase B also rejects retired cohort identities directly.
+**Current B2 authority (updated 2026-07-18):** final cohort 71452 remains
+permanently retired under
+`docs/multires/B2-GENERATED-COHORT-71452-FAILURE.json`; none of its bytes may be
+retried, repaired, or reused. Corrective commit
+`14dfc409b047611cb0722e53cad57d8c8584acb5` passed fresh disposable
+qualification `b2q26_14dfc40_71810000` 28/28 plus all seven infrastructure
+checks, including production Phase-B replay of real compact Atlas writer bytes
+and both promotion-sealed manifest digests. Qualification bytes remain
+non-admissible. `ACTIVE_FINAL_AUTHORITY` now pins only fresh disjoint cohort
+`b2g26_final_71453`, declaration SHA-256
+`5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810`,
+and the exact twelve-path qualified-successor delta. Its first source attempt
+consumes its sole authorization. Gate assembly, deployment, trainer, and
+TensorBoard remain forbidden until that one-shot final cohort and every B2-B6
+cutover gate pass.
 
 ## Training Topology
 

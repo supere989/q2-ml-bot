@@ -658,6 +658,30 @@ manifest digests sealed in that map's promotion evidence, and re-derives
 snapped origin from `model0_mins`. Final Phase B also refuses any identity in
 the retired-cohort registry before artifact binding.
 
+### Active 71453 final cohort
+
+Corrective commit `14dfc409b047611cb0722e53cad57d8c8584acb5`, tree
+`725815ca68b1a44cbb8699656e214f4d19e60409`, passed fresh disposable
+qualification `b2q26_14dfc40_71810000` 28/28 end to end with all seven retained
+infrastructure checks green. The canonical green, non-admissible report
+SHA-256 is
+`30e9e6e044ef49ec6b3352b7c57580833ff182b11cfddc909c32b840c3297d0d`.
+That qualification drove production compact Atlas writer bytes and both exact
+manifest seals through Phase B; none of its maps or artifacts are admissible
+in the final lane.
+
+The separately committed immutable declaration
+`B2-GENERATED-COHORT-71453-DECLARATION.json` and current alias are
+byte-identical with SHA-256
+`5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810`.
+They name `b2g26_final_71453` and seed blocks 71453000..71453003 through
+71453600..71453603. `ACTIVE_FINAL_AUTHORITY` explicitly pins only that cohort,
+digest, immutable path, and the
+exact twelve-path declaration/gate/schema/direct-test/agent-guidance successor delta from the
+qualified commit. Its first source-generation invocation consumes its sole
+authorization; retry, repair, resume, salvage, and substitution are forbidden.
+Retired 71452 and qualification bytes cannot enter the final root.
+
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
 proved ancestry, the exact qualified commit/tree and report binding,
@@ -762,9 +786,10 @@ syntax report must never be required to identify the execution runtime.
 
 The assembler rejects declarations for retired cohorts 71426 through 71452
 before reading campaign evidence. The immutable 71447, 71448, 71449, 71450,
-71451, and 71452 declarations are historical only. The schema retains
-historical 71452 field pins, but `ACTIVE_FINAL_AUTHORITY = None`; neither the
-schema nor the byte-identical alias/named declaration can infer authority.
+71451, and 71452 declarations are historical only.
+The active authority and schema pin only 71453, and executable authority still requires replay of the
+exact qualified-successor relation and all one-shot evidence; neither the
+schema nor a declaration can infer authority by itself.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -981,21 +1006,19 @@ reuse of any retired cohort byte.
 
 ## Assembly template
 
-This template is disabled while `ACTIVE_FINAL_AUTHORITY = None`. Historical
-71452 field pins remain in the schema only until a freshly qualified successor
-updates them; neither the current alias nor the schema can infer executable
-authority. When reactivated, all values are exact paths, `OUT` must not exist,
-and both two-phase Dyn authority reports are mandatory.
+This template is active only for the exact 71453 authority. All values are
+exact paths, `OUT` must not exist, and both two-phase Dyn authority reports are
+mandatory.
 
-The qualified parent is commit `707331d0d87249074a591326c25e3f9688ba8276`,
-tree `02293e6c9776ad7c50358b7cbaf45544a280894d`. Qualification
-`b2q26_707331d_71809000` passed 27/28 end to end and six infrastructure checks;
-its green non-admissible report SHA-256 is
-`6563e3efe716997867a84325f19af8b562700b3a2e27a416daf3e53d6d32eb38`.
+The qualified parent is commit `14dfc409b047611cb0722e53cad57d8c8584acb5`,
+tree `725815ca68b1a44cbb8699656e214f4d19e60409`. Qualification
+`b2q26_14dfc40_71810000` passed 28/28 end to end and all seven infrastructure
+checks; its green non-admissible report SHA-256 is
+`30e9e6e044ef49ec6b3352b7c57580833ff182b11cfddc909c32b840c3297d0d`.
 Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. It
 cannot admit qualification artifacts, passing subsets, retired bytes,
-deployment, or training. Its historical authorization was consumed by 71452
-and cannot authorize a successor.
+deployment, or training; it authorizes only the separately committed 71453
+declaration through the exact successor check.
 
 ```sh
 python tools/assemble_b2_gate.py \
