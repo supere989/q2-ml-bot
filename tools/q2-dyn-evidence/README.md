@@ -42,9 +42,17 @@ The retained report binds the clean repository commit/tree, executable bytes,
 exact producer argv, and the absent output path. A failed final-lane CLI
 invocation is terminal; the preflight is the only authorized place to catch
 argv construction errors without consuming the cohort.
+The preflight report path must be absolute, fresh, and outside the repository
+so publishing it cannot dirty or advance the commit/tree it attests.
+A successor's sole Dyn action must use
+`tools/run_preflighted_b2_dyn.py --preflight-report REPORT`; that launcher
+rehashes the helper, replays the clean repository binding, rejects an existing
+output, and passes the retained `producer_argv` list directly to the operating
+system without shell reconstruction.
 
 ```sh
-tools/q2-dyn-evidence/target/release/q2-dyn-evidence \
+python tools/preflight_b2_dyn_invocation.py \
+  --executable "$DYN_EVIDENCE_EXECUTABLE" \
   --repo-root "$PWD" \
   --atlas "$ATLAS" \
   --manifest "$ATLAS_MANIFEST" \
@@ -56,7 +64,11 @@ tools/q2-dyn-evidence/target/release/q2-dyn-evidence \
   --map-epoch "$MAP_EPOCH" \
   --environment-steps "$ENVIRONMENT_STEPS" \
   --samples 4000 \
-  --output "$NEW_EVIDENCE_DIRECTORY"
+  --output "$NEW_EVIDENCE_DIRECTORY" \
+  --report "$NEW_DYN_ARGV_PREFLIGHT_REPORT"
+
+python tools/run_preflighted_b2_dyn.py \
+  --preflight-report "$NEW_DYN_ARGV_PREFLIGHT_REPORT"
 ```
 
 The command atomically publishes exactly these files. Publication uses Linux

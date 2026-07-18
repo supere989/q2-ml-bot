@@ -1094,8 +1094,19 @@ None`; there is currently no active final cohort. A successor requires a Dyn
 CLI argv preflight that proves the separate-token `--expected-origin X,Y,Z`
 form (and refuses equals-glued flags) before any final Dyn invocation, a fresh
 green disposable qualification, and a separately committed immutable
-declaration before any producer may run. That preflight is not implemented in
-this retirement commit.
+declaration before any producer may run. The corrected toolchain implements
+that boundary in `tools/preflight_b2_dyn_invocation.py` and the helper's
+`--preflight-only true` mode. The retained pre-source report must be canonical
+schema `q2-b2-dyn-argv-preflight-v1`, bind the clean activation commit/tree and
+exact helper bytes, retain the complete later producer argv with
+`--expected-origin` and its negative origin as separate tokens, and prove the
+future Dyn output remained absent before and after parsing.
+The sole later Dyn action must be
+`tools/run_preflighted_b2_dyn.py --preflight-report REPORT`; it rehashes the
+helper and clean repository binding and executes the retained `producer_argv`
+list directly, without a shell or manually reconstructed flags.
+The exclusive preflight report must be an absolute fresh path outside the
+repository so its publication cannot invalidate the clean commit/tree binding.
 
 The declaration-bearing 71449 producer commit was a strict successor of
 qualified commit `7c3463c28e8913e340d77f182e52752be3381999`. Its exact

@@ -1118,18 +1118,25 @@ fn sync_directory(path: &Path) -> AppResult<()> {
         .map_err(|error| format!("cannot sync directory {}: {error}", path.display()))
 }
 
-fn execute(arguments: Arguments) -> AppResult<(PathBuf, bool)> {
-    let embedded_commit = BUILD_COMMIT.ok_or_else(|| {
+fn validate_embedded_commit<'a>(
+    embedded_commit: Option<&'a str>,
+    expected_crate_commit: &str,
+) -> AppResult<&'a str> {
+    let embedded_commit = embedded_commit.ok_or_else(|| {
         "binary lacks embedded Q2_LATTICE_CRATE_COMMIT; rebuild with the documented environment variable"
             .to_owned()
     })?;
     validate_commit(embedded_commit)?;
-    if embedded_commit != arguments.expected_crate_commit {
+    if embedded_commit != expected_crate_commit {
         return Err(format!(
-            "embedded crate commit {embedded_commit} != expected {}",
-            arguments.expected_crate_commit
+            "embedded crate commit {embedded_commit} != expected {expected_crate_commit}"
         ));
     }
+    Ok(embedded_commit)
+}
+
+fn execute(arguments: Arguments) -> AppResult<(PathBuf, bool)> {
+    let embedded_commit = validate_embedded_commit(BUILD_COMMIT, &arguments.expected_crate_commit)?;
     let repo_root = fs::canonicalize(&arguments.repo_root).map_err(|error| {
         format!(
             "cannot canonicalize repository root {}: {error}",
@@ -1369,6 +1376,11 @@ fn main() {
         }
     };
     if arguments.preflight_only {
+        if let Err(error) = validate_embedded_commit(BUILD_COMMIT, &arguments.expected_crate_commit)
+        {
+            eprintln!("q2-dyn-evidence: {error}");
+            std::process::exit(64);
+        }
         println!("{{\"passed\":true,\"schema\":\"q2-b2-dyn-argv-preflight-v1\"}}");
         return;
     }
@@ -1467,6 +1479,18 @@ mod tests {
                 .unwrap_err()
                 .contains("unknown flag --expected-origin=-256,0,512")
         );
+    }
+
+    #[test]
+    fn cli_preflight_rejects_missing_or_mismatched_embedded_commit() {
+        let expected = "22".repeat(20);
+        assert!(validate_embedded_commit(None, &expected).is_err());
+        assert!(
+            validate_embedded_commit(Some(&"33".repeat(20)), &expected)
+                .unwrap_err()
+                .contains("!= expected")
+        );
+        validate_embedded_commit(Some(&expected), &expected).unwrap();
     }
 
     #[test]

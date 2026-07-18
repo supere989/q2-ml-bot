@@ -252,6 +252,7 @@ class B2GatePaths:
     stock_analysis_dir: Path
     stock_validation_dir: Path
     dyn_evidence_executable: Path
+    dyn_argv_preflight_report: Path
     dyn_evidence_report: Path
     test_report: Path
     qualification_report: Path
@@ -2332,6 +2333,97 @@ def _latency_distribution(value: object, label: str) -> Mapping[str, Any]:
     return result
 
 
+def _validate_dyn_argv_preflight(
+    path: Path,
+    implementation: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    atlas: Mapping[str, Any],
+    performance: Mapping[str, Any],
+    paths: B2GatePaths,
+) -> dict[str, Any]:
+    try:
+        path.resolve().relative_to(paths.repo_root.resolve())
+    except ValueError:
+        pass
+    else:
+        raise B2GateError("Dyn argv preflight report is inside the repository")
+    report = _mapping(_load_json(path), "Dyn argv preflight report")
+    _exact_keys(
+        report,
+        {
+            "schema", "passed", "repository", "executable", "producer_argv",
+            "preflight_argv", "producer_output_absent_before",
+            "producer_output_absent_after", "preflight_stdout_sha256",
+            "preflight_stderr_sha256",
+        },
+        "Dyn argv preflight report",
+    )
+    _require(
+        report["schema"] == "q2-b2-dyn-argv-preflight-v1"
+        and report["passed"] is True,
+        "Dyn argv preflight is not green",
+    )
+    _require(
+        report["repository"] == implementation,
+        "Dyn argv preflight repository binding differs",
+    )
+    _file_evidence_matches(
+        report["executable"],
+        paths.dyn_evidence_executable,
+        "Dyn argv preflight executable",
+    )
+    map_id = authority["canonical_map_id"]
+    expected_argv = [
+        str(paths.dyn_evidence_executable),
+        "--repo-root",
+        str(paths.repo_root),
+        "--atlas",
+        str(paths.analysis_dir / f"{map_id}.atlas.bin"),
+        "--manifest",
+        str(paths.analysis_dir / f"{map_id}.atlas.manifest.json"),
+        "--bsp",
+        str(paths.claims_dir / f"{map_id}.bsp"),
+        "--expected-map-id",
+        map_id,
+        "--expected-origin",
+        ",".join(str(value) for value in atlas["origin"]),
+        "--expected-analyzer-authority",
+        authority["analyzer_authority_sha256"],
+        "--expected-crate-commit",
+        authority["crate_commit"],
+        "--map-epoch",
+        str(authority["map_epoch"]),
+        "--environment-steps",
+        str(authority["environment_steps"]),
+        "--samples",
+        str(performance["resident_samples"]),
+        "--output",
+        str(paths.dyn_evidence_report.parent),
+    ]
+    _require(
+        report["producer_argv"] == expected_argv,
+        "Dyn producer argv differs from its pre-source preflight",
+    )
+    _require(
+        report["preflight_argv"] == [*expected_argv, "--preflight-only", "true"],
+        "Dyn parser-preflight argv differs",
+    )
+    _require(
+        report["producer_output_absent_before"] is True
+        and report["producer_output_absent_after"] is True,
+        "Dyn argv preflight did not preserve output absence",
+    )
+    expected_stdout = canonical_bytes(
+        {"passed": True, "schema": "q2-b2-dyn-argv-preflight-v1"}
+    )
+    _require(
+        report["preflight_stdout_sha256"] == _sha256_bytes(expected_stdout)
+        and report["preflight_stderr_sha256"] == _sha256_bytes(b""),
+        "Dyn argv preflight output digest differs",
+    )
+    return _file_record(path)
+
+
 def _validate_dyn_evidence(
     path: Path,
     implementation: Mapping[str, Any],
@@ -2630,9 +2722,18 @@ def _validate_dyn_evidence(
         "four_dyn_resident_bytes": dyn_state["combined_resident_bytes"],
         "four_client_feature_assembly_p99_ns": total["p99_ns"],
     }
+    argv_preflight = _validate_dyn_argv_preflight(
+        paths.dyn_argv_preflight_report,
+        implementation,
+        authority,
+        atlas,
+        performance,
+        paths,
+    )
     evidence = {
         "report": _file_record(path),
         "executable": executable,
+        "argv_preflight": argv_preflight,
         "source_authority": source_authority,
         "magic": "Q2LAT002",
         "client_count": 4,
@@ -2960,6 +3061,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--stock-analysis-dir", type=Path, required=True)
     parser.add_argument("--stock-validation-dir", type=Path, required=True)
     parser.add_argument("--dyn-evidence-executable", type=Path, required=True)
+    parser.add_argument("--dyn-argv-preflight-report", type=Path, required=True)
     parser.add_argument("--dyn-evidence-report", type=Path, required=True)
     parser.add_argument("--test-report", type=Path, required=True)
     parser.add_argument("--qualification-report", type=Path, required=True)

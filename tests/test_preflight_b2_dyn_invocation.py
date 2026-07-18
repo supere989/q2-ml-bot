@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -9,9 +10,12 @@ import pytest
 
 from tools.preflight_b2_dyn_invocation import (
     DynInvocationPreflightError,
+    EXPECTED_STDOUT,
     SCHEMA,
     preflight,
 )
+from tools.run_preflighted_b2_dyn import execute, load_preflight
+from tools.run_generator_cohort import canonical_bytes
 
 
 def _repo(tmp_path: Path) -> tuple[Path, str]:
@@ -62,6 +66,31 @@ def _executable(tmp_path: Path, *, touch_output: bool = False) -> Path:
         )
     body.append(f"print('{json.dumps({'passed': True, 'schema': SCHEMA}, separators=(',', ':'))}')")
     executable.write_text("\n".join(body) + "\n")
+    executable.chmod(0o755)
+    return executable
+
+
+def _dual_executable(tmp_path: Path) -> Path:
+    executable = tmp_path / "q2-dyn-evidence"
+    executable.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import pathlib, sys",
+                "origin = sys.argv.index('--expected-origin')",
+                "assert sys.argv[origin + 1] == '-512,-512,-512'",
+                "if sys.argv[-2:] == ['--preflight-only', 'true']:",
+                f"    print('{json.dumps({'passed': True, 'schema': SCHEMA}, separators=(',', ':'))}')",
+                "else:",
+                "    output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])",
+                "    output.mkdir(parents=True)",
+                "    report = output / 'b2-dyn-evidence.json'",
+                "    report.write_text('{}\\n')",
+                "    print(report)",
+            ]
+        )
+        + "\n"
+    )
     executable.chmod(0o755)
     return executable
 
@@ -135,3 +164,83 @@ def test_preflight_rejects_any_producer_output_side_effect(
 
     with pytest.raises(DynInvocationPreflightError, match="touched the producer output"):
         preflight(args)
+
+
+def test_preflighted_runner_executes_the_retained_argv_without_shell_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo, commit = _repo(tmp_path)
+    _stub_binding(monkeypatch, repo, commit)
+    args = _args(tmp_path, repo, commit, _dual_executable(tmp_path))
+    report = preflight(args)
+    args.report.write_bytes(canonical_bytes(report))
+    monkeypatch.setattr(
+        "tools.run_preflighted_b2_dyn.repository_binding",
+        lambda _: report["repository"],
+    )
+
+    loaded = load_preflight(args.report)
+    published = execute(loaded)
+
+    assert published == args.output / "b2-dyn-evidence.json"
+    assert published.read_bytes() == b"{}\n"
+
+
+def test_preflighted_runner_rejects_equals_glued_origin(tmp_path: Path):
+    report = {
+        "schema": SCHEMA,
+        "passed": True,
+        "repository": {},
+        "executable": {},
+        "producer_argv": ["dyn", "--expected-origin=-512,-512,-512"],
+        "preflight_argv": [
+            "dyn",
+            "--expected-origin=-512,-512,-512",
+            "--preflight-only",
+            "true",
+        ],
+        "producer_output_absent_before": True,
+        "producer_output_absent_after": True,
+        "preflight_stdout_sha256": "11" * 32,
+        "preflight_stderr_sha256": "22" * 32,
+    }
+    path = tmp_path / "preflight.json"
+    path.write_bytes(canonical_bytes(report))
+
+    with pytest.raises(ValueError, match="equals-glued"):
+        load_preflight(path)
+
+
+def test_preflighted_runner_rejects_relative_executable_and_paths(tmp_path: Path):
+    producer_argv = [
+        "relative-dyn",
+        "--repo-root",
+        "relative-repo",
+        "--atlas",
+        "relative-atlas",
+        "--manifest",
+        "relative-manifest",
+        "--bsp",
+        "relative-bsp",
+        "--expected-origin",
+        "-512,-512,-512",
+        "--output",
+        "relative-output",
+    ]
+    report = {
+        "schema": SCHEMA,
+        "passed": True,
+        "repository": {},
+        "executable": {},
+        "producer_argv": producer_argv,
+        "preflight_argv": [*producer_argv, "--preflight-only", "true"],
+        "producer_output_absent_before": True,
+        "producer_output_absent_after": True,
+        "preflight_stdout_sha256": hashlib.sha256(EXPECTED_STDOUT).hexdigest(),
+        "preflight_stderr_sha256": hashlib.sha256(b"").hexdigest(),
+    }
+    path = tmp_path / "preflight.json"
+    path.write_bytes(canonical_bytes(report))
+
+    with pytest.raises(ValueError, match="paths must all be absolute"):
+        load_preflight(path)

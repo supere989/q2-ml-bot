@@ -114,6 +114,7 @@ def _paths(tmp_path: Path) -> B2GatePaths:
         stock_analysis_dir=dummy,
         stock_validation_dir=dummy,
         dyn_evidence_executable=tmp_path / "q2-dyn-evidence",
+        dyn_argv_preflight_report=tmp_path / "dyn-argv-preflight.json",
         dyn_evidence_report=tmp_path / "dyn/b2-dyn-evidence.json",
         test_report=dummy,
         qualification_report=dummy,
@@ -684,6 +685,62 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
         },
     }
     paths.dyn_evidence_report.write_bytes(canonical_bytes(report))
+    producer_argv = [
+        str(paths.dyn_evidence_executable),
+        "--repo-root",
+        str(paths.repo_root),
+        "--atlas",
+        str(atlas_path),
+        "--manifest",
+        str(atlas_manifest_path),
+        "--bsp",
+        str(paths.claims_dir / f"{map_id}.bsp"),
+        "--expected-map-id",
+        map_id,
+        "--expected-origin",
+        "0,0,0",
+        "--expected-analyzer-authority",
+        SHA,
+        "--expected-crate-commit",
+        COMMIT,
+        "--map-epoch",
+        "1",
+        "--environment-steps",
+        "17",
+        "--samples",
+        "2000",
+        "--output",
+        str(paths.dyn_evidence_report.parent),
+    ]
+    paths.dyn_argv_preflight_report.write_bytes(
+        canonical_bytes(
+            {
+                "schema": "q2-b2-dyn-argv-preflight-v1",
+                "passed": True,
+                "repository": _implementation(),
+                "executable": _file_evidence(
+                    str(paths.dyn_evidence_executable), executable
+                ),
+                "producer_argv": producer_argv,
+                "preflight_argv": [
+                    *producer_argv,
+                    "--preflight-only",
+                    "true",
+                ],
+                "producer_output_absent_before": True,
+                "producer_output_absent_after": True,
+                "preflight_stdout_sha256": _sha256(
+                    canonical_bytes(
+                        {
+                            "passed": True,
+                            "schema": "q2-b2-dyn-argv-preflight-v1",
+                        }
+                    )
+                ),
+                "preflight_stderr_sha256": _sha256(b""),
+            }
+        )
+    )
     declaration = {
         "cohort_id": RETIRED_COHORT_71446,
         "maps": _historical_71446_rows(),

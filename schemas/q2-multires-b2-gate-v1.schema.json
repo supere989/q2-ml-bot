@@ -164,10 +164,11 @@
     "dyn_evidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["report", "executable", "source_authority", "magic", "client_count", "host", "kernel_release", "machine_identity_sha256"],
+      "required": ["report", "executable", "argv_preflight", "source_authority", "magic", "client_count", "host", "kernel_release", "machine_identity_sha256"],
       "properties": {
         "report": {"$ref": "#/$defs/file"},
         "executable": {"$ref": "#/$defs/file"},
+        "argv_preflight": {"$ref": "#/$defs/file"},
         "source_authority": {
           "type": "object",
           "additionalProperties": false,

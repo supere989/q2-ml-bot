@@ -16,7 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.run_generator_cohort import canonical_bytes, repository_binding  # noqa: E402
+from tools.run_generator_cohort import (  # noqa: E402
+    GeneratorCohortError,
+    canonical_bytes,
+    repository_binding,
+)
 
 
 SCHEMA = "q2-b2-dyn-argv-preflight-v1"
@@ -89,6 +93,18 @@ def _producer_argv(args: argparse.Namespace) -> list[str]:
 
 def preflight(args: argparse.Namespace) -> dict[str, object]:
     _regular_file(args.executable, "Dyn evidence executable")
+    if args.map_epoch <= 0 or args.environment_steps < 0 or args.samples < 2000:
+        raise DynInvocationPreflightError("planned Dyn numeric domain differs")
+    if not args.report.is_absolute():
+        raise DynInvocationPreflightError("Dyn argv preflight report must be absolute")
+    try:
+        args.report.resolve().relative_to(args.repo_root.resolve())
+    except ValueError:
+        pass
+    else:
+        raise DynInvocationPreflightError(
+            "Dyn argv preflight report must be outside the repository"
+        )
     if args.output.exists() or args.output.is_symlink():
         raise DynInvocationPreflightError("planned Dyn output already exists")
     if args.report.exists() or args.report.is_symlink():
@@ -163,8 +179,6 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.map_epoch <= 0 or args.environment_steps < 0 or args.samples < 2000:
-            raise DynInvocationPreflightError("planned Dyn numeric domain differs")
         report = preflight(args)
         payload = canonical_bytes(report)
         descriptor = os.open(args.report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
@@ -174,7 +188,12 @@ def main(argv: list[str] | None = None) -> int:
             os.fsync(stream.fileno())
         sys.stdout.buffer.write(payload)
         return 0
-    except (DynInvocationPreflightError, OSError, subprocess.SubprocessError) as exc:
+    except (
+        DynInvocationPreflightError,
+        GeneratorCohortError,
+        OSError,
+        subprocess.SubprocessError,
+    ) as exc:
         print(f"Dyn argv preflight refused: {exc}", file=sys.stderr)
         return 1
 
