@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:q2-ml:q2-multires-b2-gate-v1",
   "title": "Fail-closed multi-resolution Atlas Batch B2 gate",
-  "$comment": "Cohort 71452 is the sole active post-qualification final authority; schema validation complements and cannot replace assembler replay of its exact declaration and qualified-successor binding.",
+  "$comment": "Historical 71452 field pins remain until a qualified successor updates the schema; the assembler has no active final authority and cannot emit a gate from this schema alone.",
   "type": "object",
   "additionalProperties": false,
   "required": [

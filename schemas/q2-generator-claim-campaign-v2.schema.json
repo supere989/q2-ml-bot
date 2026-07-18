@@ -194,6 +194,8 @@
         "report_sha256",
         "bsp_sha256",
         "atlas_sha256",
+        "atlas_manifest_sha256",
+        "analysis_manifest_sha256",
         "generator_claims_sha256",
         "failures"
       ],
@@ -214,6 +216,18 @@
           ]
         },
         "atlas_sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "atlas_manifest_sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "analysis_manifest_sha256": {
           "oneOf": [
             {"$ref": "#/$defs/sha256"},
             {"type": "null"}

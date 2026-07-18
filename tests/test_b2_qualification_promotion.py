@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -98,8 +99,18 @@ def test_promotion_calls_independent_validator_for_every_eligible_map(
     assert len(calls) == 28 and len(set(calls)) == 28
     assert len(list(paths["evidence"].iterdir())) == 28
     for row in report["maps"]:
-        raw = (paths["evidence"] / f"{row['ordinal']:03d}-{row['map']}.json").read_bytes()
+        evidence_path = (
+            paths["evidence"] / f"{row['ordinal']:03d}-{row['map']}.json"
+        )
+        raw = evidence_path.read_bytes()
         assert sha(raw) == row["evidence_sha256"]
+        evidence = json.loads(raw)
+        assert evidence["atlas_manifest_sha256"] == file_record(
+            paths["analysis"] / f"{row['map']}.atlas.manifest.json"
+        )["sha256"]
+        assert evidence["analysis_manifest_sha256"] == file_record(
+            paths["analysis"] / f"{row['map']}.analysis.manifest.json"
+        )["sha256"]
 
 
 def test_promotion_rejects_artifact_changed_after_atlas_evidence(tmp_path: Path):

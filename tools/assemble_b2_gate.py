@@ -77,6 +77,10 @@ from tools.retired_cohort_registry import (  # noqa: E402
     require_unretired_identity,
     require_unretired_declaration,
 )
+from tools.bind_b2_dyn_origin import (  # noqa: E402
+    DynOriginBindingError,
+    _load_atlas_compact,
+)
 from tools.source_route_contract import ROUTE_CONTRACT_SCHEMA  # noqa: E402
 from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
 
@@ -88,6 +92,7 @@ RETIRED_COHORT_71448 = "b2g26_final_71448"
 RETIRED_COHORT_71449 = "b2g26_final_71449"
 RETIRED_COHORT_71450 = "b2g26_final_71450"
 RETIRED_COHORT_71451 = "b2g26_final_71451"
+RETIRED_COHORT_71452 = "b2g26_final_71452"
 EXPECTED_DESIGN_SHA256 = (
     "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
 )
@@ -200,7 +205,7 @@ RETIRED_71451_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
-ACTIVE_71452_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+RETIRED_71452_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
     "docs/multires/B2-GATE-ASSEMBLY.md",
     "docs/multires/B2-GENERATED-COHORT-71452-DECLARATION.json",
@@ -227,20 +232,11 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Explicit post-qualification activation. Cohort 71451 remains permanently
-# retired; this authority pins only the fresh 71452 declaration and the exact
-# declaration/gate/schema/direct-test successor delta from qualified commit
-# 707331d0d87249074a591326c25e3f9688ba8276.
-ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
-    cohort_id="b2g26_final_71452",
-    declaration_sha256=(
-        "eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf"
-    ),
-    immutable_declaration_path=(
-        "docs/multires/B2-GENERATED-COHORT-71452-DECLARATION.json"
-    ),
-    qualification_successor_paths=ACTIVE_71452_QUALIFICATION_SUCCESSOR_PATHS,
-)
+# Cohort 71452 consumed source authorization and passed promotion before the
+# sole Phase-B bind exposed a deterministic Atlas writer/loader byte-contract
+# defect. A separately committed post-correction, post-qualification successor
+# is required before this may become non-None; the current alias is forensic.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
 
 
 def _require_active_final_authority() -> ActiveFinalAuthority:
@@ -2746,9 +2742,15 @@ def _validate_dyn_evidence(
     atlas_path = paths.analysis_dir / f"{map_id}.atlas.bin"
     bsp_path = paths.claims_dir / f"{map_id}.bsp"
     analysis = _mapping(_load_json(analysis_path), "representative analysis")
-    atlas_manifest = _mapping(
-        _load_json(atlas_manifest_path), "representative Atlas manifest"
-    )
+    try:
+        atlas_manifest = _mapping(
+            _load_atlas_compact(atlas_manifest_path),
+            "representative Atlas manifest",
+        )
+    except DynOriginBindingError as exc:
+        raise B2GateError(
+            f"representative Atlas manifest format differs: {exc}"
+        ) from exc
     manifest_bsp = _mapping(atlas_manifest.get("bsp"), "representative manifest BSP")
     manifest_analyzer = _mapping(
         atlas_manifest.get("analyzer"), "representative manifest analyzer"

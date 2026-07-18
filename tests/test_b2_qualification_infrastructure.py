@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from harness.atlas_analyzer import _rust_struct_json
 from tests.b2_qualification_native_fixtures import (
     IMPLEMENTATION, declaration, sha, stage_report, write_json,
 )
@@ -89,17 +90,75 @@ def _inputs(tmp_path: Path, *, sparse: bool = False) -> dict[str, object]:
         }
         for suffix in STAGE_SUFFIXES["analysis"]:
             path = analysis / f"{name}{suffix}"
-            if suffix == ".analysis.manifest.json":
-                path.write_bytes(canonical_bytes({"performance": {"full_cold_rebuild": proof}}))
-            else:
+            if suffix not in (
+                ".analysis.manifest.json", ".atlas.manifest.json",
+            ):
                 path.write_bytes(f"analysis:{name}:{suffix}\n".encode())
+        atlas_manifest_path = analysis / f"{name}.atlas.manifest.json"
+        atlas_manifest = {
+            "schema_version": 1,
+            "byte_order": "little",
+            "atlas_magic": "Q2ATL001",
+            "grid": {
+                "origin": [-512, -512, -512],
+                "model0_mins": [-321, -321, -321],
+            },
+        }
+        writer_bytes = _rust_struct_json(atlas_manifest) + b"\n"
+        assert writer_bytes != canonical_bytes(atlas_manifest)
+        atlas_manifest_path.write_bytes(writer_bytes)
+        atlas_manifest_sha = sha(atlas_manifest_path.read_bytes())
+        (analysis / f"{name}.analysis.manifest.json").write_bytes(
+            canonical_bytes({
+                "artifacts": {
+                    "atlas_manifest": {"sha256": atlas_manifest_sha},
+                },
+                "canonical_map_id": name,
+                "identity": {
+                    "atlas_manifest_sha256": atlas_manifest_sha,
+                },
+                "performance": {"full_cold_rebuild": proof},
+            })
+        )
     roots["atlas-build"] = analysis
     promotion = tmp_path / "promotion-evidence"
     promotion.mkdir()
+    promotion_report = json.loads(
+        report_paths["generated-promotion"].read_bytes()
+    )
     for row in declared["maps"]:
-        write_json(promotion / f"{row['ordinal']:03d}-{row['map']}.json", {
-            "map": row["map"], "eligible": row["ordinal"] < 20,
-        })
+        ordinal = row["ordinal"]
+        name = row["map"]
+        stage_row = promotion_report["maps"][ordinal]
+        eligible = stage_row["passed"] is True
+        evidence = {
+            "schema": "q2-b2-qualification-promotion-map-evidence-v1",
+            "ordinal": ordinal,
+            "map": name,
+            "atlas_evidence_sha256": sha(f"atlas:{name}".encode()),
+            "runtime": {"fixture": True},
+            "eligible": eligible,
+            "validation": {} if eligible else None,
+            "atlas_manifest_sha256": (
+                sha((analysis / f"{name}.atlas.manifest.json").read_bytes())
+                if eligible else None
+            ),
+            "analysis_manifest_sha256": (
+                sha((analysis / f"{name}.analysis.manifest.json").read_bytes())
+                if eligible else None
+            ),
+            "criteria": stage_row["criteria"],
+            "failures": stage_row["failures"],
+            "passed": stage_row["passed"],
+        }
+        evidence_path = write_json(
+            promotion / f"{ordinal:03d}-{name}.json", evidence
+        )
+        stage_row["evidence_sha256"] = sha(evidence_path.read_bytes())
+    write_json(report_paths["generated-promotion"], promotion_report)
+    report_hashes["generated-promotion"] = sha(
+        report_paths["generated-promotion"].read_bytes()
+    )
     roots["generated-promotion"] = promotion
     syntax = write_json(tmp_path / "syntax.json", {
         "enumeration": "git-tracked", "failures": [], "file_count": 17,
@@ -145,19 +204,53 @@ def _run(paths):
     )
 
 
-def test_infrastructure_retains_six_actual_evidence_documents(tmp_path: Path):
+def test_infrastructure_retains_seven_actual_evidence_documents(tmp_path: Path):
     paths = _inputs(tmp_path)
     report = _run(paths)
-    assert report["pass_count"] == 6
+    assert report["pass_count"] == 7
     assert sorted(path.stem for path in paths["evidence"].iterdir()) == sorted(
         check["id"] for check in report["checks"]
     )
+    binding = json.loads(
+        (
+            paths["evidence"]
+            / "dyn-phase-b-atlas-manifest-binding.json"
+        ).read_bytes()
+    )["evidence"]
+    assert binding["pass_count"] == 20
+    assert binding["contract"] == (
+        "production-phase-b-compact-atlas-manifest-and-promotion-seal"
+    )
+
+
+def test_infrastructure_rejects_manifest_digest_rewritten_in_sealed_promotion(
+    tmp_path: Path,
+) -> None:
+    paths = _inputs(tmp_path)
+    first = declaration()["maps"][0]
+    evidence_path = (
+        paths["roots"]["generated-promotion"]
+        / f"{first['ordinal']:03d}-{first['map']}.json"
+    )
+    evidence = json.loads(evidence_path.read_bytes())
+    evidence["atlas_manifest_sha256"] = "00" * 32
+    evidence_path.write_bytes(canonical_bytes(evidence))
+    report_path = paths["reports"]["generated-promotion"]
+    report = json.loads(report_path.read_bytes())
+    report["maps"][0]["evidence_sha256"] = sha(evidence_path.read_bytes())
+    report_path.write_bytes(canonical_bytes(report))
+
+    with pytest.raises(
+        QualificationStageError,
+        match="promotion manifest digests differ",
+    ):
+        _run(paths)
 
 
 def test_infrastructure_accepts_exact_sparse_stage_membership(tmp_path: Path):
     paths = _inputs(tmp_path, sparse=True)
     report = _run(paths)
-    assert report["pass_count"] == 6
+    assert report["pass_count"] == 7
     exact = next(
         check for check in report["checks"]
         if check["id"] == "exact-stage-membership"

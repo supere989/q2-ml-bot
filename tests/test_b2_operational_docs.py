@@ -196,7 +196,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
 
-def test_current_gate_contract_retires_71451_and_activates_two_phase_71452() -> None:
+def test_current_gate_contract_retires_71452_and_clears_authority() -> None:
     text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
         encoding="utf-8"
     )
@@ -289,8 +289,8 @@ def test_current_gate_contract_retires_71451_and_activates_two_phase_71452() -> 
         "byte identity of the CM, Pmove, and hook oracles",
         "separately committed immutable declaration",
         "fresh green disposable qualification",
-        "The assembler rejects declarations for retired cohorts 71426 through 71451",
-        "Active 71452 final cohort",
+        "The assembler rejects declarations for retired cohorts 71426 through 71452",
+        "Retired 71452 final attempt",
         "b2g26_final_71452",
         "B2-GENERATED-COHORT-71452-DECLARATION.json",
         "eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf",
@@ -302,6 +302,20 @@ def test_current_gate_contract_retires_71451_and_activates_two_phase_71452() -> 
         "02293e6c9776ad7c50358b7cbaf45544a280894d",
         "27/28",
         "route:0002:segment:0004",
+        "B2-GENERATED-COHORT-71452-FAILURE.json",
+        "951fc1184f5eb21db5415a0d6d88f896e311865dfc6b5c38ae21d0203ae4fb5d",
+        "dyn-origin-binding-atlas-manifest-canonicality",
+        "permanently-failed-dyn-origin-binding-atlas-manifest-canonicality",
+        "Dyn origin binding refused: Atlas manifest is not canonical JSON",
+        "1673e94d9860911eaf52484a03dd9db8e1b8a5ac4e324b23b8300ab2fc15095e",
+        "compact insertion-order JSON-plus-LF",
+        "compiled-promotion row seals",
+        "atlas_manifest_sha256",
+        "analysis_manifest_sha256",
+        "ACTIVE_FINAL_AUTHORITY = None",
+        "seven retained checks",
+        "dyn-phase-b-atlas-manifest-binding",
+        "refuses any identity",
     ):
         assert required in text
     for stale_claim in (
@@ -323,8 +337,9 @@ def test_current_gate_contract_retires_71451_and_activates_two_phase_71452() -> 
         "Active 71451 final cohort",
         "`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71451`",
         "The active authority and schema both pin 71451",
-        "there is currently no active final cohort",
-        "No final cohort is active",
+        "Active 71452 final cohort",
+        "`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71452`",
+        "The active authority and schema pin only 71452",
     ):
         assert stale_claim not in text
 

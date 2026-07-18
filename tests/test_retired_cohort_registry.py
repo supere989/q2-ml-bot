@@ -89,6 +89,9 @@ FAILURE_71450 = (
 FAILURE_71451 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71451-FAILURE.json"
 )
+FAILURE_71452 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71452-FAILURE.json"
+)
 RETIRED_DECLARATIONS = (
     NAMED_71438,
     NAMED_71439,
@@ -104,6 +107,7 @@ RETIRED_DECLARATIONS = (
     NAMED_71449,
     NAMED_71450,
     NAMED_71451,
+    NAMED_71452,
 )
 
 
@@ -370,25 +374,64 @@ def test_named_71450_is_retired() -> None:
         )
 
 
-def test_current_alias_is_active_71452_while_named_71451_remains_retired() -> None:
-    current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
+@pytest.mark.parametrize("declaration_path", [CURRENT_ALIAS, NAMED_71452])
+def test_current_alias_and_named_71452_are_retired(
+    declaration_path: Path,
+) -> None:
+    retired, retired_sha256 = cohort.load_declaration(declaration_path)
 
-    assert current["cohort_id"] == "b2g26_final_71452"
+    assert retired["cohort_id"] == "b2g26_final_71452"
     assert CURRENT_ALIAS.read_bytes() == NAMED_71452.read_bytes()
-    assert current_sha256 == (
+    assert retired_sha256 == (
         "eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf"
     )
-    registry.require_unretired_declaration(
-        CURRENT_ALIAS, current, current_sha256
-    )
-
-    retired, retired_sha256 = cohort.load_declaration(NAMED_71451)
     with pytest.raises(
-        registry.RetiredCohortRegistryError, match="71451.*permanently retired"
+        registry.RetiredCohortRegistryError, match="71452.*permanently retired"
     ):
         registry.require_unretired_declaration(
-            NAMED_71451, retired, retired_sha256
+            declaration_path, retired, retired_sha256
         )
+
+
+def test_71452_terminal_failure_authority_is_canonical_and_exact() -> None:
+    payload = FAILURE_71452.read_bytes()
+    authority = json.loads(payload)
+
+    assert payload == cohort.canonical_bytes(authority)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "951fc1184f5eb21db5415a0d6d88f896e311865dfc6b5c38ae21d0203ae4fb5d"
+    )
+    assert authority["schema"] == registry.FAILURE_SCHEMA
+    assert authority["status"] == (
+        "permanently-failed-dyn-origin-binding-atlas-manifest-canonicality"
+    )
+    assert authority["cohort_id"] == "b2g26_final_71452"
+    assert authority["declaration"]["sha256"] == (
+        "eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf"
+    )
+    assert authority["failure"]["phase"] == (
+        "dyn-origin-binding-atlas-manifest-canonicality"
+    )
+    dyn = authority["evidence"]["dyn"]
+    assert dyn["phase_a"]["passed"] is True
+    assert dyn["origin_binding"]["attempt_count"] == 1
+    assert dyn["origin_binding"]["exit_code"] == 1
+    assert dyn["origin_binding"]["report_published"] is False
+    assert dyn["origin_binding"]["output_directory_exists"] is False
+    assert dyn["promoted_representative"]["atlas_manifest_writer_canonical"] is True
+    assert dyn["promoted_representative"]["atlas_manifest_sorted_canonical"] is False
+    contract = authority["failure"]["publication_contract"]
+    assert contract["source_stage_published"] is True
+    assert contract["analysis_stage_published"] is True
+    assert contract["dyn_run"] is True
+    assert contract["dyn_passed"] is False
+    assert contract["gate_run"] is False
+    assert contract["training_run"] is False
+    assert authority["evidence"]["source_authorization"]["consumed"] is True
+    assert authority["admission"]["retry_under_same_declaration_allowed"] is False
+    assert authority["admission"]["replacement_declaration_status"] == (
+        "pending-atlas-binder-fix-and-fresh-qualification"
+    )
 
 
 def test_71451_terminal_failure_authority_is_canonical_and_exact() -> None:

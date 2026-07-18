@@ -107,7 +107,8 @@ def validate_promotion_evidence(
                 f"promotion evidence hash differs for {row['map']}")
         require(set(evidence) == {
             "schema", "ordinal", "map", "atlas_evidence_sha256", "runtime",
-            "eligible", "validation", "criteria", "failures", "passed",
+            "eligible", "validation", "atlas_manifest_sha256",
+            "analysis_manifest_sha256", "criteria", "failures", "passed",
         }, f"promotion evidence keys differ for {row['map']}")
         require(evidence["schema"] == "q2-b2-qualification-promotion-map-evidence-v1"
                 and evidence["ordinal"] == row["ordinal"]
@@ -119,8 +120,21 @@ def validate_promotion_evidence(
                 f"promotion evidence disposition differs for {row['map']}")
         validation = evidence["validation"]
         if row["passed"]:
-            require(isinstance(validation, Mapping),
-                    f"passing promotion evidence lacks validator report for {row['map']}")
+            require(
+                evidence["eligible"] is True
+                and isinstance(validation, Mapping),
+                f"passing promotion evidence lacks eligibility or validator "
+                f"report for {row['map']}",
+            )
+            require(
+                evidence["atlas_manifest_sha256"] == file_record(
+                    analysis_root / f"{row['map']}.atlas.manifest.json"
+                )["sha256"]
+                and evidence["analysis_manifest_sha256"] == file_record(
+                    analysis_root / f"{row['map']}.analysis.manifest.json"
+                )["sha256"],
+                f"promotion manifest digests differ for {row['map']}",
+            )
             try:
                 validate_promotion_report(validation)
             except ClaimValidationError as error:
@@ -208,6 +222,15 @@ def run_qualification_promotion(
                 failures.append("Atlas stage did not pass")
             independent_passed = bool(validation and validation.get("passed") is True)
             identities_bound = False
+            atlas_manifest_sha256: str | None = None
+            analysis_manifest_sha256: str | None = None
+            if name in atlas_passes:
+                atlas_manifest_sha256 = file_record(
+                    paths["analysis root"] / f"{name}.atlas.manifest.json"
+                )["sha256"]
+                analysis_manifest_sha256 = file_record(
+                    paths["analysis root"] / f"{name}.analysis.manifest.json"
+                )["sha256"]
             if independent_passed:
                 identities = validation.get("identities", {})
                 identities_bound = (
@@ -231,6 +254,8 @@ def run_qualification_promotion(
                 "atlas_evidence_sha256": atlas_report["maps"][ordinal]["evidence_sha256"],
                 "runtime": runtime,
                 "eligible": name in atlas_passes, "validation": validation,
+                "atlas_manifest_sha256": atlas_manifest_sha256,
+                "analysis_manifest_sha256": analysis_manifest_sha256,
                 "criteria": criteria, "failures": failures,
                 "passed": all(criteria.values()) and not failures,
             }

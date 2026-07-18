@@ -364,8 +364,12 @@ roots and must not exist: publication uses exclusive creation and refuses to
 overwrite an earlier result (`O_CREAT | O_EXCL`). The report binds `cohort_id`,
 the canonical declaration SHA-256, exact stage-membership report SHA-256
 values, all 28 ordinal rows, and aggregate failures. `compiled_validation`
-additionally binds the B1 gate SHA-256. `pass_count` is diagnostic; only
-top-level `passed: true` for the complete declaration is admission.
+additionally binds the B1 gate SHA-256. Each compiled-validation row seals the
+exact Atlas-manifest and analysis-manifest bytes as
+`atlas_manifest_sha256` and `analysis_manifest_sha256`; later Dyn binding
+rehashes both rather than trusting mutually rewritten manifest links.
+`pass_count` is diagnostic; only top-level `passed: true` for the complete
+declaration is admission.
 
 The retired campaign-v1 options `--generated-dir`, `--glob`,
 `--expected-count`, and `--phase` are not accepted. Glob/count equality was
@@ -1259,15 +1263,53 @@ artifact or passing subset. The
 canonical green, non-admissible report SHA-256 is
 `6563e3efe716997867a84325f19af8b562700b3a2e27a416daf3e53d6d32eb38`.
 
-The separately committed active declaration is now
+The separately committed 71452 declaration was
 `b2g26_final_71452`. Immutable
 `B2-GENERATED-COHORT-71452-DECLARATION.json` and the current alias are
 byte-identical with SHA-256
 `eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf`.
-Its 28 wholly new members use seed blocks 71452000..71452003 through
-71452600..71452603. `ACTIVE_FINAL_AUTHORITY` pins only this identity and the
-exact eleven-path activation delta; qualification maps and every 71451 byte
-remain forbidden final inputs.
+Its 28 members use seed blocks 71452000..71452003 through
+71452600..71452603. At activation, `ACTIVE_FINAL_AUTHORITY` pinned only this
+identity and the exact eleven-path activation delta.
+
+The sole 71452 lifecycle consumed source authorization and passed all eight
+source-through-generated-promotion stages for all 28 maps. Pre-source Phase A
+schema `q2-b2-dyn-argv-shape-preflight-v2` passed and correctly deferred
+origin. The first and only post-promotion Phase-B invocation then exited 1
+with `Dyn origin binding refused: Atlas manifest is not canonical JSON`.
+Promoted representative `b2g26_open_71452000` carried Atlas-manifest SHA-256
+`1673e94d9860911eaf52484a03dd9db8e1b8a5ac4e324b23b8300ab2fc15095e`,
+the exact compact insertion-order JSON-plus-LF writer and promotion format.
+The binder incorrectly required the generic sorted-canonical format. No
+`q2-b2-dyn-origin-binding-v1` report, Dyn output, or staging was published;
+tests, gate assembly, deployment, and training did not run.
+
+`B2-GENERATED-COHORT-71452-FAILURE.json`, SHA-256
+`951fc1184f5eb21db5415a0d6d88f896e311865dfc6b5c38ae21d0203ae4fb5d`,
+is canonical terminal authority with phase
+`dyn-origin-binding-atlas-manifest-canonicality` and status
+`permanently-failed-dyn-origin-binding-atlas-manifest-canonicality`.
+Source authorization had already been consumed, so absence of a bind report or
+Dyn output opens no retry lane. `ACTIVE_FINAL_AUTHORITY = None`; every 71452
+declaration, seed, map, stage, promotion, Atlas, BSP, report, build, WSL,
+qualification, and activation byte is forensic-only and cannot be retried,
+repaired, resumed, reused, copied forward, salvaged, substituted, or admitted.
+
+A successor requires a dedicated Atlas compact loader matching the promotion
+predicate, with declarations, analysis manifests, promotions, and binding
+reports still sorted canonical. The compactness predicate admits any compact
+key order. Every compiled-promotion row seals the exact
+`atlas_manifest_sha256` and `analysis_manifest_sha256`; Phase B rehashes both,
+so mutually rewritten manifests remain ineligible. The correction must pass a
+completely fresh disposable qualification that drives real writer bytes
+through Phase B, followed by a separately committed disjoint successor
+declaration. Qualification infrastructure now
+requires seven retained checks. New check
+`dyn-phase-b-atlas-manifest-binding` drives every promoted map's real Atlas
+manifest through the production compact loader, replays both exact manifest
+digests sealed in that map's promotion evidence, and re-derives snapped origin
+from `model0_mins`. Final Phase B also rejects retired cohort identities
+before artifact binding.
 
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
@@ -1365,14 +1407,13 @@ check.
 
 ## Offline workflow
 
-`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71452`. The command
-templates in this section apply only to that separately committed, freshly
-qualified authority and its fresh absent outputs.
-Cohorts 71449, 71450, and 71451 remain terminally retired under their canonical
-failure records. Commands must never name retired cohorts 71426 through 71451. No retired or
-qualification population, report, Dyn evidence, compiled byte, partial stock
-artifact, or passing subset may be copied into the 71452 cohort root. The first
-71452 source invocation consumes its sole authorization.
+`ACTIVE_FINAL_AUTHORITY = None`. The command templates in this section are
+disabled until a separately committed, freshly qualified successor replaces
+all historical paths. Cohorts 71449, 71450, 71451, and 71452 are terminally
+retired under their canonical failure records. Commands must never name
+retired cohorts 71426 through 71452. No retired or qualification population,
+report, Dyn evidence, compiled byte, partial stock artifact, or passing subset
+may be copied into a successor root.
 
 The declaration-aware compiler remains the required final-cohort shape.
 Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer

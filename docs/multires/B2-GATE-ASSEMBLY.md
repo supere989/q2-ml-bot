@@ -593,7 +593,7 @@ argv list directly without a shell. A completely fresh
 disposable qualification and separately committed declaration are mandatory
 before a successor can become active.
 
-### Active 71452 final cohort
+### Retired 71452 final attempt
 
 The two-phase correction was committed as
 `707331d0d87249074a591326c25e3f9688ba8276`, tree
@@ -607,15 +607,56 @@ or artifact is admissible in the final lane. The canonical green,
 non-admissible report SHA-256 is
 `6563e3efe716997867a84325f19af8b562700b3a2e27a416daf3e53d6d32eb38`.
 
-The separately committed immutable declaration
+At activation, the separately committed immutable declaration
 `B2-GENERATED-COHORT-71452-DECLARATION.json` and current alias are
 byte-identical with SHA-256
 `eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf`.
-They name `b2g26_final_71452` and fresh seed blocks
-71452000..71452003 through 71452600..71452603. `ACTIVE_FINAL_AUTHORITY`
-explicitly pins that cohort, digest, immutable path, and the exact eleven-path
-declaration/gate/schema/direct-test successor delta. Qualification 71452 maps,
-retired 71451 bytes, and passing subsets remain forbidden inputs.
+They name `b2g26_final_71452` and seed blocks 71452000..71452003 through
+71452600..71452603. `ACTIVE_FINAL_AUTHORITY` pinned that cohort, digest,
+immutable path, and the exact eleven-path declaration/gate/schema/direct-test
+successor delta.
+
+The sole 71452 lifecycle consumed source authorization and passed source
+freeze, real q2tool compilation, compiled static validation, compiled-CM
+preflight, materialization, claims preparation, Atlas construction, and
+generated promotion for all 28 maps. Phase A schema
+`q2-b2-dyn-argv-shape-preflight-v2` passed and correctly deferred origin. The
+first and only Phase-B invocation then rejected promoted representative
+`b2g26_open_71452000` with
+`Dyn origin binding refused: Atlas manifest is not canonical JSON` and exit 1.
+The real manifest SHA-256
+`1673e94d9860911eaf52484a03dd9db8e1b8a5ac4e324b23b8300ab2fc15095e`
+is the exact compact insertion-order JSON-plus-LF form emitted by
+`harness/atlas_analyzer.py` and admitted by generated promotion. The binder
+incorrectly routed it through the generic sorted-canonical loader. No
+`q2-b2-dyn-origin-binding-v1` report, Dyn output, or staging was published;
+tests, gate assembly, deployment, and training did not run.
+
+`B2-GENERATED-COHORT-71452-FAILURE.json`, SHA-256
+`951fc1184f5eb21db5415a0d6d88f896e311865dfc6b5c38ae21d0203ae4fb5d`,
+is the canonical terminal authority with phase
+`dyn-origin-binding-atlas-manifest-canonicality` and status
+`permanently-failed-dyn-origin-binding-atlas-manifest-canonicality`.
+Source authorization was already consumed, so no 71452 declaration, seed,
+map, stage, promotion, Atlas, BSP, report, build, WSL, qualification, or
+activation byte may be retried, repaired, resumed, reused, copied forward,
+salvaged, substituted, or admitted. `ACTIVE_FINAL_AUTHORITY = None`.
+
+A successor requires the committed dedicated Atlas compact loader to match the
+existing promotion predicate, while declarations, analysis manifests,
+promotions, and binding reports remain sorted canonical. Compactness admits
+any compact key order. Every compiled-promotion row seals the exact
+`atlas_manifest_sha256` and `analysis_manifest_sha256`; Phase B rehashes both,
+so a byte-order rewrite is rejected even if both manifests are changed
+together. The correction must pass a completely fresh disposable
+qualification that exercises real writer bytes through Phase B, followed by a
+separately committed disjoint successor declaration. Qualification
+infrastructure now requires seven retained checks; the additional
+`dyn-phase-b-atlas-manifest-binding` evidence drives every promoted map's real
+writer bytes through the production compact loader, replays both exact
+manifest digests sealed in that map's promotion evidence, and re-derives
+snapped origin from `model0_mins`. Final Phase B also refuses any identity in
+the retired-cohort registry before artifact binding.
 
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
@@ -719,11 +760,11 @@ while the infrastructure producer and materializer remain bound to the
 separate CPython 3.11.4 executable and zstandard module digests above. The
 syntax report must never be required to identify the execution runtime.
 
-The assembler rejects declarations for retired cohorts 71426 through 71451
+The assembler rejects declarations for retired cohorts 71426 through 71452
 before reading campaign evidence. The immutable 71447, 71448, 71449, 71450,
-and 71451 declarations are historical only. The active authority and schema
-pin only 71452 and the byte-identical alias/named declaration; neither can
-substitute for qualification replay or the exact successor-delta check.
+71451, and 71452 declarations are historical only. The schema retains
+historical 71452 field pins, but `ACTIVE_FINAL_AUTHORITY = None`; neither the
+schema nor the byte-identical alias/named declaration can infer authority.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -940,9 +981,11 @@ reuse of any retired cohort byte.
 
 ## Assembly template
 
-This template is active only for the exact 71452 authority. All values are
-exact paths, `OUT` must not exist, and both two-phase Dyn authority reports are
-mandatory.
+This template is disabled while `ACTIVE_FINAL_AUTHORITY = None`. Historical
+71452 field pins remain in the schema only until a freshly qualified successor
+updates them; neither the current alias nor the schema can infer executable
+authority. When reactivated, all values are exact paths, `OUT` must not exist,
+and both two-phase Dyn authority reports are mandatory.
 
 The qualified parent is commit `707331d0d87249074a591326c25e3f9688ba8276`,
 tree `02293e6c9776ad7c50358b7cbaf45544a280894d`. Qualification
@@ -951,8 +994,8 @@ its green non-admissible report SHA-256 is
 `6563e3efe716997867a84325f19af8b562700b3a2e27a416daf3e53d6d32eb38`.
 Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. It
 cannot admit qualification artifacts, passing subsets, retired bytes,
-deployment, or training; it authorizes only the exact separately committed
-71452 successor relation.
+deployment, or training. Its historical authorization was consumed by 71452
+and cannot authorize a successor.
 
 ```sh
 python tools/assemble_b2_gate.py \

@@ -9,9 +9,11 @@ import subprocess
 
 import pytest
 
+from harness.atlas_analyzer import _rust_struct_json
 from tools.bind_b2_dyn_origin import (
     ARTIFACT_PREFLIGHT_SCHEMA,
     DynOriginBindingError,
+    _load_atlas_compact,
     bind_origin,
 )
 from tools.preflight_b2_dyn_invocation import (
@@ -26,6 +28,7 @@ from tools.run_preflighted_b2_dyn import (
     load_origin_binding,
 )
 from tools.run_generator_cohort import canonical_bytes
+from tools.retired_cohort_registry import RetiredCohortRegistryError
 
 
 ANALYZER = "11" * 32
@@ -162,6 +165,9 @@ def _write_artifacts(args: argparse.Namespace) -> Path:
     atlas_sha = hashlib.sha256(args.atlas.read_bytes()).hexdigest()
     bsp_sha = hashlib.sha256(args.bsp.read_bytes()).hexdigest()
     manifest = {
+        "schema_version": 1,
+        "byte_order": "little",
+        "atlas_magic": "Q2ATL001",
         "analyzer": {"sha256": ANALYZER},
         "artifacts": {
             args.atlas.name: {
@@ -179,7 +185,9 @@ def _write_artifacts(args: argparse.Namespace) -> Path:
             "origin": ORIGIN,
         },
     }
-    args.manifest.write_bytes(canonical_bytes(manifest))
+    writer_bytes = _rust_struct_json(manifest) + b"\n"
+    assert writer_bytes != canonical_bytes(manifest)
+    args.manifest.write_bytes(writer_bytes)
     manifest_sha = hashlib.sha256(args.manifest.read_bytes()).hexdigest()
     analysis_path = args.manifest.parent / f"{MAP_ID}.analysis.manifest.json"
     analysis = {
@@ -194,6 +202,7 @@ def _write_artifacts(args: argparse.Namespace) -> Path:
         },
     }
     analysis_path.write_bytes(canonical_bytes(analysis))
+    analysis_sha = hashlib.sha256(analysis_path.read_bytes()).hexdigest()
     promotion_path = args.output.parent / "reports" / "generated-promotion.json"
     promotion_path.parent.mkdir(parents=True)
     declaration_path = (
@@ -202,6 +211,12 @@ def _write_artifacts(args: argparse.Namespace) -> Path:
     promotion_maps = [
         {
             "atlas_sha256": atlas_sha if ordinal == 0 else f"{ordinal + 1:064x}",
+            "atlas_manifest_sha256": (
+                manifest_sha if ordinal == 0 else f"{ordinal + 201:064x}"
+            ),
+            "analysis_manifest_sha256": (
+                analysis_sha if ordinal == 0 else f"{ordinal + 301:064x}"
+            ),
             "bsp_sha256": bsp_sha if ordinal == 0 else f"{ordinal + 101:064x}",
             "failures": [],
             "map": MAP_ID if ordinal == 0 else f"map_{ordinal:02d}",
@@ -304,6 +319,104 @@ def test_phase_b_derives_asymmetric_origin_and_verifies_artifacts_without_output
     assert not args.output.exists()
 
 
+def test_phase_b_accepts_sorted_compact_form_then_rejects_digest_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, commit, repository = _repo(tmp_path)
+    _stub_binding(monkeypatch, repository)
+    args = _args(tmp_path, repo, commit, _executable(tmp_path))
+    shape = preflight(args)
+    args.report.write_bytes(canonical_bytes(shape))
+    promotion = _write_artifacts(args)
+    manifest = json.loads(args.manifest.read_bytes())
+    sorted_bytes = canonical_bytes(manifest)
+    assert sorted_bytes != _rust_struct_json(manifest) + b"\n"
+    args.manifest.write_bytes(sorted_bytes)
+    assert _load_atlas_compact(args.manifest) == manifest
+
+    with pytest.raises(
+        DynOriginBindingError,
+        match="promoted artifact digest authority differs",
+    ):
+        bind_origin(args.report, promotion, tmp_path / "binding.json")
+
+
+def test_phase_b_rejects_coordinated_manifest_rewrite_at_promotion_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, commit, repository = _repo(tmp_path)
+    _stub_binding(monkeypatch, repository)
+    args = _args(tmp_path, repo, commit, _executable(tmp_path))
+    shape = preflight(args)
+    args.report.write_bytes(canonical_bytes(shape))
+    promotion = _write_artifacts(args)
+    manifest = json.loads(args.manifest.read_bytes())
+    args.manifest.write_bytes(canonical_bytes(manifest))
+    rewritten_manifest_sha = hashlib.sha256(
+        args.manifest.read_bytes()
+    ).hexdigest()
+    analysis_path = args.manifest.parent / f"{MAP_ID}.analysis.manifest.json"
+    analysis = json.loads(analysis_path.read_bytes())
+    analysis["identity"]["atlas_manifest_sha256"] = rewritten_manifest_sha
+    analysis["artifacts"]["atlas_manifest"]["sha256"] = rewritten_manifest_sha
+    analysis_path.write_bytes(canonical_bytes(analysis))
+
+    with pytest.raises(
+        DynOriginBindingError,
+        match="representative Dyn artifacts are not admitted by promotion",
+    ):
+        bind_origin(args.report, promotion, tmp_path / "binding.json")
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            b'{"analyzer":{},"analyzer":{}}\n',
+            "duplicate JSON key",
+        ),
+        (
+            b'{"schema_version":NaN}\n',
+            "non-finite JSON token",
+        ),
+        (
+            '{"schema_version":"\N{SNOWMAN}"}\n'.encode("utf-8"),
+            "canonical compact JSON",
+        ),
+        (
+            b'{"schema_version":1}',
+            "canonical compact JSON",
+        ),
+        (
+            b'{\n  "schema_version": 1\n}\n',
+            "canonical compact JSON",
+        ),
+        (
+            b'[]\n',
+            "must be a JSON object",
+        ),
+    ],
+)
+def test_phase_b_rejects_noncanonical_atlas_manifest_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+    message: str,
+) -> None:
+    repo, commit, repository = _repo(tmp_path)
+    _stub_binding(monkeypatch, repository)
+    args = _args(tmp_path, repo, commit, _executable(tmp_path))
+    shape = preflight(args)
+    args.report.write_bytes(canonical_bytes(shape))
+    promotion = _write_artifacts(args)
+    args.manifest.write_bytes(payload)
+
+    with pytest.raises(DynOriginBindingError, match=message):
+        bind_origin(args.report, promotion, tmp_path / "binding.json")
+
+
 def test_dual_authority_runner_executes_exact_bound_argv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -338,6 +451,31 @@ def test_phase_b_rejects_manifest_analysis_origin_disagreement(
 
     with pytest.raises(DynOriginBindingError, match="origins differ"):
         bind_origin(args.report, promotion, tmp_path / "binding.json")
+
+
+def test_phase_b_rejects_retired_identity_before_artifact_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, commit, repository = _repo(tmp_path)
+    _stub_binding(monkeypatch, repository)
+    args = _args(tmp_path, repo, commit, _executable(tmp_path))
+    shape = preflight(args)
+    args.report.write_bytes(canonical_bytes(shape))
+    promotion = _write_artifacts(args)
+
+    def retired(_cohort_id: str, _declaration_sha256: str) -> None:
+        raise RetiredCohortRegistryError("fixture identity is permanently retired")
+
+    monkeypatch.setattr(
+        "tools.bind_b2_dyn_origin.require_unretired_identity", retired
+    )
+    with pytest.raises(
+        DynOriginBindingError,
+        match="active cohort declaration is permanently retired",
+    ):
+        bind_origin(args.report, promotion, tmp_path / "binding.json")
+    assert not args.output.exists()
 
 
 def test_phase_b_rejects_artifacts_absent_from_promotion(

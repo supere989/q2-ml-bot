@@ -87,6 +87,7 @@ REQUIRED_STAGE_CHECKS = {
 }
 REQUIRED_INFRASTRUCTURE_CHECKS = {
     "deterministic-cold-rebuild",
+    "dyn-phase-b-atlas-manifest-binding",
     "exact-stage-membership",
     "exclusive-create",
     "python310-syntax-floor",

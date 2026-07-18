@@ -17,10 +17,10 @@ from harness.hook_claims_v4 import (
     validation_trace_sha256,
     validation_traces_sha256,
 )
+from harness.atlas_analyzer import _rust_struct_json
 import tools.assemble_b2_gate as b2_gate
 import tools.run_b2_test_suite as b2_test_suite
 from tools.assemble_b2_gate import (
-    ACTIVE_71452_QUALIFICATION_SUCCESSOR_PATHS,
     ACTIVE_FINAL_AUTHORITY,
     ActiveFinalAuthority,
     B2GateError,
@@ -32,12 +32,14 @@ from tools.assemble_b2_gate import (
     RETIRED_71449_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_71450_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_71451_QUALIFICATION_SUCCESSOR_PATHS,
+    RETIRED_71452_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_COHORT_71446,
     RETIRED_COHORT_71447,
     RETIRED_COHORT_71448,
     RETIRED_COHORT_71449,
     RETIRED_COHORT_71450,
     RETIRED_COHORT_71451,
+    RETIRED_COHORT_71452,
     assemble_gate,
     _exact_directory_files,
     _decode_dyn_snapshot,
@@ -560,7 +562,10 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
     atlas_bytes = bytes(header) + b"l0-bytes"
     atlas_path = paths.analysis_dir / f"{map_id}.atlas.bin"
     atlas_path.write_bytes(atlas_bytes)
-    atlas_manifest_bytes = canonical_bytes({
+    atlas_manifest = {
+        "schema_version": 1,
+        "byte_order": "little",
+        "atlas_magic": "Q2ATL001",
         "specification_sha256": EXPECTED_DESIGN_SHA256,
         "bsp": {"canonical_map_id": map_id, "sha256": _sha256(bsp)},
         "analyzer": {
@@ -568,7 +573,9 @@ def _write_dyn_fixture(tmp_path: Path) -> tuple[B2GatePaths, dict, dict]:
             "version": "b2-a-v4",
             "sha256": SHA,
         },
-    })
+    }
+    atlas_manifest_bytes = _rust_struct_json(atlas_manifest) + b"\n"
+    assert atlas_manifest_bytes != canonical_bytes(atlas_manifest)
     atlas_manifest_path = paths.analysis_dir / f"{map_id}.atlas.manifest.json"
     atlas_manifest_path.write_bytes(atlas_manifest_bytes)
     analysis = {
@@ -927,6 +934,10 @@ def test_retired_71446_identity_remains_readable_and_cli_is_explicit() -> None:
             ROOT / "docs/multires/B2-GENERATED-COHORT-71451-DECLARATION.json",
             "71451",
         ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71452-DECLARATION.json",
+            "71452",
+        ),
     ],
 )
 def test_gate_refuses_retired_declaration_before_evidence(
@@ -936,19 +947,14 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_71451_is_retired_and_71452_is_the_active_final_authority() -> None:
-    authority = _require_active_final_authority()
-    assert ACTIVE_FINAL_AUTHORITY == authority
-    assert authority.cohort_id == "b2g26_final_71452"
-    assert authority.declaration_sha256 == (
-        "eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf"
-    )
-    assert authority.immutable_declaration_path == (
-        "docs/multires/B2-GENERATED-COHORT-71452-DECLARATION.json"
-    )
+def test_71452_is_retired_and_no_final_authority_is_active() -> None:
+    assert ACTIVE_FINAL_AUTHORITY is None
+    with pytest.raises(B2GateError, match="no active final cohort"):
+        _require_active_final_authority()
+    assert RETIRED_COHORT_71452 == "b2g26_final_71452"
     assert (
-        authority.qualification_successor_paths
-        == ACTIVE_71452_QUALIFICATION_SUCCESSOR_PATHS
+        "docs/multires/B2-GENERATED-COHORT-71452-DECLARATION.json"
+        in RETIRED_71452_QUALIFICATION_SUCCESSOR_PATHS
     )
     assert RETIRED_COHORT_71451 == "b2g26_final_71451"
     assert (
@@ -977,17 +983,11 @@ def test_71451_is_retired_and_71452_is_the_active_final_authority() -> None:
     )
 
 
-def test_current_alias_is_byte_identical_to_active_71452() -> None:
-    declaration, digest = _validate_declaration(
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
-    assert declaration["cohort_id"] == "b2g26_final_71452"
-    assert digest == ACTIVE_FINAL_AUTHORITY.declaration_sha256
-    assert (
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    ).read_bytes() == (
-        ROOT / "docs/multires/B2-GENERATED-COHORT-71452-DECLARATION.json"
-    ).read_bytes()
+def test_current_alias_is_historical_and_cannot_authorize_71452() -> None:
+    with pytest.raises(B2GateError, match="71452.*permanently retired"):
+        _validate_declaration(
+            ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+        )
 
 
 def test_retired_71446_qualification_delta_remains_historically_readable(
@@ -1388,6 +1388,27 @@ def test_canonical_dyn_fixture_binds_atlas_and_rejects_stale_authority(
         )
 
 
+def test_dyn_gate_rejects_noncompact_atlas_manifest_bytes(
+    tmp_path: Path,
+) -> None:
+    paths, declaration, _report = _write_dyn_fixture(tmp_path)
+    manifest = json.loads(
+        next(paths.analysis_dir.glob("*.atlas.manifest.json")).read_bytes()
+    )
+    manifest_path = next(paths.analysis_dir.glob("*.atlas.manifest.json"))
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="ascii"
+    )
+
+    with pytest.raises(
+        B2GateError,
+        match="representative Atlas manifest format differs",
+    ):
+        _validate_dyn_evidence(
+            paths.dyn_evidence_report, _implementation(), declaration, paths
+        )
+
+
 def test_dyn_gate_rejects_rebound_or_guessed_phase_b_origin(tmp_path: Path) -> None:
     paths, declaration, _report = _write_dyn_fixture(tmp_path)
     binding = json.loads(paths.dyn_origin_binding_report.read_bytes())
@@ -1617,7 +1638,7 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
         "implementation_successor"
     ]["properties"]["changed_paths"]["minItems"] == len(
-        ACTIVE_71452_QUALIFICATION_SUCCESSOR_PATHS
+        RETIRED_71452_QUALIFICATION_SUCCESSOR_PATHS
     )
     assert gate_schema["$defs"]["compiled_cm_preflight_stage"]["properties"][
         "pass_count"

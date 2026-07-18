@@ -125,6 +125,9 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
     assert schema["$defs"]["analysis_membership"]["allOf"][1][
         "properties"
     ]["expected_file_count"]["const"] == 224
+    assert {
+        "atlas_manifest_sha256", "analysis_manifest_sha256",
+    }.issubset(schema["$defs"]["validation_row"]["required"])
     assert not (
         ROOT / "schemas/q2-generator-claim-campaign-v1.schema.json"
     ).exists()
@@ -290,7 +293,7 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "byte identity of the CM, Pmove, and hook oracles",
         "separately committed immutable declaration",
         "fresh green disposable qualification",
-        "Commands must never name retired cohorts 71426 through 71451",
+        "retired cohorts 71426 through 71452",
         "b2g26_final_71452",
         "B2-GENERATED-COHORT-71452-DECLARATION.json",
         "eb9d761d5cc48c3b2ad7dbca3ee9e232884fffc241c20aea76ed363893f0baaf",
@@ -302,6 +305,18 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "02293e6c9776ad7c50358b7cbaf45544a280894d",
         "27/28",
         "route:0002:segment:0004",
+        "B2-GENERATED-COHORT-71452-FAILURE.json",
+        "951fc1184f5eb21db5415a0d6d88f896e311865dfc6b5c38ae21d0203ae4fb5d",
+        "dyn-origin-binding-atlas-manifest-canonicality",
+        "permanently-failed-dyn-origin-binding-atlas-manifest-canonicality",
+        "Dyn origin binding refused: Atlas manifest is not canonical JSON",
+        "1673e94d9860911eaf52484a03dd9db8e1b8a5ac4e324b23b8300ab2fc15095e",
+        "compact insertion-order JSON-plus-LF",
+        "compiled-promotion row seals",
+        "ACTIVE_FINAL_AUTHORITY = None",
+        "seven retained checks",
+        "dyn-phase-b-atlas-manifest-binding",
+        "rejects retired cohort identities",
         "4b26c670ed54585787505cf7dfbb35bdc1830fdfbd42585a16d0484622ea306f",
         "oracle batch timeout must be finite and in (0, 60]",
         "not a 3,600-second runtime timeout",
@@ -335,7 +350,10 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "version 2",
         "room-edge fallback",
     )
-    assert all(fragment in contract for fragment in required_contract)
+    missing_contract_fragments = [
+        fragment for fragment in required_contract if fragment not in contract
+    ]
+    assert not missing_contract_fragments, missing_contract_fragments
     assert "--glob 'b2claim_*.map'" not in contract
     assert "--expected-count 20" not in contract
     for stale_claim in (
@@ -352,8 +370,8 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "Active 71451 final cohort",
         "`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71451`",
         "The active authority and schema both pin 71451",
-        "there is currently no active final cohort",
-        "No final cohort is active",
+        "Active 71452 final cohort",
+        "`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71452`",
     ):
         assert stale_claim not in contract
 
@@ -1946,6 +1964,14 @@ def test_validate_uses_separate_explicit_analysis_root_in_declared_order(
     assert report["passed"] is True
     assert report["pass_count"] == 28
     assert [row["map"] for row in report["maps"]] == expected_names
+    for row in report["maps"]:
+        name = row["map"]
+        assert row["atlas_manifest_sha256"] == file_sha256(
+            analysis / f"{name}.atlas.manifest.json"
+        )
+        assert row["analysis_manifest_sha256"] == file_sha256(
+            analysis / f"{name}.analysis.manifest.json"
+        )
     assert [call[0] for call in calls] == [
         claims / f"{name}.map" for name in expected_names
     ]

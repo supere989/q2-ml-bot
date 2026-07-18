@@ -25,6 +25,10 @@ from tools.preflight_b2_dyn_invocation import (  # noqa: E402
     load_shape_preflight,
 )
 from harness.atlas_analyzer import _snapped_origin  # noqa: E402
+from tools.retired_cohort_registry import (  # noqa: E402
+    RetiredCohortRegistryError,
+    require_unretired_identity,
+)
 from tools.run_generator_cohort import (  # noqa: E402
     GeneratorCohortError,
     canonical_bytes,
@@ -70,16 +74,56 @@ def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _load_canonical(path: Path, label: str) -> dict[str, Any]:
+def _reject_nonfinite(token: str) -> None:
+    raise DynOriginBindingError(
+        f"non-finite JSON token in Dyn artifact: {token}"
+    )
+
+
+def _load_json_object(path: Path, label: str) -> tuple[bytes, dict[str, Any]]:
     if path.is_symlink() or not path.is_file():
         raise DynOriginBindingError(f"{label} must be a regular file: {path}")
-    raw = path.read_bytes()
     try:
-        value = json.loads(raw, object_pairs_hook=_reject_duplicates)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raw = path.read_bytes()
+        value = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicates,
+            parse_constant=_reject_nonfinite,
+        )
+    except DynOriginBindingError:
+        raise
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise DynOriginBindingError(f"invalid {label} JSON: {exc}") from exc
-    if not isinstance(value, dict) or raw != canonical_bytes(value):
+    if not isinstance(value, dict):
+        raise DynOriginBindingError(f"{label} must be a JSON object")
+    return raw, value
+
+
+def _load_canonical(path: Path, label: str) -> dict[str, Any]:
+    raw, value = _load_json_object(path, label)
+    if raw != canonical_bytes(value):
         raise DynOriginBindingError(f"{label} is not canonical JSON")
+    return value
+
+
+def _load_atlas_compact(path: Path) -> dict[str, Any]:
+    """Load exactly the compact JSON-plus-LF form admitted by promotion."""
+
+    raw, value = _load_json_object(path, "Atlas manifest")
+    compact = (
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=False,
+        )
+        + "\n"
+    ).encode("ascii")
+    if raw != compact:
+        raise DynOriginBindingError(
+            "Atlas manifest is not canonical compact JSON"
+        )
     return value
 
 
@@ -173,6 +217,14 @@ def bind_origin(
         or any(not isinstance(row, dict) for row in declaration_maps)
     ):
         raise DynOriginBindingError("active cohort declaration shape differs")
+    try:
+        require_unretired_identity(
+            declaration["cohort_id"], _sha256(declaration_path)
+        )
+    except RetiredCohortRegistryError as exc:
+        raise DynOriginBindingError(
+            f"active cohort declaration is permanently retired: {exc}"
+        ) from exc
 
     atlas_path = Path(argv_flag(argv_without_origin, "--atlas"))
     manifest_path = Path(argv_flag(argv_without_origin, "--manifest"))
@@ -181,7 +233,7 @@ def bind_origin(
     expected_analysis_name = f"{map_id}.analysis.manifest.json"
     analysis_path = manifest_path.parent / expected_analysis_name
 
-    manifest = _load_canonical(manifest_path, "Atlas manifest")
+    manifest = _load_atlas_compact(manifest_path)
     analysis = _load_canonical(analysis_path, "analysis manifest")
     promotion = _load_canonical(promotion_path, "generated promotion report")
     manifest_grid = _mapping(manifest.get("grid"), "Atlas manifest grid")
@@ -296,6 +348,10 @@ def bind_origin(
         or promoted_rows[0].get("atlas_sha256")
         != artifacts["atlas"]["sha256"]
         or promoted_rows[0].get("bsp_sha256") != artifacts["bsp"]["sha256"]
+        or promoted_rows[0].get("atlas_manifest_sha256")
+        != artifacts["atlas_manifest"]["sha256"]
+        or promoted_rows[0].get("analysis_manifest_sha256")
+        != artifacts["analysis_manifest"]["sha256"]
     ):
         raise DynOriginBindingError(
             "representative Dyn artifacts are not admitted by promotion"

@@ -45,6 +45,8 @@ from tools.generator_claim_validator import (  # noqa: E402
     MAX_BUILD_RSS_BYTES,
     MAX_FULL_COLD_MILLISECONDS,
 )
+from harness.atlas_analyzer import _snapped_origin  # noqa: E402
+from tools.bind_b2_dyn_origin import _load_atlas_compact  # noqa: E402
 from tools.run_generator_cohort import STAGE_SUFFIXES  # noqa: E402
 
 
@@ -53,8 +55,9 @@ PINNED_PYTHON_SHA256 = "b25abf001748dc7ebb4b25013b2572d4e6913246b4c3b8e8b726b3da
 SYNTAX_PYTHON_VERSION = [3, 10, 12]
 SYNTAX_PYTHON_SHA256 = "7d51cd6b48b521277f5caa4610a82126e315fa2be4df069823a8b1eeb5bd4a86"
 CHECK_IDS = (
-    "deterministic-cold-rebuild", "exact-stage-membership", "exclusive-create",
-    "python310-syntax-floor", "resource-bounds", "timeout-fail-closed",
+    "deterministic-cold-rebuild", "dyn-phase-b-atlas-manifest-binding",
+    "exact-stage-membership", "exclusive-create", "python310-syntax-floor",
+    "resource-bounds", "timeout-fail-closed",
 )
 
 
@@ -101,6 +104,9 @@ def validate_infrastructure_evidence(
     cold, resources = _cold_and_resource_evidence(
         stage_reports, roots["atlas-build"]
     )
+    dyn_binding = _dyn_phase_b_atlas_manifest_binding_evidence(
+        stage_reports, roots["atlas-build"], roots["generated-promotion"]
+    )
     syntax = _syntax_evidence(syntax_report, dict(runtime_provider()))
     probe_root = Path(tempfile.mkdtemp(prefix=".b2q-exclusive-replay-"))
     try:
@@ -110,6 +116,7 @@ def validate_infrastructure_evidence(
     timeout = _timeout_probe()
     recomputed = {
         "deterministic-cold-rebuild": cold,
+        "dyn-phase-b-atlas-manifest-binding": dyn_binding,
         "exact-stage-membership": membership,
         "exclusive-create": exclusive,
         "python310-syntax-floor": syntax,
@@ -300,6 +307,117 @@ def _cold_and_resource_evidence(
     return ({"source": source, "atlas": cold_maps}, {"atlas": resources})
 
 
+def _dyn_phase_b_atlas_manifest_binding_evidence(
+    stage_reports: Mapping[str, Mapping[str, Any]], analysis_root: Path,
+    promotion_evidence_root: Path,
+) -> dict[str, Any]:
+    """Replay production compact loading and promotion manifest seals."""
+
+    promoted = [
+        row for row in stage_reports["generated-promotion"]["maps"]
+        if row.get("passed") is True
+    ]
+    require(
+        len(promoted) >= REQUIRED_END_TO_END_PASSES,
+        f"fewer than {REQUIRED_END_TO_END_PASSES} promoted maps can exercise "
+        "Phase-B Atlas binding",
+    )
+    names = [row.get("map") for row in promoted]
+    require(
+        all(isinstance(name, str) for name in names)
+        and len(set(names)) == len(names),
+        "promoted Phase-B map identities are malformed or duplicated",
+    )
+    maps: list[dict[str, Any]] = []
+    for row, name in zip(promoted, names):
+        ordinal = row.get("ordinal")
+        require(
+            isinstance(ordinal, int) and not isinstance(ordinal, bool),
+            f"{name} promoted Phase-B ordinal is malformed",
+        )
+        manifest_path = analysis_root / f"{name}.atlas.manifest.json"
+        analysis_path = analysis_root / f"{name}.analysis.manifest.json"
+        promotion_path = (
+            promotion_evidence_root / f"{ordinal:03d}-{name}.json"
+        )
+        manifest = _load_atlas_compact(manifest_path)
+        analysis, _raw = load_canonical(analysis_path)
+        promotion, promotion_raw = load_canonical(promotion_path)
+        manifest_record = file_record(manifest_path)
+        analysis_record = file_record(analysis_path)
+        promotion_record = file_record(promotion_path)
+        require(
+            sha256_bytes(promotion_raw) == row.get("evidence_sha256")
+            and promotion.get("schema")
+            == "q2-b2-qualification-promotion-map-evidence-v1"
+            and promotion.get("ordinal") == ordinal
+            and promotion.get("map") == name
+            and promotion.get("eligible") is True
+            and promotion.get("passed") is True,
+            f"{name} promotion evidence binding differs",
+        )
+        require(
+            promotion.get("atlas_manifest_sha256")
+            == manifest_record["sha256"]
+            and promotion.get("analysis_manifest_sha256")
+            == analysis_record["sha256"],
+            f"{name} promotion manifest digests differ",
+        )
+        identity = analysis.get("identity")
+        artifacts = analysis.get("artifacts")
+        require(isinstance(identity, Mapping), f"{name} analysis identity is absent")
+        require(isinstance(artifacts, Mapping), f"{name} analysis artifacts are absent")
+        atlas_manifest = artifacts.get("atlas_manifest")
+        require(
+            isinstance(atlas_manifest, Mapping)
+            and identity.get("atlas_manifest_sha256") == manifest_record["sha256"]
+            and atlas_manifest.get("sha256") == manifest_record["sha256"],
+            f"{name} Atlas manifest digest binding differs",
+        )
+        require(
+            analysis.get("canonical_map_id") == name,
+            f"{name} analysis map identity differs",
+        )
+        grid = manifest.get("grid")
+        require(isinstance(grid, Mapping), f"{name} Atlas grid is absent")
+        origin = grid.get("origin")
+        model0_mins = grid.get("model0_mins")
+        require(
+            isinstance(origin, list)
+            and len(origin) == 3
+            and all(
+                isinstance(axis, int) and not isinstance(axis, bool)
+                for axis in origin
+            ),
+            f"{name} Atlas origin is malformed",
+        )
+        require(
+            isinstance(model0_mins, list)
+            and len(model0_mins) == 3
+            and all(
+                isinstance(axis, int) and not isinstance(axis, bool)
+                for axis in model0_mins
+            )
+            and list(_snapped_origin(model0_mins)) == origin,
+            f"{name} Atlas origin is not the snapped model0 bounds",
+        )
+        maps.append({
+            "map": name,
+            "origin": origin,
+            "model0_mins": model0_mins,
+            "atlas_manifest": manifest_record,
+            "analysis_manifest": analysis_record,
+            "promotion_evidence": promotion_record,
+        })
+    return {
+        "contract": (
+            "production-phase-b-compact-atlas-manifest-and-promotion-seal"
+        ),
+        "pass_count": len(maps),
+        "maps": maps,
+    }
+
+
 def _syntax_evidence(path: Path, runtime: Mapping[str, Any]) -> dict[str, Any]:
     report, raw = load_canonical(path)
     require(report.get("schema") == "q2-python-syntax-floor-v1" and report.get("passed") is True,
@@ -387,6 +505,9 @@ def produce_infrastructure_report(
             "generated-promotion": paths["promotion evidence root"],
         })
         cold, resources = _cold_and_resource_evidence(reports, paths["analysis root"])
+        dyn_binding = _dyn_phase_b_atlas_manifest_binding_evidence(
+            reports, paths["analysis root"], paths["promotion evidence root"]
+        )
         syntax = _syntax_evidence(paths["syntax report"], runtime)
         exclusive = _exclusive_probe(stage)
         timeout = timeout_probe()
@@ -394,6 +515,7 @@ def produce_infrastructure_report(
                 "timeout probe did not fail closed and kill its process group")
         bodies = {
             "deterministic-cold-rebuild": cold,
+            "dyn-phase-b-atlas-manifest-binding": dyn_binding,
             "exact-stage-membership": membership,
             "exclusive-create": exclusive,
             "python310-syntax-floor": syntax,

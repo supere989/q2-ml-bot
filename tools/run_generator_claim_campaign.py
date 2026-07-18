@@ -137,6 +137,8 @@ def _failed_input_rows(
                 "report_sha256": None,
                 "bsp_sha256": None,
                 "atlas_sha256": None,
+                "atlas_manifest_sha256": None,
+                "analysis_manifest_sha256": None,
                 "generator_claims_sha256": None,
                 "failures": [message],
             })
@@ -380,6 +382,10 @@ def validate_campaign(
                 "report_sha256": hashlib.sha256(result_bytes).hexdigest(),
                 "bsp_sha256": result["identities"]["bsp_sha256"],
                 "atlas_sha256": analysis["identity"]["atlas_sha256"],
+                "atlas_manifest_sha256": file_sha256(
+                    analysis_dir / f"{name}.atlas.manifest.json"
+                ),
+                "analysis_manifest_sha256": file_sha256(analysis_path),
                 "generator_claims_sha256": result["identities"][
                     "generator_claims_sha256"
                 ],
@@ -403,6 +409,8 @@ def validate_campaign(
                     else None
                 ),
                 "atlas_sha256": None,
+                "atlas_manifest_sha256": None,
+                "analysis_manifest_sha256": None,
                 "generator_claims_sha256": None,
                 "failures": [_canonical_error(exc)],
             }
