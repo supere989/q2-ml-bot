@@ -1,0 +1,244 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "q2-multires-pretraining-validation-v1.schema.json",
+  "title": "Multires B5 no-update pretraining validation evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "tool", "status", "passed", "source", "normative_documents",
+    "tools", "bindings", "seeds", "campaign_transition_count",
+    "runtime_manifest_identity_sha256", "b4_privilege_admission",
+    "campaign_schedule", "campaigns", "campaign_summary", "proof",
+    "no_update", "failures", "report_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "q2-multires-pretraining-validation-v1"},
+    "tool": {"const": "run_multires_pretraining_validation"},
+    "status": {"const": "passed"},
+    "passed": {"const": true},
+    "source": {"$ref": "#/$defs/source"},
+    "normative_documents": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["design", "plan"],
+      "properties": {
+        "design": {"$ref": "#/$defs/file"},
+        "plan": {"$ref": "#/$defs/file"}
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suite", "campaign_runner", "proof", "one_run"],
+      "properties": {
+        "suite": {"$ref": "#/$defs/file"},
+        "campaign_runner": {"$ref": "#/$defs/file"},
+        "proof": {"$ref": "#/$defs/file"},
+        "one_run": {"$ref": "#/$defs/file"}
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "b3_gate", "b4_evidence", "runtime_manifest", "checkpoint",
+        "training_manifest", "bundle_manifest", "objectives", "atlas"
+      ],
+      "properties": {
+        "b3_gate": {"$ref": "#/$defs/file"},
+        "b4_evidence": {"$ref": "#/$defs/file"},
+        "runtime_manifest": {"$ref": "#/$defs/file"},
+        "checkpoint": {"$ref": "#/$defs/file"},
+        "training_manifest": {"$ref": "#/$defs/file"},
+        "bundle_manifest": {"$ref": "#/$defs/file"},
+        "objectives": {"$ref": "#/$defs/file"},
+        "atlas": {"$ref": "#/$defs/file"}
+      }
+    },
+    "seeds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seed", "game_seed", "divergence_game_seed"],
+      "properties": {
+        "seed": {"type": "integer", "minimum": 0},
+        "game_seed": {"type": "integer", "minimum": 0},
+        "divergence_game_seed": {"type": "integer", "minimum": 0}
+      }
+    },
+    "runtime_manifest_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "b4_privilege_admission": {"$ref": "#/$defs/b4Privilege"},
+    "campaign_transition_count": {"type": "integer", "minimum": 1},
+    "campaign_schedule": {
+      "type": "array", "minItems": 10, "maxItems": 10,
+      "items": {"$ref": "#/$defs/schedule"}
+    },
+    "campaigns": {
+      "type": "array", "minItems": 10, "maxItems": 10,
+      "items": {"$ref": "#/$defs/campaign"}
+    },
+    "campaign_summary": {"type": "object"},
+    "proof": {"type": "object"},
+    "no_update": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkpoint_unchanged", "policy_state_unchanged",
+        "optimizer_state_unchanged", "optimizer_steps",
+        "backward_parameter_gradients"
+      ],
+      "properties": {
+        "checkpoint_unchanged": {"const": true},
+        "policy_state_unchanged": {"const": true},
+        "optimizer_state_unchanged": {"const": true},
+        "optimizer_steps": {"const": 0},
+        "backward_parameter_gradients": {"const": 0}
+      }
+    },
+    "failures": {"type": "array", "maxItems": 0},
+    "report_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "git": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clean", "commit", "tree"],
+      "properties": {
+        "clean": {"const": true},
+        "commit": {"$ref": "#/$defs/git"},
+        "tree": {"$ref": "#/$defs/git"}
+      }
+    },
+    "b4Privilege": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis", "aggregate_evidence_sha256", "runtime_manifest_sha256",
+        "network_qualification_evidence_sha256", "datagrams_seen",
+        "public_packets_decoded", "teacher_packets_detected",
+        "negative_probe_result", "documents"
+        , "predecessor"
+      ],
+      "properties": {
+        "basis": {"const": "sealed-b4-real-public-datagram-audit-v1"},
+        "aggregate_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "runtime_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "network_qualification_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "datagrams_seen": {"type": "integer", "minimum": 1},
+        "public_packets_decoded": {"type": "integer", "minimum": 1},
+        "teacher_packets_detected": {"const": 0},
+        "negative_probe_result": {"const": "fatal-public-privilege-violation"},
+        "predecessor": {"$ref": "#/$defs/predecessor"},
+        "documents": {
+          "type": "object", "minProperties": 4, "maxProperties": 4,
+          "additionalProperties": {"$ref": "#/$defs/file"}
+        }
+      }
+    },
+    "predecessor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "b3_gate", "b3_gate_sha256", "cohort_id",
+        "declaration_sha256", "atlas_set_sha256"
+      ],
+      "properties": {
+        "b3_gate": {"$ref": "#/$defs/file"},
+        "b3_gate_sha256": {"$ref": "#/$defs/sha256"},
+        "cohort_id": {
+          "type": "string",
+          "pattern": "^b2g[0-9]+_final_[0-9]+$",
+          "not": {"const": "b2g26_final_71446"}
+        },
+        "declaration_sha256": {"$ref": "#/$defs/sha256"},
+        "atlas_set_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "mode": {
+      "enum": [
+        "guide_on", "guide_off", "hazard_hook", "posture_water_crouch",
+        "aim_combat_holdout"
+      ]
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["campaign", "replicate"],
+      "properties": {
+        "campaign": {"$ref": "#/$defs/mode"},
+        "replicate": {"enum": [0, 1]}
+      }
+    },
+    "campaign": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "campaign", "replicate", "status", "no_update", "seed",
+        "game_seed", "transition_count", "source", "bindings", "counters",
+        "trajectory_sha256", "season_report", "season_report_sha256",
+        "results", "result_sha256"
+      ],
+      "properties": {
+        "schema": {"const": "q2-multires-pretraining-campaign-v1"},
+        "campaign": {"$ref": "#/$defs/mode"},
+        "replicate": {"enum": [0, 1]},
+        "status": {"const": "passed"},
+        "no_update": {"const": true},
+        "seed": {"type": "integer", "minimum": 0},
+        "game_seed": {"type": "integer", "minimum": 0},
+        "transition_count": {"type": "integer", "minimum": 1},
+        "source": {
+          "type": "object", "additionalProperties": false,
+          "required": ["commit", "tree"],
+          "properties": {
+            "commit": {"$ref": "#/$defs/git"},
+            "tree": {"$ref": "#/$defs/git"}
+          }
+        },
+        "bindings": {"type": "object"},
+        "counters": {"type": "object"},
+        "trajectory_sha256": {"$ref": "#/$defs/sha256"},
+        "season_report": {
+          "type": "object",
+          "required": [
+            "schema", "season_id", "atlas_sha256", "policy_start_version",
+            "policy_end_version", "accepted_transitions", "transport",
+            "privilege"
+          ],
+          "properties": {
+            "schema": {"const": "multires-atlas-season-v1"},
+            "season_id": {"type": "string", "pattern": "^b5-"},
+            "atlas_sha256": {"$ref": "#/$defs/sha256"},
+            "policy_start_version": {"const": 1},
+            "policy_end_version": {"const": 1},
+            "accepted_transitions": {"type": "integer", "minimum": 1},
+            "transport": {"type": "object"},
+            "privilege": {
+              "type": "object", "additionalProperties": false,
+              "required": ["scope", "upstream_evidence_required"],
+              "properties": {
+                "scope": {"const": "not-measured-offline-no-public-conduit"},
+                "upstream_evidence_required": {
+                  "const": "sealed-b4-real-public-datagram-audit-v1"
+                }
+              }
+            }
+          }
+        },
+        "season_report_sha256": {"$ref": "#/$defs/sha256"},
+        "results": {"type": "object"},
+        "result_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

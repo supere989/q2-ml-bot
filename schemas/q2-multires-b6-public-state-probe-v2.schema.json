@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "q2-multires-b6-public-state-probe-v2.schema.json",
+  "title": "Signed B6 public-host state probe",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "payload", "attestation", "evidence_sha256"],
+  "properties": {
+    "schema": {"const": "q2-multires-b6-public-state-probe-v2"},
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "tool", "synthetic", "run_binding", "captured_at_unix_ns",
+        "authority_sha256", "capture_tool", "scope", "host", "state",
+        "state_sha256"
+      ],
+      "properties": {
+        "schema": {"const": "q2-multires-b6-public-state-payload-v2"},
+        "tool": {"const": "capture_b6_public_state"},
+        "synthetic": {"const": false},
+        "run_binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "campaign_id", "run_nonce", "phase", "capture_nonce",
+            "predecessor_evidence_sha256"
+          ],
+          "properties": {
+            "campaign_id": {"const": "b6-wsl-g1-no-update"},
+            "run_nonce": {"$ref": "#/$defs/sha256"},
+            "phase": {"enum": ["pre", "post"]},
+            "capture_nonce": {"$ref": "#/$defs/sha256"},
+            "predecessor_evidence_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "captured_at_unix_ns": {"type": "integer", "minimum": 1},
+        "authority_sha256": {"$ref": "#/$defs/sha256"},
+        "capture_tool": {"$ref": "#/$defs/tool"},
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "services", "ports", "queue_paths", "map_roots",
+            "credential_paths", "runtime_artifact_paths"
+          ],
+          "properties": {
+            "services": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"type": "string"}},
+            "ports": {"type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true, "items": {"type": "integer", "minimum": 1, "maximum": 65535}},
+            "queue_paths": {"type": "array", "maxItems": 0},
+            "map_roots": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "string", "pattern": "^/"}},
+            "credential_paths": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^/"}},
+            "runtime_artifact_paths": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^/"}}
+          }
+        },
+        "host": {"$ref": "#/$defs/host"},
+        "state": {"$ref": "#/$defs/state"},
+        "state_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "algorithm", "key_id", "payload_sha256", "signature_base64"],
+      "properties": {
+        "schema": {"const": "q2-ed25519-attestation-v1"},
+        "algorithm": {"const": "ed25519"},
+        "key_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{7,63}$"},
+        "payload_sha256": {"$ref": "#/$defs/sha256"},
+        "signature_base64": {"type": "string", "minLength": 88, "maxLength": 88}
+      }
+    },
+    "evidence_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "tool": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": {"const": "tools/capture_b6_public_state.py"},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "host": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hostname", "kernel_release", "architecture", "machine_identity_sha256"],
+      "properties": {
+        "hostname": {"type": "string", "minLength": 1},
+        "kernel_release": {"type": "string", "minLength": 1},
+        "architecture": {"const": "x86_64"},
+        "machine_identity_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "kind", "device", "inode", "bytes", "uid", "gid", "mode", "mtime_ns", "ctime_ns", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^/"}, "kind": {"const": "file"},
+        "device": {"type": "integer", "minimum": 0}, "inode": {"type": "integer", "minimum": 1},
+        "bytes": {"type": "integer", "minimum": 0}, "uid": {"type": "integer", "minimum": 0},
+        "gid": {"type": "integer", "minimum": 0}, "mode": {"type": "integer", "minimum": 0, "maximum": 4095},
+        "mtime_ns": {"type": "integer", "minimum": 0}, "ctime_ns": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "artifact": {
+      "oneOf": [
+        {"$ref": "#/$defs/file"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["path", "kind", "device", "inode", "uid", "gid", "mode", "mtime_ns", "ctime_ns"],
+          "properties": {
+            "path": {"type": "string", "pattern": "^/"}, "kind": {"const": "directory"},
+            "device": {"type": "integer", "minimum": 0}, "inode": {"type": "integer", "minimum": 1},
+            "uid": {"type": "integer", "minimum": 0}, "gid": {"type": "integer", "minimum": 0},
+            "mode": {"type": "integer", "minimum": 0, "maximum": 4095},
+            "mtime_ns": {"type": "integer", "minimum": 0}, "ctime_ns": {"type": "integer", "minimum": 0}
+          }
+        }
+      ]
+    },
+    "credential": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "kind", "device", "inode", "bytes", "uid", "gid", "mode", "mtime_ns", "ctime_ns", "opaque_hmac_sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^/"}, "kind": {"const": "file"},
+        "device": {"type": "integer", "minimum": 0}, "inode": {"type": "integer", "minimum": 1},
+        "bytes": {"type": "integer", "minimum": 0}, "uid": {"type": "integer", "minimum": 0},
+        "gid": {"type": "integer", "minimum": 0}, "mode": {"type": "integer", "minimum": 0, "maximum": 4095},
+        "mtime_ns": {"type": "integer", "minimum": 0}, "ctime_ns": {"type": "integer", "minimum": 0},
+        "opaque_hmac_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "socket": {
+      "type": "object", "additionalProperties": false,
+      "required": ["transport", "local_address_hex", "port", "socket_inode", "pid", "pid_start_ticks"],
+      "properties": {
+        "transport": {"enum": ["tcp4", "tcp6", "udp4", "udp6"]},
+        "local_address_hex": {"type": "string", "minLength": 1},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "socket_inode": {"type": "integer", "minimum": 1},
+        "pid": {"type": "integer", "minimum": 2},
+        "pid_start_ticks": {"type": "integer", "minimum": 1}
+      }
+    },
+    "service": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "name", "load_state", "active_state", "sub_state", "fragment_path",
+        "drop_in_paths", "working_directory", "root_directory", "environment_files",
+        "exec_start", "main_pid", "main_pid_start_ticks",
+        "active_enter_monotonic_usec", "exec_main_start_monotonic_usec",
+        "unit_artifacts", "main_executable"
+      ],
+      "properties": {
+        "name": {"type": "string", "pattern": "\\.service$"}, "load_state": {"const": "loaded"},
+        "active_state": {"const": "active"}, "sub_state": {"enum": ["running", "listening"]},
+        "fragment_path": {"type": "string", "pattern": "^/"},
+        "drop_in_paths": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^/"}},
+        "working_directory": {"type": "string", "pattern": "^/"}, "root_directory": {"type": "string"},
+        "environment_files": {"type": "string"}, "exec_start": {"type": "string", "minLength": 1},
+        "main_pid": {"type": "integer", "minimum": 2}, "main_pid_start_ticks": {"type": "integer", "minimum": 1},
+        "active_enter_monotonic_usec": {"type": "integer", "minimum": 1},
+        "exec_main_start_monotonic_usec": {"type": "integer", "minimum": 1},
+        "unit_artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/file"}},
+        "main_executable": {"$ref": "#/$defs/file"}
+      }
+    },
+    "state": {
+      "type": "object", "additionalProperties": false,
+      "required": ["services", "ports", "queues", "maps", "runtime_artifacts", "credentials"],
+      "properties": {
+        "services": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/service"}},
+        "ports": {"type": "array", "minItems": 3, "items": {"$ref": "#/$defs/socket"}},
+        "queues": {"type": "array", "maxItems": 0},
+        "maps": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/artifact"}},
+        "runtime_artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/file"}},
+        "credentials": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/credential"}}
+      }
+    }
+  }
+}

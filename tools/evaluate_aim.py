@@ -34,7 +34,7 @@ def _nearest_visible_enemy(obs) -> Optional[np.ndarray]:
     best = None
     count = max(0, min(int(obs.entity_count), obs.entities.shape[0]))
     for idx, ent in enumerate(obs.entities[:count]):
-        if ent[7] <= 0.5 or ent[8] <= 0.5:
+        if ent[7] <= 0.5 or abs(float(ent[8])) <= 0.0:
             continue
         if int(obs.entity_debug[idx, 2]) != ML_CONTROL_LEGACY_BOT:
             continue

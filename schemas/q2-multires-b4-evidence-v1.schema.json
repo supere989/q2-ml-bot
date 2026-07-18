@@ -1,0 +1,260 @@
+{
+  "$id": "https://supere989.github.io/q2-ml-bot/schemas/q2-multires-b4-evidence-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "atlas_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "predecessor": {"$ref": "#/$defs/predecessor"},
+    "documents": {
+      "additionalProperties": false,
+      "properties": {
+        "b4_wire_generation": {
+          "$ref": "#/$defs/documentRecord"
+        },
+        "causal_reward_admission": {
+          "$ref": "#/$defs/documentRecord"
+        },
+        "feature_action_contract": {
+          "$ref": "#/$defs/documentRecord"
+        },
+        "runtime_epoch_fencing": {
+          "$ref": "#/$defs/documentRecord"
+        }
+      },
+      "required": [
+        "feature_action_contract",
+        "runtime_epoch_fencing",
+        "b4_wire_generation",
+        "causal_reward_admission"
+      ],
+      "type": "object"
+    },
+    "component_evidence": {
+      "additionalProperties": false,
+      "properties": {
+        "b4_wire_generation": {"type": "object"},
+        "causal_reward_admission": {"type": "object"},
+        "feature_action_contract": {"type": "object"},
+        "runtime_epoch_fencing": {"type": "object"}
+      },
+      "required": [
+        "feature_action_contract", "runtime_epoch_fencing",
+        "b4_wire_generation", "causal_reward_admission"
+      ],
+      "type": "object"
+    },
+    "evidence_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "gate": {
+      "additionalProperties": false,
+      "properties": {
+        "atomic_wire_generation": {"const": true},
+        "causal_reward_frames_admissible": {"const": true},
+        "active_authority_b3_predecessor_bound": {"const": true},
+        "clean_exact_sources": {"const": true},
+        "epoch_and_stale_fencing_proven": {"const": true},
+        "public_teacher_violations_zero": {"const": true},
+        "real_network_barrier_replayed": {"const": true},
+        "runtime_and_binary_seals_bound": {"const": true}
+      },
+      "required": [
+        "clean_exact_sources",
+        "atomic_wire_generation",
+        "real_network_barrier_replayed",
+        "runtime_and_binary_seals_bound",
+        "epoch_and_stale_fencing_proven",
+        "public_teacher_violations_zero",
+        "causal_reward_frames_admissible",
+        "active_authority_b3_predecessor_bound"
+      ],
+      "type": "object"
+    },
+    "milestone": {"const": "B4"},
+    "network_qualification": {"$ref": "#/$defs/qualificationRecord"},
+    "public_privilege_proof": {"$ref": "#/$defs/publicPrivilegeProof"},
+    "normative_documents": {
+      "items": {"$ref": "#/$defs/fileRecord"},
+      "maxItems": 2,
+      "minItems": 2,
+      "type": "array"
+    },
+    "runtime_binaries": {
+      "additionalProperties": false,
+      "properties": {
+        "client_binary": {"$ref": "#/$defs/fileRecord"},
+        "game_module": {"$ref": "#/$defs/fileRecord"},
+        "q2ded": {"$ref": "#/$defs/fileRecord"}
+      },
+      "required": ["q2ded", "game_module", "client_binary"],
+      "type": "object"
+    },
+    "runtime_manifest": {"$ref": "#/$defs/manifestRecord"},
+    "scenario_proofs": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline_cold_1": {"$ref": "#/$defs/scenarioRecord"},
+        "epoch_drain": {"$ref": "#/$defs/scenarioRecord"},
+        "old_telemetry": {"$ref": "#/$defs/scenarioRecord"}
+      },
+      "required": ["baseline_cold_1", "epoch_drain", "old_telemetry"],
+      "type": "object"
+    },
+    "schema": {"const": "q2-multires-b4-evidence-v1"},
+    "source_closure_sha256": {"$ref": "#/$defs/sha256"},
+    "source_repositories": {
+      "additionalProperties": false,
+      "properties": {
+        "bot": {"$ref": "#/$defs/gitIdentity"},
+        "client": {"$ref": "#/$defs/gitIdentity"},
+        "game": {"$ref": "#/$defs/gitIdentity"}
+      },
+      "required": ["bot", "client", "game"],
+      "type": "object"
+    },
+    "status": {"const": "green"}
+  },
+  "required": [
+    "schema",
+    "milestone",
+    "status",
+    "atlas_sha256",
+    "predecessor",
+    "source_repositories",
+    "source_closure_sha256",
+    "normative_documents",
+    "runtime_binaries",
+    "runtime_manifest",
+    "network_qualification",
+    "public_privilege_proof",
+    "scenario_proofs",
+    "documents",
+    "component_evidence",
+    "gate",
+    "evidence_sha256"
+  ],
+  "title": "Fail-closed multires B4 evidence aggregate",
+  "type": "object",
+  "$defs": {
+    "predecessor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "b3_gate", "b3_gate_sha256", "status", "cohort_id",
+        "declaration_sha256", "atlas_set_sha256", "repository_commit",
+        "repository_tree"
+      ],
+      "properties": {
+        "b3_gate": {"$ref": "#/$defs/fileRecord"},
+        "b3_gate_sha256": {"$ref": "#/$defs/sha256"},
+        "status": {"const": "green"},
+        "cohort_id": {
+          "type": "string",
+          "pattern": "^b2g[0-9]+_final_[0-9]+$",
+          "not": {"const": "b2g26_final_71446"}
+        },
+        "declaration_sha256": {"$ref": "#/$defs/sha256"},
+        "atlas_set_sha256": {"$ref": "#/$defs/sha256"},
+        "repository_commit": {"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$", "type": "string"},
+        "repository_tree": {"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$", "type": "string"}
+      }
+    },
+    "documentRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "name": {"minLength": 1, "type": "string"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"minimum": 1, "type": "integer"}
+      },
+      "required": ["name", "sha256", "size", "evidence_sha256"],
+      "type": "object"
+    },
+    "fileRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {"minLength": 1, "type": "string"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"minimum": 1, "type": "integer"}
+      },
+      "required": ["name", "sha256", "size"],
+      "type": "object"
+    },
+    "gitIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "clean": {"const": true},
+        "commit": {"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$", "type": "string"},
+        "tree": {"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$", "type": "string"}
+      },
+      "required": ["commit", "tree", "clean"],
+      "type": "object"
+    },
+    "manifestRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "name": {"const": "runtime-manifest"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"minimum": 1, "type": "integer"}
+      },
+      "required": ["name", "sha256", "size", "manifest_sha256"],
+      "type": "object"
+    },
+    "qualificationRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "execution_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "name": {"const": "network-qualification"},
+        "runtime_closure_sha256": {"$ref": "#/$defs/sha256"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"minimum": 1, "type": "integer"}
+      },
+      "required": [
+        "name", "sha256", "size", "evidence_sha256",
+        "execution_evidence_sha256", "runtime_closure_sha256"
+      ],
+      "type": "object"
+    },
+    "publicPrivilegeProof": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline_raw_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "datagrams_seen": {"minimum": 1, "type": "integer"},
+        "negative_probe_packet_sha256": {"$ref": "#/$defs/sha256"},
+        "negative_probe_result": {
+          "const": "fatal-public-privilege-violation"
+        },
+        "public_packets_decoded": {"minimum": 1, "type": "integer"},
+        "teacher_packets_detected": {"const": 0}
+      },
+      "required": [
+        "baseline_raw_evidence_sha256",
+        "datagrams_seen",
+        "public_packets_decoded",
+        "teacher_packets_detected",
+        "negative_probe_packet_sha256",
+        "negative_probe_result"
+      ],
+      "type": "object"
+    },
+    "scenarioRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {"minLength": 1, "type": "string"},
+        "raw_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"minimum": 1, "type": "integer"}
+      },
+      "required": ["name", "sha256", "size", "raw_evidence_sha256"],
+      "type": "object"
+    },
+    "sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    }
+  }
+}

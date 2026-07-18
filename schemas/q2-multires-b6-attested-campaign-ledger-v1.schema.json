@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "q2-multires-b6-attested-campaign-ledger-v1.schema.json",
+  "title": "B6 signed-probe/one-run controller ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "tool", "status", "campaign_id", "run_nonce", "launch_id",
+    "controller_host", "controller_tool", "plan", "authority", "stages",
+    "ordering_basis", "ledger_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "q2-multires-b6-attested-campaign-ledger-v1"},
+    "tool": {"const": "run_b6_attested_campaign"},
+    "status": {"const": "green"},
+    "campaign_id": {"const": "b6-wsl-g1-no-update"},
+    "run_nonce": {"$ref": "#/$defs/sha256"},
+    "launch_id": {"type": "string", "pattern": "^b6-[0-9a-f]{60}$"},
+    "controller_host": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hostname", "kernel_release", "architecture"],
+      "properties": {
+        "hostname": {"const": "DESKTOP-RTX2080"},
+        "kernel_release": {"type": "string", "pattern": "microsoft-standard-WSL2"},
+        "architecture": {"const": "x86_64"}
+      }
+    },
+    "controller_tool": {"$ref": "#/$defs/file"},
+    "plan": {"$ref": "#/$defs/file"},
+    "authority": {"$ref": "#/$defs/file"},
+    "stages": {
+      "type": "object", "additionalProperties": false,
+      "required": ["public_pre", "one_run", "public_post"],
+      "properties": {
+        "public_pre": {"$ref": "#/$defs/stage"},
+        "one_run": {"$ref": "#/$defs/stage"},
+        "public_post": {"$ref": "#/$defs/stage"}
+      }
+    },
+    "ordering_basis": {"const": "single-controller-monotonic-ns-v1"},
+    "ledger_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {"bytes": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "stream": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {"bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "stage": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "argv", "argv_sha256", "started_monotonic_ns", "completed_monotonic_ns",
+        "returncode", "stdout", "stderr", "output", "evidence_sha256"
+      ],
+      "properties": {
+        "argv": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "argv_sha256": {"$ref": "#/$defs/sha256"},
+        "started_monotonic_ns": {"type": "integer", "minimum": 1},
+        "completed_monotonic_ns": {"type": "integer", "minimum": 1},
+        "returncode": {"const": 0},
+        "stdout": {"$ref": "#/$defs/stream"}, "stderr": {"$ref": "#/$defs/stream"},
+        "output": {"$ref": "#/$defs/file"}, "evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

@@ -47,6 +47,11 @@ class OnnxPolicy:
 
 
 def main() -> int:
+    print(
+        "retired: use the network-client multires qualification/campaign path",
+        file=sys.stderr,
+    )
+    return 2
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--onnx", required=True, help="checkpoint for slot A (and B, unless --onnx_b given)")
     p.add_argument("--onnx_b", default="", help="optional different checkpoint for slot B")

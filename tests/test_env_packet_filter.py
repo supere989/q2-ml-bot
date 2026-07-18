@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
-from harness.env import _is_duplicate_obs_tick, _is_fresh_obs_transition
+from harness.env import (
+    _is_duplicate_obs_tick,
+    _is_fresh_obs_transition,
+    _observations_share_tick,
+)
 from harness.spatial import VoxelSpatialReward
 
 
@@ -55,6 +59,17 @@ def test_lower_tick_after_map_reload_is_accepted():
     # Quake resets level.framenum on map load. Freshness is therefore based on
     # exact duplication, not numerical ordering.
     assert _accepted_ticks([(3, False)], previous_tick=9000) == [(3, False)]
+
+
+def test_bootstrap_alignment_requires_every_slot_on_same_tick():
+    assert not _observations_share_tick([])
+    assert not _observations_share_tick([SimpleNamespace(tick=101), None])
+    assert not _observations_share_tick([
+        SimpleNamespace(tick=123), SimpleNamespace(tick=112),
+    ])
+    assert _observations_share_tick([
+        SimpleNamespace(tick=145), SimpleNamespace(tick=145),
+    ])
 
 
 def test_spatial_reward_rng_is_local_and_repeatable():

@@ -1,0 +1,31 @@
+[Unit]
+Description=Q2 persistent distributed rollout worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/q2-rollout/worker.env
+WorkingDirectory=%h/q2-rollout/q2-ml-bot
+ExecStart=/usr/bin/env ${PYTHON_BIN} tools/rollout_worker.py \
+  --mode q2 --continuous --leased \
+  --coordinator ${Q2_ROLLOUT_COORDINATOR} \
+  --token ${Q2_ROLLOUT_TOKEN} \
+  --runtime-manifest ${Q2_ROLLOUT_RUNTIME_MANIFEST} \
+  --attestation-key-env ${Q2_ROLLOUT_ATTESTATION_KEY_ENV} \
+  --worker-id ${Q2_ROLLOUT_WORKER_ID} \
+  --sequence 1 --rollout-index 0 \
+  --seed ${Q2_ROLLOUT_SEED} --game-seed ${Q2_ROLLOUT_GAME_SEED} \
+  --steps ${Q2_ROLLOUT_STEPS} --map-name ${Q2_ROLLOUT_MAP} \
+  --n-bots ${Q2_ROLLOUT_N_BOTS} --n-ml ${Q2_ROLLOUT_N_ML} \
+  --sv-port-base ${Q2_SV_PORT_BASE} --ml-port-base ${Q2_ML_PORT_BASE} \
+  --lattice-dir ${Q2_ROLLOUT_ROOT}/state/${Q2_ROLLOUT_WORKER_ID}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+StandardOutput=append:%h/q2-rollout/logs/worker.log
+StandardError=append:%h/q2-rollout/logs/worker.log
+
+[Install]
+WantedBy=default.target

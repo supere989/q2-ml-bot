@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:q2-ml:q2-multires-b3-gate-v1",
+  "title": "Fail-closed offline multi-resolution B3 gate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "batch", "status", "evidence_kind", "synthetic_claims",
+    "normative_documents", "repository", "predecessor", "design_prior",
+    "recovery_guide", "bundle", "component_evidence", "deployment", "gate",
+    "gate_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "q2-multires-b3-gate-v1"},
+    "batch": {"const": "B3"},
+    "status": {"const": "green"},
+    "evidence_kind": {"const": "measured-offline"},
+    "synthetic_claims": {"const": false},
+    "normative_documents": {"$ref": "#/$defs/normative"},
+    "repository": {"$ref": "#/$defs/repository"},
+    "predecessor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["b2_gate", "status", "cohort_id", "declaration_sha256"],
+      "properties": {
+        "b2_gate": {"$ref": "#/$defs/file"},
+        "status": {"const": "green"},
+        "cohort_id": {
+          "type": "string",
+          "pattern": "^b2g[0-9]+_final_[0-9]+$",
+          "not": {"const": "b2g26_final_71446"}
+        },
+        "declaration_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "design_prior": {
+      "type": "object", "additionalProperties": false,
+      "required": ["report", "campaign_id", "pair_count", "metrics_improved", "static_pass_rate_preserved", "diversity_passed"],
+      "properties": {
+        "report": {"$ref": "#/$defs/file"},
+        "campaign_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"},
+        "pair_count": {"const": 28},
+        "metrics_improved": {"const": true},
+        "static_pass_rate_preserved": {"const": true},
+        "diversity_passed": {"const": true}
+      }
+    },
+    "recovery_guide": {
+      "type": "object", "additionalProperties": false,
+      "required": ["report", "source_closure", "atlas_set_sha256", "finite_non_safe_cells", "unresolved_cells", "spatial_width", "hook_walk_budget_ticks", "game_tick_hz", "walk_speed_q8_per_second", "rust_extension"],
+      "properties": {
+        "report": {"$ref": "#/$defs/file"},
+        "source_closure": {"$ref": "#/$defs/closure"},
+        "atlas_set_sha256": {"$ref": "#/$defs/sha256"},
+        "finite_non_safe_cells": {"type": "integer", "minimum": 1},
+        "unresolved_cells": {"const": 0},
+        "spatial_width": {"const": 76},
+        "hook_walk_budget_ticks": {"const": 15},
+        "game_tick_hz": {"const": 10},
+        "walk_speed_q8_per_second": {"const": 76800},
+        "rust_extension": {"$ref": "#/$defs/extension"}
+      }
+    },
+    "bundle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["report", "source_closure", "v2_compatible", "v3_isolated", "public_enabled"],
+      "properties": {
+        "report": {"$ref": "#/$defs/file"},
+        "source_closure": {"$ref": "#/$defs/closure"},
+        "v2_compatible": {"const": true},
+        "v3_isolated": {"const": true},
+        "public_enabled": {"const": false}
+      }
+    },
+    "component_evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["b2_gate", "design_prior", "recovery_guide", "bundle"],
+      "properties": {
+        "b2_gate": {"type": "object"},
+        "design_prior": {"type": "object"},
+        "recovery_guide": {"type": "object"},
+        "bundle": {"type": "object"}
+      }
+    },
+    "deployment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["public_or_teacher_service_changed", "cross_host_runtime_copy_performed", "trainer_or_tensorboard_started"],
+      "properties": {
+        "public_or_teacher_service_changed": {"const": false},
+        "cross_host_runtime_copy_performed": {"const": false},
+        "trainer_or_tensorboard_started": {"const": false}
+      }
+    },
+    "gate": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "finite_cells_descend_or_plateau", "spatial_addition_width",
+        "matched_treatment_improved", "static_pass_rate_preserved",
+        "diversity_preserved", "v2_compatibility_passed", "bundle_v3_isolated",
+        "failures", "green"
+      ],
+      "properties": {
+        "finite_cells_descend_or_plateau": {"const": true},
+        "spatial_addition_width": {"const": 76},
+        "matched_treatment_improved": {"const": true},
+        "static_pass_rate_preserved": {"const": true},
+        "diversity_preserved": {"const": true},
+        "v2_compatibility_passed": {"const": true},
+        "bundle_v3_isolated": {"const": true},
+        "failures": {"type": "array", "maxItems": 0},
+        "green": {"const": true}
+      }
+    },
+    "gate_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "not": {"const": "0000000000000000000000000000000000000000000000000000000000000000"}},
+    "git": {"type": "string", "pattern": "^[0-9a-f]{40}$", "not": {"const": "0000000000000000000000000000000000000000"}},
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {"bytes": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "normative": {
+      "type": "object", "additionalProperties": false,
+      "required": ["design_sha256", "plan_sha256"],
+      "properties": {"design_sha256": {"$ref": "#/$defs/sha256"}, "plan_sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "repository": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository_commit", "repository_tree", "git_clean"],
+      "properties": {"repository_commit": {"$ref": "#/$defs/git"}, "repository_tree": {"$ref": "#/$defs/git"}, "git_clean": {"const": true}}
+    },
+    "closure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["file_count", "sha256"],
+      "properties": {"file_count": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "extension": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "bytes", "sha256", "repository_tree", "source_closure_sha256", "qualification_commands_sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "repository_tree": {"$ref": "#/$defs/git"},
+        "source_closure_sha256": {"$ref": "#/$defs/sha256"},
+        "qualification_commands_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

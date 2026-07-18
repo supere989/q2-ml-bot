@@ -147,7 +147,9 @@ def _ppo_update(
             act_b = act_flat[b].unsqueeze(1)
 
             act_params, value_b, _ = policy(obs_b)
-            log_prob, entropy = policy.action_log_prob_entropy(act_params, act_b)
+            log_prob, entropy = policy.action_log_prob_entropy(
+                act_params, act_b, obs=obs_b
+            )
             log_prob = log_prob.reshape(-1)
             entropy = entropy.reshape(-1)
             value = value_b.reshape(-1)
@@ -329,6 +331,12 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    print(
+        "retired: use train.multires_primary with the attested network-client "
+        "lattice runtime",
+        file=sys.stderr,
+    )
+    return 2
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default="")
     parser.add_argument("--map_name", default="mltrain_00000000")

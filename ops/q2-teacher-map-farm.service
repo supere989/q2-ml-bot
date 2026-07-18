@@ -1,0 +1,21 @@
+[Unit]
+Description=Q2 3ZB2 teacher-map compile farm (WSL)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/q2-rollout/q2-ml-bot
+ExecStart=/usr/bin/python3 -u tools/map_farm_worker.py \
+  --q2_root %h/q2-rollout/runtime \
+  --install_dir %h/q2-rollout/runtime/baseq2/maps \
+  --queue_dir %h/q2-rollout/teacher-map-farm-queue \
+  --bind 100.86.206.50 \
+  --port 32513 \
+  --prefix mlteacher \
+  --queue_depth 4 \
+  --threads 8
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -2,15 +2,61 @@
 
 ML-based bot engine for Quake 2 (Lithium II + 3ZB2 base).
 
-**Status:** Live-deployed. `checkpoints/policy_39929600.onnx` (39.9M training
-steps) runs a public 1v1 human-vs-bot server via `tools/live_match_onnx.py`
-(see **Live Deployment**). Movement/control is solid as of 2026-07-10. Aim
-never converged through pure RL; the first telemetry used to quantify that was
-later found geometrically invalid, but corrected BC/evaluation now provides a
-strong warm start and a reward/terminal-fixed PPO canary retained it. Combat is
-still far below the promotion target — see **Known Issues / Roadmap** item 2.
-**See `docs/HANDOFF-2026-07-11.md` for the current artifacts, evidence, and
-next controlled experiment if picking this up fresh.**
+**Current status (2026-07-14):** the multiresolution Atlas/Lattice replacement
+is under construction on `feature/multires-map-atlas-v1`. All previous model
+lineages are retired and forbidden as resume or deployment sources. The old
+trainer, four ML clients, and TensorBoard view are stopped; their operational
+checkpoint/event paths are absent. The public and teacher game services remain
+online only until the new game/client/Python protocol can replace them
+atomically. The authoritative specification and batch plan are
+`docs/MULTIRES-LATTICE-MAP-ATLAS-{DESIGN,PLAN}-2026-07-14.md`.
+
+**Retired baseline:** The network-native target/thermal-lattice prototype was
+training on the live public server as `public_network_thermal_bc_live_v2`. It used four
+ordinary headless clients, the Rust persistent lattice, a per-client transient
+thermal overlay, and exact damage-point aim.
+Four headless Yamagi clients connect as ordinary protocol-34 players while a
+private per-client conduit supplies authoritative 219-feature observations to
+PPO on WSL; two of six slots remain available for humans. The old in-process
+ONNX runtime is archived/rollback-only. Transport and action admission are
+proven. The rejected
+`public_network_engagement_anchor_v3` descendant reached 100% down-look and
+70.5% backward commands at step 4,063,488 and must not be resumed. The clean
+fresh-policy experiment is archived as the rollback lineage; the active
+warm-start was cloned from its complete step-49,152 policy and matching
+398-cell/four-client lattice. The replacement prototype adds a target-aligned fire
+gate, bounded target-acquisition reward, escalating same-target hit credit,
+automatic network-client respawn, attested generated-map lattice sidecars, and
+lattice-directed hook corrections. A persistent map-epoch barrier now holds
+all actions while clients download/load the next BSP and resumes only after all
+four report the same playable map. The live conduit now uses the client's true
+view angles (Quake's rendered model pitch is intentionally divided by three),
+and TensorBoard records entity visibility, alignment error, damage events,
+signed movement, and posture reward. A conservative 0.02 recurrent aim anchor
+now consumes chest-first actionable target labels in one full 512-sample
+minibatch. It also supplies exposure-weighted, per-client transient target heat
+through correctly transformed world voxels, dual eye/muzzle-clear damage
+points, generation-counted target tracks, and exact full-action PPO provenance.
+The fully fresh run fixed posture and forward motion but its zero-state holdout
+still measured 39.6-degree yaw and 16.9-degree pitch error. A frozen-head clone
+could not decode the target geometry. The accepted 100k-sample/32-epoch
+distilled-backbone warm-start measures 2.23-degree yaw, 1.69-degree pitch,
+30.0% post-command alignment, 92.7% aligned-fire precision, zero hidden fire,
+and 0.0041 movement drift. PPO resumed it with a fresh optimizer, LR `1e-5`,
+look/posture anchor `0.02`, fire-anchor weight zero, and the exact-point hard
+fire gate. In its first 16,384 live generated-map transitions, down-look was
+4.2%, forward commands were 53.0% versus 33.3% backward, and the causal ladder
+produced 1,539 aligned frames, 1,117 aligned shots, 49 hit events, 15 repeat-hit
+events, and two kills with zero transport failures or echo timeouts. The
+generated-map prototype gate has passed; a matching stock-map season remains
+required for promotion.
+That retired run's combat quality remained below the promotion target and must be
+judged by a fresh seasonal soak, not loss convergence.
+**See the multires specification and plan for the active implementation state.**
+The channel-by-channel sufficiency review is in
+`docs/TELEMETRY-AUDIT-2026-07-14.md`.
+The implemented redesign and cutover gates are in
+`docs/TARGET-THERMAL-LATTICE-PROTOTYPE-2026-07-14.md`.
 
 ## Architecture
 
@@ -18,10 +64,13 @@ next controlled experiment if picking this up fresh.**
 q2_plugin/ml_bridge.{c,h}   C bridge in game.so: packs observations, applies actions
 harness/protocol.py          Python-side struct serialization (must match bridge.h)
 harness/env.py               Gymnasium environment wrapping a q2ded subprocess
+harness/client_env.py        Real protocol-34 client backend + private authoritative telemetry
 harness/spatial.py           Voxel/spatial reward shaping from existing observations ("Voxel Lattice")
 models/policy.py             LSTM actor-critic policy + ONNX export
 train/ppo.py                 PPO training loop (parallel envs, overnight on Vega 10)
 tools/live_match_onnx.py     ONNX-Runtime live match server — human-joinable, --live_maps
+tools/network_public_server.py Server-only public lane for ordinary training clients
+harness/client_batch.py      Synchronous multi-client action/echo admission and map resync
 maps/                        Procedurally generated maps + hook-zone annotations
 data/                        Recorded human demonstrations for imitation learning
 ```
@@ -43,10 +92,10 @@ and current known issues) lives at `docs/architecture-map.svg`.
 | ext_obs *(Q2_EXT_OBS=1)* | 10 | rune_flags[5] + inbound_dmg_dir[3] + dist/recency[2] |
 | session_memory | 24 | per-voxel-cell lattice: engagement/threat/opportunity/self-fire scores + nearest-signal pull vectors + survivability projection (win_margin, effective-HP, DPS-share) — see `harness/spatial.py` |
 
-`OBS_DIM = 185 + 24 + (10 if Q2_EXT_OBS else 0)`. The deployed live checkpoint
-(`policy_39929600.onnx`) was trained with `Q2_EXT_OBS=1` → 219 dims; running it
-with the env var unset is a silent shape mismatch, not a training bug — see
-`harness/protocol.py` and the `Q2_EXT_OBS` gotcha noted in project memory.
+`OBS_DIM = 185 + 24 + (10 if Q2_EXT_OBS else 0)`. The active public trainer
+and its `policy_00049152.pt` warm start use `Q2_EXT_OBS=1` → 219 dims. Loading
+that checkpoint with the variable unset fails at the encoder with a ten-input
+shape mismatch; see `harness/protocol.py` and the handoff gotcha.
 
 ## Action space (8 dims)
 
@@ -86,8 +135,12 @@ bash tools/train_service.sh start
 ## Generated-Map Curriculum
 
 `maps/generator.py` creates Lithium/3ZB2 deathmatch maps with spawns, weapons,
-items, platforms, and hook affordances. `maps/compile.sh` installs compiled BSPs,
-hook zones, lattice priors, and route/item-timing sidecars into
+items, platforms, hook affordances, and measured floor lighting. Spawn-clear
+base floors are divided into deterministic 512-unit regions and sampled every
+128 units. At least 90% of every region must have a direct tagged point light;
+the generator adds lights below platforms and building roofs when those block
+the ceiling source. `maps/compile.sh` installs compiled BSPs, hook zones,
+lattice priors, and route/item-timing sidecars into
 `q2_lithium_merge/baseq2/maps/`.
 
 Use `--map_glob 'mltrain_*.bsp'` to train from the installed generated maps. Use
@@ -96,7 +149,10 @@ each ML episode. Keep `--map_name q2dm1` for fixed benchmark runs.
 
 Run `python tools/validate_maps.py --glob 'mltrain_*.map' --runtime` before
 overnight training to check spawn spread, map scale, pickups, hook zones, and
-q2ded loadability with a four-bot setup.
+q2ded loadability with a four-bot setup. Static validation recomputes lighting
+from the point lights in the `.map` and the floor samples/occluders in
+`.meta.json`; missing, weak, moved, or platform-occluded lights fail the map.
+Use `--min-light-coverage` only to raise the default 0.90 promotion floor.
 
 ## KD Evaluation Gate
 
@@ -127,19 +183,27 @@ procedurally-generated, fully-lit map compiled in the background every round
 instead of cycling a fixed pool.
 
 ```bash
-python tools/live_match_onnx.py --onnx checkpoints/policy_39929600.onnx \
-  --live_maps --dlserver http://<host>:<port>
+python tools/live_match_onnx.py --onnx checkpoints/policy_43507714.onnx \
+  --live_maps --map_farm_url http://100.86.206.50:32510 \
+  --dlserver http://<host>:<port>
 ```
 
-Key flags: `--live_maps` (background `bsp -vis -fast -rad` compile per round,
-armed via `sv_maplist`/`EndDMLevel` fallback since `use_mapqueue=0`);
+Key flags: `--live_maps` (fresh-map rotation armed through
+`sv_maplist`/`EndDMLevel` since `use_mapqueue=0`; standalone mode compiles
+locally);
+`--map_farm_url` (consume checksum-attested maps from the private WSL worker
+instead of compiling on the live VPS; production keeps a two-map reserve);
 `--dlserver` (HTTP `sv_downloadserver` instead of the legacy in-game UDP map
 transfer — required once maps are never pre-bundled); `Q2_BIND_IP=""` (empty
 string — some builds hit a `getaddrinfo` error on a literal `+set ip`, empty
-string takes the working bind-all path instead).
+string takes the working bind-all path instead). Production also sets
+`Q2_ML_STEP_TIMEOUT_MS=75`: normal ONNX replies take 1–14 ms, so an inference
+failure falls back within the current 100 ms frame instead of stalling the
+server for the training-oriented one-second default.
 
 A production instance (Hetzner VPS, `q2mlbot.service` + `q2mlbot-gamedata.service`
-systemd units) has been running since 2026-07 with real external players.
+systemd units) has been running since 2026-07 with real external players. The
+versioned live unit is [`ops/q2mlbot-live.service`](ops/q2mlbot-live.service).
 
 ## Known Issues / Roadmap
 
@@ -214,11 +278,12 @@ fixed checkpoint). Ordered by what's blocking what.
    recurrent chunks initially showed roughly 34° yaw error. At coefficient
    `0.1`, a seed-5301 canary retained the synthetic gate and improved pooled
    real-q2dm1 post-alignment from 13.45% to about 21.35%, but failed the fixed
-   generated-map gate: 5/129 fell to 2/162. It remains an experimental switch,
-   default `0`; do not extend that checkpoint. If revisiting it, isolate a
-   weaker or look-only anchor and require the same multi-seed fixed-combat gate
-   before any longer PPO run. Leave expensive gradient diagnostics disabled
-   for ordinary training.
+   generated-map gate: 5/129 fell to 2/162. That experiment also consumed the
+   now-fixed one-third model-pitch observation, so it is historical evidence,
+   not a verdict on the corrected target frame. The current true-view run is
+   the isolated weaker retest at coefficient `0.02`; it still requires the same
+   seasonal combat gate before promotion. Leave expensive gradient diagnostics
+   disabled for ordinary training.
 
 3. **[PROTOTYPE 2026-07-11]** Lattice pull signals in the old checkpoint are
    weak, and one is inverted from intent.
@@ -268,8 +333,8 @@ fixed checkpoint). Ordered by what's blocking what.
    against each other, zero 3ZB2 by default if `n_bots=num_ml_bots`, but see
    this gotcha before using a small `n_bots`).
 
-7. **[FIXED IN SOURCE 2026-07-11; not deployed to the active trainer or
-   production]** ML reward accounting used raw Quake damage. Kill planes,
+7. **[FIXED AND DEPLOYED TO TRAINING AND PRODUCTION]** ML reward accounting
+   used raw Quake damage. Kill planes,
    telefrags, crushers, and the out-of-bounds fallback deliberately pass
    `100000`, which entered PPO returns unchanged; corpse hits could also add
    damage and repeat ML kill credit. The impossible totals were exact
@@ -282,7 +347,7 @@ fixed checkpoint). Ordered by what's blocking what.
    17 of 18 apparent kills were corpse credits and the critic spikes were
    sentinel returns, not useful learning.
 
-8. **[FIXED IN SOURCE 2026-07-11; isolated runtime verified]** Terminal
+8. **[FIXED, VERIFIED, AND DEPLOYED TO TRAINING AND PRODUCTION]** Terminal
    delivery had two independent bugs: lockstep sent the same death terminal
    from both the frame pre-pass and dead `Bot_Think`, while every intermission
    frame was terminal. The latter produced runs with 2,769 episode endings in
@@ -354,14 +419,71 @@ conservatively modify actions.
 ## Spatial Reward Shaping
 
 `harness/spatial.py` adds a training-side voxel reward without changing the C
-wire protocol or checkpoint shape. It rewards entering new position voxels,
-visible tactical engagement ranges, and proximity to required hook zones, while
-lightly penalizing stagnation. Generated-map objective/danger priors and live
-route/item readiness feed the existing 24-dimensional memory tail. The trainer
+wire protocol or checkpoint shape. It rewards entering new position voxels and
+visible tactical engagement ranges while lightly penalizing stagnation.
+Generated-map objective/danger priors and live route/item readiness feed the
+existing 24-dimensional memory tail. The trainer
 checkpoints learned cells alongside the policy and explicitly supervises
 movement along the pull vectors outside visible combat.
 The implementation contract and isolated real-engine smoke results are in
 `docs/LATTICE-PROTOTYPE-2026-07-11.md`.
+
+Fresh policies also use a grounded-locomotion curriculum. Their categorical
+heads start jump-off/hook-idle instead of the old uniform 50% jump / 75% hook
+distribution. The spatial reward targets 220–360 units/s when meaningful
+movement is requested, rewards forward traversal inside that window, and
+penalizes backward travel, slow jumping, and unnecessary hook overspeed. With
+no visible target, forward travel at 96--360 units/s also earns a coupled
+level-aim posture reward that increases continuously toward the horizon; a
+separate down/up-look penalty begins beyond 15 degrees. Backward motion cannot
+collect the reward and target-visible vertical aim is exempt. TensorBoard exposes
+the result under `movement/*`, `behavior/jump_*`, and
+`behavior/hook_overspeed_rate`. Generated maps now carry eight geometry-checked,
+384-unit-separated deathmatch starts, leaving spare starts for six-player live
+matches instead of forcing spawn reuse.
+
+Three arena-focused presets provide deliberate spatial composition:
+`arena_open` is flat and cover-rich, `arena_vertical` combines arena bowls
+with terraces/stairs/platforms, and `arena_lanes` emphasizes ground-level
+lanes and chokepoints. Arena presets enforce at least two 256-unit-wide
+through-hallways, repeated L-shaped corner pockets, low/mid/high ceiling
+bands, and one or more enterable 384–448-unit buildings with opposed doors,
+interior ceilings, and playable roofs. Their counts are recorded in each
+map's metadata as `hallways`, `corner_pockets`, `corners`, `large_buildings`, and
+`ceiling_bands`. `mixed` includes these presets alongside the original four.
+The live and teacher map farms additionally maintain a 50% arena-style quota
+in each ready queue (one of two public bundles and two of four teacher
+bundles), while the remaining capacity preserves the original style family.
+
+Generator v6 treats lighting, movement clearance, and lethal-drop containment
+as promotion contracts.
+It rejects overlapping horizontal surfaces with a player-admitting 56--95-unit
+gap, requires each spawn to have a clear 96-unit column and supported escape
+path, raises direct floor-light coverage to 98%, and assigns every enterable
+room, hallway, corner pocket, building, and safe under-platform space its own
+internal light. Every union edge of playable base floor that faces void gets a
+solid 96-unit guard wall; the validator independently rejects missing or
+mis-sized guards. Map-farm bundle v2 delivers the compiled BSP together with
+hook zones, lattice priors, routes/item timing, and a checksum manifest; the
+trainer fails closed on missing or corrupt farm sidecars. See
+`docs/MAP-LIGHTING-GEOMETRY-CONTRACT.md` for the exact thresholds.
+
+Hook telemetry distinguishes fire, release, and the reserved class-2 no-op,
+but hook use is no longer a positive rate/value objective. A correction can
+start only for required traversal, stuck/slow movement, or escape pressure,
+and only when a live hook-zone landing advances toward a positive heated
+lattice cell. One fixed correction pays bounded new-best displacement plus one
+arrival bonus; replaying the same ground cannot farm reward. Blind fire, the
+class-2 no-op, idle release, and overspeed retain their costs. TensorBoard's
+`behavior/hook_action_rate` remains diagnostic only; authoritative progress is
+under `hook/target_*`, `hook/progress_*`, and `hook/correction_*`.
+
+The live server still uses Lithium's real `hook_pullspeed 1700` actuator. In
+the current C implementation an attached hook replaces the player's complete
+velocity every frame, so it can look like low gravity even though maps without
+a gravity key reset to normal `sv_gravity 800`. The former
+`hook_gravity_comp`, `hook_min_lift`, `hook_pullscale`, and
+`hook_pullspeed_max` config lines were inert and are no longer emitted.
 
 Prototype smoke test and checkpoint regression gate:
 
@@ -387,6 +509,9 @@ Useful knobs:
 - `Q2_LATTICE_ROUTES=0` disables live route/item readiness deposits.
 - `--lattice_direction_coef 0.02` controls direct pull-vector supervision
   (`0` disables it for an A/B control).
+- `Q2_NOMINAL_SPEED_MIN=220` / `Q2_NOMINAL_SPEED_MAX=360` define the ordinary
+  traversal window; `R_MOVE_*`, `R_JUMP_*`, and `R_HOOK_OVERSPEED` tune its
+  reward terms.
 - `R_KILL=5.0` and `R_DEATH=3.0` emphasize the KD objective during training.
 
 ## Related repos

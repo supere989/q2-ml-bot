@@ -18,11 +18,29 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-from .protocol import OBS_SESSION_MEMORY_DIM, Observation
+from .protocol import (
+    ML_ENTITY_DUCKED,
+    ML_ENTITY_EPOCH_MASK,
+    ML_ENTITY_EPOCH_SHIFT,
+    ML_HIT_STREAK_MASK,
+    ML_HIT_STREAK_SHIFT,
+    OBS_SESSION_MEMORY_DIM,
+    Observation,
+)
 from .item_timing import ItemTimingTable
+from tools.map_bundle import (
+    farm_map_requires_attestation,
+    installed_manifest_name,
+    sha256_bytes,
+    validate_manifest,
+    verify_installed_artifact,
+)
 
 HOOK_REQUIRED = 4
 BLASTER_ITEM_INDEX = 8
+# Fixed policy-readout contract: immediate hostile thermal direction/heat.
+# Persistent engagement is the fallback producer for the same tactical signal.
+IMMEDIATE_ENGAGEMENT_SLICE = slice(5, 9)
 
 
 @dataclass
@@ -65,6 +83,17 @@ class SessionMemoryCell:
         )
 
 
+@dataclass
+class ThermalTargetTrack:
+    """Per-client, non-persistent hostile heat with an exact subvoxel point."""
+
+    target_id: int
+    world_point: np.ndarray
+    world_velocity: np.ndarray
+    exposure: float
+    last_tick: int
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, default))
@@ -91,19 +120,50 @@ class VoxelSpatialReward:
     engagement_reward: float = 0.01
     engagement_min: float = 192.0
     engagement_max: float = 1400.0
+    combat_navigation_suppression: float = 0.85
     aim_alignment_reward: float = 0.02
+    aim_tracking_reward: float = 0.006
     aim_yaw_deg: float = 12.0
     aim_pitch_deg: float = 14.0
-    hook_required_reward: float = 0.005
+    # Legacy hook-use rewards are retained as zero-valued constructor/config
+    # compatibility fields only.  Grapple is a high-energy movement actuator,
+    # not a rate objective; the correction fields below are its only positive
+    # shaping.
+    hook_required_reward: float = 0.0
     hook_required_distance: float = 512.0
-    hook_cost: float = 0.001
-    hook_enemy_reward: float = 0.01
-    hook_no_ammo_reward: float = 0.035
+    hook_cost: float = 0.004
+    hook_enemy_reward: float = 0.0
+    hook_no_ammo_reward: float = 0.0
     hook_blind_penalty: float = 0.008
+    hook_noop_penalty: float = 0.012
+    hook_release_overspeed_reward: float = 0.0
+    hook_release_idle_penalty: float = 0.002
+    hook_correction_progress_reward: float = 0.020
+    hook_correction_complete_reward: float = 0.040
+    hook_correction_min_heat: float = 0.05
+    hook_correction_min_advance: float = 32.0
+    hook_correction_progress_epsilon: float = 4.0
+    hook_correction_arrival_radius: float = 96.0
+    hook_correction_max_anchor_distance: float = 700.0
+    hook_correction_timeout_ticks: int = 40
     hook_melee_distance: float = 768.0
     hook_yaw_deg: float = 18.0
     hook_pitch_deg: float = 22.0
     hook_ammo_threshold: float = 0.5
+    nominal_speed_min: float = 220.0
+    nominal_speed_max: float = 360.0
+    movement_intent_min: float = 0.55
+    nominal_speed_reward: float = 0.008
+    backward_movement_penalty: float = 0.020
+    slow_movement_penalty: float = 0.012
+    overspeed_penalty: float = 0.008
+    horizon_pitch_limit: float = 15.0
+    horizon_pitch_penalty: float = 0.006
+    level_aim_movement_reward: float = 0.012
+    level_aim_min_speed: float = 96.0
+    jump_cost: float = 0.006
+    slow_jump_penalty: float = 0.014
+    hook_overspeed_penalty: float = 0.012
     fire_cost: float = 0.002
     fire_unseen_penalty: float = 0.025
     fire_unaligned_penalty: float = 0.018
@@ -125,11 +185,17 @@ class VoxelSpatialReward:
     session_memory_death_aversion: float = 0.010
     session_memory_self_fire_penalty: float = 0.012
     session_memory_camp_penalty: float = 0.004
+    thermal_target_enabled: bool = True
+    thermal_target_voxel_size: float = 64.0
+    thermal_target_decay: float = 0.75
+    thermal_target_max_age_ticks: int = 5
+    rust_lattice_enabled: bool = False
     lattice_preload_enabled: bool = True
     lattice_routes_enabled: bool = True
     lattice_prior_scale: float = 8.0
     lattice_route_scale: float = 4.0
     lattice_tick_rate: float = 10.0
+    lattice_route_refresh_ticks: int = 5
     # Engine-supplied extended channels (both runs). prox = how-hard-hit
     # aversion; offense/survival = rune-conditioned payoffs.
     damage_prox_aversion: float = 0.004
@@ -189,6 +255,44 @@ class VoxelSpatialReward:
     sidecar_sources: Dict[str, Dict[str, str]] = field(default_factory=dict, init=False)
     selected_route: str = ""
     _map_last_tick: Dict[str, int] = field(default_factory=dict, init=False)
+    _route_heat_last_tick: Dict[str, int] = field(default_factory=dict, init=False)
+    _route_heat_last_axis: Dict[str, str] = field(default_factory=dict, init=False)
+    _feature_cache_key: Optional[Tuple[str, int]] = field(default=None, init=False)
+    _feature_cache: Optional[np.ndarray] = field(default=None, init=False, repr=False)
+    _feature_nearest_deaths: float = field(default=0.0, init=False)
+    _rust_indices: Dict[str, object] = field(default_factory=dict, init=False, repr=False)
+    _rust_dirty_cells: Dict[str, Set[Tuple[int, int, int]]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _rust_removed_cells: Dict[str, Set[Tuple[int, int, int]]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _rust_score_events: Dict[
+        str, Dict[Tuple[int, int, int], np.ndarray]
+    ] = field(default_factory=dict, init=False, repr=False)
+    _rust_fallback_reason: str = field(default="", init=False)
+    _rust_event_rows_applied: int = field(default=0, init=False)
+    _thermal_tracks: Dict[int, ThermalTargetTrack] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _thermal_last_tick: int = field(default=-1, init=False, repr=False)
+    _thermal_last_signal: Tuple[float, float, float, float, float] = field(
+        default=(0.0, 0.0, 0.0, 0.0, 0.0), init=False, repr=False
+    )
+    _hook_correction_target: Optional[Tuple[float, float, float]] = field(
+        default=None, init=False, repr=False
+    )
+    _hook_correction_anchor: Optional[Tuple[float, float, float]] = field(
+        default=None, init=False, repr=False
+    )
+    _hook_correction_hot_target: Optional[Tuple[float, float, float]] = field(
+        default=None, init=False, repr=False
+    )
+    _hook_correction_heat: float = field(default=0.0, init=False)
+    _hook_correction_initial_distance: float = field(default=0.0, init=False)
+    _hook_correction_best_distance: float = field(default=0.0, init=False)
+    _hook_correction_started_tick: int = field(default=-1, init=False)
+    _hook_correction_escape: bool = field(default=False, init=False)
     last_visible_count: int = 0
     last_damage_tick: int = -1000000
     last_damage_cell: Optional[Tuple[int, int, int]] = None
@@ -220,19 +324,66 @@ class VoxelSpatialReward:
             engagement_reward=_env_float("R_TACTICAL_ENGAGEMENT", 0.01),
             engagement_min=_env_float("Q2_ENGAGEMENT_MIN", 192.0),
             engagement_max=_env_float("Q2_ENGAGEMENT_MAX", 1400.0),
+            combat_navigation_suppression=_env_float(
+                "Q2_COMBAT_NAV_SUPPRESSION", 0.85
+            ),
             aim_alignment_reward=_env_float("R_AIM_ALIGNMENT", 0.02),
+            aim_tracking_reward=_env_float("R_AIM_TRACKING", 0.006),
             aim_yaw_deg=_env_float("Q2_AIM_YAW_DEG", 12.0),
             aim_pitch_deg=_env_float("Q2_AIM_PITCH_DEG", 14.0),
-            hook_required_reward=_env_float("R_HOOK_REQUIRED_PROXIMITY", 0.005),
+            # Do not honor the old positive hook-use knobs.  A stale runtime
+            # environment must not silently restore hook-rate farming.
+            hook_required_reward=0.0,
             hook_required_distance=_env_float("Q2_HOOK_REQUIRED_DISTANCE", 512.0),
-            hook_cost=_env_float("R_HOOK_COST", 0.001),
-            hook_enemy_reward=_env_float("R_HOOK_ENEMY_REWARD", 0.01),
-            hook_no_ammo_reward=_env_float("R_HOOK_NO_AMMO_REWARD", 0.035),
+            hook_cost=_env_float("R_HOOK_COST", 0.004),
+            hook_enemy_reward=0.0,
+            hook_no_ammo_reward=0.0,
             hook_blind_penalty=_env_float("R_HOOK_BLIND_PENALTY", 0.008),
+            hook_noop_penalty=_env_float("R_HOOK_NOOP", 0.012),
+            hook_release_overspeed_reward=0.0,
+            hook_release_idle_penalty=_env_float("R_HOOK_RELEASE_IDLE", 0.002),
+            hook_correction_progress_reward=_env_float(
+                "R_HOOK_CORRECTION_PROGRESS", 0.020
+            ),
+            hook_correction_complete_reward=_env_float(
+                "R_HOOK_CORRECTION_COMPLETE", 0.040
+            ),
+            hook_correction_min_heat=_env_float(
+                "Q2_HOOK_CORRECTION_MIN_HEAT", 0.05
+            ),
+            hook_correction_min_advance=_env_float(
+                "Q2_HOOK_CORRECTION_MIN_ADVANCE", 32.0
+            ),
+            hook_correction_progress_epsilon=_env_float(
+                "Q2_HOOK_CORRECTION_PROGRESS_EPSILON", 4.0
+            ),
+            hook_correction_arrival_radius=_env_float(
+                "Q2_HOOK_CORRECTION_ARRIVAL_RADIUS", 96.0
+            ),
+            hook_correction_max_anchor_distance=_env_float(
+                "Q2_HOOK_CORRECTION_MAX_ANCHOR_DISTANCE", 700.0
+            ),
+            hook_correction_timeout_ticks=_env_int(
+                "Q2_HOOK_CORRECTION_TIMEOUT_TICKS", 40
+            ),
             hook_melee_distance=_env_float("Q2_HOOK_MELEE_DISTANCE", 768.0),
             hook_yaw_deg=_env_float("Q2_HOOK_YAW_DEG", 18.0),
             hook_pitch_deg=_env_float("Q2_HOOK_PITCH_DEG", 22.0),
             hook_ammo_threshold=_env_float("Q2_HOOK_AMMO_THRESHOLD", 0.5),
+            nominal_speed_min=_env_float("Q2_NOMINAL_SPEED_MIN", 220.0),
+            nominal_speed_max=_env_float("Q2_NOMINAL_SPEED_MAX", 360.0),
+            movement_intent_min=_env_float("Q2_MOVEMENT_INTENT_MIN", 0.55),
+            nominal_speed_reward=_env_float("R_MOVE_NOMINAL", 0.008),
+            backward_movement_penalty=_env_float("R_MOVE_BACKWARD", 0.020),
+            slow_movement_penalty=_env_float("R_MOVE_SLOW", 0.012),
+            overspeed_penalty=_env_float("R_MOVE_OVERSPEED", 0.008),
+            horizon_pitch_limit=_env_float("Q2_HORIZON_PITCH_LIMIT", 15.0),
+            horizon_pitch_penalty=_env_float("R_HORIZON_PITCH", 0.006),
+            level_aim_movement_reward=_env_float("R_MOVE_LEVEL_AIM", 0.012),
+            level_aim_min_speed=_env_float("Q2_LEVEL_AIM_MIN_SPEED", 96.0),
+            jump_cost=_env_float("R_JUMP_COST", 0.006),
+            slow_jump_penalty=_env_float("R_JUMP_SLOW", 0.014),
+            hook_overspeed_penalty=_env_float("R_HOOK_OVERSPEED", 0.012),
             fire_cost=_env_float("R_FIRE_COST", 0.002),
             fire_unseen_penalty=_env_float("R_FIRE_UNSEEN_PENALTY", 0.025),
             fire_unaligned_penalty=_env_float("R_FIRE_UNALIGNED_PENALTY", 0.018),
@@ -272,6 +423,17 @@ class VoxelSpatialReward:
             session_memory_camp_penalty=_env_float(
                 "R_SESSION_MEMORY_CAMP", 0.004
             ),
+            thermal_target_enabled=os.environ.get(
+                "Q2_THERMAL_TARGETS", "1"
+            ).lower() not in {"0", "false", "off", "no"},
+            thermal_target_voxel_size=_env_float(
+                "Q2_THERMAL_VOXEL_SIZE", 64.0
+            ),
+            thermal_target_decay=_env_float("Q2_THERMAL_DECAY", 0.75),
+            thermal_target_max_age_ticks=_env_int(
+                "Q2_THERMAL_MAX_AGE_TICKS", 5
+            ),
+            rust_lattice_enabled=bool(_env_int("Q2_RUST_LATTICE", 0)),
             lattice_preload_enabled=os.environ.get(
                 "Q2_LATTICE_PRELOAD", "1"
             ).lower() not in {"0", "false", "off", "no"},
@@ -281,6 +443,9 @@ class VoxelSpatialReward:
             lattice_prior_scale=_env_float("Q2_LATTICE_PRIOR_SCALE", 8.0),
             lattice_route_scale=_env_float("Q2_LATTICE_ROUTE_SCALE", 4.0),
             lattice_tick_rate=_env_float("Q2_LATTICE_TICK_RATE", 10.0),
+            lattice_route_refresh_ticks=_env_int(
+                "Q2_LATTICE_ROUTE_REFRESH_TICKS", 5
+            ),
             damage_prox_aversion=_env_float("R_DAMAGE_PROX_AVERSION", 0.004),
             offense_rune_reward=_env_float("R_OFFENSE_RUNE", 0.004),
             survival_rune_reward=_env_float("R_SURVIVAL_RUNE", 0.004),
@@ -328,6 +493,7 @@ class VoxelSpatialReward:
         )
 
     def reset(self, map_name: str, obs: Optional[Observation] = None) -> None:
+        self._invalidate_feature_cache()
         self.map_name = map_name
         self._memory_for_map(map_name)
         tick = int(getattr(obs, "tick", 0)) if obs is not None else 0
@@ -342,13 +508,17 @@ class VoxelSpatialReward:
         self.last_visible_count = 0
         self.last_damage_tick = -1000000
         self.last_damage_cell = None
+        self._thermal_tracks.clear()
+        self._thermal_last_tick = -1
+        self._thermal_last_signal = (0.0, 0.0, 0.0, 0.0, 0.0)
+        self._clear_hook_correction()
         self._reset_episode_state()
         if obs is not None:
             cell = self.cell_for(obs)
             self.visited.add(cell)
             self.last_cell = cell
             self.pos_history.append(tuple(obs.self_state[:3]))
-            self._refresh_route_heat(obs)
+            self._refresh_route_heat(obs, force=True)
 
     @staticmethod
     def _sidecar_roots() -> List[Path]:
@@ -381,6 +551,27 @@ class VoxelSpatialReward:
                 return candidate
         return None
 
+    @staticmethod
+    def _read_attested_sidecar(
+        map_name: str, path: Path,
+    ) -> tuple[bytes, dict | None]:
+        """Verify farm sidecars while retaining legacy local-map support."""
+        manifest_path = path.parent / installed_manifest_name(map_name)
+        if not manifest_path.is_file():
+            if farm_map_requires_attestation(map_name):
+                raise ValueError(
+                    f"farm sidecar has no installed bundle manifest: {manifest_path}"
+                )
+            return path.read_bytes(), None
+        manifest_payload = manifest_path.read_bytes()
+        manifest = json.loads(manifest_payload)
+        validate_manifest(manifest, map_name)
+        payload = verify_installed_artifact(path, manifest)
+        return payload, {
+            "path": str(manifest_path),
+            "sha256": sha256_bytes(manifest_payload),
+        }
+
     def _ensure_map_lattice(self, map_name: str, tick: int,
                             reset_clock: bool = False) -> None:
         """Load generator priors once and initialize the live item clock."""
@@ -391,11 +582,17 @@ class VoxelSpatialReward:
             lattice_path = self._find_sidecar(map_name, "lattice")
             if lattice_path is not None:
                 try:
-                    payload = json.loads(lattice_path.read_text())
+                    encoded, attestation = self._read_attested_sidecar(
+                        map_name, lattice_path,
+                    )
+                    payload = json.loads(encoded)
                     self._preload_lattice_payload(map_name, payload)
                     sources["lattice"] = str(lattice_path)
-                except (OSError, ValueError, TypeError, KeyError):
-                    sources["lattice_error"] = str(lattice_path)
+                    if attestation is not None:
+                        sources["bundle"] = attestation["path"]
+                        sources["bundle_sha256"] = attestation["sha256"]
+                except (OSError, ValueError, TypeError, KeyError) as error:
+                    sources["lattice_error"] = f"{lattice_path}: {error}"
             self.preloaded_maps.add(map_name)
 
         if not self.lattice_routes_enabled:
@@ -405,11 +602,18 @@ class VoxelSpatialReward:
             route_path = self._find_sidecar(map_name, "routes")
             if route_path is not None:
                 try:
-                    graph = json.loads(route_path.read_text())
+                    encoded, attestation = self._read_attested_sidecar(
+                        map_name, route_path,
+                    )
+                    graph = json.loads(encoded)
                     self.route_graphs[map_name] = graph
                     sources["routes"] = str(route_path)
-                except (OSError, ValueError, TypeError):
-                    sources["routes_error"] = str(route_path)
+                    sources["item_timing"] = str(route_path)
+                    if attestation is not None:
+                        sources["bundle"] = attestation["path"]
+                        sources["bundle_sha256"] = attestation["sha256"]
+                except (OSError, ValueError, TypeError, KeyError) as error:
+                    sources["routes_error"] = f"{route_path}: {error}"
                     graph = None
         if graph is not None and (map_name not in self.item_timings or reset_clock):
             table = ItemTimingTable()
@@ -441,6 +645,108 @@ class VoxelSpatialReward:
     def _game_time(self, tick: int) -> float:
         return float(tick) / max(0.1, float(self.lattice_tick_rate))
 
+    def _invalidate_feature_cache(self) -> None:
+        self._feature_cache_key = None
+        self._feature_cache = None
+        self._feature_nearest_deaths = 0.0
+
+    def _mark_rust_dirty(
+        self, cell: Tuple[int, int, int], map_name: Optional[str] = None
+    ) -> None:
+        if not self.rust_lattice_enabled:
+            return
+        key = map_name or self.map_name or "unknown"
+        normalized = tuple(int(value) for value in cell)
+        self._rust_dirty_cells.setdefault(key, set()).add(normalized)
+        self._rust_removed_cells.setdefault(key, set()).discard(normalized)
+
+    def _mark_rust_removed(
+        self, cell: Tuple[int, int, int], map_name: Optional[str] = None
+    ) -> None:
+        if not self.rust_lattice_enabled:
+            return
+        key = map_name or self.map_name or "unknown"
+        normalized = tuple(int(value) for value in cell)
+        self._rust_removed_cells.setdefault(key, set()).add(normalized)
+        self._rust_dirty_cells.setdefault(key, set()).discard(normalized)
+
+    def _mark_rust_score_event(
+        self,
+        cell: Tuple[int, int, int],
+        engagement: float = 0.0,
+        threat: float = 0.0,
+        opportunity: float = 0.0,
+        self_fire: float = 0.0,
+        deaths: float = 0.0,
+        samples: float = 0.0,
+        force_confident: bool = False,
+        confidence_override: Optional[float] = None,
+        map_name: Optional[str] = None,
+    ) -> None:
+        if not self.rust_lattice_enabled:
+            return
+        key = map_name or self.map_name or "unknown"
+        normalized = tuple(int(value) for value in cell)
+        events = self._rust_score_events.setdefault(key, {})
+        delta = events.get(normalized)
+        if delta is None:
+            delta = np.zeros(8, dtype=np.float32)
+            delta[7] = np.nan
+            events[normalized] = delta
+        delta[:6] += (
+            engagement,
+            threat,
+            opportunity,
+            self_fire,
+            deaths,
+            samples,
+        )
+        if force_confident:
+            delta[6] = 1.0
+        if confidence_override is not None:
+            delta[7] = float(confidence_override)
+
+    def _rust_index(self):
+        """Return the current map's index, or permanently fall back to Python."""
+        if not self.rust_lattice_enabled:
+            return None
+        key = self.map_name or "unknown"
+        existing = self._rust_indices.get(key)
+        if existing is not None:
+            return existing
+        try:
+            from .rust_lattice import StatefulLatticeIndex
+
+            index = StatefulLatticeIndex(self, sync=True)
+        except (ImportError, RuntimeError, AttributeError, ValueError) as error:
+            self._rust_fallback_reason = str(error)
+            self.rust_lattice_enabled = False
+            return None
+        self._rust_indices[key] = index
+        self._rust_dirty_cells.pop(key, None)
+        self._rust_removed_cells.pop(key, None)
+        self._rust_score_events.pop(key, None)
+        return index
+
+    def _flush_rust_index(self):
+        index = self._rust_index()
+        if index is None:
+            return None
+        key = self.map_name or "unknown"
+        removed = self._rust_removed_cells.pop(key, set())
+        dirty = self._rust_dirty_cells.pop(key, set())
+        events = self._rust_score_events.pop(key, {})
+        if removed:
+            index.remove_cells(removed)
+        for cell in removed | dirty:
+            events.pop(cell, None)
+        if events:
+            index.apply_score_events(events)
+            self._rust_event_rows_applied += len(events)
+        if dirty:
+            index.apply_cells(self, dirty)
+        return index
+
     def _wanted_route_axis(self, obs: Observation) -> str:
         health = float(obs.self_state[6]) if len(obs.self_state) > 6 else 100.0
         if health <= self.rune_low_health:
@@ -469,8 +775,19 @@ class VoxelSpatialReward:
         for cell in self.dynamic_cells.get(map_name, set()):
             entry = memory.get(cell)
             if entry is not None:
+                old_threat = max(0.0, -entry.readiness)
+                old_opportunity = (
+                    max(0.0, entry.readiness) + max(0.0, entry.route_bias)
+                )
                 entry.readiness = 0.0
                 entry.route_bias = 0.0
+                self._mark_rust_score_event(
+                    cell,
+                    threat=-old_threat,
+                    opportunity=-old_opportunity,
+                    confidence_override=self._memory_confidence(entry),
+                    map_name=map_name,
+                )
         self.dynamic_cells[map_name] = set()
 
     def _deposit_dynamic(self, map_name: str, deposit: dict,
@@ -496,20 +813,48 @@ class VoxelSpatialReward:
                     if weight <= 0.0:
                         continue
                     entry = memory.setdefault(cell, SessionMemoryCell())
+                    old_threat = max(0.0, -entry.readiness)
+                    old_opportunity = (
+                        max(0.0, entry.readiness) + max(0.0, entry.route_bias)
+                    )
                     entry.readiness += amount * self.lattice_route_scale * weight
                     entry.route_bias += route_bias * weight
                     touched.add(cell)
+                    new_threat = max(0.0, -entry.readiness)
+                    new_opportunity = (
+                        max(0.0, entry.readiness) + max(0.0, entry.route_bias)
+                    )
+                    self._mark_rust_score_event(
+                        cell,
+                        threat=new_threat - old_threat,
+                        opportunity=new_opportunity - old_opportunity,
+                        confidence_override=self._memory_confidence(entry),
+                        map_name=map_name,
+                    )
 
-    def _refresh_route_heat(self, obs: Observation) -> None:
+    def _refresh_route_heat(self, obs: Observation, force: bool = False) -> bool:
         table = self.item_timings.get(self.map_name)
         if table is None:
             self.selected_route = ""
-            return
-        t = self._game_time(int(obs.tick))
+            return False
+        tick = int(obs.tick)
         pickup_id = self._nearest_pickup_id(table, obs)
+        wanted = self._wanted_route_axis(obs)
+        last_tick = self._route_heat_last_tick.get(self.map_name, -10**9)
+        last_axis = self._route_heat_last_axis.get(self.map_name, "")
+        refresh_ticks = max(1, int(self.lattice_route_refresh_ticks))
+        if (
+            not force
+            and pickup_id is None
+            and wanted == last_axis
+            and tick >= last_tick
+            and tick - last_tick < refresh_ticks
+        ):
+            return False
+
+        t = self._game_time(tick)
         table.observe(t, (), (), (() if pickup_id is None else (pickup_id,)))
         self._clear_dynamic_heat(self.map_name)
-        wanted = self._wanted_route_axis(obs)
         graph = self.route_graphs.get(self.map_name, {})
         route_name = "balanced" if wanted == "value" else wanted
         route = next((r for r in graph.get("routes", [])
@@ -531,6 +876,10 @@ class VoxelSpatialReward:
                 else 0.0
             )
             self._deposit_dynamic(self.map_name, deposit, route_bias=bias)
+        self._route_heat_last_tick[self.map_name] = tick
+        self._route_heat_last_axis[self.map_name] = wanted
+        self._invalidate_feature_cache()
+        return True
 
     def cell_for(self, obs: Observation) -> Tuple[int, int, int]:
         return self.cell_for_pos(obs.self_state[:3])
@@ -538,6 +887,89 @@ class VoxelSpatialReward:
     def cell_for_pos(self, pos) -> Tuple[int, int, int]:
         size = max(self.voxel_size, 1.0)
         return tuple(int(floor(float(v) / size)) for v in pos)
+
+    def _clear_hook_correction(self) -> None:
+        self._hook_correction_target = None
+        self._hook_correction_anchor = None
+        self._hook_correction_hot_target = None
+        self._hook_correction_heat = 0.0
+        self._hook_correction_initial_distance = 0.0
+        self._hook_correction_best_distance = 0.0
+        self._hook_correction_started_tick = -1
+        self._hook_correction_escape = False
+
+    def _heated_hook_correction(self, obs: Observation) -> Optional[dict]:
+        """Select a reachable hook landing that advances toward lattice heat.
+
+        The opportunity lattice is the destination authority.  Hook zones are
+        the reachability authority: a landing is eligible only when its anchor
+        is in the live observation and that landing makes concrete progress
+        toward the selected heated cell.  This keeps a 1700 u/s grapple pull
+        from becoming ordinary locomotion or an action-rate reward.
+        """
+        direction = self._nearest_memory_signal(obs, "opportunity")
+        heat = float(direction[3])
+        if heat < max(0.0, float(self.hook_correction_min_heat)):
+            return None
+
+        origin = np.asarray(obs.self_state[:3], dtype=np.float32)
+        hot_offset = np.asarray(direction[:3], dtype=np.float32)
+        if float(np.linalg.norm(hot_offset)) <= 1e-6:
+            return None
+        radius = max(float(self.session_memory_search_radius), self.voxel_size)
+        hot_target = origin + hot_offset * radius
+        current_distance = float(np.linalg.norm(hot_target - origin))
+        if current_distance <= max(1.0, float(self.hook_correction_arrival_radius)):
+            return None
+
+        count = max(0, min(
+            int(getattr(obs, "hook_zone_count", 0)),
+            getattr(obs, "hook_zones", np.empty((0, 8))).shape[0],
+        ))
+        best = None
+        max_anchor = max(1.0, float(self.hook_correction_max_anchor_distance))
+        min_advance = max(0.0, float(self.hook_correction_min_advance))
+        for index, zone in enumerate(obs.hook_zones[:count]):
+            anchor = np.asarray(zone[:3], dtype=np.float32)
+            landing = np.asarray(zone[3:6], dtype=np.float32)
+            anchor_distance = float(np.linalg.norm(anchor - origin))
+            if anchor_distance <= 1.0 or anchor_distance > max_anchor:
+                continue
+            landing_distance = float(np.linalg.norm(hot_target - landing))
+            advance = current_distance - landing_distance
+            if advance < min_advance:
+                continue
+            # Prefer the landing that removes the most remaining distance;
+            # heat breaks ties when multiple live zones reach the same area.
+            rank = advance + heat * max(1.0, self.voxel_size)
+            if best is None or rank > best["rank"]:
+                best = {
+                    "rank": float(rank),
+                    "zone_index": int(index),
+                    "anchor": tuple(float(value) for value in anchor),
+                    "landing": tuple(float(value) for value in landing),
+                    "hot_target": tuple(float(value) for value in hot_target),
+                    "heat": heat,
+                    "distance": float(np.linalg.norm(landing - origin)),
+                    "advance": float(advance),
+                    "required": float(int(zone[7]) & HOOK_REQUIRED != 0),
+                }
+        return best
+
+    def _start_hook_correction(
+        self, candidate: dict, obs: Observation, *, escape: bool
+    ) -> None:
+        self._hook_correction_target = candidate["landing"]
+        self._hook_correction_anchor = candidate["anchor"]
+        self._hook_correction_hot_target = candidate["hot_target"]
+        self._hook_correction_heat = float(candidate["heat"])
+        origin = np.asarray(obs.self_state[:3], dtype=np.float32)
+        target = np.asarray(self._hook_correction_target, dtype=np.float32)
+        distance = float(np.linalg.norm(target - origin))
+        self._hook_correction_initial_distance = distance
+        self._hook_correction_best_distance = distance
+        self._hook_correction_started_tick = int(obs.tick)
+        self._hook_correction_escape = bool(escape)
 
     def update(self, obs: Observation) -> Tuple[float, Dict[str, float]]:
         if not self.enabled:
@@ -579,7 +1011,17 @@ class VoxelSpatialReward:
         if stagnated:
             bonus -= self.stagnation_penalty
 
+        # Exploration/navigation reward is useful for reaching combat, but it
+        # must not remain a competing objective after contact begins.
+        navigation_bonus = max(0.0, float(bonus))
+
         fire_context = self.fire_context(obs)
+        entity_count = max(
+            0, min(int(obs.entity_count), int(obs.entities.shape[0]))
+        )
+        enemy_count = sum(
+            1 for ent in obs.entities[:entity_count] if ent[7] > 0.5
+        )
         visible_count = int(fire_context["enemy_visible_count"])
         nearest_visible = float(fire_context["enemy_visible_nearest"])
         aim_aligned = bool(fire_context["aim_aligned"])
@@ -588,6 +1030,15 @@ class VoxelSpatialReward:
         splash_viable = bool(fire_context["splash_viable"])
         splash_weapon = bool(fire_context["splash_weapon"])
         audio_contact = bool(fire_context["audio_contact"])
+        damage_dealt = max(
+            0.0, float(getattr(obs, "reward_damage_dealt", 0.0))
+        )
+        kills = max(0.0, float(getattr(obs, "reward_kill", 0.0)))
+        action_debug = getattr(obs, "action_debug", ())
+        hit_streak = (
+            (int(action_debug[11]) & ML_HIT_STREAK_MASK)
+            >> ML_HIT_STREAK_SHIFT
+        ) if len(action_debug) >= 12 else 0
 
         tactical_engagement = (
             visible_count > 0 and
@@ -598,10 +1049,20 @@ class VoxelSpatialReward:
 
         if aim_aligned:
             bonus += self.aim_alignment_reward
+        # The hard aligned bonus is intentionally decisive near the firing
+        # gate, but it was too sparse to pull a downward-looking policy back
+        # toward a visible player.  Add bounded dense progress inside the
+        # forward hemisphere; a target behind the view reports no candidate
+        # errors and receives no tracking credit.
+        aim_tracking_quality = 0.0
+        if visible_count > 0 and (
+                aim_aligned or aim_yaw_error > 0.0 or aim_pitch_error > 0.0):
+            yaw_quality = max(0.0, 1.0 - aim_yaw_error / 90.0)
+            pitch_quality = max(0.0, 1.0 - aim_pitch_error / 60.0)
+            aim_tracking_quality = yaw_quality * pitch_quality
+            bonus += self.aim_tracking_reward * aim_tracking_quality
 
         hook_required_near = self._has_required_hook_nearby(obs)
-        if hook_required_near:
-            bonus += self.hook_required_reward
 
         hook_context = self.hook_context(obs)
         hook_action = int(hook_context["hook_action"])
@@ -611,21 +1072,136 @@ class VoxelSpatialReward:
         hook_no_ammo_melee = False
         hook_blind = False
         hook_traversal = False
-        if hook_action > 0:
+        hook_overspeed = False
+        hook_fired = hook_action == 1
+        hook_noop = hook_action == 2  # reserved by C; intentionally does nothing
+        hook_released = hook_action == 3
+        hook_release_overspeed = False
+
+        movement = self.movement_context(obs)
+        movement_delta = float(movement["movement_discipline"])
+        horizontal_speed = float(movement["movement_speed"])
+        movement_intent = float(movement["movement_intent"])
+        forward_intent = float(movement["forward_intent"])
+        backward_intent = float(movement["backward_intent"])
+        nominal_speed = bool(movement["movement_nominal"])
+        slow_movement = bool(movement["movement_slow"])
+        overspeed = bool(movement["movement_overspeed"])
+        jump_action = bool(movement["jump_action"])
+        jump_slow = bool(movement["jump_slow"])
+        bonus += movement_delta
+
+        # Grapple is an escape/correction actuator.  Positive reward is based
+        # on one fixed landing target and new best displacement toward it, so
+        # repeatedly issuing hook cannot manufacture reward.  The destination
+        # must be reachable through a live hook zone and advance toward a
+        # positive opportunity/readiness lattice cell.
+        hook_candidate = self._heated_hook_correction(obs)
+        damage_now = max(0.0, float(getattr(obs, "reward_damage_taken", 0.0)))
+        recent_damage = (
+            0 <= int(obs.tick) - int(self.last_damage_tick)
+            <= max(1, int(self.recent_threat_window))
+        )
+        health = float(obs.self_state[6]) if len(obs.self_state) > 6 else 100.0
+        escape_needed = bool(
+            damage_now > 0.0
+            or recent_damage
+            or self.recent_threat_steps > 0
+            or (health <= self.low_health_threshold and visible_count > 0)
+        )
+        correction_needed = bool(
+            stagnated or slow_movement or hook_required_near or escape_needed
+        )
+        hook_correction_available = hook_candidate is not None
+        hook_correction_started = False
+        hook_correction_progress = 0.0
+        hook_correction_progress_delta = 0.0
+        hook_correction_success = False
+        hook_correction_timed_out = False
+        if self._hook_correction_target is not None:
+            hook_correction_report_target = self._hook_correction_target
+            hook_correction_report_anchor = self._hook_correction_anchor
+            hook_correction_report_hot_target = self._hook_correction_hot_target
+            hook_correction_report_heat = self._hook_correction_heat
+            hook_correction_report_escape = self._hook_correction_escape
+        elif hook_candidate is not None:
+            hook_correction_report_target = hook_candidate["landing"]
+            hook_correction_report_anchor = hook_candidate["anchor"]
+            hook_correction_report_hot_target = hook_candidate["hot_target"]
+            hook_correction_report_heat = float(hook_candidate["heat"])
+            hook_correction_report_escape = escape_needed
+        else:
+            hook_correction_report_target = None
+            hook_correction_report_anchor = None
+            hook_correction_report_hot_target = None
+            hook_correction_report_heat = 0.0
+            hook_correction_report_escape = False
+
+        if self._hook_correction_target is not None:
+            elapsed = int(obs.tick) - self._hook_correction_started_tick
+            if elapsed < 0 or elapsed > max(1, self.hook_correction_timeout_ticks):
+                hook_correction_timed_out = True
+                self._clear_hook_correction()
+            else:
+                target = np.asarray(self._hook_correction_target, dtype=np.float32)
+                origin = np.asarray(obs.self_state[:3], dtype=np.float32)
+                distance = float(np.linalg.norm(target - origin))
+                improvement = self._hook_correction_best_distance - distance
+                if improvement >= max(
+                    0.0, float(self.hook_correction_progress_epsilon)
+                ):
+                    self._hook_correction_best_distance = distance
+                    hook_correction_progress = float(improvement)
+                    initial = max(1.0, self._hook_correction_initial_distance)
+                    hook_correction_progress_delta = (
+                        self.hook_correction_progress_reward
+                        * min(1.0, improvement / initial)
+                    )
+                    hook_delta += hook_correction_progress_delta
+                    hook_traversal = True
+                if distance <= max(
+                    1.0, float(self.hook_correction_arrival_radius)
+                ):
+                    hook_correction_success = True
+                    hook_delta += self.hook_correction_complete_reward
+
+        if hook_fired:
             hook_delta -= self.hook_cost
-            if hook_required_near:
-                hook_traversal = True
-                hook_delta += self.hook_required_reward
-            if bool(hook_context["hook_enemy_viable"]):
-                hook_enemy = True
-                hook_delta += self.hook_enemy_reward
-                if bool(hook_context["ammo_low"]):
-                    hook_no_ammo_melee = True
-                    hook_delta += self.hook_no_ammo_reward
-            elif hook_action == 1 and not hook_required_near:
+            if (
+                self._hook_correction_target is None
+                and hook_candidate is not None
+                and correction_needed
+                and not hook_correction_success
+            ):
+                self._start_hook_correction(
+                    hook_candidate, obs, escape=escape_needed
+                )
+                hook_correction_started = True
+            elif self._hook_correction_target is None:
                 hook_blind = True
                 hook_delta -= self.hook_blind_penalty
-            bonus += hook_delta
+            if overspeed:
+                hook_overspeed = True
+                hook_delta -= self.hook_overspeed_penalty
+        elif hook_noop:
+            # Protocol class 2 has no C-side effect. Rewarding it as generic
+            # hook use caused the first movement-reset policy to spam it.
+            hook_delta -= self.hook_noop_penalty
+        elif hook_released:
+            if self._hook_correction_target is not None:
+                # Release ends this one-shot correction.  It is only positive
+                # if arrival was already measured above; overspeed release is
+                # safe but no longer a farmable reward event.
+                if not hook_correction_success and not overspeed:
+                    hook_delta -= self.hook_release_idle_penalty
+                self._clear_hook_correction()
+            elif overspeed:
+                hook_release_overspeed = True
+            else:
+                hook_delta -= self.hook_release_idle_penalty
+        if hook_correction_success:
+            self._clear_hook_correction()
+        bonus += hook_delta
 
         fired = self._action_fired(obs)
         fire_delta = 0.0
@@ -679,6 +1255,9 @@ class VoxelSpatialReward:
             fire_audio_contact=fire_audio_contact,
             audio_contact=audio_contact,
         )
+        # Session marks, DPS state, and possibly route heat changed this tick.
+        # Compute once below; env._obs_vector() reuses the exact cached vector.
+        self._invalidate_feature_cache()
         memory_features = self.memory_features(obs)
         memory_delta = 0.0
         current_engagement = float(memory_features[0])
@@ -706,7 +1285,7 @@ class VoxelSpatialReward:
         # bot's gravity toward it, unconditionally (not just at low health).
         # Each repeat deepens the repulsion until the tanh saturates, directly
         # counteracting the engagement/opportunity pull at lethal locations.
-        _, _, _, nearest_deaths = self._nearest_memory_signal(obs, "deaths")
+        nearest_deaths = self._feature_nearest_deaths
         entry_here = self._memory_for_map(self.map_name).get(cell)
         current_deaths = 0.0
         if entry_here is not None and entry_here.deaths > 0.0:
@@ -751,6 +1330,14 @@ class VoxelSpatialReward:
                       + self.survival_rune_reward * survival)
         bonus += ext_delta
 
+        navigation_suppressed = 0.0
+        if tactical_engagement and navigation_bonus > 0.0:
+            navigation_suppressed = (
+                navigation_bonus
+                * max(0.0, min(1.0, self.combat_navigation_suppression))
+            )
+            bonus -= navigation_suppressed
+
         # Contextual rune switching: reward acquiring (or swapping to) the rune
         # that fits the current health need, scaled by the fit GAIN over the
         # rune dropped. Low health → survival runes pay; healthy → offense; a
@@ -780,20 +1367,111 @@ class VoxelSpatialReward:
             "voxel_cell_y": float(cell[1]),
             "voxel_cell_z": float(cell[2]),
             "visible_enemy": float(tactical_engagement),
+            "combat_navigation_suppressed": float(navigation_suppressed),
+            "entity_count": float(entity_count),
+            "enemy_count": float(enemy_count),
             "enemy_visible_any": float(visible_count > 0),
             "enemy_visible_count": float(visible_count),
             "enemy_visible_nearest": float(nearest_visible if visible_count > 0 else 0.0),
+            "enemy_visible_exposure_sum": float(
+                fire_context["enemy_visible_exposure_sum"]
+            ),
+            "enemy_visible_exposure_max": float(
+                fire_context["enemy_visible_exposure_max"]
+            ),
             "aim_aligned": float(aim_aligned),
             "aim_yaw_error": float(aim_yaw_error),
             "aim_pitch_error": float(aim_pitch_error),
+            "aim_tracking_quality": float(aim_tracking_quality),
+            "target_hit_event": float(damage_dealt > 0.0),
+            "target_hit_streak": float(
+                hit_streak if damage_dealt > 0.0 else 0
+            ),
+            "target_repeat_hit_event": float(
+                damage_dealt > 0.0 and hit_streak >= 2
+            ),
+            "target_kill_event": float(kills > 0.0),
             "memory_death_aversion": float(death_aversion),
             "hook_required_near": float(hook_required_near),
-            "hook_action": float(hook_action),
+            "hook_action": float(hook_action > 0),
+            "hook_action_code": float(hook_action),
             "hook_discipline": float(hook_delta),
             "hook_enemy": float(hook_enemy),
             "hook_no_ammo_melee": float(hook_no_ammo_melee),
             "hook_blind": float(hook_blind),
             "hook_traversal": float(hook_traversal),
+            "hook_overspeed": float(hook_overspeed),
+            "hook_fire_action": float(hook_fired),
+            "hook_noop_action": float(hook_noop),
+            "hook_release_action": float(hook_released),
+            "hook_release_overspeed": float(hook_release_overspeed),
+            "hook_correction_available": float(hook_correction_available),
+            "hook_correction_needed": float(correction_needed),
+            "hook_correction_active": float(
+                self._hook_correction_target is not None
+            ),
+            "hook_correction_started": float(hook_correction_started),
+            "hook_correction_escape": float(hook_correction_report_escape),
+            "hook_correction_progress": float(hook_correction_progress),
+            "hook_correction_progress_reward": float(
+                hook_correction_progress_delta
+            ),
+            "hook_correction_success": float(hook_correction_success),
+            "hook_correction_timeout": float(hook_correction_timed_out),
+            "hook_correction_heat": float(hook_correction_report_heat),
+            "hook_correction_target_x": float(
+                hook_correction_report_target[0]
+                if hook_correction_report_target is not None else 0.0
+            ),
+            "hook_correction_target_y": float(
+                hook_correction_report_target[1]
+                if hook_correction_report_target is not None else 0.0
+            ),
+            "hook_correction_target_z": float(
+                hook_correction_report_target[2]
+                if hook_correction_report_target is not None else 0.0
+            ),
+            "hook_correction_anchor_x": float(
+                hook_correction_report_anchor[0]
+                if hook_correction_report_anchor is not None else 0.0
+            ),
+            "hook_correction_anchor_y": float(
+                hook_correction_report_anchor[1]
+                if hook_correction_report_anchor is not None else 0.0
+            ),
+            "hook_correction_anchor_z": float(
+                hook_correction_report_anchor[2]
+                if hook_correction_report_anchor is not None else 0.0
+            ),
+            "hook_correction_hot_x": float(
+                hook_correction_report_hot_target[0]
+                if hook_correction_report_hot_target is not None else 0.0
+            ),
+            "hook_correction_hot_y": float(
+                hook_correction_report_hot_target[1]
+                if hook_correction_report_hot_target is not None else 0.0
+            ),
+            "hook_correction_hot_z": float(
+                hook_correction_report_hot_target[2]
+                if hook_correction_report_hot_target is not None else 0.0
+            ),
+            "movement_speed": float(horizontal_speed),
+            "movement_intent": float(movement_intent),
+            "forward_intent": float(forward_intent),
+            "backward_intent": float(backward_intent),
+            "view_pitch_abs": float(movement["view_pitch_abs"]),
+            "horizon_pitch_penalty": float(
+                movement["horizon_pitch_penalty"]
+            ),
+            "level_aim_movement_reward": float(
+                movement["level_aim_movement_reward"]
+            ),
+            "movement_nominal": float(nominal_speed),
+            "movement_slow": float(slow_movement),
+            "movement_overspeed": float(overspeed),
+            "movement_discipline": float(movement_delta),
+            "jump_action": float(jump_action),
+            "jump_slow": float(jump_slow),
             "weapon_id": float(hook_context["weapon_id"]),
             "requested_weapon": float(hook_context["requested_weapon"]),
             "ammo": float(hook_context["ammo"]),
@@ -821,6 +1499,9 @@ class VoxelSpatialReward:
             "session_nearest_engagement": float(nearest_engagement),
             "session_nearest_threat": float(nearest_threat),
             "session_nearest_opportunity": float(nearest_opportunity),
+            "thermal_target_tracks": float(len(self._thermal_tracks)),
+            "thermal_target_heat": float(self._thermal_last_signal[3]),
+            "thermal_target_age": float(self._thermal_last_signal[4]),
             "lattice_prior_loaded": float(
                 "lattice" in self.sidecar_sources.get(self.map_name, {})
             ),
@@ -902,27 +1583,50 @@ class VoxelSpatialReward:
     def memory_features(self, obs: Observation) -> np.ndarray:
         """Compact non-decaying session memory features for the policy input.
         Last 3 slots are the survivability projection (always set)."""
+        self._update_thermal_tracks(obs)
+        cache_key = (self.map_name or "unknown", int(obs.tick))
+        if self._feature_cache_key == cache_key and self._feature_cache is not None:
+            return self._feature_cache
+
+        if self.session_memory_enabled and self.rust_lattice_enabled:
+            try:
+                rust_index = self._flush_rust_index()
+                if rust_index is not None:
+                    features, nearest_deaths = rust_index.features_with_deaths(
+                        self, obs
+                    )
+                    self._feature_nearest_deaths = float(nearest_deaths)
+                    return self._finish_memory_features(
+                        obs, features, cache_key
+                    )
+            except (RuntimeError, ValueError, AttributeError) as error:
+                self._rust_fallback_reason = str(error)
+                self.rust_lattice_enabled = False
+
         features = np.zeros(OBS_SESSION_MEMORY_DIM, dtype=np.float32)
+        nearest = {
+            kind: (0.0, 0.0, 0.0, 0.0)
+            for kind in ("engagement", "threat", "opportunity", "self_fire", "deaths")
+        }
+        if self.session_memory_enabled:
+            nearest = self._nearest_memory_signals(obs, tuple(nearest))
+        self._feature_nearest_deaths = float(nearest["deaths"][3])
 
         # Survivability projection (slots 21-23) — always computed so the bot
         # perceives "will I win this race" every step, not just when memory
         # exists. map_help = nearby recovery opportunity (extends survival).
-        try:
-            map_help = (self._nearest_memory_signal(obs, "opportunity")[3]
-                        if self.session_memory_enabled else 0.0)
-        except Exception:
-            map_help = 0.0
+        map_help = float(nearest["opportunity"][3])
         wm, ehp_n, dps_sh = self._win_margin(obs, map_help)
         features[21] = wm
         features[22] = ehp_n
         features[23] = dps_sh
 
         if not self.session_memory_enabled:
-            return features
+            return self._finish_memory_features(obs, features, cache_key)
 
         memory = self._memory_for_map(self.map_name)
         if not memory:
-            return features
+            return self._finish_memory_features(obs, features, cache_key)
 
         cell = self.cell_for(obs)
         current = memory.get(cell)
@@ -939,9 +1643,26 @@ class VoxelSpatialReward:
             (13, "opportunity"),
             (17, "self_fire"),
         ):
-            dx, dy, dz, score = self._nearest_memory_signal(obs, kind)
+            dx, dy, dz, score = nearest[kind]
             features[offset:offset + 4] = (dx, dy, dz, score)
 
+        return self._finish_memory_features(obs, features, cache_key)
+
+    def _finish_memory_features(
+        self,
+        obs: Observation,
+        features: np.ndarray,
+        cache_key: Tuple[str, int],
+    ) -> np.ndarray:
+        features = np.asarray(features, dtype=np.float32).copy()
+        dx, dy, dz, heat, age = self._thermal_target_signal(obs)
+        self._thermal_last_signal = (dx, dy, dz, heat, age)
+        if heat > 0.0:
+            # Live/cooling hostile occupancy owns the immediate engagement
+            # pull. Persistent map knowledge resumes automatically at expiry.
+            features[IMMEDIATE_ENGAGEMENT_SLICE] = (dx, dy, dz, heat)
+        self._feature_cache_key = cache_key
+        self._feature_cache = features
         return features
 
     def _memory_for_map(
@@ -975,6 +1696,7 @@ class VoxelSpatialReward:
         )[:overflow]
         for cell, _entry in victims:
             memory.pop(cell, None)
+            self._mark_rust_removed(cell)
 
     def _update_session_memory(
         self,
@@ -996,6 +1718,7 @@ class VoxelSpatialReward:
         deaths = max(0.0, float(obs.reward_death))
         items = max(0.0, float(obs.reward_item_pickup))
         visible_contact = visible_count > 0
+        exposure_sum, _exposure_max = self._visible_enemy_exposure(obs)
         contact = (
             visible_contact or
             audio_contact or
@@ -1010,7 +1733,7 @@ class VoxelSpatialReward:
             if contact:
                 here.engagement_count += 1.0
             if visible_contact:
-                here.enemy_seen += float(visible_count)
+                here.enemy_seen += exposure_sum
             if fired:
                 here.self_fire += 1.0
             if hook_enemy:
@@ -1021,19 +1744,63 @@ class VoxelSpatialReward:
             here.damage_taken += damage_taken
             here.kills += kills
             here.deaths += deaths
+            self._mark_rust_score_event(
+                cell,
+                engagement=(
+                    (1.0 if contact else 0.0)
+                    + 0.35 * exposure_sum
+                    + (0.50 if hook_enemy else 0.0)
+                    + (0.35 * items if contact else 0.0)
+                ),
+                threat=0.15 * exposure_sum + 0.03 * damage_taken + 3.0 * deaths,
+                opportunity=(
+                    (0.45 if hook_enemy else 0.0)
+                    + (0.45 * items if contact else 0.0)
+                    + 0.03 * damage_dealt
+                    + 3.0 * kills
+                ),
+                self_fire=(1.0 if fired else 0.0),
+                deaths=3.0 * deaths,
+                samples=(
+                    (1.0 if contact else 0.0)
+                    + exposure_sum
+                    + (1.0 if fired else 0.0)
+                    + (1.0 if hook_enemy else 0.0)
+                    + (items if contact else 0.0)
+                    + kills
+                    + deaths
+                ),
+            )
 
         if visible_contact:
-            for enemy_cell in self._visible_enemy_cells(obs):
+            for enemy_cell, exposure in self._visible_enemy_heat_samples(obs):
                 seen = self._memory_cell(enemy_cell, tick)
                 seen.engagement_count += 1.0
-                seen.enemy_seen += 1.0
+                seen.enemy_seen += exposure
                 seen.damage_dealt += damage_dealt / max(1, visible_count)
                 seen.kills += kills / max(1, visible_count)
                 if fire_audio_contact:
                     seen.self_fire += 0.25
+                dealt_share = damage_dealt / max(1, visible_count)
+                kill_share = kills / max(1, visible_count)
+                self._mark_rust_score_event(
+                    enemy_cell,
+                    engagement=1.0 + 0.35 * exposure,
+                    threat=0.15 * exposure,
+                    opportunity=0.03 * dealt_share + 3.0 * kill_share,
+                    self_fire=(0.25 if fire_audio_contact else 0.0),
+                    samples=(
+                        1.0 + exposure
+                        + kill_share
+                        + (0.25 if fire_audio_contact else 0.0)
+                    ),
+                )
 
         if self.last_visible_count > 0 and visible_count == 0:
             self._memory_cell(cell, tick).enemy_lost += 1.0
+            self._mark_rust_score_event(
+                cell, engagement=0.25, threat=0.20, samples=1.0
+            )
 
         if damage_taken > 0.0:
             self.last_damage_tick = tick
@@ -1045,17 +1812,155 @@ class VoxelSpatialReward:
             cell != self.last_damage_cell
         ):
             self._memory_cell(cell, tick).successful_escape += 1.0
+            self._mark_rust_score_event(cell, opportunity=0.20, samples=1.0)
             self.last_damage_cell = None
 
         self.last_visible_count = visible_count
 
-    def _visible_enemy_cells(self, obs: Observation):
+    @staticmethod
+    def _local_to_world_vector(
+        local: np.ndarray, yaw_deg: float, pitch_deg: float
+    ) -> np.ndarray:
+        """Invert Quake AngleVectors' forward/Quake-right/up projection."""
+        yaw = np.deg2rad(float(yaw_deg))
+        pitch = np.deg2rad(float(pitch_deg))
+        sy, cy = np.sin(yaw), np.cos(yaw)
+        sp, cp = np.sin(pitch), np.cos(pitch)
+        forward = np.array((cp * cy, cp * sy, -sp), dtype=np.float32)
+        right = np.array((sy, -cy, 0.0), dtype=np.float32)
+        up = np.array((sp * cy, sp * sy, cp), dtype=np.float32)
+        vector = np.asarray(local, dtype=np.float32)
+        return forward * vector[0] + right * vector[1] + up * vector[2]
+
+    def _target_world_point(self, obs: Observation, ent: np.ndarray) -> np.ndarray:
+        # The C target contract is camera-eye-relative. Quake II viewheight is
+        # 22 standing and -2 ducked; muzzle clearance is checked separately.
+        eye = np.asarray(obs.self_state[:3], dtype=np.float32).copy()
+        flags = 0
+        if hasattr(obs, "self_debug") and len(obs.self_debug) >= 4:
+            flags = int(obs.self_debug[3])
+        eye[2] += -2.0 if flags & ML_ENTITY_DUCKED else 22.0
+        return eye + self._local_to_world_vector(
+            ent[:3], getattr(obs, "yaw", 0.0), getattr(obs, "pitch", 0.0)
+        )
+
+    def _update_thermal_tracks(self, obs: Observation) -> None:
+        if not self.thermal_target_enabled:
+            self._thermal_tracks.clear()
+            self._thermal_last_tick = int(obs.tick)
+            return
+
+        tick = int(obs.tick)
+        if tick == self._thermal_last_tick:
+            return
+        if tick < self._thermal_last_tick or float(obs.self_state[6]) <= 0.0:
+            self._thermal_tracks.clear()
+        if float(getattr(obs, "reward_kill", 0.0)) > 0.0:
+            # Hit attribution is not yet target-specific; clearing is safer
+            # than retaining a dead hostile as actionable thermal evidence.
+            self._thermal_tracks.clear()
+
         count = max(0, min(int(obs.entity_count), obs.entities.shape[0]))
-        origin = obs.self_state[:3]
-        for ent in obs.entities[:count]:
-            if not (ent[7] > 0.5 and ent[8] > 0.5):
+        for index, ent in enumerate(obs.entities[:count]):
+            exposure = abs(float(ent[8]))
+            if not (ent[6] > 0.0 and ent[7] > 0.5 and exposure > 0.0):
                 continue
-            yield self.cell_for_pos(origin + ent[:3])
+            target_id = index + 1
+            if (
+                hasattr(obs, "entity_debug")
+                and index < obs.entity_debug.shape[0]
+                and int(obs.entity_debug[index, 0]) > 0
+            ):
+                debug = obs.entity_debug[index]
+                edict_index = int(debug[0])
+                life_epoch = (
+                    int(debug[3]) & ML_ENTITY_EPOCH_MASK
+                ) >> ML_ENTITY_EPOCH_SHIFT
+                target_id = (edict_index << 14) | life_epoch
+                for previous_id in tuple(self._thermal_tracks):
+                    if (
+                        previous_id != target_id
+                        and previous_id >> 14 == edict_index
+                    ):
+                        self._thermal_tracks.pop(previous_id, None)
+            rel_velocity = self._local_to_world_vector(
+                ent[3:6], getattr(obs, "yaw", 0.0),
+                getattr(obs, "pitch", 0.0)
+            )
+            target_velocity = (
+                rel_velocity + np.asarray(obs.self_state[3:6], dtype=np.float32)
+            )
+            self._thermal_tracks[target_id] = ThermalTargetTrack(
+                target_id=target_id,
+                world_point=self._target_world_point(obs, ent),
+                world_velocity=target_velocity,
+                exposure=float(np.clip(exposure, 0.0, 1.0)),
+                last_tick=tick,
+            )
+
+        max_age = max(0, int(self.thermal_target_max_age_ticks))
+        self._thermal_tracks = {
+            target_id: track
+            for target_id, track in self._thermal_tracks.items()
+            if 0 <= tick - track.last_tick <= max_age
+        }
+        self._thermal_last_tick = tick
+
+    def _thermal_target_signal(
+        self, obs: Observation
+    ) -> Tuple[float, float, float, float, float]:
+        if not self.thermal_target_enabled or not self._thermal_tracks:
+            return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+        tick = int(obs.tick)
+        tick_rate = max(1.0, float(self.lattice_tick_rate))
+        decay = float(np.clip(self.thermal_target_decay, 0.0, 1.0))
+        voxel_size = max(1.0, float(self.thermal_target_voxel_size))
+        origin = np.asarray(obs.self_state[:3], dtype=np.float32)
+        best = None
+        best_rank = -1.0
+        for target_id in sorted(self._thermal_tracks):
+            track = self._thermal_tracks[target_id]
+            age = max(0, tick - track.last_tick)
+            predicted = track.world_point + track.world_velocity * (
+                float(age) / tick_rate
+            )
+            cell = np.floor(predicted / voxel_size)
+            center = (cell + 0.5) * voxel_size
+            delta = center - origin
+            distance = float(np.linalg.norm(delta))
+            confidence = (0.5 + 0.5 * track.exposure) * (decay ** age)
+            rank = confidence / max(1.0, distance / voxel_size)
+            if rank > best_rank:
+                best_rank = rank
+                best = (delta, confidence, float(age))
+
+        if best is None:
+            return (0.0, 0.0, 0.0, 0.0, 0.0)
+        delta, confidence, age = best
+        radius = max(float(self.session_memory_search_radius), voxel_size)
+        direction = np.clip(delta / radius, -1.0, 1.0)
+        return (
+            float(direction[0]),
+            float(direction[1]),
+            float(direction[2]),
+            float(confidence),
+            age,
+        )
+
+    def _visible_enemy_heat_samples(self, obs: Observation):
+        count = max(0, min(int(obs.entity_count), obs.entities.shape[0]))
+        for ent in obs.entities[:count]:
+            if not (ent[7] > 0.5 and abs(float(ent[8])) > 0.0):
+                continue
+            yield (
+                self.cell_for_pos(self._target_world_point(obs, ent)),
+                float(np.clip(abs(float(ent[8])), 0.0, 1.0)),
+            )
+
+    def _visible_enemy_cells(self, obs: Observation):
+        for cell, _exposure in self._visible_enemy_heat_samples(obs):
+            yield cell
 
     def apply_directive(self, map_name: str, action: str,
                         x: float, y: float, z: float,
@@ -1085,47 +1990,67 @@ class VoxelSpatialReward:
             entry.damage_taken += amt * 33.0
         else:
             return False
+        if target == self.map_name:
+            self._invalidate_feature_cache()
+        self._mark_rust_dirty(cell, target)
         return True
 
     def _nearest_memory_signal(
         self, obs: Observation, kind: str
     ) -> Tuple[float, float, float, float]:
+        return self._nearest_memory_signals(obs, (kind,))[kind]
+
+    def _nearest_memory_signals(
+        self, obs: Observation, kinds: Tuple[str, ...]
+    ) -> Dict[str, Tuple[float, float, float, float]]:
+        """Find every requested channel in one traversal of the voxel map."""
+        zero = (0.0, 0.0, 0.0, 0.0)
+        results = {kind: zero for kind in kinds}
         memory = self._memory_for_map(self.map_name)
         if not memory:
-            return 0.0, 0.0, 0.0, 0.0
+            return results
 
         pos = obs.self_state[:3]
+        px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
         radius = max(self.session_memory_search_radius, self.voxel_size)
-        best_cell = None
-        best_score = 0.0
-        best_dist = float("inf")
+        voxel_size = max(self.voxel_size, 1.0)
+        best = {
+            kind: {"rank": -1.0, "score": 0.0, "center": None}
+            for kind in kinds
+        }
         for cell, entry in memory.items():
-            raw_score = self._memory_score(entry, kind)
-            if raw_score <= 0.0:
-                continue
-            center = self._cell_center(cell)
-            dist = float(hypot(center[0] - pos[0], center[1] - pos[1], center[2] - pos[2]))
+            cx = (float(cell[0]) + 0.5) * voxel_size
+            cy = (float(cell[1]) + 0.5) * voxel_size
+            cz = (float(cell[2]) + 0.5) * voxel_size
+            dist = float(hypot(cx - px, cy - py, cz - pz))
             if dist > radius:
                 continue
-            score = self._norm_memory_score(raw_score) * self._memory_confidence(entry)
-            rank = score / max(1.0, dist / self.voxel_size)
-            best_rank = best_score / max(1.0, best_dist / self.voxel_size)
-            if best_cell is None or rank > best_rank:
-                best_cell = cell
-                best_score = score
-                best_dist = dist
+            confidence = self._memory_confidence(entry)
+            distance_scale = max(1.0, dist / voxel_size)
+            for kind in kinds:
+                raw_score = self._memory_score(entry, kind)
+                if raw_score <= 0.0:
+                    continue
+                score = self._norm_memory_score(raw_score) * confidence
+                rank = score / distance_scale
+                if rank > best[kind]["rank"]:
+                    best[kind] = {
+                        "rank": rank,
+                        "score": score,
+                        "center": (cx, cy, cz),
+                    }
 
-        if best_cell is None:
-            return 0.0, 0.0, 0.0, 0.0
-
-        center = self._cell_center(best_cell)
-        direction = np.clip((center - pos) / radius, -1.0, 1.0)
-        return (
-            float(direction[0]),
-            float(direction[1]),
-            float(direction[2]),
-            float(best_score),
-        )
+        for kind, candidate in best.items():
+            center = candidate["center"]
+            if center is None:
+                continue
+            results[kind] = (
+                float(np.clip((center[0] - px) / radius, -1.0, 1.0)),
+                float(np.clip((center[1] - py) / radius, -1.0, 1.0)),
+                float(np.clip((center[2] - pz) / radius, -1.0, 1.0)),
+                float(candidate["score"]),
+            )
+        return results
 
     def _cell_center(self, cell: Tuple[int, int, int]) -> np.ndarray:
         size = max(self.voxel_size, 1.0)
@@ -1220,7 +2145,7 @@ class VoxelSpatialReward:
         n = min(int(obs.entity_count), obs.entities.shape[0])
         for k in range(n):
             e = obs.entities[k]
-            if e[7] < 0.5 or e[8] < 0.5:   # is_enemy, visible
+            if e[7] < 0.5 or abs(float(e[8])) <= 0.0:
                 continue
             d = float(e[0] * e[0] + e[1] * e[1] + e[2] * e[2])
             if d < best_d:
@@ -1431,6 +2356,7 @@ class VoxelSpatialReward:
 
     def fire_context(self, obs: Observation, weapon_id: Optional[int] = None) -> Dict[str, float]:
         visible_count, nearest_visible = self._visible_enemy_stats(obs)
+        exposure_sum, exposure_max = self._visible_enemy_exposure(obs)
         aim_aligned, aim_yaw_error, aim_pitch_error = self._aim_alignment(obs)
         splash_weapon = self._is_splash_weapon(obs, weapon_id)
         splash_viable, splash_yaw_error, splash_pitch_error = self._splash_viability(
@@ -1441,6 +2367,8 @@ class VoxelSpatialReward:
             "enemy_visible_any": float(visible_count > 0),
             "enemy_visible_count": float(visible_count),
             "enemy_visible_nearest": float(nearest_visible if visible_count > 0 else 0.0),
+            "enemy_visible_exposure_sum": exposure_sum,
+            "enemy_visible_exposure_max": exposure_max,
             "aim_aligned": float(aim_aligned),
             "aim_yaw_error": float(aim_yaw_error),
             "aim_pitch_error": float(aim_pitch_error),
@@ -1497,7 +2425,7 @@ class VoxelSpatialReward:
         nearest = float("inf")
         for ent in obs.entities[:count]:
             is_enemy = ent[7] > 0.5
-            visible = ent[8] > 0.5
+            visible = abs(float(ent[8])) > 0.0
             if not (is_enemy and visible):
                 continue
             # Avoid np.linalg.norm overhead for small 3D slices
@@ -1506,6 +2434,17 @@ class VoxelSpatialReward:
             nearest = min(nearest, dist)
         return visible_count, nearest
 
+    def _visible_enemy_exposure(self, obs: Observation) -> Tuple[float, float]:
+        count = max(0, min(int(obs.entity_count), obs.entities.shape[0]))
+        values = [
+            float(np.clip(abs(float(ent[8])), 0.0, 1.0))
+            for ent in obs.entities[:count]
+            if ent[6] > 0.0 and ent[7] > 0.5 and abs(float(ent[8])) > 0.0
+        ]
+        if not values:
+            return 0.0, 0.0
+        return float(sum(values)), float(max(values))
+
     def _aim_alignment(self, obs: Observation) -> Tuple[bool, float, float]:
         count = max(0, min(int(obs.entity_count), obs.entities.shape[0]))
         best_yaw = 180.0
@@ -1513,7 +2452,7 @@ class VoxelSpatialReward:
         aligned = False
         
         for ent in obs.entities[:count]:
-            if not (ent[7] > 0.5 and ent[8] > 0.5):
+            if not (ent[7] > 0.5 and abs(float(ent[8])) > 0.0):
                 continue
             x, y, z = (float(ent[0]), float(ent[1]), float(ent[2]))
             if x <= 0.0:
@@ -1547,7 +2486,7 @@ class VoxelSpatialReward:
         aligned = False
 
         for ent in obs.entities[:count]:
-            if not (ent[7] > 0.5 and ent[8] > 0.5):
+            if not (ent[7] > 0.5 and abs(float(ent[8])) > 0.0):
                 continue
             x, y, z = (float(ent[0]), float(ent[1]), float(ent[2]))
             if x <= 0.0:
@@ -1583,7 +2522,7 @@ class VoxelSpatialReward:
         best_pitch = 90.0
         viable = False
         for ent in obs.entities[:count]:
-            if not (ent[7] > 0.5 and ent[8] > 0.5):
+            if not (ent[7] > 0.5 and abs(float(ent[8])) > 0.0):
                 continue
             x, y, z = (float(ent[0]), float(ent[1]), float(ent[2]))
             if x <= 0.0:
@@ -1631,6 +2570,98 @@ class VoxelSpatialReward:
         if action_debug is None or len(action_debug) <= 9:
             return False
         return bool(int(action_debug[9]))
+
+    def movement_context(self, obs: Observation) -> Dict[str, float]:
+        """Grade grounded map traversal using the engine-applied action echo."""
+        action_debug = getattr(obs, "action_debug", ())
+        move_forward = float(action_debug[4]) if len(action_debug) > 4 else 0.0
+        move_right = float(action_debug[5]) if len(action_debug) > 5 else 0.0
+        jump_action = bool(int(action_debug[8])) if len(action_debug) > 8 else False
+        movement_intent = min(1.0, hypot(move_forward, move_right))
+        forward_intent = min(1.0, max(0.0, move_forward))
+        backward_intent = min(1.0, max(0.0, -move_forward))
+        horizontal_speed = hypot(float(obs.self_state[3]), float(obs.self_state[4]))
+        wants_movement = movement_intent >= self.movement_intent_min
+        nominal_speed = wants_movement and (
+            self.nominal_speed_min <= horizontal_speed <= self.nominal_speed_max
+        )
+        slow_movement = wants_movement and horizontal_speed < self.nominal_speed_min
+        overspeed = horizontal_speed > self.nominal_speed_max
+        delta = 0.0
+        if nominal_speed:
+            # Scale by forward intent so circling/knockback cannot farm the
+            # speed reward without actually traversing the map.
+            delta += self.nominal_speed_reward * forward_intent
+        elif slow_movement:
+            deficit = 1.0 - horizontal_speed / max(1.0, self.nominal_speed_min)
+            delta -= self.slow_movement_penalty * deficit
+        elif overspeed and wants_movement:
+            excess = min(1.0, (horizontal_speed - self.nominal_speed_max) /
+                         max(1.0, self.nominal_speed_max))
+            delta -= self.overspeed_penalty * excess
+
+        # Nominal traversal must prefer actual forward travel. Previously the
+        # reward used abs(move_forward), making a backwards moonwalk exactly
+        # as valuable as moving into the direction the body is facing.
+        delta -= self.backward_movement_penalty * backward_intent
+
+        view_pitch = float(getattr(obs, "pitch", 0.0))
+        view_pitch_abs = abs(view_pitch)
+        visible_count = 0
+        if hasattr(obs, "entity_count") and hasattr(obs, "entities"):
+            visible_count, _nearest = self._visible_enemy_stats(obs)
+        horizon_penalty = 0.0
+        if visible_count == 0 and view_pitch_abs > self.horizon_pitch_limit:
+            excess = min(
+                1.0,
+                (view_pitch_abs - self.horizon_pitch_limit) /
+                max(1.0, 89.0 - self.horizon_pitch_limit),
+            )
+            horizon_penalty = self.horizon_pitch_penalty * excess
+            delta -= horizon_penalty
+
+        # Make level posture an active traversal objective. Only genuine
+        # forward travel with no visible target can collect this reward;
+        # backward moonwalking cannot, and target-visible vertical aim stays
+        # unconstrained for combat across elevations.
+        level_aim_reward = 0.0
+        if (
+            visible_count == 0
+            and forward_intent >= self.movement_intent_min
+            and horizontal_speed >= self.level_aim_min_speed
+            and horizontal_speed <= self.nominal_speed_max
+        ):
+            level_quality = max(
+                0.0,
+                1.0 - view_pitch_abs / 89.0,
+            )
+            level_aim_reward = (
+                self.level_aim_movement_reward
+                * forward_intent
+                * level_quality
+            )
+            delta += level_aim_reward
+
+        jump_slow = jump_action and (slow_movement or not wants_movement)
+        if jump_action:
+            delta -= self.jump_cost
+            if jump_slow:
+                delta -= self.slow_jump_penalty
+        return {
+            "movement_speed": float(horizontal_speed),
+            "movement_intent": float(movement_intent),
+            "forward_intent": float(forward_intent),
+            "backward_intent": float(backward_intent),
+            "view_pitch_abs": float(view_pitch_abs),
+            "horizon_pitch_penalty": float(horizon_penalty),
+            "level_aim_movement_reward": float(level_aim_reward),
+            "movement_nominal": float(nominal_speed),
+            "movement_slow": float(slow_movement),
+            "movement_overspeed": float(overspeed),
+            "movement_discipline": float(delta),
+            "jump_action": float(jump_action),
+            "jump_slow": float(jump_slow),
+        }
 
     def _action_hook(self, obs: Observation) -> int:
         action_debug = getattr(obs, "action_debug", None)
@@ -1726,6 +2757,11 @@ def load_lattice_state(instances, path) -> dict:
                 memory[cell] = SessionMemoryCell(**kwargs)
                 restored_cells += 1
             inst.preloaded_maps.add(map_name)
+            inst._rust_indices.pop(map_name, None)
+            inst._rust_dirty_cells.pop(map_name, None)
+            inst._rust_removed_cells.pop(map_name, None)
+            inst._rust_score_events.pop(map_name, None)
+        inst._invalidate_feature_cache()
     return {
         "env_steps": int(payload.get("env_steps", 0)),
         "instances": min(len(instances), len(saved_instances)),

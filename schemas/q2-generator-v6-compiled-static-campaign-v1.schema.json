@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:q2-ml:q2-generator-v6-compiled-static-campaign-v1",
+  "title": "Exact generated-v6 compiled/static campaign",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "map_count", "pass_count", "passed", "maps"],
+  "properties": {
+    "schema": {"const": "q2-generator-v6-compiled-static-campaign-v1"},
+    "map_count": {"const": 28},
+    "pass_count": {"const": 28},
+    "passed": {"const": true},
+    "maps": {
+      "type": "array",
+      "minItems": 28,
+      "maxItems": 28,
+      "items": {
+        "type": "object",
+        "required": ["map", "compiled_bsp_present", "qrad_lightdata_ok", "static_ok"],
+        "properties": {
+          "map": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"},
+          "compiled_bsp_present": {"const": true},
+          "qrad_lightdata_ok": {"const": true},
+          "static_ok": {"const": true}
+        }
+      }
+    }
+  }
+}

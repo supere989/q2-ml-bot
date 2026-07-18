@@ -233,7 +233,7 @@ def _enemy_snapshot(obs) -> Dict[str, object]:
             source = "unknown"
             state = {}
         source_counts[source] = source_counts.get(source, 0) + 1
-        if not (ent[7] > 0.5 and ent[8] > 0.5):
+        if not (ent[7] > 0.5 and abs(float(ent[8])) > 0.0):
             continue
         dist = float(np.linalg.norm(ent[:3]))
         visible += 1

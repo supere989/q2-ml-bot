@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:q2-ml:q2-b3-recovery-guide-evidence-v1",
+  "title": "Measured B3 recovery and guide evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "evidence_kind", "synthetic_claims", "implementation", "rust_extension", "atlas_set_sha256", "map_count", "recovery", "guide", "tests", "failures", "passed"],
+  "properties": {
+    "schema": {"const": "q2-b3-recovery-guide-evidence-v1"},
+    "evidence_kind": {"const": "measured-offline-atlas"},
+    "synthetic_claims": {"const": false},
+    "implementation": {"$ref": "#/$defs/implementation"},
+    "rust_extension": {"$ref": "#/$defs/extension"},
+    "atlas_set_sha256": {"$ref": "#/$defs/sha256"},
+    "map_count": {"type": "integer", "minimum": 8},
+    "recovery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["finite_non_safe_cells", "strict_descending_cells", "mover_plateau_cells", "unresolved_cells", "max_local_repair_nodes", "hazard_classes", "hook_necessity_walking_budget_ticks", "hook_necessity_game_tick_hz", "hook_necessity_walk_speed_q8_per_second", "hook_necessity_evaluated_edges", "hook_necessity_query_cells", "hook_necessity_path_to_safety_cases", "hook_necessity_positive_cases", "recovery_width"],
+      "properties": {
+        "finite_non_safe_cells": {"type": "integer", "minimum": 1},
+        "strict_descending_cells": {"type": "integer", "minimum": 0},
+        "mover_plateau_cells": {"type": "integer", "minimum": 0},
+        "unresolved_cells": {"const": 0},
+        "max_local_repair_nodes": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "hazard_classes": {"const": ["lava", "slime", "hurt", "void_or_lethal_drop", "crush_or_current"]},
+        "hook_necessity_walking_budget_ticks": {"const": 15},
+        "hook_necessity_game_tick_hz": {"const": 10},
+        "hook_necessity_walk_speed_q8_per_second": {"const": 76800},
+        "hook_necessity_evaluated_edges": {"type": "integer", "minimum": 1},
+        "hook_necessity_query_cells": {"type": "integer", "minimum": 1},
+        "hook_necessity_path_to_safety_cases": {"type": "integer", "minimum": 0},
+        "hook_necessity_positive_cases": {"type": "integer", "minimum": 0},
+        "recovery_width": {"const": 16}
+      }
+    },
+    "guide": {
+      "type": "object", "additionalProperties": false,
+      "required": ["guide_width", "candidate_count", "candidate_width", "objective_classes", "objective_bearing_fixtures", "universal_zero_objective_fixtures"],
+      "properties": {
+        "guide_width": {"const": 60},
+        "candidate_count": {"const": 4},
+        "candidate_width": {"const": 15},
+        "objective_classes": {"const": ["weapon", "ammunition", "health", "armor", "powerup", "rune", "control", "spawn_egress"]},
+        "objective_bearing_fixtures": {"type": "integer", "minimum": 1},
+        "universal_zero_objective_fixtures": {"const": 0}
+      }
+    },
+    "tests": {"$ref": "#/$defs/tests"},
+    "failures": {"type": "array", "maxItems": 0},
+    "passed": {"const": true}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "not": {"const": "0000000000000000000000000000000000000000000000000000000000000000"}},
+    "git": {"type": "string", "pattern": "^[0-9a-f]{40}$", "not": {"const": "0000000000000000000000000000000000000000"}},
+    "closure": {"type": "object", "additionalProperties": false, "required": ["file_count", "sha256"], "properties": {"file_count": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/sha256"}}},
+    "implementation": {"type": "object", "additionalProperties": false, "required": ["repository_commit", "repository_tree", "git_clean", "source_closure"], "properties": {"repository_commit": {"$ref": "#/$defs/git"}, "repository_tree": {"$ref": "#/$defs/git"}, "git_clean": {"const": true}, "source_closure": {"$ref": "#/$defs/closure"}}},
+    "extension": {"type": "object", "additionalProperties": false, "required": ["path", "bytes", "sha256", "repository_tree", "source_closure_sha256", "qualification_commands_sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "bytes": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/sha256"}, "repository_tree": {"$ref": "#/$defs/git"}, "source_closure_sha256": {"$ref": "#/$defs/sha256"}, "qualification_commands_sha256": {"$ref": "#/$defs/sha256"}}},
+    "stream": {"type": "object", "additionalProperties": false, "required": ["bytes", "sha256"], "properties": {"bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256"}}},
+    "run": {"type": "object", "additionalProperties": false, "required": ["command", "exit_code", "passed_count", "stdout", "stderr"], "properties": {"command": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "exit_code": {"const": 0}, "passed_count": {"type": "integer", "minimum": 1}, "stdout": {"$ref": "#/$defs/stream"}, "stderr": {"$ref": "#/$defs/stream"}}},
+    "tests": {"type": "object", "additionalProperties": false, "required": ["report_sha256", "commands_sha256", "passed_count", "failed_count", "runs"], "properties": {"report_sha256": {"$ref": "#/$defs/sha256"}, "commands_sha256": {"$ref": "#/$defs/sha256"}, "passed_count": {"type": "integer", "minimum": 1}, "failed_count": {"const": 0}, "runs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/run"}}}}
+  }
+}

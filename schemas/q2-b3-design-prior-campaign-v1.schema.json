@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:q2-ml:q2-b3-design-prior-campaign-v1",
+  "title": "Measured matched-seed B3 design-prior campaign",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "campaign_id", "status", "evidence_kind", "synthetic_claims",
+    "community_input_used", "plan", "implementation", "normative_documents",
+    "stock_prior", "lanes", "metrics", "diversity", "decision", "failures",
+    "passed"
+  ],
+  "properties": {
+    "schema": {"const": "q2-b3-design-prior-campaign-v1"},
+    "campaign_id": {"$ref": "#/$defs/id"},
+    "status": {"enum": ["green", "red"]},
+    "evidence_kind": {"const": "measured-compiled-atlas"},
+    "synthetic_claims": {"const": false},
+    "community_input_used": {"const": false},
+    "plan": {"$ref": "#/$defs/file"},
+    "implementation": {"$ref": "#/$defs/implementation"},
+    "normative_documents": {"$ref": "#/$defs/normative"},
+    "stock_prior": {"$ref": "#/$defs/prior"},
+    "lanes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline", "treatment"],
+      "properties": {
+        "baseline": {"$ref": "#/$defs/lane"},
+        "treatment": {"$ref": "#/$defs/lane"}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "baseline", "treatment", "improvement_ppm", "aggregate_improvement_ppm"],
+      "properties": {
+        "contract": {"type": "object"},
+        "baseline": {"$ref": "#/$defs/distances"},
+        "treatment": {"$ref": "#/$defs/distances"},
+        "improvement_ppm": {"$ref": "#/$defs/primary_distances"},
+        "aggregate_improvement_ppm": {"type": "integer"}
+      }
+    },
+    "diversity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline", "treatment"],
+      "properties": {
+        "baseline": {"$ref": "#/$defs/diversity"},
+        "treatment": {"$ref": "#/$defs/diversity"}
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "all_metrics_improved", "aggregate_improved", "static_pass_rate_preserved",
+        "layout_diversity_passed", "style_diversity_passed",
+        "descriptor_diversity_passed", "green"
+      ],
+      "properties": {
+        "all_metrics_improved": {"type": "boolean"},
+        "aggregate_improved": {"type": "boolean"},
+        "static_pass_rate_preserved": {"type": "boolean"},
+        "layout_diversity_passed": {"type": "boolean"},
+        "style_diversity_passed": {"type": "boolean"},
+        "descriptor_diversity_passed": {"type": "boolean"},
+        "green": {"type": "boolean"}
+      }
+    },
+    "failures": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "passed": {"type": "boolean"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "not": {"const": "0000000000000000000000000000000000000000000000000000000000000000"}},
+    "git": {"type": "string", "pattern": "^[0-9a-f]{40}$", "not": {"const": "0000000000000000000000000000000000000000"}},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"},
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {"bytes": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "implementation": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "repository_commit", "repository_tree", "git_clean", "generator_sha256",
+        "analyzer_authority_sha256", "analyzer_authority_file_count"
+      ],
+      "properties": {
+        "repository_commit": {"$ref": "#/$defs/git"},
+        "repository_tree": {"$ref": "#/$defs/git"},
+        "git_clean": {"const": true},
+        "generator_sha256": {"$ref": "#/$defs/sha256"},
+        "analyzer_authority_sha256": {"$ref": "#/$defs/sha256"},
+        "analyzer_authority_file_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "normative": {
+      "type": "object", "additionalProperties": false,
+      "required": ["design_sha256", "plan_sha256"],
+      "properties": {"design_sha256": {"$ref": "#/$defs/sha256"}, "plan_sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "histogram": {
+      "type": "object", "minProperties": 1,
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "prior": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "coordinate_free", "map_count", "source_bsp_sha256", "histograms", "content_sha256"],
+      "properties": {
+        "schema": {"const": "q2-b3-coordinate-free-prior-pack-v1"},
+        "coordinate_free": {"const": true},
+        "map_count": {"type": "integer", "minimum": 1},
+        "source_bsp_sha256": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/sha256"}},
+        "histograms": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "degree_mass", "edge_type_mass", "item_class_mass",
+            "edges_per_node_milli", "items_per_spawn_milli", "lightmapped_faces_ppm"
+          ],
+          "properties": {
+            "degree_mass": {"$ref": "#/$defs/histogram"},
+            "edge_type_mass": {"$ref": "#/$defs/histogram"},
+            "item_class_mass": {"$ref": "#/$defs/histogram"},
+            "edges_per_node_milli": {"$ref": "#/$defs/histogram"},
+            "items_per_spawn_milli": {"$ref": "#/$defs/histogram"},
+            "lightmapped_faces_ppm": {"$ref": "#/$defs/histogram"}
+          }
+        },
+        "content_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "lane": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evidence", "map_count", "static_pass_count", "prior_pack", "maps_sha256"],
+      "properties": {
+        "evidence": {"$ref": "#/$defs/file"},
+        "map_count": {"const": 28},
+        "static_pass_count": {"const": 28},
+        "prior_pack": {"$ref": "#/$defs/prior"},
+        "maps_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "primary_distances": {
+      "type": "object", "additionalProperties": false,
+      "required": ["topology_distance_ppm", "economy_distance_ppm", "environment_distance_ppm"],
+      "properties": {
+        "topology_distance_ppm": {"type": "integer"},
+        "economy_distance_ppm": {"type": "integer"},
+        "environment_distance_ppm": {"type": "integer"}
+      }
+    },
+    "distances": {
+      "type": "object", "additionalProperties": false,
+      "required": ["topology_distance_ppm", "economy_distance_ppm", "environment_distance_ppm", "aggregate_distance_ppm"],
+      "properties": {
+        "topology_distance_ppm": {"type": "integer", "minimum": 0},
+        "economy_distance_ppm": {"type": "integer", "minimum": 0},
+        "environment_distance_ppm": {"type": "integer", "minimum": 0},
+        "aggregate_distance_ppm": {"type": "integer", "minimum": 0}
+      }
+    },
+    "diversity": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "map_count", "unique_layout_count", "unique_layout_ratio_ppm",
+        "unique_descriptor_count", "unique_descriptor_ratio_ppm", "style_counts",
+        "style_simpson_ppm"
+      ],
+      "properties": {
+        "map_count": {"const": 28},
+        "unique_layout_count": {"type": "integer", "minimum": 1, "maximum": 28},
+        "unique_layout_ratio_ppm": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "unique_descriptor_count": {"type": "integer", "minimum": 1, "maximum": 28},
+        "unique_descriptor_ratio_ppm": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "style_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}},
+        "style_simpson_ppm": {"type": "integer", "minimum": 0, "maximum": 1000000}
+      }
+    }
+  }
+}

@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:q2-ml:q2-generator-claim-campaign-v2",
+  "title": "Exact declaration-bound generated-map claim campaign v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "cohort_id",
+    "declaration_sha256",
+    "phase",
+    "expected_count",
+    "map_count",
+    "input_stages",
+    "pass_count",
+    "passed",
+    "maps",
+    "failures"
+  ],
+  "properties": {
+    "schema": {"const": "q2-generator-claim-campaign-v2"},
+    "cohort_id": {"$ref": "#/$defs/map_id"},
+    "declaration_sha256": {"$ref": "#/$defs/sha256"},
+    "phase": {"enum": ["prepare_claims", "compiled_validation"]},
+    "expected_count": {"const": 28},
+    "map_count": {"const": 28},
+    "input_stages": {"type": "object"},
+    "pass_count": {"type": "integer", "minimum": 0, "maximum": 28},
+    "passed": {"type": "boolean"},
+    "b1_gate_sha256": {
+      "oneOf": [
+        {"$ref": "#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "maps": {
+      "type": "array",
+      "minItems": 28,
+      "maxItems": 28
+    },
+    "failures": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "phase": {"const": "prepare_claims"},
+        "input_stages": {"$ref": "#/$defs/prepare_stages"},
+        "maps": {
+          "type": "array",
+          "minItems": 28,
+          "maxItems": 28,
+          "items": {"$ref": "#/$defs/prepare_row"}
+        }
+      },
+      "not": {"required": ["b1_gate_sha256"]}
+    },
+    {
+      "required": ["b1_gate_sha256"],
+      "properties": {
+        "phase": {"const": "compiled_validation"},
+        "input_stages": {"$ref": "#/$defs/validation_stages"},
+        "maps": {
+          "type": "array",
+          "minItems": 28,
+          "maxItems": 28,
+          "items": {"$ref": "#/$defs/validation_row"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "map_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+    },
+    "materialized_membership": {
+      "allOf": [
+        {"$ref": "#/$defs/membership"},
+        {
+          "properties": {
+            "stage": {"const": "materialized"},
+            "expected_file_count": {"const": 196}
+          }
+        }
+      ]
+    },
+    "claims_membership": {
+      "allOf": [
+        {"$ref": "#/$defs/membership"},
+        {
+          "properties": {
+            "stage": {"const": "claims"},
+            "expected_file_count": {"const": 224}
+          }
+        }
+      ]
+    },
+    "analysis_membership": {
+      "allOf": [
+        {"$ref": "#/$defs/membership"},
+        {
+          "properties": {
+            "stage": {"const": "analysis"},
+            "expected_file_count": {"const": 224}
+          }
+        }
+      ]
+    },
+    "membership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "passed",
+        "expected_map_count",
+        "expected_file_count",
+        "actual_file_count",
+        "report_sha256"
+      ],
+      "properties": {
+        "stage": {"enum": ["materialized", "claims", "analysis"]},
+        "passed": {"type": "boolean"},
+        "expected_map_count": {"const": 28},
+        "expected_file_count": {"type": "integer", "minimum": 0},
+        "actual_file_count": {"type": "integer", "minimum": 0},
+        "report_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "prepare_stages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["materialized", "claims"],
+      "properties": {
+        "materialized": {"$ref": "#/$defs/materialized_membership"},
+        "claims": {
+          "oneOf": [
+            {"$ref": "#/$defs/claims_membership"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "validation_stages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claims", "analysis"],
+      "properties": {
+        "claims": {"$ref": "#/$defs/claims_membership"},
+        "analysis": {"$ref": "#/$defs/analysis_membership"}
+      }
+    },
+    "prepare_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinal",
+        "map",
+        "passed",
+        "generator_claims_sha256",
+        "error"
+      ],
+      "properties": {
+        "ordinal": {"type": "integer", "minimum": 0, "maximum": 27},
+        "map": {"$ref": "#/$defs/map_id"},
+        "passed": {"type": "boolean"},
+        "generator_claims_sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "validation_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinal",
+        "map",
+        "passed",
+        "report_sha256",
+        "bsp_sha256",
+        "atlas_sha256",
+        "atlas_manifest_sha256",
+        "analysis_manifest_sha256",
+        "generator_claims_sha256",
+        "failures"
+      ],
+      "properties": {
+        "ordinal": {"type": "integer", "minimum": 0, "maximum": 27},
+        "map": {"$ref": "#/$defs/map_id"},
+        "passed": {"type": "boolean"},
+        "report_sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "bsp_sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "atlas_sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "atlas_manifest_sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "analysis_manifest_sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "generator_claims_sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "failures": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

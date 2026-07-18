@@ -1,0 +1,95 @@
+{
+  "schema": "q2-multires-batch-gate-v1",
+  "batch": "B0",
+  "status": "green",
+  "recorded_at": "2026-07-14T11:08:27-07:00",
+  "owner_directive": {
+    "replacement": "one-way",
+    "legacy_model_lineages": "retired",
+    "operational_fallback": "forbidden",
+    "rollback_package_created": false,
+    "historical_artifacts": "evidence-only; forbidden in runtime and resume selectors"
+  },
+  "normative_documents": {
+    "design": {
+      "path": "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md",
+      "sha256": "eab02d2269f250a26f45bb5d3b1f66ffab2c34ba3ee958d2f8b5bd2a14fef8b5"
+    },
+    "plan": {
+      "path": "docs/MULTIRES-LATTICE-MAP-ATLAS-PLAN-2026-07-14.md",
+      "sha256": "970e97b9478b27ad1f1cd35d29a74b2ed2cd51ed1ae8b4af82605615d5b5ba6b"
+    }
+  },
+  "integration_branches": {
+    "q2-ml-bot": {
+      "base_branch": "feature/rust-lattice",
+      "base_commit": "ac41d1a6d6bf624033ce5c75ce0a4b4693272271",
+      "branch": "feature/multires-map-atlas-v1"
+    },
+    "q2-ml-client": {
+      "base_branch": "feature/ml-client-harness",
+      "base_commit": "200d777fe2d45cae3a2c7fce17147092c22200c2",
+      "branch": "feature/multires-map-atlas-v1"
+    },
+    "q2-lithium-3zb2": {
+      "base_branch": "ml-wip-20260611",
+      "base_commit": "3555263859af94f03392965f59edc0c29d62b595",
+      "branch": "feature/multires-map-atlas-v1"
+    }
+  },
+  "frozen_baseline": {
+    "observation_magic": "0x514d4c50",
+    "action_magic": "0x514d4c41",
+    "public_client_wire_version": 4,
+    "teacher_version": 2,
+    "rollout_telemetry_schema": "ppo-telemetry-v8",
+    "observation": {
+      "base_floats": 185,
+      "session_memory_floats": 24,
+      "extension_floats": 10,
+      "active_total_floats": 219
+    },
+    "logical_action_floats": 8,
+    "vertical_head": "binary-jump",
+    "policy_parameters": 781916,
+    "rust_dyn_magic": "Q2LAT001",
+    "map_bundle_version": 2,
+    "deployed_client_sha256": "d509739817e491641fc8d191989af67bc4b411ec4e0e431ce8b89641257b8f27",
+    "deployed_game_module_sha256": "d265c6da3ae92d8d3e71f71284701c60f8c3187b9b20971f2fe96d4f23144467"
+  },
+  "retirement": {
+    "run_tag": "public_network_thermal_bc_live_v2",
+    "last_observed_checkpoint": "policy_00770048.pt",
+    "trainer_processes": 0,
+    "network_client_processes": 0,
+    "tensorboard_processes": 0,
+    "evidence_root": "/home/raymond/q2-network-client-staging-20260713/training-data/retired-evidence/public_network_thermal_bc_live_v2",
+    "operational_paths_absent": true,
+    "retirement_was_move_not_copy": true,
+    "checkpoint_root_selectable": false,
+    "tensorboard_root_selectable": false,
+    "legacy_resume_allowed": false,
+    "fallback_copy_created": false
+  },
+  "service_topology": {
+    "public_server": "active",
+    "teacher_server": "active",
+    "obsolete_curriculum_service": "inactive",
+    "q2ded_processes": 2,
+    "public_or_teacher_mutated_in_b0": false
+  },
+  "artifact_namespaces": {
+    "offline_atlas": "/home/raymondj/multires-artifacts/atlas-v1",
+    "integration_worktrees": "/home/raymondj/multires-worktrees/integration",
+    "agent_worktrees": "/home/raymondj/multires-worktrees/agents"
+  },
+  "gate": {
+    "branches_start_from_named_bases": true,
+    "worktrees_clean": true,
+    "normative_digests_pinned": true,
+    "legacy_trainer_retired": true,
+    "public_services_untouched": true,
+    "retirement_inventory_complete": true,
+    "green": true
+  }
+}

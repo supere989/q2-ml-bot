@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:q2-ml:q2-multires-b9-promotion-decision-v1",
+  "title": "Non-mutating B9 cold-restart promotion decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "tool", "inputs", "promotion_manifest", "gate_comparison", "failures", "decision", "eligible", "automatic_promotion", "public_mutation_performed", "public_mutation_authorized", "root_manual_promotion_required", "decision_sha256"],
+  "properties": {
+    "schema": {"const": "q2-multires-b9-promotion-decision-v1"},
+    "tool": {"const": "assemble_b8_b9_evidence"},
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["b8_gate", "restart_archive", "cold_restart_evidence", "reconstruction_manifest"],
+      "properties": {
+        "b8_gate": {"$ref": "#/$defs/gateArtifact"},
+        "restart_archive": {"$ref": "#/$defs/manifestArtifact"},
+        "cold_restart_evidence": {"$ref": "#/$defs/evidenceArtifact"},
+        "reconstruction_manifest": {"$ref": "#/$defs/manifestArtifact"}
+      }
+    },
+    "promotion_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_manifest_sha256", "atlas_catalog_sha256", "atlases",
+        "lineage_root_sha256", "artifact_identities", "b8_gate_sha256",
+        "cold_restart_evidence_sha256", "reconstruction_manifest_sha256",
+        "reconstruction_manifest_evidence_sha256", "complete_predicate",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "runtime_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "atlas_catalog_sha256": {"$ref": "#/$defs/sha256"},
+        "atlases": {"$ref": "#/$defs/atlases"},
+        "lineage_root_sha256": {"$ref": "#/$defs/sha256"},
+        "artifact_identities": {"type": "object", "minProperties": 19, "maxProperties": 19, "additionalProperties": {"$ref": "#/$defs/artifact"}},
+        "b8_gate_sha256": {"$ref": "#/$defs/sha256"},
+        "cold_restart_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "reconstruction_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "reconstruction_manifest_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "complete_predicate": {"const": "G0&&G1&&G2&&G3&&G4&&G5_generated&&G5_stock&&G6"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "gate_comparison": {
+      "type": "object", "additionalProperties": false,
+      "required": ["G0", "G1_generated", "G1_stock", "G2_generated", "G2_stock", "G3_generated", "G3_stock", "G4_generated", "G4_stock", "G5_generated", "G5_stock", "G6_shadow", "G6_cold_restart"],
+      "properties": {
+        "G0": {"$ref": "#/$defs/g0Predicate"},
+        "G1_generated": {"$ref": "#/$defs/predicate"},
+        "G1_stock": {"$ref": "#/$defs/predicate"},
+        "G2_generated": {"$ref": "#/$defs/predicate"},
+        "G2_stock": {"$ref": "#/$defs/predicate"},
+        "G3_generated": {"$ref": "#/$defs/predicate"},
+        "G3_stock": {"$ref": "#/$defs/predicate"},
+        "G4_generated": {"$ref": "#/$defs/predicate"},
+        "G4_stock": {"$ref": "#/$defs/predicate"},
+        "G5_generated": {"$ref": "#/$defs/predicate"},
+        "G5_stock": {"$ref": "#/$defs/predicate"},
+        "G6_shadow": {"$ref": "#/$defs/predicate"},
+        "G6_cold_restart": {"$ref": "#/$defs/predicate"}
+      }
+    },
+    "failures": {"type": "array", "items": {"type": "string"}},
+    "decision": {"enum": ["eligible-for-root-manual-promotion", "hold"]},
+    "eligible": {"type": "boolean"},
+    "automatic_promotion": {"const": false},
+    "public_mutation_performed": {"const": false},
+    "public_mutation_authorized": {"const": false},
+    "root_manual_promotion_required": {"type": "boolean"},
+    "decision_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "gateArtifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256", "gate_sha256"],
+      "properties": {"bytes": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/sha256"}, "gate_sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "manifestArtifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256", "manifest_sha256"],
+      "properties": {"bytes": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/sha256"}, "manifest_sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "evidenceArtifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256", "evidence_sha256"],
+      "properties": {"bytes": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/sha256"}, "evidence_sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "atlasIdentity": {"type": "object", "additionalProperties": false, "required": ["semantic_sha256", "artifact"], "properties": {"semantic_sha256": {"$ref": "#/$defs/sha256"}, "artifact": {"$ref": "#/$defs/artifact"}}},
+    "atlases": {"type": "object", "additionalProperties": false, "required": ["generated", "stock", "shadow"], "properties": {"generated": {"$ref": "#/$defs/atlasIdentity"}, "stock": {"$ref": "#/$defs/atlasIdentity"}, "shadow": {"$ref": "#/$defs/artifact"}}},
+    "predicate": {"type": "object", "additionalProperties": false, "required": ["passed", "failures"], "properties": {"passed": {"type": "boolean"}, "failures": {"type": "array", "items": {"type": "string"}}}},
+    "g0Predicate": {"type": "object", "additionalProperties": false, "required": ["passed", "failures", "evidence"], "properties": {"passed": {"type": "boolean"}, "failures": {"type": "array", "items": {"type": "string"}}, "evidence": {"type": "object", "additionalProperties": false, "required": ["schema", "assertions", "evidence", "evidence_sha256"], "properties": {"schema": {"const": "q2-multires-b8-g0-evidence-summary-v1"}, "assertions": {"type": "object", "minProperties": 9, "maxProperties": 9, "additionalProperties": {"const": true}}, "evidence": {"type": "object", "minProperties": 11, "maxProperties": 11, "additionalProperties": {"$ref": "#/$defs/sha256"}}, "evidence_sha256": {"$ref": "#/$defs/sha256"}}}}}
+  }
+}

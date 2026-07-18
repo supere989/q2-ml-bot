@@ -9,9 +9,12 @@ Usage:
 """
 
 import atexit
+import hashlib
+import io
 import os
 import json
 import random
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 import argparse
@@ -23,6 +26,10 @@ import torch.optim as optim
 from pathlib import Path
 from typing import Dict, List, Optional
 from torch.utils.tensorboard import SummaryWriter
+from harness.rollout_protocol import (
+    PPO_BEHAVIOR_METRIC_KEYS,
+    PPO_EPISODE_SUMMARY_COLUMNS,
+)
 from models.policy import (
     ACTION_DIM,
     ENT_CNT,
@@ -75,6 +82,8 @@ DEFAULT = dict(
     seed                = 0,
     game_seed           = -1,        # >=0 enables deterministic game.so rand() per server
     deterministic       = 0,         # opt-in deterministic Torch/CUDA kernels for A/B runs
+    reset_optimizer     = 0,         # warm-start policy but discard stale Adam moments
+    reset_lattice       = 0,         # rebuild dynamic memory from attested map sidecars
     n_servers           = 2,         # parallel q2ded instances
     n_bots_per_server   = 4,         # total bots in server (ML + 3ZB2 opponents)
     n_ml_bots           = 1,         # ML-controlled slots per server (venvs each)
@@ -103,9 +112,11 @@ DEFAULT = dict(
     aux_coef            = 0.05,  # auxiliary next-obs prediction loss weight
     aim_anchor_coef     = 0.0,   # opt-in recurrent geometric aim/fire supervision
     aim_anchor_look_weight = 16.0,
+    aim_anchor_posture_weight = 4.0,
     aim_anchor_fire_weight = 1.0,
     aim_anchor_yaw_deg  = 12.0,
     aim_anchor_pitch_deg = 14.0,
+    target_fire_gate    = 1,     # network-native only: mask blind/unaligned fire
     lattice_direction_coef = 0.02,
 )
 
@@ -115,11 +126,13 @@ def _safe_tag(value: str) -> str:
 
 
 def _lattice_direction_loss(act_params: dict, obs: torch.Tensor) -> dict:
-    """Teach local movement to follow the existing world-space lattice pulls.
+    """Teach movement to follow lattice pulls and convert contact to pursuit.
 
     The 24-d memory block is always the tail of the observation, independent
-    of Q2_EXT_OBS. Engagement/opportunity attract; threat repels. Supervision
-    is withheld during visible combat so aim/dodge policy remains in charge.
+    of Q2_EXT_OBS. Away from contact, engagement/opportunity attract and threat
+    repels. During live contact a combat-ready bot follows the nearest visible
+    enemy in its already bot-local frame instead of dropping lattice guidance
+    at precisely the point where actionability is required.
     """
     memory = obs[..., -24:]
     engagement = memory[..., 5:8] * memory[..., 8:9] * 0.5
@@ -134,24 +147,55 @@ def _lattice_direction_loss(act_params: dict, obs: torch.Tensor) -> dict:
     yaw = obs[..., 183] * torch.pi
     cos_yaw = torch.cos(yaw)
     sin_yaw = torch.sin(yaw)
-    target = torch.stack((
+    memory_target = torch.stack((
         desired_xy[..., 0] * cos_yaw + desired_xy[..., 1] * sin_yaw,
         desired_xy[..., 0] * sin_yaw - desired_xy[..., 1] * cos_yaw,
     ), dim=-1)
-    target = target / torch.linalg.vector_norm(target, dim=-1, keepdim=True).clamp_min(1e-6)
+    memory_target = memory_target / torch.linalg.vector_norm(
+        memory_target, dim=-1, keepdim=True
+    ).clamp_min(1e-6)
 
-    visibility = torch.stack(
-        [obs[..., ENT_OFF + index * ENT_DIM + 8] for index in range(ENT_CNT)],
-        dim=-1,
-    ).amax(dim=-1)
+    entities = obs[..., ENT_OFF:ENT_OFF + ENT_CNT * ENT_DIM].reshape(
+        *obs.shape[:-1], ENT_CNT, ENT_DIM
+    )
+    candidates = (
+        (entities[..., 6] > 0.0)
+        & (entities[..., 7] > 0.5)
+        & (entities[..., 8].abs() > 0.0)
+    )
+    visible = candidates.any(dim=-1)
+    distance_sq = entities[..., :3].square().sum(dim=-1).masked_fill(
+        ~candidates, torch.inf
+    )
+    nearest_index = distance_sq.argmin(dim=-1)
+    gather_index = nearest_index.unsqueeze(-1).unsqueeze(-1).expand(
+        *nearest_index.shape, 1, 2
+    )
+    pursuit_xy = entities[..., :2].gather(-2, gather_index).squeeze(-2)
+    pursuit_target = pursuit_xy / torch.linalg.vector_norm(
+        pursuit_xy, dim=-1, keepdim=True
+    ).clamp_min(1e-6)
     alive = obs[..., 6] > 0.0
-    mask = (strength > 0.03) & (visibility < 0.5) & alive
+    combat_ready = alive & (obs[..., 6] > 0.175) & (obs[..., 9] > 0.0)
+    # Never teach backpedaling toward a target behind the bot. The look anchor
+    # first turns the view; positive-forward pursuit begins once the target is
+    # in the forward hemisphere.
+    committed = visible & combat_ready & (pursuit_xy[..., 0] > 0.0)
+    target = torch.where(committed.unsqueeze(-1), pursuit_target, memory_target)
+    mask = alive & (committed | ((strength > 0.03) & ~visible))
     predicted = act_params["cont_mean"][..., :2]
     predicted = predicted / torch.linalg.vector_norm(
         predicted, dim=-1, keepdim=True
     ).clamp_min(0.25)
     cosine = (predicted * target).sum(dim=-1).clamp(-1.0, 1.0)
-    weights = strength.clamp(max=1.0) * mask.float()
+    memory_weight = strength.clamp(max=1.0)
+    # Engagement/opportunity history raises commitment; threat only repels when
+    # no live, winnable target is present.
+    combat_weight = (
+        0.5 + 0.25 * memory[..., 0] + 0.15 * memory[..., 2]
+        + 0.10 * memory[..., 21].clamp(min=0.0)
+    ).clamp(max=1.0)
+    weights = torch.where(committed, combat_weight, memory_weight) * mask.float()
     denominator = weights.sum()
     loss = ((1.0 - cosine) * weights).sum() / denominator.clamp_min(1.0)
     mean_cosine = (cosine * weights).sum() / denominator.clamp_min(1.0)
@@ -177,17 +221,37 @@ class RolloutBuffer:
         self.dones    = torch.zeros(n_steps, n_envs,           device=device)
         self.values   = torch.zeros(n_steps, n_envs,           device=device)
         self.log_probs = torch.zeros(n_steps, n_envs,          device=device)
+        # A hard action mask is part of the behavior distribution. Preserve
+        # the rollout-time decision so PPO evaluates the same distribution.
+        self.fire_allowed = torch.ones(
+            n_steps, n_envs, dtype=torch.bool, device=device
+        )
         self.h_states = torch.zeros(n_steps, n_envs, hidden_dim, device=device)
         self.c_states = torch.zeros(n_steps, n_envs, hidden_dim, device=device)
         self.ptr      = 0
 
-    def add(self, obs, action, reward, done, value, log_prob, h_state, c_state):
+    def add(
+        self,
+        obs,
+        action,
+        reward,
+        done,
+        value,
+        log_prob,
+        h_state,
+        c_state,
+        fire_allowed=None,
+    ):
         self.obs[self.ptr]       = obs
         self.actions[self.ptr]   = action
         self.rewards[self.ptr]   = reward
         self.dones[self.ptr]     = done
         self.values[self.ptr]    = value
         self.log_probs[self.ptr] = log_prob
+        if fire_allowed is None:
+            self.fire_allowed[self.ptr] = True
+        else:
+            self.fire_allowed[self.ptr] = fire_allowed
         self.h_states[self.ptr]  = h_state
         self.c_states[self.ptr]  = c_state
         self.ptr += 1
@@ -204,6 +268,54 @@ class RolloutBuffer:
         self.returns = advantages + self.values
         self.advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         self.ptr = 0
+
+
+def _reconcile_server_fire_suppressions(
+    actions: np.ndarray,
+    log_probs: np.ndarray,
+    fire_allowed: np.ndarray,
+    fire_metadata: dict | None,
+    step_results,
+    *,
+    n_ml: int,
+) -> int:
+    """Replace server-suppressed fire with its exact hard-mask likelihood.
+
+    The network server may invalidate a shot after collection-time inference
+    because protection or target state changed. The applied action is no-fire,
+    whose log-probability under the resulting closed gate is zero. Remove the
+    sampled fire log-probability from the recorded joint likelihood and store
+    the closed mask so every later PPO evaluation uses that same distribution.
+    """
+    suppressions = 0
+    for server_index, results in step_results:
+        base = server_index * n_ml
+        for bot_index, (_obs, _reward, _term, _trunc, info) in enumerate(results):
+            if not info.get("fire_gate_suppressed", False):
+                continue
+            vector_index = base + bot_index
+            if (
+                fire_metadata is None
+                or actions[vector_index, 5] <= 0.5
+                or not fire_allowed[vector_index]
+            ):
+                raise RuntimeError(
+                    "server suppressed fire outside the recorded network "
+                    "target-gate distribution"
+                )
+            fire_log_probability = float(
+                fire_metadata["raw_fire_log_probability"][vector_index]
+            )
+            if not np.isfinite(fire_log_probability):
+                raise RuntimeError(
+                    "server-suppressed fire has a non-finite behavior "
+                    "log-probability"
+                )
+            log_probs[vector_index] -= fire_log_probability
+            actions[vector_index, 5] = 0.0
+            fire_allowed[vector_index] = False
+            suppressions += 1
+    return suppressions
 
 
 def _forward_sequence_with_done_masks(
@@ -293,6 +405,8 @@ def _explained_variance(prediction: torch.Tensor, target: torch.Tensor) -> torch
 # Observation layout after entities: rays[16*4], hook zones[4*8], audio[5],
 # yaw, pitch. Extended observations are appended later and do not shift this.
 _AIM_PITCH_OBS_INDEX = ENT_OFF + ENT_CNT * ENT_DIM + 16 * 4 + 4 * 8 + 5 + 1
+_POSTURE_DOWNLOOK_DEG = 15.0
+_AIM_POSTURE_MIN_SPEED = 96.0
 
 
 def _wrap_degrees_tensor(angle: torch.Tensor) -> torch.Tensor:
@@ -322,7 +436,7 @@ def _aim_anchor_targets(
     candidates = (
         (entities[..., 6] > 0.0)
         & (entities[..., 7] > 0.5)
-        & (entities[..., 8] > 0.5)
+        & (entities[..., 8].abs() > 0.0)
     )
     has_target = candidates.any(dim=-1)
     distance_sq = xyz.square().sum(dim=-1).masked_fill(
@@ -353,22 +467,33 @@ def _aim_anchor_targets(
 
     yaw_command = desired_yaw.clamp(-45.0, 45.0)
     pitch_command = desired_pitch.clamp(-30.0, 30.0)
-    look_target = torch.stack((yaw_command, pitch_command), dim=-1)
+    new_pitch = (current_pitch + pitch_command).clamp(-89.0, 89.0)
+    effective_pitch_command = new_pitch - current_pitch
+    look_target = torch.stack((yaw_command, effective_pitch_command), dim=-1)
     look_target = torch.where(
         has_target.unsqueeze(-1), look_target, torch.zeros_like(look_target)
     )
 
     self_alive = obs[..., 6] > 0.0
     look_mask = self_alive & has_target
-    new_pitch = (current_pitch + pitch_command).clamp(-89.0, 89.0)
-    effective_pitch_command = new_pitch - current_pitch
     yaw_residual = _wrap_degrees_tensor(-desired_yaw + yaw_command)
     pitch_residual = -desired_pitch + effective_pitch_command
     aligned_after_teacher = (
         (yaw_residual.abs() <= float(yaw_threshold_deg))
         & (pitch_residual.abs() <= float(pitch_threshold_deg))
     )
-    fire_target = (look_mask & aligned_after_teacher).long()
+    nearest_exposure = entities[..., 8].gather(
+        -1, nearest_index.unsqueeze(-1)
+    ).squeeze(-1)
+    fire_target = (
+        look_mask & (nearest_exposure > 0.0) & aligned_after_teacher
+    ).long()
+    horizontal_speed = torch.linalg.vector_norm(obs[..., 3:5], dim=-1) * 1000.0
+    posture_mask = (
+        self_alive & ~has_target
+        & (horizontal_speed >= _AIM_POSTURE_MIN_SPEED)
+    )
+    posture_pitch_target = (-current_pitch).clamp(-30.0, 30.0)
 
     return {
         "look_target": look_target,
@@ -376,6 +501,8 @@ def _aim_anchor_targets(
         "fire_target": fire_target,
         "fire_mask": self_alive,
         "has_target": has_target,
+        "posture_mask": posture_mask,
+        "posture_pitch_target": posture_pitch_target,
     }
 
 
@@ -413,6 +540,7 @@ def _aim_anchor_loss(
     targets: Dict[str, torch.Tensor],
     fire_class_weights: torch.Tensor,
     look_weight: float,
+    posture_weight: float,
     fire_weight: float,
 ) -> Dict[str, torch.Tensor]:
     """Aim/fire loss on the same recurrent features used by PPO."""
@@ -420,6 +548,12 @@ def _aim_anchor_loss(
     look_error = act_params["cont_mean"][..., 2:4] - targets["look_target"]
     look_scaled_sq = (look_error / look_error.new_tensor([45.0, 30.0])).square()
     look_loss = _masked_mean(look_scaled_sq, look_mask.unsqueeze(-1).expand_as(look_scaled_sq))
+    posture_error = (
+        act_params["cont_mean"][..., 3] - targets["posture_pitch_target"]
+    )
+    posture_loss = _masked_mean(
+        (posture_error / 30.0).square(), targets["posture_mask"]
+    )
 
     weapon_idx = recorded_actions[..., 7].round().long().clamp(
         0, WEAPON_CLASSES - 1
@@ -434,10 +568,17 @@ def _aim_anchor_loss(
     fire_mask = targets["fire_mask"]
     fire_loss = _masked_mean(fire_ce * target_weights, fire_mask)
 
-    inner = float(look_weight) * look_loss + float(fire_weight) * fire_loss
+    inner = (
+        float(look_weight) * look_loss
+        + float(posture_weight) * posture_loss
+        + float(fire_weight) * fire_loss
+    )
     with torch.no_grad():
         yaw_mae = _masked_mean(look_error[..., 0].abs(), look_mask)
         pitch_mae = _masked_mean(look_error[..., 1].abs(), look_mask)
+        posture_pitch_mae = _masked_mean(
+            posture_error.abs(), targets["posture_mask"]
+        )
         fire_probability = fire_logits.softmax(dim=-1)[..., 1]
         positive = fire_mask & (targets["fire_target"] > 0)
         negative = fire_mask & ~positive
@@ -453,9 +594,11 @@ def _aim_anchor_loss(
     return {
         "inner": inner,
         "look": look_loss,
+        "posture": posture_loss,
         "fire": fire_loss,
         "yaw_mae_deg": yaw_mae,
         "pitch_mae_deg": pitch_mae,
+        "posture_pitch_mae_deg": posture_pitch_mae,
         "fire_accuracy": fire_accuracy,
         "fire_positive_probability": positive_probability,
         "fire_negative_probability": negative_probability,
@@ -480,6 +623,8 @@ def _pick_device() -> torch.device:
 def train(cfg: dict):
     seed = int(cfg.get("seed", 0))
     deterministic = bool(int(cfg.get("deterministic", 0)))
+    reset_optimizer = bool(int(cfg.get("reset_optimizer", 0)))
+    reset_lattice = bool(int(cfg.get("reset_lattice", 0)))
     if deterministic:
         # Must be set before the first CUDA context is created. This is
         # required by deterministic cuBLAS matrix multiplies on CUDA 10.2+.
@@ -509,13 +654,18 @@ def train(cfg: dict):
     }
     aim_anchor_coef = float(cfg.get("aim_anchor_coef", 0.0) or 0.0)
     aim_anchor_look_weight = float(cfg.get("aim_anchor_look_weight", 16.0))
+    aim_anchor_posture_weight = float(
+        cfg.get("aim_anchor_posture_weight", 4.0)
+    )
     aim_anchor_fire_weight = float(cfg.get("aim_anchor_fire_weight", 1.0))
     aim_anchor_yaw_deg = float(cfg.get("aim_anchor_yaw_deg", 12.0))
     aim_anchor_pitch_deg = float(cfg.get("aim_anchor_pitch_deg", 14.0))
+    target_fire_gate_requested = bool(int(cfg.get("target_fire_gate", 1)))
     lattice_direction_coef = float(cfg.get("lattice_direction_coef", 0.02) or 0.0)
     for name, value in (
         ("aim_anchor_coef", aim_anchor_coef),
         ("aim_anchor_look_weight", aim_anchor_look_weight),
+        ("aim_anchor_posture_weight", aim_anchor_posture_weight),
         ("aim_anchor_fire_weight", aim_anchor_fire_weight),
         ("aim_anchor_yaw_deg", aim_anchor_yaw_deg),
         ("aim_anchor_pitch_deg", aim_anchor_pitch_deg),
@@ -536,7 +686,9 @@ def train(cfg: dict):
         print(
             "Recurrent aim anchor: ON "
             f"coef={aim_anchor_coef:g} "
-            f"look={aim_anchor_look_weight:g} fire={aim_anchor_fire_weight:g}"
+            f"look={aim_anchor_look_weight:g} "
+            f"posture={aim_anchor_posture_weight:g} "
+            f"fire={aim_anchor_fire_weight:g}"
         )
     if lattice_direction_coef > 0:
         print(f"Lattice direction objective: ON coef={lattice_direction_coef:g}")
@@ -564,13 +716,35 @@ def train(cfg: dict):
             resume_steps = int(latest.stem.split("_")[-1])
         except ValueError:
             resume_steps = 0
+        optimizer_checkpoint = resume_dir / f"optimizer_{resume_steps:08d}.pt"
+        if optimizer_checkpoint.is_file() and not reset_optimizer:
+            optimizer.load_state_dict(torch.load(
+                optimizer_checkpoint, map_location=device
+            ))
+            print(f"Restored optimizer from {optimizer_checkpoint}")
+        elif reset_optimizer:
+            print("Optimizer reset requested; loaded policy weights only")
         print(f"Resumed from {latest} (env_steps={resume_steps:,})")
 
     from harness.env import Q2MultiEnv, discover_map_pool
 
-    n_servers         = cfg["n_servers"]
-    n_bots            = cfg["n_bots_per_server"]    # bots IN server (ML + AI)
-    n_ml              = max(1, min(int(cfg.get("n_ml_bots", 1)), n_bots))
+    try:
+        network_client_count = int(os.environ.get("Q2_NETWORK_CLIENTS", "0"))
+    except ValueError as error:
+        raise ValueError("Q2_NETWORK_CLIENTS must be an integer") from error
+    if network_client_count < 0:
+        raise ValueError("Q2_NETWORK_CLIENTS cannot be negative")
+    network_native = network_client_count > 0
+    target_fire_gate = network_native and target_fire_gate_requested
+
+    n_servers         = 1 if network_native else cfg["n_servers"]
+    n_bots            = (
+        network_client_count if network_native else cfg["n_bots_per_server"]
+    )
+    n_ml              = (
+        network_client_count if network_native else
+        max(1, min(int(cfg.get("n_ml_bots", 1)), n_bots))
+    )
     total_venvs       = n_servers * n_ml
     map_pool = discover_map_pool(
         map_name=cfg["map_name"],
@@ -581,33 +755,246 @@ def train(cfg: dict):
     print(f"Map pool ({len(map_pool)}): {', '.join(map_pool[:8])}"
           f"{' ...' if len(map_pool) > 8 else ''}")
 
-    servers = [
-        Q2MultiEnv(
-            server_id    = i,
-            map_name     = cfg["map_name"],
-            map_pool     = map_pool,
-            map_seed     = int(cfg["map_seed"]),
-            game_seed    = (
-                None if int(cfg.get("game_seed", -1)) < 0
-                else int(cfg["game_seed"]) + i * 1009
-            ),
-            spatial_seed = seed + i * 104729,
-            map_change_episodes = int(cfg["map_change_episodes"]),
-            n_bots       = n_bots,
-            num_ml_bots  = n_ml,
-            port_offset  = i,
-            max_ep_steps = cfg["max_ep_steps"],
-            timelimit    = cfg["timelimit"],
-            fraglimit    = cfg["fraglimit"],
-            timescale    = float(cfg.get("timescale", 1.0)),
-            console_pipe = True,   # live gamemap rotation instead of restarts
+    distributed = os.environ.get("Q2_DISTRIBUTED_LEARNER", "0") == "1"
+    if network_native and distributed:
+        raise ValueError(
+            "Q2_NETWORK_CLIENTS and Q2_DISTRIBUTED_LEARNER are mutually exclusive"
         )
-        for i in range(n_servers)
-    ]
+    rollout_coordinator = None
+    rollout_server = None
+    publish_distributed_policy = None
+    if distributed:
+        from harness.rollout_protocol import (
+            CoordinatorServer,
+            CoordinatorRecoveryConfig,
+            PolicyArtifact,
+            RolloutCoordinator,
+        )
+
+        quorum = max(1, int(os.environ.get("Q2_ROLLOUT_QUORUM", "1")))
+        remote_envs = max(1, int(os.environ.get("Q2_ROLLOUT_ENVS_PER_WORKER", "1")))
+        total_venvs = quorum * remote_envs
+        from harness.runtime_attestation import (
+            load_runtime_manifest,
+            verify_runtime_manifest,
+        )
+
+        runtime_manifest_path = os.environ.get(
+            "Q2_ROLLOUT_RUNTIME_MANIFEST", ""
+        ).strip()
+        if not runtime_manifest_path:
+            raise ValueError(
+                "Q2_DISTRIBUTED_LEARNER=1 requires "
+                "Q2_ROLLOUT_RUNTIME_MANIFEST"
+            )
+        runtime_manifest = load_runtime_manifest(Path(runtime_manifest_path))
+        attestation_key_name = os.environ.get(
+            "Q2_ROLLOUT_ATTESTATION_KEY_ENV", ""
+        ).strip()
+        attestation_key = (
+            os.environ[attestation_key_name].encode()
+            if attestation_key_name else None
+        )
+        runtime_verification = verify_runtime_manifest(
+            runtime_manifest,
+            hmac_key=attestation_key,
+            require_signature=bool(attestation_key_name),
+        )
+        if not runtime_verification.valid:
+            raise ValueError(
+                "invalid rollout runtime manifest: "
+                + "; ".join(runtime_verification.errors)
+            )
+        runtime_manifest_sha256 = runtime_verification.digest
+        recovery_enabled = os.environ.get("Q2_ROLLOUT_RECOVERY", "0") == "1"
+        config_payload = json.dumps({
+            "ppo": cfg,
+            "obs_dim": OBS_DIM,
+            "action_dim": ACTION_DIM,
+            "hidden_dim": HIDDEN_DIM,
+            "ext_obs": os.environ.get("Q2_EXT_OBS", "0"),
+            "rust_lattice": os.environ.get("Q2_RUST_LATTICE", "0"),
+            "worker_envs": remote_envs,
+            "runtime_manifest_sha256": runtime_manifest_sha256,
+            "recovery_enabled": recovery_enabled,
+        }, sort_keys=True, separators=(",", ":")).encode()
+        distributed_config_hash = hashlib.sha256(config_payload).hexdigest()
+        recovery_config = None
+        if recovery_enabled:
+            from harness.distributed_runtime import LearnerLatticeStore
+
+            learner_id = os.environ.get(
+                "Q2_ROLLOUT_LEARNER_ID", "q2-ppo-shadow"
+            )
+            lattice_root = Path(os.environ.get(
+                "Q2_ROLLOUT_LATTICE_DIR",
+                str(ckpt_dir / "distributed_lattice"),
+            ))
+            lattice_store = LearnerLatticeStore(
+                lattice_root, learner_id, distributed_config_hash
+            )
+            configured_game_seed = int(cfg.get("game_seed", -1))
+            recovery_config = CoordinatorRecoveryConfig(
+                learner_id=learner_id,
+                steps=int(cfg["n_steps"]),
+                n_envs=remote_envs,
+                maps=tuple(map_pool),
+                base_seed=seed,
+                base_game_seed=(
+                    configured_game_seed
+                    if configured_game_seed >= 0 else seed
+                ),
+                lease_ttl=float(os.environ.get(
+                    "Q2_ROLLOUT_LEASE_TTL", "45"
+                )),
+                max_attempts=int(os.environ.get(
+                    "Q2_ROLLOUT_MAX_ATTEMPTS", "3"
+                )),
+                lattice_store=lattice_store,
+            )
+        rollout_coordinator = RolloutCoordinator(
+            quorum=quorum,
+            schema="ppo",
+            expected_runtime_manifest_sha256=runtime_manifest_sha256,
+            recovery=recovery_config,
+        )
+        rollout_server = CoordinatorServer(
+            rollout_coordinator,
+            os.environ.get("Q2_ROLLOUT_BIND", "0.0.0.0"),
+            int(os.environ.get("Q2_ROLLOUT_PORT", "38888")),
+            token=os.environ.get("Q2_ROLLOUT_TOKEN", ""),
+        ).start()
+
+        def _publish_distributed_policy(version: int) -> None:
+            buffer = io.BytesIO()
+            cpu_state = {
+                name: tensor.detach().cpu()
+                for name, tensor in policy.state_dict().items()
+            }
+            torch.save(cpu_state, buffer)
+            rollout_coordinator.publish(PolicyArtifact.create(
+                int(version), buffer.getvalue(), distributed_config_hash,
+                runtime_manifest_sha256,
+            ))
+
+        publish_distributed_policy = _publish_distributed_policy
+        publish_distributed_policy(resume_steps)
+        print(
+            "Distributed learner: "
+            f"{rollout_server.address[0]}:{rollout_server.address[1]} "
+            f"quorum={quorum} envs/worker={remote_envs} "
+            f"policy_version={resume_steps} config={distributed_config_hash[:12]} "
+            f"recovery={'on' if recovery_enabled else 'off'}"
+        )
+
+    if distributed:
+        servers = []
+    elif network_native:
+        from harness.client_batch import build_network_client_multi_env
+
+        telemetry_token = os.environ.get(
+            "Q2_ML_CLIENT_TELEMETRY_TOKEN", ""
+        )
+        if not telemetry_token:
+            raise ValueError(
+                "network-native training requires "
+                "Q2_ML_CLIENT_TELEMETRY_TOKEN"
+            )
+        required_network_paths = {
+            "Q2_NETWORK_CLIENT_BINARY": os.environ.get(
+                "Q2_NETWORK_CLIENT_BINARY", ""
+            ),
+            "Q2_NETWORK_CLIENT_ROOT": os.environ.get(
+                "Q2_NETWORK_CLIENT_ROOT", ""
+            ),
+        }
+        missing_network_paths = [
+            name for name, value in required_network_paths.items() if not value
+        ]
+        if missing_network_paths:
+            raise ValueError(
+                "network-native training requires "
+                + ", ".join(missing_network_paths)
+            )
+        network_server = os.environ.get(
+            "Q2_NETWORK_SERVER", "100.101.57.114:28000"
+        )
+        telemetry_server = os.environ.get(
+            "Q2_NETWORK_TELEMETRY_SERVER", "100.101.57.114:28049"
+        )
+        client_data_root = os.environ.get(
+            "Q2_NETWORK_CLIENT_DATA_ROOT",
+            str(Path(required_network_paths["Q2_NETWORK_CLIENT_ROOT"]) / ".ml-clients"),
+        )
+        servers = [build_network_client_multi_env(
+            n_clients=network_client_count,
+            server=network_server,
+            telemetry_server=telemetry_server,
+            telemetry_token=telemetry_token,
+            client_binary=required_network_paths["Q2_NETWORK_CLIENT_BINARY"],
+            client_root=required_network_paths["Q2_NETWORK_CLIENT_ROOT"],
+            client_data_root=client_data_root,
+            harness_host=os.environ.get("Q2_NETWORK_HARNESS_HOST", "127.0.0.1"),
+            harness_port_base=int(os.environ.get(
+                "Q2_NETWORK_HARNESS_PORT_BASE", "39000"
+            )),
+            qport_base=int(os.environ.get("Q2_NETWORK_QPORT_BASE", "49000")),
+            client_id_prefix=os.environ.get(
+                "Q2_NETWORK_CLIENT_ID_PREFIX", "public-trainer"
+            ),
+            name_prefix=os.environ.get("Q2_NETWORK_CLIENT_NAME_PREFIX", "Lattice"),
+            client_timeout=float(os.environ.get(
+                "Q2_NETWORK_CLIENT_TIMEOUT", "30"
+            )),
+            round_timeout=float(os.environ.get(
+                "Q2_NETWORK_ROUND_TIMEOUT", "2"
+            )),
+            max_rejected_echoes=int(os.environ.get(
+                "Q2_NETWORK_MAX_REJECTED_ECHOES", "16"
+            )),
+            max_ep_steps=int(cfg["max_ep_steps"]),
+            initial_policy_version=resume_steps,
+            spatial_seed=seed,
+        )]
+        print(
+            "Network-native clients: "
+            f"count={network_client_count} game={network_server} "
+            f"telemetry={telemetry_server} policy_version={resume_steps}"
+        )
+        print(
+            "Network target-fire gate: "
+            f"{'ON' if target_fire_gate else 'off'} "
+            f"yaw<={aim_anchor_yaw_deg:g}deg "
+            f"pitch<={aim_anchor_pitch_deg:g}deg"
+        )
+    else:
+        servers = [
+            Q2MultiEnv(
+                server_id    = i,
+                map_name     = cfg["map_name"],
+                map_pool     = map_pool,
+                map_seed     = int(cfg["map_seed"]),
+                game_seed    = (
+                    None if int(cfg.get("game_seed", -1)) < 0
+                    else int(cfg["game_seed"]) + i * 1009
+                ),
+                spatial_seed = seed + i * 104729,
+                map_change_episodes = int(cfg["map_change_episodes"]),
+                n_bots       = n_bots,
+                num_ml_bots  = n_ml,
+                port_offset  = i,
+                max_ep_steps = cfg["max_ep_steps"],
+                timelimit    = cfg["timelimit"],
+                fraglimit    = cfg["fraglimit"],
+                timescale    = float(cfg.get("timescale", 1.0)),
+                console_pipe = True,   # live gamemap rotation instead of restarts
+            )
+            for i in range(n_servers)
+        ]
     lattice_instances = [
         sr for server in servers for sr in server._spatial_rewards
     ]
-    if resume_dir is not None:
+    if resume_dir is not None and not reset_lattice:
         from harness.spatial import load_lattice_state
         lattice_candidates = (
             resume_dir / f"lattice_{resume_steps:08d}.json.gz",
@@ -622,10 +1009,14 @@ def train(cfg: dict):
             )
         else:
             print("No lattice checkpoint found; maps will start from sidecar priors")
+    elif resume_dir is not None:
+        print("Lattice reset requested; rebuilding dynamic memory from map sidecar priors")
 
     def _close_all_servers() -> None:
         for server in servers:
             server.close()
+        if rollout_server is not None:
+            rollout_server.close()
 
     # An optimizer/assertion failure used to orphan q2ded children and leave
     # their UDP ports occupied for the next experiment. Normal completion
@@ -639,11 +1030,12 @@ def train(cfg: dict):
 
     # reset all servers in parallel and populate initial obs (sequential boot
     # cost ~50s/server; each env owns its own ports, sockets, and process)
-    with ThreadPoolExecutor(max_workers=n_servers) as ex:
-        all_initial = list(ex.map(lambda srv: srv.reset_all(), servers))
-    for si, obs_list in enumerate(all_initial):
-        for bi, o in enumerate(obs_list):
-            obs_np[si * n_ml + bi] = o
+    if not distributed:
+        with ThreadPoolExecutor(max_workers=n_servers) as ex:
+            all_initial = list(ex.map(lambda srv: srv.reset_all(), servers))
+        for si, obs_list in enumerate(all_initial):
+            for bi, o in enumerate(obs_list):
+                obs_np[si * n_ml + bi] = o
 
     total_env_steps    = resume_steps
     _directive_seqs    = {}
@@ -655,7 +1047,8 @@ def train(cfg: dict):
     # isolated by map prefix so it never touches maps other runs glob. See
     # train/curriculum.py for the absorb-for-entropy-not-convergence rationale.
     evolver = None
-    if os.environ.get("Q2_CURRICULUM_EVOLVE") == "1":
+    if (not distributed and not network_native and
+            os.environ.get("Q2_CURRICULUM_EVOLVE") == "1"):
         try:
             from train.curriculum import CurriculumEvolver
             _pref = os.environ.get("Q2_CURRICULUM_PREFIX") or (
@@ -673,11 +1066,25 @@ def train(cfg: dict):
 
     run_name = (f"ppo_{run_tag}_{int(time.time())}" if run_tag
                 else f"ppo_{_safe_tag(map_label)}_{int(time.time())}")
-    writer   = SummaryWriter(log_dir=f"runs/{run_name}")
+    runs_dir = Path(os.environ.get("Q2_RUNS_DIR", "runs"))
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    writer   = SummaryWriter(log_dir=str(runs_dir / run_name))
     writer.add_scalar("config/seed", seed, resume_steps)
-    print(f"TensorBoard log: runs/{run_name}")
+    print(f"TensorBoard log: {runs_dir / run_name}")
     print(f"  view with:  tensorboard --logdir runs --bind_all")
-    print(f"  virtual envs: {total_venvs}  ({n_servers} servers × 1 ML bot + {n_bots-1} AI opponents)")
+    if distributed:
+        print(f"  virtual envs: {total_venvs} from distributed rollout quorum")
+    elif network_native:
+        print(
+            f"  virtual envs: {total_venvs} normal-player clients on the "
+            "public network-native lane"
+        )
+    else:
+        print(
+            f"  virtual envs: {total_venvs}  "
+            f"({n_servers} servers × {n_ml} ML bot(s) + "
+            f"{n_bots - n_ml} AI opponents each)"
+        )
 
     ep_rewards           = np.zeros(total_venvs, dtype=np.float64)
     ep_base_rewards      = np.zeros(total_venvs, dtype=np.float64)
@@ -694,62 +1101,30 @@ def train(cfg: dict):
     completed_map_rewards: Dict[str, List[float]] = {}
 
     start = time.time()
-    behavior_metric_keys = (
-        "ammo_depleted",
-        "requested_ammo_weapon_unavailable",
-        "fire_no_ammo",
-        "hook_action",
-        "hook_enemy",
-        "hook_no_ammo_melee",
-        "session_memory_bonus",
-        "session_memory_cells",
-        "session_current_engagement",
-        "session_current_threat",
-        "session_current_opportunity",
-        "session_current_self_fire",
-        "session_nearest_engagement",
-        "session_nearest_threat",
-        "session_nearest_opportunity",
-        "lattice_prior_loaded",
-        "lattice_routes_loaded",
-        "lattice_dynamic_cells",
-        "lattice_route_active",
-        "threat_bonus",
-        "threat_in_range",
-        "threat_active",
-        "threat_ignored",
-        "survival_low_health",
-        "survival_contact",
-        "damage_margin_step",
-        "outcome_sample",
-        "outcome_bonus",
-        "outcome_win",
-        "outcome_survival",
-        "outcome_loss",
-        "outcome_idle",
-        "episode_damage_margin",
-        "episode_frag_margin",
-        "episode_contact_events",
-        # ext channels + exchange/chicken + rune observability
-        "offense",
-        "survival",
-        "damage_prox",
-        "exchange_ratio",
-        "exchange_dominating",
-        "exchange_even",
-        "exchange_losing",
-        "rune_held",
-        "rune_switch",
-        "win_margin",
-    )
+    behavior_metric_keys = PPO_BEHAVIOR_METRIC_KEYS
 
     while total_env_steps < cfg["total_steps"]:
         # ── collect rollout ──────────────────────────────────────────
         policy.eval()
         rollout_behavior = {key: 0.0 for key in behavior_metric_keys}
         rollout_behavior_samples = 0
+        rollout_fire_gate_samples = 0
+        rollout_fire_gate_allowed = 0
+        rollout_fire_gate_executed = 0
+        rollout_fire_gate_blocked_probability = 0.0
+        rollout_posture_samples = 0
+        rollout_signed_forward = 0.0
+        rollout_forward_commands = 0
+        rollout_backward_commands = 0
+        rollout_look_pitch = 0.0
+        rollout_look_pitch_abs = 0.0
+        rollout_view_pitch = 0.0
+        rollout_view_pitch_abs = 0.0
+        rollout_downlook_frames = 0
 
-        for step in range(cfg["n_steps"]):
+        accepted_rollout_steps = 0
+        target_rollout_steps = 0 if distributed else int(cfg["n_steps"])
+        while accepted_rollout_steps < target_rollout_steps:
             # Store the current observation which produced the actions!
             current_obs = obs_np.copy()
 
@@ -762,8 +1137,29 @@ def train(cfg: dict):
                 c_step = torch.zeros(total_venvs, HIDDEN_DIM, device=device)
 
             # Batched policy inference — 1 GPU call instead of total_venvs calls
-            actions_np, values_np, lps_np, hx_list = policy.act_batch(
-                obs_np, hx_list, device)
+            fire_metadata = None
+            if network_native:
+                (
+                    actions_np,
+                    values_np,
+                    lps_np,
+                    hx_list,
+                    fire_metadata,
+                ) = policy.act_batch(
+                    obs_np,
+                    hx_list,
+                    device,
+                    gate_fire=target_fire_gate,
+                    fire_gate_yaw_deg=aim_anchor_yaw_deg,
+                    fire_gate_pitch_deg=aim_anchor_pitch_deg,
+                    return_fire_metadata=True,
+                )
+                fire_allowed_np = fire_metadata["fire_allowed"]
+            else:
+                actions_np, values_np, lps_np, hx_list = policy.act_batch(
+                    obs_np, hx_list, device
+                )
+                fire_allowed_np = np.ones(total_venvs, dtype=np.bool_)
 
             rewards_np = np.zeros(total_venvs, dtype=np.float32)
             dones_np   = np.zeros(total_venvs, dtype=np.float32)
@@ -772,16 +1168,132 @@ def train(cfg: dict):
             def _step_server(si_srv):
                 si, srv = si_srv
                 base = si * n_ml
-                return si, srv.step_all([actions_np[base + k] for k in range(srv.n_ml)])
+                actions = [actions_np[base + k] for k in range(srv.n_ml)]
+                if network_native:
+                    return si, srv.step_all(
+                        actions, policy_version=total_env_steps
+                    )
+                return si, srv.step_all(actions)
 
             with ThreadPoolExecutor(max_workers=n_servers) as ex:
                 step_results = list(ex.map(_step_server, enumerate(servers)))
+
+            # A live gamemap resets the authoritative server-frame epoch.  The
+            # client batch returns the first observation from the new map as a
+            # synchronization boundary, not as a transition from the old map.
+            # Reset recurrent/episode memory and recollect this rollout slot so
+            # cross-map rewards and actions can never enter PPO.
+            if network_native:
+                trainable_flags = [
+                    bool(info.get("trainable_transition", False))
+                    for _si, results in step_results
+                    for _o, _r, _term, _trunc, info in results
+                ]
+                if not all(trainable_flags):
+                    if any(trainable_flags):
+                        raise RuntimeError(
+                            "network collector returned a partially trainable "
+                            "map-epoch round"
+                        )
+                    target_maps = set()
+                    preflight_packets_drained = 0
+                    map_epoch_resync = False
+                    telemetry_gap_resync = False
+                    for si, results in step_results:
+                        base = si * n_ml
+                        for bi, (o, _r, _term, _trunc, info) in enumerate(results):
+                            vi = base + bi
+                            obs_np[vi] = o
+                            hx_list[vi] = policy.init_hidden(1, device)
+                            target_maps.add(str(info.get("map", "unknown")))
+                            preflight_packets_drained += int(
+                                info.get("preflight_packets_drained", 0)
+                            )
+                            map_epoch_resync |= bool(
+                                info.get("map_epoch_resync", False)
+                            )
+                            telemetry_gap_resync |= bool(
+                                info.get("telemetry_gap_resync", False)
+                            )
+                            ep_rewards[vi] = 0.0
+                            ep_base_rewards[vi] = 0.0
+                            ep_spatial_rewards[vi] = 0.0
+                            ep_kills[vi] = 0.0
+                            ep_deaths[vi] = 0.0
+                            ep_lengths[vi] = 0
+                    boundary_kind = (
+                        "map-epoch" if map_epoch_resync else
+                        "telemetry-gap" if telemetry_gap_resync else
+                        "realtime-catchup"
+                    )
+                    print(
+                        "Network client synchronization boundary: "
+                        f"kind={boundary_kind} "
+                        f"maps={','.join(sorted(target_maps))} "
+                        f"drained={preflight_packets_drained}"
+                    )
+                    continue
+
+                # The server independently rejects a shot when protection or
+                # last-moment world-state changes invalidate the policy mask.
+                # Reconcile that authoritative shield into the stored action
+                # and behavior log-probability so PPO never learns from an
+                # action the game did not execute. This remains required when
+                # the proactive policy gate is disabled for an ablation.
+                _reconcile_server_fire_suppressions(
+                    actions_np,
+                    lps_np,
+                    fire_allowed_np,
+                    fire_metadata,
+                    step_results,
+                    n_ml=n_ml,
+                )
+
+                # Explicit signed posture telemetry. The historical
+                # forward-intent metric used abs(move_forward), which hid a
+                # backwards moonwalk behind a healthy-looking value.
+                effective_forward = np.clip(actions_np[:, 0], -1.0, 1.0)
+                effective_look_pitch = np.clip(actions_np[:, 3], -30.0, 30.0)
+                view_pitch = current_obs[:, _AIM_PITCH_OBS_INDEX] * 90.0
+                rollout_posture_samples += int(effective_forward.size)
+                rollout_signed_forward += float(effective_forward.sum())
+                rollout_forward_commands += int((effective_forward > 0.15).sum())
+                rollout_backward_commands += int((effective_forward < -0.15).sum())
+                rollout_look_pitch += float(effective_look_pitch.sum())
+                rollout_look_pitch_abs += float(
+                    np.abs(effective_look_pitch).sum()
+                )
+                rollout_view_pitch += float(view_pitch.sum())
+                rollout_view_pitch_abs += float(np.abs(view_pitch).sum())
+                # Quake pitch is positive when looking down.
+                rollout_downlook_frames += int(
+                    (view_pitch > _POSTURE_DOWNLOOK_DEG).sum()
+                )
+
+            if target_fire_gate:
+                rollout_fire_gate_samples += int(fire_allowed_np.size)
+                rollout_fire_gate_allowed += int(fire_allowed_np.sum())
+                rollout_fire_gate_executed += int(
+                    (actions_np[:, 5] > 0.5).sum()
+                )
+                closed = ~fire_allowed_np
+                rollout_fire_gate_blocked_probability += float(
+                    fire_metadata["raw_fire_probability"][closed].sum()
+                )
 
             for si, results in step_results:
                 base = si * n_ml
                 srv = servers[si]
                 for bi, (o, r, term, trunc, info) in enumerate(results):
                     vi = base + bi
+                    if network_native and (
+                        not info.get("trainable_transition", False)
+                        or int(info.get("policy_version", -1)) != total_env_steps
+                    ):
+                        raise RuntimeError(
+                            "network collector returned an unversioned or "
+                            "non-trainable transition"
+                        )
                     spatial_bonus = float(info.get("spatial_bonus", 0.0))
                     base_reward = float(info.get("reward_base", r - spatial_bonus))
                     kills = float(info.get("kills", 0.0))
@@ -827,22 +1339,108 @@ def train(cfg: dict):
                 torch.from_numpy(lps_np).to(device, dtype=torch.float32),
                 h_step,
                 c_step,
+                torch.from_numpy(fire_allowed_np).to(
+                    device, dtype=torch.bool
+                ),
             )
+            accepted_rollout_steps += 1
 
-        total_env_steps += cfg["n_steps"] * total_venvs
+        if distributed:
+            from harness.rollout_protocol import merge_ppo_batches
 
-        # compute bootstrap value
-        with torch.no_grad():
-            # Batched bootstrap computation to run in a single GPU pass
-            if os.environ.get("Q2_POLICY_STATEFUL", "1").lower() in {"1", "true", "yes", "on"}:
-                h_stack = torch.cat([hx[0] for hx in hx_list], dim=1)
-                c_stack = torch.cat([hx[1] for hx in hx_list], dim=1)
-            else:
-                h_stack, c_stack = policy.init_hidden(total_venvs, device)
-            
-            obs_t = torch.from_numpy(obs_np).to(device, dtype=torch.float32).unsqueeze(1) # (N, 1, OBS_DIM)
-            _, values_t, _ = policy(obs_t, (h_stack, c_stack))
-            last_vals = values_t.squeeze(-1).squeeze(-1) # (total_venvs,)
+            policy_version = rollout_coordinator.policy().version
+            batches = rollout_coordinator.wait_for_quorum(
+                policy_version,
+                float(os.environ.get("Q2_ROLLOUT_TIMEOUT", "600")),
+            )
+            if not batches:
+                raise TimeoutError(
+                    f"distributed rollout quorum timed out for policy {policy_version}"
+                )
+            merged = merge_ppo_batches(batches)
+            expected_obs = (cfg["n_steps"], total_venvs, OBS_DIM)
+            if merged["obs"].shape != expected_obs:
+                raise ValueError(
+                    f"distributed rollout shape {merged['obs'].shape} != {expected_obs}"
+                )
+            for target, name in (
+                (buf.obs, "obs"),
+                (buf.actions, "actions"),
+                (buf.rewards, "rewards"),
+                (buf.dones, "dones"),
+                (buf.values, "values"),
+                (buf.log_probs, "log_probs"),
+                (buf.h_states, "h_states"),
+                (buf.c_states, "c_states"),
+            ):
+                target.copy_(torch.from_numpy(merged[name]).to(
+                    device, dtype=target.dtype
+                ))
+            episode_columns = {
+                name: index
+                for index, name in enumerate(PPO_EPISODE_SUMMARY_COLUMNS)
+            }
+            episode_summaries = merged["episode_summaries"]
+            completed_ep_rewards.extend(
+                episode_summaries[:, episode_columns["reward"]].tolist()
+            )
+            completed_ep_base_rewards.extend(
+                episode_summaries[:, episode_columns["base_reward"]].tolist()
+            )
+            completed_ep_spatial_rewards.extend(
+                episode_summaries[:, episode_columns["spatial_reward"]].tolist()
+            )
+            completed_ep_kills.extend(
+                episode_summaries[:, episode_columns["kills"]].tolist()
+            )
+            completed_ep_deaths.extend(
+                episode_summaries[:, episode_columns["deaths"]].tolist()
+            )
+            completed_ep_lengths.extend(
+                int(value)
+                for value in episode_summaries[:, episode_columns["length"]]
+            )
+            for map_name, reward in zip(
+                merged["episode_map_names"],
+                episode_summaries[:, episode_columns["reward"]],
+            ):
+                completed_map_rewards.setdefault(str(map_name), []).append(
+                    float(reward)
+                )
+            rollout_behavior.update(zip(
+                behavior_metric_keys,
+                merged["behavior_sums"].tolist(),
+            ))
+            rollout_behavior_samples = int(merged["behavior_samples"][0])
+            total_env_steps += cfg["n_steps"] * total_venvs
+            with torch.no_grad():
+                obs_t = torch.from_numpy(merged["last_obs"]).to(
+                    device, dtype=torch.float32
+                ).unsqueeze(1)
+                h_stack = torch.from_numpy(merged["last_h"]).to(
+                    device, dtype=torch.float32
+                ).unsqueeze(0)
+                c_stack = torch.from_numpy(merged["last_c"]).to(
+                    device, dtype=torch.float32
+                ).unsqueeze(0)
+                _, values_t, _ = policy(obs_t, (h_stack, c_stack))
+                last_vals = values_t.squeeze(-1).squeeze(-1)
+        else:
+            total_env_steps += cfg["n_steps"] * total_venvs
+
+            # compute bootstrap value
+            with torch.no_grad():
+                # Batched bootstrap computation to run in a single GPU pass
+                if os.environ.get("Q2_POLICY_STATEFUL", "1").lower() in {"1", "true", "yes", "on"}:
+                    h_stack = torch.cat([hx[0] for hx in hx_list], dim=1)
+                    c_stack = torch.cat([hx[1] for hx in hx_list], dim=1)
+                else:
+                    h_stack, c_stack = policy.init_hidden(total_venvs, device)
+                obs_t = torch.from_numpy(obs_np).to(
+                    device, dtype=torch.float32
+                ).unsqueeze(1)
+                _, values_t, _ = policy(obs_t, (h_stack, c_stack))
+                last_vals = values_t.squeeze(-1).squeeze(-1)
 
         buf.compute_returns(last_vals, cfg["gamma"], cfg["gae_lambda"])
 
@@ -863,6 +1461,7 @@ def train(cfg: dict):
         adv_chunked = buf.advantages.reshape(num_chunks_per_env, chunk_len, N_envs).permute(0, 2, 1).reshape(total_chunks, chunk_len)
         ret_chunked = buf.returns.reshape(num_chunks_per_env, chunk_len, N_envs).permute(0, 2, 1).reshape(total_chunks, chunk_len)
         log_probs_chunked = buf.log_probs.reshape(num_chunks_per_env, chunk_len, N_envs).permute(0, 2, 1).reshape(total_chunks, chunk_len)
+        fire_allowed_chunked = buf.fire_allowed.reshape(num_chunks_per_env, chunk_len, N_envs).permute(0, 2, 1).reshape(total_chunks, chunk_len)
         dones_chunked = buf.dones.reshape(num_chunks_per_env, chunk_len, N_envs).permute(0, 2, 1).reshape(total_chunks, chunk_len)
 
         aim_anchor_targets = None
@@ -884,6 +1483,9 @@ def train(cfg: dict):
                 "eligible_alive_rate": fire_valid.mean(),
                 "visible_alive_rate": (
                     aim_anchor_targets["look_mask"].float().sum() / fire_denom
+                ),
+                "posture_moving_alive_rate": (
+                    aim_anchor_targets["posture_mask"].float().sum() / fire_denom
                 ),
                 "fire_positive_rate": (
                     aim_anchor_targets["fire_target"].float().sum() / fire_denom
@@ -961,9 +1563,11 @@ def train(cfg: dict):
             "aim_anchor_inner_loss",
             "aim_anchor_weighted_loss",
             "aim_anchor_look_loss",
+            "aim_anchor_posture_loss",
             "aim_anchor_fire_loss",
             "aim_anchor_yaw_mae_deg",
             "aim_anchor_pitch_mae_deg",
+            "aim_anchor_posture_pitch_mae_deg",
             "aim_anchor_fire_accuracy",
             "aim_anchor_fire_positive_probability",
             "aim_anchor_fire_negative_probability",
@@ -998,7 +1602,12 @@ def train(cfg: dict):
                 val_b = val_b.squeeze(-1) # (B_chunks, chunk_len)
 
                 # Compute mixed-action log probabilities and entropy using policy's built-in function
-                log_prob, entropy = policy.action_log_prob_entropy(act_params, act_b)
+                log_prob, entropy = policy.action_log_prob_entropy(
+                    act_params,
+                    act_b,
+                    fire_allowed=fire_allowed_chunked[b],
+                    obs=obs_b,
+                )
                 log_prob = log_prob.reshape(-1)
                 entropy = entropy.reshape(-1)
 
@@ -1041,9 +1650,11 @@ def train(cfg: dict):
                 aim_anchor_metrics = {
                     "inner": anchor_zero,
                     "look": anchor_zero,
+                    "posture": anchor_zero,
                     "fire": anchor_zero,
                     "yaw_mae_deg": anchor_zero,
                     "pitch_mae_deg": anchor_zero,
+                    "posture_pitch_mae_deg": anchor_zero,
                     "fire_accuracy": anchor_zero,
                     "fire_positive_probability": anchor_zero,
                     "fire_negative_probability": anchor_zero,
@@ -1057,6 +1668,7 @@ def train(cfg: dict):
                         {key: value[b] for key, value in aim_anchor_targets.items()},
                         aim_anchor_fire_class_weights,
                         look_weight=aim_anchor_look_weight,
+                        posture_weight=aim_anchor_posture_weight,
                         fire_weight=aim_anchor_fire_weight,
                     )
                 aim_anchor_component = aim_anchor_coef * aim_anchor_metrics["inner"]
@@ -1183,9 +1795,13 @@ def train(cfg: dict):
                             aim_anchor_metrics["inner"].detach(),
                             aim_anchor_component.detach(),
                             aim_anchor_metrics["look"].detach(),
+                            aim_anchor_metrics["posture"].detach(),
                             aim_anchor_metrics["fire"].detach(),
                             aim_anchor_metrics["yaw_mae_deg"].detach(),
                             aim_anchor_metrics["pitch_mae_deg"].detach(),
+                            aim_anchor_metrics[
+                                "posture_pitch_mae_deg"
+                            ].detach(),
                             aim_anchor_metrics["fire_accuracy"].detach(),
                             aim_anchor_metrics[
                                 "fire_positive_probability"
@@ -1235,7 +1851,10 @@ def train(cfg: dict):
                     else:
                         params_post, values_post, _ = policy(obs_post)
                     log_prob_post, _entropy_post = policy.action_log_prob_entropy(
-                        params_post, act_post
+                        params_post,
+                        act_post,
+                        fire_allowed=fire_allowed_chunked[start_i:end_i],
+                        obs=obs_post,
                     )
                     log_ratio_post = (
                         log_prob_post.reshape(-1)
@@ -1309,6 +1928,29 @@ def train(cfg: dict):
                 diagnostic_all_names, diagnostic_all_values
             ))
 
+        if distributed:
+            # The next policy must be durable before workers can observe it.
+            # Together with the accepted-batch journal this prevents a crash
+            # from replaying an optimizer update or losing Adam state.
+            policy_checkpoint = ckpt_dir / f"policy_{total_env_steps:08d}.pt"
+            optimizer_checkpoint = ckpt_dir / f"optimizer_{total_env_steps:08d}.pt"
+            for target, value in (
+                (policy_checkpoint, policy.state_dict()),
+                (optimizer_checkpoint, optimizer.state_dict()),
+            ):
+                temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+                with temporary.open("wb") as handle:
+                    torch.save(value, handle)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, target)
+            checkpoint_directory = os.open(ckpt_dir, os.O_RDONLY)
+            try:
+                os.fsync(checkpoint_directory)
+            finally:
+                os.close(checkpoint_directory)
+            publish_distributed_policy(total_env_steps)
+
         # logging
         elapsed = time.time() - start
         # A resumed checkpoint can already carry tens of millions of steps;
@@ -1379,9 +2021,11 @@ def train(cfg: dict):
                 "aim_anchor_inner_loss",
                 "aim_anchor_weighted_loss",
                 "aim_anchor_look_loss",
+                "aim_anchor_posture_loss",
                 "aim_anchor_fire_loss",
                 "aim_anchor_yaw_mae_deg",
                 "aim_anchor_pitch_mae_deg",
+                "aim_anchor_posture_pitch_mae_deg",
                 "aim_anchor_fire_accuracy",
                 "aim_anchor_fire_positive_probability",
                 "aim_anchor_fire_negative_probability",
@@ -1411,6 +2055,44 @@ def train(cfg: dict):
                     f"diagnostics/{name}", value, total_env_steps
                 )
         writer.add_scalar("train/sps", sps, total_env_steps)
+        if target_fire_gate and rollout_fire_gate_samples > 0:
+            gate_denom = float(rollout_fire_gate_samples)
+            allowed_rate = rollout_fire_gate_allowed / gate_denom
+            writer.add_scalar(
+                "targeting/fire_gate_allowed_rate",
+                allowed_rate,
+                total_env_steps,
+            )
+            writer.add_scalar(
+                "targeting/fire_gate_closed_rate",
+                1.0 - allowed_rate,
+                total_env_steps,
+            )
+            writer.add_scalar(
+                "targeting/executed_fire_rate",
+                rollout_fire_gate_executed / gate_denom,
+                total_env_steps,
+            )
+            closed_count = rollout_fire_gate_samples - rollout_fire_gate_allowed
+            writer.add_scalar(
+                "targeting/blocked_fire_probability_mean",
+                rollout_fire_gate_blocked_probability
+                / float(max(1, closed_count)),
+                total_env_steps,
+            )
+        if rollout_posture_samples > 0:
+            posture_denom = float(rollout_posture_samples)
+            for tag, value in (
+                ("movement/signed_forward_mean", rollout_signed_forward),
+                ("movement/forward_command_rate", rollout_forward_commands),
+                ("movement/backward_command_rate", rollout_backward_commands),
+                ("aim/look_pitch_command_mean", rollout_look_pitch),
+                ("aim/look_pitch_command_abs_mean", rollout_look_pitch_abs),
+                ("aim/view_pitch_mean", rollout_view_pitch),
+                ("aim/view_pitch_abs_mean", rollout_view_pitch_abs),
+                ("aim/downlook_rate", rollout_downlook_frames),
+            ):
+                writer.add_scalar(tag, value / posture_denom, total_env_steps)
 
         rollout_tensors = {
             "reward": buf.rewards,
@@ -1454,6 +2136,21 @@ def train(cfg: dict):
                 total_env_steps,
             )
             writer.add_scalar(
+                "targeting/acquisition_bonus_mean",
+                rollout_behavior["target_alignment_bonus"] / denom,
+                total_env_steps,
+            )
+            writer.add_scalar(
+                "targeting/acquisition_rate",
+                rollout_behavior["target_acquired"] / denom,
+                total_env_steps,
+            )
+            writer.add_scalar(
+                "targeting/aligned_rate",
+                rollout_behavior["target_aligned"] / denom,
+                total_env_steps,
+            )
+            writer.add_scalar(
                 "behavior/hook_action_rate",
                 rollout_behavior["hook_action"] / denom,
                 total_env_steps,
@@ -1468,6 +2165,74 @@ def train(cfg: dict):
                 rollout_behavior["hook_no_ammo_melee"] / denom,
                 total_env_steps,
             )
+            for key, tag in (
+                ("movement_speed", "movement/speed_mean"),
+                ("movement_intent", "movement/intent_mean"),
+                ("forward_intent", "movement/forward_intent_mean"),
+                ("movement_nominal", "movement/nominal_rate"),
+                ("movement_slow", "movement/slow_rate"),
+                ("movement_overspeed", "movement/overspeed_rate"),
+                ("movement_discipline", "movement/reward_mean"),
+                ("level_aim_movement_reward", "movement/level_aim_reward_mean"),
+                ("jump_action", "behavior/jump_action_rate"),
+                ("jump_slow", "behavior/jump_slow_rate"),
+                ("entity_count", "sensing/entity_count_mean"),
+                ("enemy_count", "sensing/enemy_count_mean"),
+                ("enemy_visible_any", "targeting/visible_any_rate"),
+                ("enemy_visible_count", "targeting/visible_count_mean"),
+                ("enemy_visible_nearest", "targeting/visible_nearest_mean"),
+                ("enemy_visible_exposure_sum", "targeting/exposure_sum_mean"),
+                ("enemy_visible_exposure_max", "targeting/exposure_max_mean"),
+                ("aim_aligned", "targeting/spatial_aligned_rate"),
+                ("aim_yaw_error", "targeting/yaw_error_mean"),
+                ("aim_pitch_error", "targeting/pitch_error_mean"),
+                ("aim_tracking_quality", "targeting/tracking_quality_mean"),
+                ("target_hit_event", "targeting/hit_event_rate"),
+                ("target_hit_streak", "targeting/hit_streak_mean"),
+                ("target_repeat_hit_event", "targeting/repeat_hit_event_rate"),
+                ("target_kill_event", "targeting/kill_event_rate"),
+                ("fire_aligned", "targeting/aligned_fire_rate"),
+                ("fire_unseen", "targeting/unseen_fire_rate"),
+                ("fire_unaligned", "targeting/unaligned_fire_rate"),
+                ("damage_dealt", "combat/damage_dealt_step_mean"),
+                ("damage_taken", "combat/damage_taken_step_mean"),
+                ("kills", "combat/kill_event_rate"),
+                ("deaths", "combat/death_event_rate"),
+                ("hook_overspeed", "behavior/hook_overspeed_rate"),
+                ("hook_fire_action", "behavior/hook_fire_rate"),
+                ("hook_noop_action", "behavior/hook_noop_rate"),
+                ("hook_release_action", "behavior/hook_release_rate"),
+                ("hook_release_overspeed", "behavior/hook_release_overspeed_rate"),
+                ("hook_correction_available", "hook/target_available_rate"),
+                ("hook_correction_needed", "hook/correction_needed_rate"),
+                ("hook_correction_active", "hook/correction_active_rate"),
+                ("hook_correction_started", "hook/correction_started_rate"),
+                ("hook_correction_escape", "hook/escape_correction_rate"),
+                ("hook_correction_progress", "hook/progress_units_mean"),
+                ("hook_correction_progress_reward", "hook/progress_reward_mean"),
+                ("hook_correction_success", "hook/correction_success_rate"),
+                ("hook_correction_timeout", "hook/correction_timeout_rate"),
+                ("hook_correction_heat", "hook/target_heat_mean"),
+                ("thermal_target_tracks", "lattice/thermal_track_count_mean"),
+                ("thermal_target_heat", "lattice/thermal_heat_mean"),
+                ("thermal_target_age", "lattice/thermal_age_ticks_mean"),
+            ):
+                writer.add_scalar(tag, rollout_behavior[key] / denom, total_env_steps)
+            visible_denom = max(1.0, rollout_behavior["enemy_visible_any"])
+            for key, tag in (
+                ("enemy_visible_count", "targeting/visible_count_when_visible_mean"),
+                ("enemy_visible_nearest", "targeting/visible_nearest_when_visible_mean"),
+                ("enemy_visible_exposure_sum", "targeting/exposure_sum_when_visible_mean"),
+                ("enemy_visible_exposure_max", "targeting/exposure_max_when_visible_mean"),
+                ("aim_yaw_error", "targeting/yaw_error_when_visible_mean"),
+                ("aim_pitch_error", "targeting/pitch_error_when_visible_mean"),
+                ("aim_tracking_quality", "targeting/tracking_quality_when_visible_mean"),
+            ):
+                writer.add_scalar(
+                    tag,
+                    rollout_behavior[key] / visible_denom,
+                    total_env_steps,
+                )
             writer.add_scalar(
                 "memory/bonus_mean",
                 rollout_behavior["session_memory_bonus"] / denom,
@@ -1624,6 +2389,10 @@ def train(cfg: dict):
             ):
                 writer.add_scalar(tag, rollout_behavior[key] / denom, total_env_steps)
 
+        if network_native:
+            for tag, value in servers[0].metrics.as_dict().items():
+                writer.add_scalar(tag, value, total_env_steps)
+
         completed_ep_rewards.clear()
         completed_ep_base_rewards.clear()
         completed_ep_spatial_rewards.clear()
@@ -1682,6 +2451,10 @@ def train(cfg: dict):
         if total_env_steps >= next_save_at:
             ckpt = save_dir / f"policy_{total_env_steps:08d}.pt"
             torch.save(policy.state_dict(), ckpt)
+            torch.save(
+                optimizer.state_dict(),
+                save_dir / f"optimizer_{total_env_steps:08d}.pt",
+            )
             try:
                 from harness.spatial import save_lattice_state
                 lattice_ckpt = save_lattice_state(
@@ -1729,6 +2502,10 @@ def train(cfg: dict):
 
     final_ckpt = save_dir / f"policy_{total_env_steps:08d}.pt"
     torch.save(policy.state_dict(), final_ckpt)
+    torch.save(
+        optimizer.state_dict(),
+        save_dir / f"optimizer_{total_env_steps:08d}.pt",
+    )
     try:
         from harness.spatial import save_lattice_state
         save_lattice_state(
@@ -1753,10 +2530,9 @@ def train(cfg: dict):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    for k, v in DEFAULT.items():
-        p.add_argument(f"--{k}", type=type(v), default=v)
-    p.add_argument("--resume", action="store_true",
-                   help="Load latest checkpoints/policy_*.pt and continue from its step count")
-    args = p.parse_args()
-    train(vars(args))
+    print(
+        "retired: use train.multires_primary with the attested network-client "
+        "lattice runtime",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)

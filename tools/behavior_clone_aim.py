@@ -59,17 +59,23 @@ def _pick_device() -> torch.device:
     return torch.device("cpu")
 
 
-def _nearest_visible_enemy(obs) -> Optional[np.ndarray]:
-    """Return the nearest visible enemy's bot-local xyz vector."""
+def _nearest_visible_enemy_row(obs) -> Optional[np.ndarray]:
+    """Return the nearest sensed enemy row, including exposure sign."""
     best = None
     count = max(0, min(int(obs.entity_count), obs.entities.shape[0]))
     for ent in obs.entities[:count]:
-        if ent[7] <= 0.5 or ent[8] <= 0.5:
+        if ent[7] <= 0.5 or abs(float(ent[8])) <= 0.0:
             continue
         dist = float(np.linalg.norm(ent[:3]))
         if best is None or dist < best[0]:
-            best = (dist, ent[:3].copy())
+            best = (dist, ent.copy())
     return None if best is None else best[1]
+
+
+def _nearest_visible_enemy(obs) -> Optional[np.ndarray]:
+    """Return the nearest sensed enemy's bot-local xyz vector."""
+    row = _nearest_visible_enemy_row(obs)
+    return None if row is None else row[:3].copy()
 
 
 def _local_aim_target(
@@ -127,21 +133,27 @@ def _teacher_action(
     aim_pitch_deg: float = DEFAULT_AIM_PITCH_DEG,
 ) -> np.ndarray:
     action = np.array([0.35, 0.0, 24.0, 0.0, 0.0, 0.0, 0.0, TEACHER_WEAPON], dtype=np.float32)
-    rel_xyz = _nearest_visible_enemy(obs)
-    if rel_xyz is None:
+    target_row = _nearest_visible_enemy_row(obs)
+    if target_row is None:
         return action
+    rel_xyz = target_row[:3]
 
     yaw_delta, pitch_delta = _local_aim_target(rel_xyz, float(obs.pitch))
     action[0] = 0.0
     action[1] = 0.0
     yaw_command = float(np.clip(yaw_delta, -45.0, 45.0))
     pitch_command = float(np.clip(pitch_delta, -30.0, 30.0))
+    pitch_command = float(
+        np.clip(float(obs.pitch) + pitch_command, -89.0, 89.0)
+        - float(obs.pitch)
+    )
     action[2] = yaw_command
     action[3] = pitch_command
     # Do not teach the policy to fire while it is still turning. The old
     # labels marked every visible target as fire=1, including targets 180
     # degrees behind the bot, which explicitly trained an always-fire policy.
-    action[5] = float(
+    selected_actionable = target_row[8] > 0.0
+    action[5] = float(selected_actionable and
         _fire_after_command(
             yaw_delta,
             pitch_delta,
@@ -345,7 +357,7 @@ def synthetic_aim(
 
 def _visible_mask(obs_t: torch.Tensor) -> torch.Tensor:
     ents = obs_t[:, ENT_OFF:ENT_OFF + ENT_CNT * ENT_DIM].reshape(-1, ENT_CNT, ENT_DIM)
-    return ((ents[:, :, 7] > 0.5) & (ents[:, :, 8] > 0.5)).any(dim=1)
+    return ((ents[:, :, 7] > 0.5) & (ents[:, :, 8].abs() > 0.0)).any(dim=1)
 
 
 def _distill_kl(current: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
@@ -402,7 +414,7 @@ def evaluate_policy(
     pred = _policy_outputs(policy, obs, device, args.eval_batch_size)
     ref = _policy_outputs(reference, obs, device, args.eval_batch_size)
     ents = obs[:, ENT_OFF:ENT_OFF + ENT_CNT * ENT_DIM].reshape(-1, ENT_CNT, ENT_DIM)
-    visible = ((ents[:, :, 7] > 0.5) & (ents[:, :, 8] > 0.5)).any(axis=1)
+    visible = ((ents[:, :, 7] > 0.5) & (np.abs(ents[:, :, 8]) > 0.0)).any(axis=1)
     fire_target = actions[:, 5] > 0.5
 
     pred_cont = pred["cont"].copy()
@@ -417,7 +429,7 @@ def evaluate_policy(
     predicted_post_aligned = np.zeros(len(obs), dtype=bool)
     for row in np.flatnonzero(visible):
         candidates = ents[row][
-            (ents[row, :, 7] > 0.5) & (ents[row, :, 8] > 0.5)
+            (ents[row, :, 7] > 0.5) & (np.abs(ents[row, :, 8]) > 0.0)
         ]
         rel_xyz = min(candidates, key=lambda ent: float(np.linalg.norm(ent[:3])))[:3]
         current_pitch = float(obs[row, 184] * 90.0)
@@ -613,6 +625,12 @@ def train_bc(policy: Q2BotPolicy, obs: np.ndarray, actions: np.ndarray, device: 
 
 
 def main() -> int:
+    print(
+        "retired: behavior-clone aim checkpoints are not admitted by the "
+        "multires lineage",
+        file=sys.stderr,
+    )
+    return 2
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument(

@@ -31,15 +31,21 @@ def _raw_obs(rel_xyz=None, pitch=0.0):
     )
 
 
-def _policy_obs(rel_xyz=None, pitch=0.0, alive=True):
+def _policy_obs(rel_xyz=None, pitch=0.0, alive=True, speed=0.0):
     obs = torch.zeros(OBS_DIM, dtype=torch.float32)
     obs[6] = 0.5 if alive else 0.0
+    obs[3] = speed / 1000.0
     obs[_AIM_PITCH_OBS_INDEX] = pitch / 90.0
     if rel_xyz is not None:
         ent = obs[ENT_OFF:ENT_OFF + ENT_DIM]
         ent[:3] = torch.as_tensor(rel_xyz) / 4096.0
         ent[6] = 0.5
         ent[7:9] = 1.0
+    return obs
+
+
+def _set_exposure(obs, exposure):
+    obs[ENT_OFF + 8] = float(exposure)
     return obs
 
 
@@ -82,13 +88,47 @@ def test_anchor_masks_and_nearest_live_visible_enemy():
     hidden = _aim_anchor_targets(_policy_obs(None).view(1, 1, -1))
     assert not bool(hidden["look_mask"][0, 0])
     assert bool(hidden["fire_mask"][0, 0])
+    assert not bool(hidden["posture_mask"][0, 0])
     assert int(hidden["fire_target"][0, 0]) == 0
+
+    pitched = _aim_anchor_targets(
+        _policy_obs(None, pitch=24.0, speed=120.0).view(1, 1, -1)
+    )
+    assert bool(pitched["posture_mask"][0, 0])
+    assert torch.isclose(
+        pitched["posture_pitch_target"][0, 0], torch.tensor(-24.0)
+    )
+
+    visible = _aim_anchor_targets(
+        _policy_obs((100.0, 0.0, 0.0), pitch=24.0).view(1, 1, -1)
+    )
+    assert not bool(visible["posture_mask"][0, 0])
 
     dead = _aim_anchor_targets(
         _policy_obs((100.0, 0.0, 0.0), alive=False).view(1, 1, -1)
     )
     assert not bool(dead["look_mask"][0, 0])
     assert not bool(dead["fire_mask"][0, 0])
+    assert not bool(dead["posture_mask"][0, 0])
+
+
+def test_anchor_tracks_protected_target_without_teaching_fire():
+    obs = _set_exposure(
+        _policy_obs((100.0, 0.0, 0.0)), -0.5
+    ).view(1, 1, -1)
+    targets = _aim_anchor_targets(obs)
+
+    assert bool(targets["look_mask"][0, 0])
+    assert bool(targets["has_target"][0, 0])
+    assert int(targets["fire_target"][0, 0]) == 0
+
+
+def test_anchor_emits_only_executable_pitch_near_engine_limit():
+    obs = _policy_obs((100.0, 0.0, -100.0), pitch=86.0).view(1, 1, -1)
+    targets = _aim_anchor_targets(obs)
+
+    assert float(targets["look_target"][0, 0, 1]) <= 3.0 + 1e-5
+    assert float(targets["look_target"][0, 0, 1]) >= -30.0
 
 
 def test_balanced_binary_weights_are_finite_and_equalize_class_mass():
@@ -116,18 +156,26 @@ def test_anchor_gradients_reach_only_intended_actor_heads_directly():
     obs = torch.stack(
         (
             _policy_obs((100.0, 83.91, 0.0)),
-            _policy_obs(None),
+            _policy_obs(None, speed=120.0),
         )
     ).view(1, 2, -1)
     params, _value, _hx = policy(obs, policy.init_hidden(1))
     actions = torch.zeros(1, 2, 8)
+    actions[0, 1, 0] = 1.0
     actions[..., 7] = torch.tensor([[3.0, 4.0]])
     targets = _aim_anchor_targets(obs)
     weights = _balanced_binary_class_weights(
         targets["fire_target"], targets["fire_mask"]
     )
     metrics = _aim_anchor_loss(
-        policy, params, actions, targets, weights, look_weight=16.0, fire_weight=1.0
+        policy,
+        params,
+        actions,
+        targets,
+        weights,
+        look_weight=16.0,
+        posture_weight=4.0,
+        fire_weight=1.0,
     )
     metrics["inner"].backward()
 
@@ -149,3 +197,4 @@ def test_anchor_gradients_reach_only_intended_actor_heads_directly():
 
 def test_anchor_is_default_off():
     assert DEFAULT["aim_anchor_coef"] == 0.0
+    assert DEFAULT["aim_anchor_posture_weight"] == 4.0

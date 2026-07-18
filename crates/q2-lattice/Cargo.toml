@@ -1,0 +1,30 @@
+[package]
+name = "q2-lattice"
+version = "0.1.0"
+edition = "2024"
+description = "Batched nearest-signal kernel for q2-ml-bot's Vector Lattice"
+license = "MIT"
+
+[lib]
+name = "q2_lattice_rs"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+python = ["dep:numpy", "dep:pyo3"]
+
+[dependencies]
+numpy = { version = "0.27", optional = true }
+pyo3 = { version = "0.27", features = ["abi3-py310", "extension-module"], optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+zstd = "0.13"
+
+[[bin]]
+name = "q2-atlas-pack"
+path = "src/bin/q2_atlas_pack.rs"
+
+[[bin]]
+name = "q2-atlas-verify"
+path = "src/bin/q2_atlas_verify.rs"

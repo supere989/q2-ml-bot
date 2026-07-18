@@ -98,15 +98,26 @@ def discover_map_pool(
 
 
 def _decode_action(raw: np.ndarray) -> Action:
+    from .protocol import VerticalIntent
+
+    values = np.asarray(raw, dtype=np.float64)
+    if values.shape != (8,) or not np.isfinite(values).all():
+        raise ValueError("policy action must be one finite eight-value vector")
+    categorical = tuple(int(values[index]) for index in range(4, 8))
+    if any(float(value) != values[index] for index, value in zip(range(4, 8), categorical)):
+        raise ValueError("policy categorical actions must be exact integers")
+    vertical, fire, hook, weapon = categorical
+    if vertical not in (0, 1, 2) or fire not in (0, 1) or not 0 <= hook <= 3 or not 0 <= weapon <= 9:
+        raise ValueError("policy categorical action is outside the frozen cardinality")
     return Action(
-        move_forward = float(np.clip(raw[0], -1, 1)),
-        move_right   = float(np.clip(raw[1], -1, 1)),
-        look_yaw     = float(np.clip(raw[2], -45, 45)),
-        look_pitch   = float(np.clip(raw[3], -30, 30)),
-        jump         = bool(raw[4] > 0.5),
-        fire         = bool(raw[5] > 0.5),
-        hook         = int(np.clip(raw[6], 0, 3)),
-        weapon       = int(np.clip(raw[7], 0, 9)),
+        move_forward = float(np.clip(values[0], -1, 1)),
+        move_right   = float(np.clip(values[1], -1, 1)),
+        look_yaw     = float(np.clip(values[2], -45, 45)),
+        look_pitch   = float(np.clip(values[3], -30, 30)),
+        vertical_intent = VerticalIntent(vertical),
+        fire         = bool(fire),
+        hook         = hook,
+        weapon       = weapon,
     )
 
 
@@ -143,6 +154,13 @@ def _is_fresh_obs_transition(obs: Observation, previous: Optional[Observation]) 
     if previous is None or int(obs.tick) != int(previous.tick):
         return True
     return bool(obs.is_terminal) and not bool(previous.is_terminal)
+
+
+def _observations_share_tick(observations) -> bool:
+    """Whether every slot has reached one common engine frame."""
+    if not observations or any(obs is None for obs in observations):
+        return False
+    return len({int(obs.tick) for obs in observations}) == 1
 
 
 class Q2MultiEnv:
@@ -318,11 +336,10 @@ class Q2MultiEnv:
             f"set ml_async {1 if self.ml_async else 0}",
             "set use_hook 1",
             "set hook_speed 1900",
+            # Lithium's live Hook_Service uses hook_pullspeed as a direct
+            # velocity override.  Do not emit the old Python-only pullscale,
+            # gravity-compensation, minimum-lift, or pullspeed-max cvars.
             "set hook_pullspeed 1700",
-            "set hook_pullspeed_max 2000",
-            "set hook_pullscale 0.25",
-            "set hook_gravity_comp 1.0",
-            "set hook_min_lift 180",
             "set hook_maxtime 15.0",
             "set hook_damage 1",
             "set hook_initdamage 10",
@@ -471,8 +488,20 @@ class Q2MultiEnv:
         rotation at high timescale; this costs the map load (~2s). Falls
         back to a full restart if the pipe or the reload fails.
         """
-        old_ticks = [obs.tick if obs is not None else 0 for obs in self._last_obs]
         self.active_map = self._choose_map()
+
+        # Empty the old level's already-queued datagrams before asking the
+        # server to rotate.  Draining after the command can discard the first
+        # new-level frames, and comparing tick numbers is not safe: a quick
+        # rotation may already have advanced past the old level's last tick.
+        for sock in self._socks:
+            if sock:
+                sock.settimeout(0.0)
+                while True:
+                    try:
+                        sock.recvfrom(4096)
+                    except (BlockingIOError, socket.timeout, OSError):
+                        break
         try:
             # `sv ml_rotate` = Bot_LevelChange() + gamemap. A bare gamemap
             # bypasses ExitLevel, so 3zb2 never re-reserves its bots and the
@@ -488,36 +517,23 @@ class Q2MultiEnv:
         self._last_obs   = [None] * self.n_ml
         self._ep_steps   = [0] * self.n_ml
 
+        # A common tick naturally filters any in-flight old-level stragglers:
+        # they cannot form a complete aligned set after the server changes
+        # levels. Reply to every slot promptly until lockstep is restored.
+        initial = self._bootstrap_aligned_observations(timeout=25.0)
+        if initial is None:
+            print(
+                f"[Server {self.server_id}] live rotation failed to align "
+                "— falling back to restart",
+                flush=True,
+            )
+            self._stop_server()
+            return self.reset_all()
+
         obs_list = []
-        for i, slot in enumerate(self.bot_slots):
-            sock = self._socks[i]
-            if sock:
-                sock.settimeout(0.0)
-                while True:
-                    try:
-                        sock.recvfrom(4096)
-                    except (BlockingIOError, socket.timeout, OSError):
-                        break
-            # level.framenum resets on map load, so a fresh-map obs has a
-            # smaller tick than anything from the old map. Skip stragglers.
-            obs = None
-            deadline = time.monotonic() + 25.0
-            while time.monotonic() < deadline:
-                cand = self._recv_one(i, timeout=max(0.1, deadline - time.monotonic()))
-                if cand is None:
-                    break
-                if old_ticks[i] and cand.tick >= old_ticks[i]:
-                    continue  # old-map straggler
-                obs = cand
-                break
-            if obs is None:
-                print(f"[Server {self.server_id}] live rotation failed on slot {slot} "
-                      f"— falling back to restart", flush=True)
-                self._stop_server()
-                return self.reset_all()
+        for i, obs in enumerate(initial):
             self._last_obs[i] = obs
             self._spatial_rewards[i].reset(self.active_map, obs)
-            self._send_action(i, np.zeros(ACTION_DIM, np.float32), obs.tick)
             obs_list.append(self._obs_vector(i, obs))
         return obs_list
 
@@ -537,23 +553,86 @@ class Q2MultiEnv:
         self._last_obs   = [None] * self.n_ml
         self._ep_steps   = [0] * self.n_ml
 
-        obs_list = []
-        for i, slot in enumerate(self.bot_slots):
-            print(f"[Server {self.server_id}] waiting for obs on slot {slot}...")
-            obs = self._recv_one(i, timeout=25.0)
-            if obs is None:
-                print(f"[Server {self.server_id}] slot {slot}: no obs — restarting")
+        initial = None
+        if self.n_ml > 1:
+            initial = self._bootstrap_aligned_observations(timeout=25.0)
+            if initial is None:
+                print(
+                    f"[Server {self.server_id}] ML slots failed to align — restarting",
+                    flush=True,
+                )
                 self._stop_server()
                 time.sleep(2)
                 return self.reset_all(_retries + 1)
+
+        obs_list = []
+        for i, slot in enumerate(self.bot_slots):
+            if initial is None:
+                print(f"[Server {self.server_id}] waiting for obs on slot {slot}...")
+                obs = self._recv_one(i, timeout=25.0)
+                if obs is None:
+                    print(f"[Server {self.server_id}] slot {slot}: no obs — restarting")
+                    self._stop_server()
+                    time.sleep(2)
+                    return self.reset_all(_retries + 1)
+                self._send_action(i, np.zeros(ACTION_DIM, np.float32), obs.tick)
+            else:
+                obs = initial[i]
             self._last_obs[i] = obs
             self._ep_steps[i] = 0
             self._spatial_rewards[i].reset(self.active_map, obs)
-            self._send_action(i, np.zeros(ACTION_DIM, np.float32), obs.tick)
             obs_list.append(self._obs_vector(i, obs))
             print(f"[Server {self.server_id}] slot {slot} ready, tick={obs.tick}")
 
         return obs_list
+
+    def _bootstrap_aligned_observations(
+        self,
+        timeout: float,
+        reject_ticks_at_or_above: Optional[List[int]] = None,
+    ) -> Optional[List[Observation]]:
+        """Arm every cold-start slot and advance them to one common tick.
+
+        Sequential bootstrap let early slots advance while later slots still
+        waited for their first packet. Under deterministic zero-wait startup,
+        four slots entered the first rollout at different frames and strict
+        lockstep could never converge. Service every readable socket promptly,
+        echo a zero action for each observed tick, and return only after all
+        slots report the same global engine frame.
+        """
+        latest: List[Optional[Observation]] = [None] * self.n_ml
+        sock_to_slot = {
+            sock: i for i, sock in enumerate(self._socks) if sock is not None
+        }
+        if len(sock_to_slot) != self.n_ml:
+            return None
+        for slot in self.bot_slots:
+            print(f"[Server {self.server_id}] aligning slot {slot}...", flush=True)
+
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        zero_action = np.zeros(ACTION_DIM, np.float32)
+        while time.monotonic() < deadline:
+            remaining = max(0.0, deadline - time.monotonic())
+            readable, _, _ = select.select(
+                list(sock_to_slot), [], [], min(0.25, remaining)
+            )
+            for sock in readable:
+                i = sock_to_slot[sock]
+                while True:
+                    obs = self._recv_one(i, timeout=0.0)
+                    if obs is None:
+                        break
+                    if (
+                        reject_ticks_at_or_above is not None
+                        and reject_ticks_at_or_above[i]
+                        and int(obs.tick) >= int(reject_ticks_at_or_above[i])
+                    ):
+                        continue
+                    latest[i] = obs
+                    self._send_action(i, zero_action, obs.tick)
+            if _observations_share_tick(latest):
+                return [obs for obs in latest if obs is not None]
+        return None
 
     def step_all(self, actions: List[np.ndarray]) -> List[Tuple]:
         """

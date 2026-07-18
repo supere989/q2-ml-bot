@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:q2-ml:q2-multires-b8-season-gate-v1",
+  "title": "Independent generated/stock G0-G5 quality gate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "tool", "season_id", "season_kind", "archive", "identities", "inputs", "window", "predicates", "failures", "passed", "automatic_promotion", "public_mutation_authorized", "gate_sha256"],
+  "properties": {
+    "schema": {"const": "q2-multires-b8-season-gate-v1"},
+    "tool": {"const": "assemble_b8_b9_evidence"},
+    "season_id": {"type": "string", "minLength": 1},
+    "season_kind": {"enum": ["generated", "stock"]},
+    "archive": {
+      "type": "object", "additionalProperties": false,
+      "required": ["archive_id", "bytes", "sha256", "manifest_sha256"],
+      "properties": {
+        "archive_id": {"type": "string", "minLength": 1},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "identities": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "runtime_manifest_sha256", "atlas_sha256", "atlas_catalog_sha256",
+        "lineage_root_sha256", "b7_gate_evidence_sha256",
+        "legacy_absence_evidence_sha256", "artifacts"
+      ],
+      "properties": {
+        "runtime_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "atlas_sha256": {"$ref": "#/$defs/sha256"},
+        "atlas_catalog_sha256": {"$ref": "#/$defs/sha256"},
+        "lineage_root_sha256": {"$ref": "#/$defs/sha256"},
+        "b7_gate_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "legacy_absence_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "artifacts": {
+          "type": "object", "minProperties": 20, "maxProperties": 20,
+          "additionalProperties": {"$ref": "#/$defs/fileRecord"}
+        }
+      }
+    },
+    "inputs": {
+      "type": "object", "additionalProperties": false,
+      "required": ["current_season", "evaluation", "current_season_evidence_sha256", "evaluation_evidence_sha256"],
+      "properties": {
+        "current_season": {"$ref": "#/$defs/fileRecord"},
+        "evaluation": {"$ref": "#/$defs/fileRecord"},
+        "current_season_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "evaluation_evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "window": {
+      "type": "object", "additionalProperties": false,
+      "required": ["causal_metrics_window_sha256", "network_metrics_window_sha256", "policy_start_version", "policy_end_version", "accepted_transitions"],
+      "properties": {
+        "causal_metrics_window_sha256": {"$ref": "#/$defs/sha256"},
+        "network_metrics_window_sha256": {"$ref": "#/$defs/sha256"},
+        "policy_start_version": {"type": "integer", "minimum": 0},
+        "policy_end_version": {"type": "integer", "minimum": 0},
+        "accepted_transitions": {"type": "integer", "minimum": 1}
+      }
+    },
+    "predicates": {
+      "type": "object", "additionalProperties": false,
+      "required": ["G0", "G1", "G2", "G3", "G4", "G5"],
+      "properties": {
+        "G0": {"$ref": "#/$defs/g0Predicate"}, "G1": {"$ref": "#/$defs/predicate"},
+        "G2": {"$ref": "#/$defs/predicate"}, "G3": {"$ref": "#/$defs/predicate"},
+        "G4": {"$ref": "#/$defs/predicate"}, "G5": {"$ref": "#/$defs/predicate"}
+      }
+    },
+    "failures": {"type": "array", "items": {"type": "string"}},
+    "passed": {"type": "boolean"},
+    "automatic_promotion": {"const": false},
+    "public_mutation_authorized": {"const": false},
+    "gate_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "fileRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "predicate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["passed", "failures"],
+      "properties": {"passed": {"type": "boolean"}, "failures": {"type": "array", "items": {"type": "string"}}}
+    },
+    "g0Predicate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["passed", "failures", "evidence"],
+      "properties": {
+        "passed": {"type": "boolean"},
+        "failures": {"type": "array", "items": {"type": "string"}},
+        "evidence": {"$ref": "#/$defs/g0Evidence"}
+      }
+    },
+    "g0Evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "assertions", "evidence", "evidence_sha256"],
+      "properties": {
+        "schema": {"const": "q2-multires-b8-g0-evidence-summary-v1"},
+        "assertions": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "archive_exact_read_only", "runtime_manifest_attested",
+            "integration_rerun_passed", "source_clean_and_b6_bound",
+            "fresh_lineage_stage7_bound", "atlas_catalog_active_atlas_bound",
+            "legacy_selectors_absent", "public_teacher_fields_absent",
+            "private_causal_payload_absent"
+          ],
+          "properties": {
+            "archive_exact_read_only": {"const": true},
+            "runtime_manifest_attested": {"const": true},
+            "integration_rerun_passed": {"const": true},
+            "source_clean_and_b6_bound": {"const": true},
+            "fresh_lineage_stage7_bound": {"const": true},
+            "atlas_catalog_active_atlas_bound": {"const": true},
+            "legacy_selectors_absent": {"const": true},
+            "public_teacher_fields_absent": {"const": true},
+            "private_causal_payload_absent": {"const": true}
+          }
+        },
+        "evidence": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "archive_manifest_sha256", "runtime_manifest_sha256",
+            "integration_report_sha256", "b6_campaign_sha256",
+            "source_identity_sha256", "retirement_manifest_sha256",
+            "atlas_catalog_sha256", "b7_gate_evidence_sha256",
+            "legacy_absence_evidence_sha256", "current_season_evidence_sha256",
+            "evaluation_evidence_sha256"
+          ],
+          "properties": {
+            "archive_manifest_sha256": {"$ref": "#/$defs/sha256"},
+            "runtime_manifest_sha256": {"$ref": "#/$defs/sha256"},
+            "integration_report_sha256": {"$ref": "#/$defs/sha256"},
+            "b6_campaign_sha256": {"$ref": "#/$defs/sha256"},
+            "source_identity_sha256": {"$ref": "#/$defs/sha256"},
+            "retirement_manifest_sha256": {"$ref": "#/$defs/sha256"},
+            "atlas_catalog_sha256": {"$ref": "#/$defs/sha256"},
+            "b7_gate_evidence_sha256": {"$ref": "#/$defs/sha256"},
+            "legacy_absence_evidence_sha256": {"$ref": "#/$defs/sha256"},
+            "current_season_evidence_sha256": {"$ref": "#/$defs/sha256"},
+            "evaluation_evidence_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

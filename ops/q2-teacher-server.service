@@ -1,0 +1,28 @@
+[Unit]
+Description=Q2 dedicated 3ZB2 teacher server
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=q2mlbot
+WorkingDirectory=/home/q2mlbot/q2-ml-bot
+Environment=Q2_ROOT=/home/q2mlbot/q2_teacher_runtime
+Environment=Q2_BIND_IP=127.0.0.1
+ExecStart=/home/q2mlbot/venv/bin/python3 -u tools/teacher_server.py \
+  --map_farm_url http://100.86.206.50:32513 \
+  --stock_maps q2dm2,q2dm4,q2dm6,q2dm8 \
+  --rotation_seed 2204 \
+  --port 28001 \
+  --receiver_addr 100.86.206.50 \
+  --receiver_port 32511 \
+  --botlist ml6sk1 \
+  --maxclients 8 \
+  --timelimit 10 \
+  --fraglimit 0
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
