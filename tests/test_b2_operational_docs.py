@@ -196,7 +196,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
 
-def test_current_gate_contract_retires_71450_and_clears_active_authority() -> None:
+def test_current_gate_contract_retires_71450_and_activates_71451() -> None:
     text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
         encoding="utf-8"
     )
@@ -262,7 +262,18 @@ def test_current_gate_contract_retires_71450_and_clears_active_authority() -> No
         "permanently-failed-stock-objective-admission-pre-source",
         "source authorization was not consumed",
         "Cohort 71450 is permanently retired",
-        "`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort",
+        "Active 71451 final cohort",
+        "b2g26_final_71451",
+        "B2-GENERATED-COHORT-71451-DECLARATION.json",
+        "e48e0ada7bcfa5a49bfdc6f69a70104daccf83b5c140e962b07305c9b6fac2bd",
+        "71451000..71451003",
+        "71451600..71451603",
+        "b2q26_a4500d2_71808000",
+        "a0b411d394e8c8a5fcea6e185cf364abf82578c262eece6e8cd892144c3b204c",
+        "a4500d2634ae0876ef9725dc94f729dbea2cb3fd",
+        "a9a33e58e09f8ea745ee681d47c3f3d76061bd5c",
+        "6309a2745796b884d105f45651d9df16159e9ed5408f27a23baee1d84713e856",
+        "`ACTIVE_FINAL_AUTHORITY` explicitly pins",
         "exact eleven-path declaration/gate/schema/direct-test successor",
         "Lithium hook oracle",
         "byte identity of the CM, Pmove, and hook oracles",
@@ -278,13 +289,16 @@ def test_current_gate_contract_retires_71450_and_clears_active_authority() -> No
         "The active final `COHORT_ID` is `b2g26_final_71447`",
         "The active final `COHORT_ID` is `b2g26_final_71448`",
         "The active final `COHORT_ID` is `b2g26_final_71449`",
+        "The active final `COHORT_ID` is `b2g26_final_71450`",
         "Active 71448 final cohort",
         "Active 71449 final cohort",
+        "Active 71450 final cohort",
         "sole active eligible declaration pair",
         "The active authority and schema both pin 71448",
         "The active authority and schema both pin 71449",
-        "Active 71450 final cohort",
+        "The active authority and schema both pin 71450",
         "`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71450`",
+        "`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort",
         "historical and non-executable until a successor activation",
     ):
         assert stale_claim not in text

@@ -28,9 +28,12 @@ DECLARATION_71449 = (
 DECLARATION_71450 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71450-DECLARATION.json"
 )
+DECLARATION_71451 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71451-DECLARATION.json"
+)
 HISTORICAL_DECLARATIONS = tuple(
     ROOT / f"docs/multires/B2-GENERATED-COHORT-{number}-DECLARATION.json"
-    for number in range(71427, 71451)
+    for number in range(71427, 71452)
 )
 HEX64 = "a" * 64
 GIT40 = "b" * 40
@@ -193,19 +196,19 @@ def static_pass(map_path: Path) -> dict[str, object]:
 def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> None:
     declaration, digest = cohort.load_declaration(AUTHORITATIVE_DECLARATION)
     declaration_bytes = AUTHORITATIVE_DECLARATION.read_bytes()
-    assert declaration_bytes == DECLARATION_71450.read_bytes()
+    assert declaration_bytes == DECLARATION_71451.read_bytes()
     assert declaration_bytes == cohort.canonical_bytes(declaration)
     assert hashlib.sha256(declaration_bytes).hexdigest() == (
-        "d02c7c0737cf38be314394dd30e0293dcdf0b80c004efc1e0d072abc72f437c4"
+        "e48e0ada7bcfa5a49bfdc6f69a70104daccf83b5c140e962b07305c9b6fac2bd"
     )
     style_bases = (
-        ("open", 71450000),
-        ("towers", 71450100),
-        ("canyon", 71450200),
-        ("pits", 71450300),
-        ("arena_open", 71450400),
-        ("arena_vertical", 71450500),
-        ("arena_lanes", 71450600),
+        ("open", 71451000),
+        ("towers", 71451100),
+        ("canyon", 71451200),
+        ("pits", 71451300),
+        ("arena_open", 71451400),
+        ("arena_vertical", 71451500),
+        ("arena_lanes", 71451600),
     )
     expected = [
         {
@@ -221,7 +224,7 @@ def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> Non
     ]
 
     assert len(digest) == 64
-    assert declaration["cohort_id"] == "b2g26_final_71450"
+    assert declaration["cohort_id"] == "b2g26_final_71451"
     assert declaration["maps"] == expected
     assert declaration["selection"] == {
         "timing": "declared-before-generation",
@@ -243,7 +246,7 @@ def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> Non
     historical_rows = [
         row
         for path in HISTORICAL_DECLARATIONS
-        if path != DECLARATION_71450
+        if path != DECLARATION_71451
         for row in cohort.load_declaration(path)[0]["maps"]
     ]
     assert {row["seed"] for row in declaration["maps"]}.isdisjoint(

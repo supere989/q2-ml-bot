@@ -1196,14 +1196,50 @@ with phase `stock-objective-l1-admission-before-source` and status
 `permanently-failed-stock-objective-admission-pre-source`.
 Cohort 71450 is permanently retired. None of its qualification, preflight, stock, partial,
 declaration, alias, or activation bytes may be retried, resumed, reused,
-copied forward, salvaged, substituted, or admitted.
+copied forward, salvaged, substituted, or admitted. The authority was cleared
+to `None` after that terminal failure. A successor required the bounded
+stock/authored objective-omission policy, exact emitted-plus-omitted BSP item
+accounting, generated zero-omission enforcement, a completely fresh green
+disposable qualification, and a separately committed immutable successor
+declaration. The historical 71450 qualification and declaration cannot
+authorize that successor.
 
-`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort.
-A successor requires the bounded stock/authored objective-omission policy,
-exact emitted-plus-omitted BSP item accounting, generated zero-omission
-enforcement, a completely fresh green disposable qualification, and a
-separately committed immutable successor declaration. The historical 71450
-qualification and declaration cannot authorize that successor.
+### Active 71451 final cohort
+
+The stock-objective-admission-corrected implementation was qualified at
+commit/tree
+`a4500d2634ae0876ef9725dc94f729dbea2cb3fd` /
+`a9a33e58e09f8ea745ee681d47c3f3d76061bd5c`. Fresh disposable
+qualification `b2q26_a4500d2_71808000` passed all seven executable stages
+28/28 and all six infrastructure checks. Its canonical green, non-admissible
+report SHA-256 is
+`a0b411d394e8c8a5fcea6e185cf364abf82578c262eece6e8cd892144c3b204c`;
+it binds the immutable `055c6930-r2` B1 authority whose canonical gate
+SHA-256 is
+`055c693027a4091178705331d1bf6c64a81638995f041e978aaf95e33effd354`.
+Analyzer closure SHA-256 is
+`6309a2745796b884d105f45651d9df16159e9ed5408f27a23baee1d84713e856`.
+The qualification remains `non_admissible: true` and
+`final_cohort_authorized: false`; it supplies no map, seed, stage, artifact,
+Dyn evidence, or passing subset to the final lane.
+
+`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71451`, immutable
+declaration `B2-GENERATED-COHORT-71451-DECLARATION.json`, declaration
+SHA-256
+`e48e0ada7bcfa5a49bfdc6f69a70104daccf83b5c140e962b07305c9b6fac2bd`,
+and the exact eleven-path declaration/gate/schema/direct-test successor
+delta. The current alias is byte-identical. The declaration uses fresh,
+disjoint seed blocks 71451000..71451003 through 71451600..71451603.
+Exactly one fresh, strictly sequential, immutable/no-retry producer lifecycle
+is authorized. This activation does not admit qualification artifacts,
+retired bytes, passing subsets, deployment, or training.
+
+The declaration-bearing 71451 producer commit must be a strict successor of
+qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
+must prove ancestry, the exact qualified commit/tree and report binding,
+byte-identical stable generator/routes/Atlas-analyzer authority fields, and a
+complete Git delta equal to the frozen 71451
+declaration/gate/schema/direct-test authorization path set.
 
 The declaration-bearing 71449 producer commit was a strict successor of
 qualified commit `7c3463c28e8913e340d77f182e52752be3381999`. Its exact
@@ -1295,16 +1331,17 @@ check.
 
 ## Offline workflow
 
-`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort.
-The command templates in this section are retained only as the required shape
-for a future, separately qualified and explicitly activated successor. They
-are not executable against the current alias or any 71450 root. Cohorts 71449
-and 71450 remain terminally retired under their canonical failure records.
+`ACTIVE_FINAL_AUTHORITY` now pins `b2g26_final_71451`. The command
+templates in this section are executable only from the exact clean activated
+snapshot, after the no-write final preauthorization closes every pinned
+runtime input, and only against the fresh 71451 root. Cohorts 71449 and
+71450 remain terminally retired under their canonical failure records; no
+command may name any retired, qualification, 71449, or 71450 path.
 Commands must never name retired cohorts 71426 through 71450. No retired or
 qualification population, report, Dyn evidence, compiled byte, partial stock
-artifact, or passing subset may be copied into a future cohort root. Only a
-new immutable declaration committed after a fresh qualification may restore
-an executable authority and consume its own one-shot source authorization.
+artifact, or passing subset may be copied into a future cohort root. For the
+active 71451 cohort, the first source invocation consumes its sole
+authorization.
 
 The declaration-aware compiler remains the required final-cohort shape.
 Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer

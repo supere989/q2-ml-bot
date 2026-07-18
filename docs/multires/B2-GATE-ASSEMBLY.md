@@ -534,14 +534,47 @@ with phase `stock-objective-l1-admission-before-source` and status
 `permanently-failed-stock-objective-admission-pre-source`.
 Cohort 71450 is permanently retired. None of its qualification, preflight, stock, partial
 q2dm8, declaration, alias, or activation bytes may be retried, resumed,
-reused, copied forward, salvaged, substituted, or admitted.
-
-`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort.
-A successor requires the bounded stock/authored objective-omission policy,
-the exact emitted-plus-omitted BSP item-accounting union, generated zero-
-omission enforcement, a completely fresh green disposable qualification, and
-a separately committed immutable successor declaration. The historical 71450
+reused, copied forward, salvaged, substituted, or admitted. The authority was
+cleared to `None` after that terminal failure. A successor required the
+bounded stock/authored objective-omission policy, the exact
+emitted-plus-omitted BSP item-accounting union, generated zero-omission
+enforcement, a completely fresh green disposable qualification, and a
+separately committed immutable successor declaration. The historical 71450
 qualification and declaration cannot authorize that successor.
+
+### Active 71451 final cohort
+
+The stock-objective-admission-corrected implementation was qualified at
+commit/tree
+`a4500d2634ae0876ef9725dc94f729dbea2cb3fd` /
+`a9a33e58e09f8ea745ee681d47c3f3d76061bd5c`. Fresh qualification
+`b2q26_a4500d2_71808000` passed all seven executable stages 28/28 and all six
+infrastructure checks. Its canonical green, non-admissible report SHA-256 is
+`a0b411d394e8c8a5fcea6e185cf364abf82578c262eece6e8cd892144c3b204c`.
+It binds immutable B1 authority `055c6930-r2`, canonical gate SHA-256
+`055c693027a4091178705331d1bf6c64a81638995f041e978aaf95e33effd354`.
+Analyzer closure SHA-256 is
+`6309a2745796b884d105f45651d9df16159e9ed5408f27a23baee1d84713e856`.
+The qualification remains `non_admissible: true` and
+`final_cohort_authorized: false`; it supplies no map, seed, stage, artifact,
+Dyn evidence, or passing subset to the final lane.
+
+`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71451`, immutable
+declaration `B2-GENERATED-COHORT-71451-DECLARATION.json`, declaration
+SHA-256
+`e48e0ada7bcfa5a49bfdc6f69a70104daccf83b5c140e962b07305c9b6fac2bd`,
+and the exact eleven-path declaration/gate/schema/direct-test successor
+delta. The current alias is byte-identical and declares fresh, disjoint seed
+blocks 71451000..71451003 through 71451600..71451603. This activation
+authorizes exactly one fresh, strictly sequential, no-retry final producer
+lifecycle. It does not admit qualification artifacts, retired bytes, passing
+subsets, deployment, or training.
+
+The declaration-bearing 71451 producer commit must be a strict successor of
+qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
+must prove ancestry, the exact qualified commit/tree and report binding,
+byte-identical stable authority fields, and a complete Git delta equal to the
+frozen 71451 declaration/gate/schema/direct-test authorization path set.
 
 The declaration-bearing 71449 producer commit was a strict successor of
 qualified commit `7c3463c28e8913e340d77f182e52752be3381999`. Its exact
@@ -641,9 +674,9 @@ syntax report must never be required to identify the execution runtime.
 
 The assembler rejects declarations for retired cohorts 71426 through 71450
 before reading campaign evidence. The immutable 71447, 71448, 71449, and
-71450 declarations are historical only. The schema retains historical 71450
-field pins, but `ACTIVE_FINAL_AUTHORITY = None`; neither the schema nor the
-byte-identical alias/named 71450 declaration can infer executable authority.
+71450 declarations are historical only. The active authority and schema both
+pin 71451 and the byte-identical alias/named declaration under
+`ACTIVE_FINAL_AUTHORITY`.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -860,22 +893,22 @@ reuse of any retired cohort byte.
 
 ## Assembly template
 
-This template is retained only as the required shape for a future, separately
-qualified and activated successor. It is not executable while
-`ACTIVE_FINAL_AUTHORITY = None` and must not be run against any retired,
-qualification, or 71450 path. The current alias is byte-identical to the
-immutable retired 71450 declaration and confers no authority. After a fresh
-successor activation, all values must be replaced with that successor's exact
-paths. `OUT` must not exist and must be outside the implementation repository
-so publishing the gate cannot invalidate its own clean-tree authority.
+This template applies only to the active 71451 lifecycle and must not be run
+against any retired, qualification, 71449, or 71450 path. All values are exact
+paths. `OUT` must not exist and must be outside the implementation
+repository so publishing the gate cannot invalidate its own clean-tree
+authority. The authority and schema both pin 71451 and its declaration
+digest, and the current alias is byte-identical to the immutable 71451
+declaration.
 
-The qualified parent is commit `a38b3bad461e63c0c9d3f2a7bb184854aa6b923d`.
-Qualification `b2q26_a38b3ba_71807000` passed all seven stages 28/28 and six
+The qualified parent is commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`.
+Qualification `b2q26_a4500d2_71808000` passed all seven stages 28/28 and six
 infrastructure checks; its green non-admissible report SHA-256 is
-`7f6a4d4c457dc257c93a7eec01f61c7fda4cb79d1737522842dde19d6a341596`.
-Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. These
-71450 qualification facts are historical and non-admissible; they authorize
-no producer lifecycle, artifact, deployment, or training.
+`a0b411d394e8c8a5fcea6e185cf364abf82578c262eece6e8cd892144c3b204c`.
+Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. This
+activation authorizes one no-retry final producer lifecycle and cannot admit
+qualification artifacts, passing subsets, retired bytes, deployment, or
+training.
 
 ```sh
 python tools/assemble_b2_gate.py \
