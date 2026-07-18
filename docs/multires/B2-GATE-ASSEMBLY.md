@@ -366,7 +366,7 @@ salvaged, substituted, or admitted. The active authority was cleared after
 this terminal attempt; a successor required the corrected atomic publisher,
 fresh qualification, and a separately committed immutable declaration.
 
-### Active 71448 final cohort
+### Retired 71448 final attempt
 
 The corrected atomic publisher passed its complete pre-activation proof at
 commit `ae41232662213342aba72823bfdfe68d0ebe475c`: 1,965 Python tests, 61
@@ -385,16 +385,50 @@ non-admissible report SHA-256 is
 `c7a623eed20eea7c115c6167391158be90bb70bd4914e1d591ecee9c1f2ff3d8`.
 It binds the immutable `055c6930-r2` B1 authority.
 
-`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71448`, immutable
+At activation, the authority constant pinned `b2g26_final_71448`, immutable
 declaration `B2-GENERATED-COHORT-71448-DECLARATION.json`, declaration
 SHA-256
 `0b48462a8cd8dfb752a73b711954616dd22d45d857748d316505bd17c976262a`,
 and the exact eleven-path declaration/gate/schema/direct-test successor
-delta. The current alias is byte-identical to that immutable declaration. It
-declares seed blocks 71448000..71448003 through 71448600..71448603. This
-activation authorizes exactly one fresh, strictly sequential, no-retry final
-producer lifecycle. It does not admit qualification artifacts, retired bytes,
+delta. The then-current alias was byte-identical to that immutable
+declaration. It declares seed blocks 71448000..71448003 through
+71448600..71448603; those seeds and map IDs are now retired. That consumed
+activation authorized exactly one fresh, strictly sequential, no-retry final
+producer lifecycle and did not admit qualification artifacts, retired bytes,
 passing subsets, deployment, or training.
+
+The sole 71448 lifecycle consumed its source authorization and passed source
+freeze, real q2tool compilation, compiled static validation, compiled-CM
+preflight, materialization, and claims preparation for all 28 declared maps.
+Atlas construction then failed 0/28: every worker was launched against the
+source-only staged q2-ml-client root, which lacked `release/q2-cm-oracle` and
+`release/q2-pmove-oracle`, so every worker exited 1 on the same missing
+canonical client release closure before writing an analysis artifact. No
+analysis stage was published and no compiled promotion, Dyn, test campaign,
+assembled gate, deployment, or training action ran.
+`B2-GENERATED-COHORT-71448-FAILURE.json` is the canonical terminal authority,
+SHA-256
+`5af6539207d41bfffe4d98404a6cc96de7b14fbc17907d3ab3f7256cf2574350`,
+with terminal phase `atlas-build-missing-canonical-client-release-closure`
+and status `permanently-failed-atlas-build-b1-client-release-closure`.
+
+Cohort 71448 is permanently retired. None of its source, compiled,
+materialized, claims, analysis-diagnostic, report, log, build, WSL,
+authorization, or producer-snapshot bytes may be retried, resumed, reused,
+copied forward, salvaged, substituted, or admitted. `ACTIVE_FINAL_AUTHORITY =
+None`; there is currently no active final cohort. A successor requires the
+pre-source closure fix below, a fresh green disposable qualification, and a
+separately committed immutable declaration before any producer may run.
+
+Final preauthorization must now require and digest the canonical client
+release CM and Pmove oracles beneath `CLIENT_ROOT/release`, the canonical
+Lithium hook oracle beneath `LITHIUM_ROOT/tools`, and the exact Atlas packer
+and verifier binaries, and must prove
+byte identity of the CM, Pmove, and hook oracles against the separately
+supplied B1 authorities before source generation, exactly as the disposable
+qualification driver already does.
+Forwarding `--client-root` and `--lithium-root` without validating those
+canonical release placements is forbidden.
 
 The declaration-bearing 71447 producer commit was a strict successor of
 qualified commit `74628f1bc04c7012903b30d44afa61566f0ff38d`. Its exact
@@ -487,10 +521,11 @@ while the infrastructure producer and materializer remain bound to the
 separate CPython 3.11.4 executable and zstandard module digests above. The
 syntax report must never be required to identify the execution runtime.
 
-The assembler rejects declarations for retired cohorts 71426 through 71447
-before reading campaign evidence. The immutable 71447 declaration is
-historical only. The byte-identical current alias and immutable 71448
-declaration are the sole active eligible declaration pair.
+The assembler rejects declarations for retired cohorts 71426 through 71448
+before reading campaign evidence. The immutable 71447 and 71448 declarations
+are historical only. There is no active eligible declaration pair; a
+successor requires a separately committed fresh declaration after a green
+qualification.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -692,20 +727,24 @@ reuse of any retired cohort byte.
 
 ## Assembly template
 
-All values are exact paths. `OUT` must not exist and must be outside the
-implementation repository so publishing the gate cannot invalidate its own
-clean-tree authority. The active authority and schema both pin 71448 and its
-declaration digest. The current alias is byte-identical to the immutable 71448
-declaration.
+This template is historical and non-executable until a successor activation:
+cohort 71448 is terminally retired, `ACTIVE_FINAL_AUTHORITY = None`, and
+there is currently no active final cohort. It records the required assembler
+shape only and must not be run against any retired, qualification, or 71448
+path. All values are exact paths. `OUT` must not exist and must be outside
+the implementation repository so publishing the gate cannot invalidate its
+own clean-tree authority. At activation, the authority and schema both pinned
+71448 and its declaration digest, and the then-current alias was
+byte-identical to the immutable 71448 declaration.
 
-The qualified parent is commit `ae41232662213342aba72823bfdfe68d0ebe475c`.
+The qualified parent was commit `ae41232662213342aba72823bfdfe68d0ebe475c`.
 Qualification `b2q26_ae41232_71805000` passed all seven stages 28/28 and six
 infrastructure checks; its green non-admissible report SHA-256 is
 `c7a623eed20eea7c115c6167391158be90bb70bd4914e1d591ecee9c1f2ff3d8`.
-Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. This
-activation authorizes one no-retry final producer lifecycle and cannot admit
-qualification artifacts, passing subsets, retired bytes, deployment, or
-training.
+Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. That
+consumed activation authorized one no-retry final producer lifecycle and
+could not admit qualification artifacts, passing subsets, retired bytes,
+deployment, or training.
 
 ```sh
 python tools/assemble_b2_gate.py \

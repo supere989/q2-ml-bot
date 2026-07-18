@@ -196,7 +196,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
 
-def test_current_gate_contract_retires_71447_and_activates_71448() -> None:
+def test_current_gate_contract_retires_71448_and_clears_active_authority() -> None:
     text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
         encoding="utf-8"
     )
@@ -216,7 +216,23 @@ def test_current_gate_contract_retires_71447_and_activates_71448() -> None:
         "71448600..71448603",
         "b2q26_ae41232_71805000",
         "c7a623eed20eea7c115c6167391158be90bb70bd4914e1d591ecee9c1f2ff3d8",
-        "`ACTIVE_FINAL_AUTHORITY` explicitly pins",
+        "Retired 71448 final attempt",
+        "B2-GENERATED-COHORT-71448-FAILURE.json",
+        "5af6539207d41bfffe4d98404a6cc96de7b14fbc17907d3ab3f7256cf2574350",
+        "atlas-build-missing-canonical-client-release-closure",
+        "permanently-failed-atlas-build-b1-client-release-closure",
+        "source-only staged q2-ml-client root",
+        "release/q2-cm-oracle",
+        "release/q2-pmove-oracle",
+        "Cohort 71448 is permanently retired",
+        "`ACTIVE_FINAL_AUTHORITY = None`",
+        "there is currently no active final cohort",
+        "historical and non-executable until a successor activation",
+        "Lithium hook oracle",
+        "byte identity of the CM, Pmove, and hook oracles",
+        "separately committed immutable declaration",
+        "fresh green disposable qualification",
+        "The assembler rejects declarations for retired cohorts 71426 through 71448",
     ):
         assert required in text
     for stale_claim in (
@@ -224,8 +240,12 @@ def test_current_gate_contract_retires_71447_and_activates_71448() -> None:
         "The active 71446 prerequisite",
         "current alias names fresh cohort 71446 and can execute",
         "The active final `COHORT_ID` is `b2g26_final_71447`",
-        "ACTIVE_FINAL_AUTHORITY = None",
-        "there is currently no active final cohort",
+        "The active final `COHORT_ID` is `b2g26_final_71448`",
+        "Active 71448 final cohort",
+        "`ACTIVE_FINAL_AUTHORITY` explicitly pins",
+        "sole active eligible declaration pair",
+        "This activation authorizes",
+        "The active authority and schema both pin 71448",
     ):
         assert stale_claim not in text
 

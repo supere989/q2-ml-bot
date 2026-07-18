@@ -84,6 +84,7 @@ from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
 GATE_SCHEMA = "q2-multires-b2-gate-v1"
 RETIRED_COHORT_71446 = "b2g26_final_71446"
 RETIRED_COHORT_71447 = "b2g26_final_71447"
+RETIRED_COHORT_71448 = "b2g26_final_71448"
 EXPECTED_DESIGN_SHA256 = (
     "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
 )
@@ -144,7 +145,7 @@ RETIRED_71447_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
-ACTIVE_71448_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+RETIRED_71448_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
     "docs/multires/B2-GATE-ASSEMBLY.md",
     "docs/multires/B2-GENERATED-COHORT-71448-DECLARATION.json",
@@ -171,19 +172,11 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Explicit post-qualification activation. The current alias is never used to
-# infer this authority, and the qualification successor delta must match this
-# fixed declaration-only path set exactly.
-ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
-    cohort_id="b2g26_final_71448",
-    declaration_sha256=(
-        "0b48462a8cd8dfb752a73b711954616dd22d45d857748d316505bd17c976262a"
-    ),
-    immutable_declaration_path=(
-        "docs/multires/B2-GENERATED-COHORT-71448-DECLARATION.json"
-    ),
-    qualification_successor_paths=ACTIVE_71448_QUALIFICATION_SUCCESSOR_PATHS,
-)
+# Cohort 71448 consumed its one-shot source authorization and failed during
+# Atlas construction. A separately committed post-qualification successor is
+# required before this may become non-None again; the current alias is never
+# sufficient to infer executable authority.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
 
 
 def _require_active_final_authority() -> ActiveFinalAuthority:

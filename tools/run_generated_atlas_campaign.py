@@ -1450,14 +1450,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--analysis-dir", type=Path, required=True)
     parser.add_argument("--diagnostics-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--client-root", type=Path, default=DEFAULT_CLIENT)
-    parser.add_argument("--lithium-root", type=Path, default=DEFAULT_LITHIUM)
-    parser.add_argument(
-        "--hook-attestation", type=Path, default=DEFAULT_ATTESTATION
-    )
-    parser.add_argument("--fall-oracle", type=Path)
-    parser.add_argument("--packer", type=Path)
-    parser.add_argument("--verifier", type=Path)
+    parser.add_argument("--client-root", type=Path, required=True)
+    parser.add_argument("--lithium-root", type=Path, required=True)
+    parser.add_argument("--hook-attestation", type=Path, required=True)
+    parser.add_argument("--fall-oracle", type=Path, required=True)
+    parser.add_argument("--packer", type=Path, required=True)
+    parser.add_argument("--verifier", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         report = build_atlas_campaign(

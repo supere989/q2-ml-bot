@@ -983,7 +983,7 @@ deletes it before clean-tree verification and publication, and emits the new
 `q2-b2-test-report-v2` schema. The active authority was cleared until a fresh
 qualification was followed by a separately committed successor declaration.
 
-### Active 71448 final cohort
+### Retired 71448 final attempt
 
 At qualified commit/tree `ae41232662213342aba72823bfdfe68d0ebe475c` /
 `cd3322b844edd2d08b8a77fe90ba2b77e273d280`, the corrected atomic publisher
@@ -998,15 +998,50 @@ green, non-admissible report SHA-256 is
 `c7a623eed20eea7c115c6167391158be90bb70bd4914e1d591ecee9c1f2ff3d8`,
 and it binds the immutable `055c6930-r2` B1 authority.
 
-`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71448`, immutable
+At activation, the authority constant pinned `b2g26_final_71448`, immutable
 declaration `B2-GENERATED-COHORT-71448-DECLARATION.json`, and declaration
 SHA-256
 `0b48462a8cd8dfb752a73b711954616dd22d45d857748d316505bd17c976262a`.
-The current alias is byte-identical. The declaration uses seed blocks
-71448000..71448003 through 71448600..71448603. Exactly one fresh,
-strictly-sequential, immutable/no-retry producer lifecycle is authorized; no
-qualification artifact, retired byte, passing subset, deployment, or training
-is admitted by this activation.
+The then-current alias was byte-identical. The declaration uses seed blocks
+71448000..71448003 through 71448600..71448603; those seeds and map IDs are
+now retired. Exactly one fresh, strictly-sequential, immutable/no-retry
+producer lifecycle was authorized; no qualification artifact, retired byte,
+passing subset, deployment, or training was admitted by that activation.
+
+The sole 71448 lifecycle consumed its source authorization and passed source
+freeze, real q2tool compilation, compiled static validation, compiled-CM
+preflight, materialization, and claims preparation for all 28 declared maps.
+Atlas construction then failed 0/28: every worker was launched against the
+source-only staged q2-ml-client root, which lacked `release/q2-cm-oracle` and
+`release/q2-pmove-oracle`. The final preauthorization plan had hash-bound the
+separately supplied B1 oracles yet only forwarded `--client-root` and
+`--lithium-root` without validating the canonical Atlas release placements,
+so every worker exited 1 on the same missing canonical client release closure
+before writing an analysis artifact. No analysis stage was published and no
+compiled promotion, Dyn, test campaign, gate, deployment, or training action
+ran. `B2-GENERATED-COHORT-71448-FAILURE.json` is the canonical terminal
+authority, SHA-256
+`5af6539207d41bfffe4d98404a6cc96de7b14fbc17907d3ab3f7256cf2574350`,
+with terminal phase `atlas-build-missing-canonical-client-release-closure`
+and status `permanently-failed-atlas-build-b1-client-release-closure`.
+
+Cohort 71448 is permanently retired. None of its source, compiled,
+materialized, claims, analysis-diagnostic, report, log, build, WSL,
+authorization, or producer-snapshot bytes may be retried, resumed, reused,
+copied forward, salvaged, substituted, or admitted. `ACTIVE_FINAL_AUTHORITY =
+None`; there is currently no active final cohort. A successor requires the
+pre-source closure fix below, a fresh green disposable qualification, and a
+separately committed immutable declaration before any producer may run.
+
+Final preauthorization must now require and digest the canonical client
+release CM and Pmove oracles beneath `CLIENT_ROOT/release`, the canonical
+Lithium hook oracle beneath `LITHIUM_ROOT/tools`, and the exact Atlas packer
+and verifier binaries, and must prove
+byte identity of the CM, Pmove, and hook oracles against the separately
+supplied B1 authorities before source generation, exactly as the disposable
+qualification driver already does.
+Forwarding `--client-root` and `--lithium-root` without validating those
+canonical release placements is forbidden.
 
 The declaration-bearing 71446 producer commit was required to be a strict successor of
 qualified commit `a05ddb7037774c1b246a6b13972b228570acb8ef`. Gate replay
@@ -1093,12 +1128,17 @@ check.
 
 ## Offline workflow
 
-The active final `COHORT_ID` is `b2g26_final_71448`. The current alias is
-byte-identical to immutable
-`B2-GENERATED-COHORT-71448-DECLARATION.json`. Commands must never name retired
-cohorts 71426 through 71447. No retired or qualification population, report,
-Dyn evidence, compiled byte, or passing subset may be copied into the 71448
-root. The first source invocation consumes the sole authorization.
+`ACTIVE_FINAL_AUTHORITY = None`; there is currently no active final cohort.
+Cohort `b2g26_final_71448` is terminally retired under
+`B2-GENERATED-COHORT-71448-FAILURE.json`. Every command template in this
+section is historical and non-executable until a successor activation: it
+records the required producer shape only and must not be run against any
+retired, qualification, or 71448 path.
+Commands must never name retired cohorts 71426 through 71448. No retired or
+qualification population, report,
+Dyn evidence, compiled byte, or passing subset may be copied into a future
+cohort root. For any future cohort, the first source invocation consumes its
+sole authorization.
 
 The declaration-aware compiler remains the required final-cohort shape.
 Do not hand-run `q2tool`, glob maps, or use `maps/compile.sh`. Every producer

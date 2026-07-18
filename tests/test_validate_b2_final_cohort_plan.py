@@ -95,6 +95,13 @@ def _fixture_args(
     pmove = _write(root / "pmove-oracle", b"oracle-pmove\n")
     hook = _write(root / "hook-oracle", b"oracle-hook\n")
     fall = _write(root / "fall-oracle", b"oracle-fall\n")
+    client_root = root / "q2-ml-client"
+    _write(client_root / "release/q2-cm-oracle", cm.read_bytes())
+    _write(client_root / "release/q2-pmove-oracle", pmove.read_bytes())
+    lithium_root = root / "q2-lithium-3zb2"
+    _write(lithium_root / "tools/q2-hook-oracle", hook.read_bytes())
+    packer = _write(root / "q2-atlas-pack", b"#!/bin/sh\n")
+    verifier = _write(root / "q2-atlas-verify", b"#!/bin/sh\n")
     attestation = root / "hook-attestation.json"
     attestation.write_bytes(b'{"schema":"fixture-hook-attestation"}\n')
     b1_gate = root / "b1-gate.json"
@@ -112,10 +119,10 @@ def _fixture_args(
         fall_oracle=fall,
         hook_attestation=attestation,
         b1_gate=b1_gate,
-        client_root=None,
-        lithium_root=None,
-        packer=None,
-        verifier=None,
+        client_root=client_root,
+        lithium_root=lithium_root,
+        packer=packer,
+        verifier=verifier,
         source_root=None,
         source_cold=None,
         compile_staging=None,
@@ -165,7 +172,172 @@ def _cli_base(args: argparse.Namespace) -> list[str]:
         str(args.hook_attestation),
         "--b1-gate",
         str(args.b1_gate),
+        "--client-root",
+        str(args.client_root),
+        "--lithium-root",
+        str(args.lithium_root),
+        "--packer",
+        str(args.packer),
+        "--verifier",
+        str(args.verifier),
     ]
+
+
+def test_missing_canonical_atlas_authority_fails_before_generation(
+    tmp_path: Path,
+) -> None:
+    args = _fixture_args(tmp_path, tag="missing-atlas-cm")
+    (args.client_root / "release/q2-cm-oracle").unlink()
+
+    with pytest.raises(
+        FinalCohortPlanError, match="canonical Atlas CM oracle.*absent"
+    ) as raised:
+        build_plan(args)
+
+    assert raised.value.defect_class == DEFECT_RUNNER_CONFIGURATION
+    assert raised.value.check_id == "path-identity"
+    assert not args.workspace.exists()
+
+
+def test_canonical_atlas_authority_must_match_supplied_bytes(
+    tmp_path: Path,
+) -> None:
+    args = _fixture_args(tmp_path, tag="mismatched-atlas-hook")
+    (args.lithium_root / "tools/q2-hook-oracle").write_bytes(b"wrong hook\n")
+
+    with pytest.raises(
+        FinalCohortPlanError,
+        match="canonical Atlas hook_oracle bytes differ",
+    ) as raised:
+        build_plan(args)
+
+    assert raised.value.defect_class == DEFECT_RUNNER_CONFIGURATION
+    assert raised.value.check_id == "atlas-release-closure"
+    assert not args.workspace.exists()
+
+
+@pytest.mark.parametrize("tool_name", ("packer", "verifier"))
+def test_exact_atlas_tool_closure_is_required_before_generation(
+    tmp_path: Path, tool_name: str,
+) -> None:
+    args = _fixture_args(tmp_path, tag=f"missing-atlas-{tool_name}")
+    getattr(args, tool_name).unlink()
+
+    with pytest.raises(FinalCohortPlanError, match=f"Atlas {tool_name}.*absent") as raised:
+        build_plan(args)
+
+    assert raised.value.defect_class == DEFECT_RUNNER_CONFIGURATION
+    assert raised.value.check_id == "path-identity"
+    assert not args.workspace.exists()
+
+
+def test_final_plan_pins_complete_atlas_release_closure(tmp_path: Path) -> None:
+    args = _fixture_args(tmp_path, tag="complete-atlas-closure")
+    plan = build_plan(args)
+    pinned = plan["pinned_inputs"]
+
+    assert {
+        "packer",
+        "verifier",
+        "atlas_cm_oracle",
+        "atlas_pmove_oracle",
+        "atlas_hook_oracle",
+    }.issubset(pinned)
+    for name in (
+        "packer",
+        "verifier",
+        "atlas_cm_oracle",
+        "atlas_pmove_oracle",
+        "atlas_hook_oracle",
+    ):
+        assert len(pinned[name]["sha256"]) == 64
+
+    atlas_command = next(
+        step["command"] for step in plan["commands"] if step["stage"] == "atlas-build"
+    )
+    assert atlas_command[atlas_command.index("--packer") + 1] == str(args.packer.resolve())
+    assert atlas_command[atlas_command.index("--verifier") + 1] == str(
+        args.verifier.resolve()
+    )
+
+
+@pytest.mark.parametrize(
+    ("pinned_name", "mutated_path"),
+    (
+        ("atlas_cm_oracle", "client"),
+        ("packer", "packer"),
+    ),
+)
+def test_atlas_release_closure_drift_is_rejected_before_source(
+    tmp_path: Path, pinned_name: str, mutated_path: str,
+) -> None:
+    args = _fixture_args(tmp_path, tag=f"drift-{pinned_name}")
+    plan = build_plan(args)
+    path = (
+        args.client_root / "release/q2-cm-oracle"
+        if mutated_path == "client"
+        else args.packer
+    )
+    path.write_bytes(b"post-plan drift\n")
+
+    with pytest.raises(FinalCohortPlanError) as raised:
+        validate_plan(plan)
+
+    assert raised.value.check_id == f"pinned-digest:{pinned_name}"
+    assert raised.value.defect_class == DEFECT_RUNNER_CONFIGURATION
+    assert not args.workspace.exists()
+
+
+@pytest.mark.parametrize("flag", ("--client-root", "--packer"))
+def test_atlas_command_rebinding_is_rejected_without_consuming_authorization(
+    tmp_path: Path, flag: str,
+) -> None:
+    args = _fixture_args(tmp_path, tag=f"rebind-{flag.removeprefix('--')}")
+    plan = build_plan(args)
+    atlas_command = next(
+        step["command"] for step in plan["commands"] if step["stage"] == "atlas-build"
+    )
+    atlas_command[atlas_command.index(flag) + 1] = str(tmp_path / "wrong-input")
+
+    check_id = f"stage-input-binding:atlas-{flag.removeprefix('--')}"
+    with pytest.raises(FinalCohortPlanError) as raised:
+        validate_plan(plan)
+    assert raised.value.check_id == check_id
+
+    evidence = run_plan(
+        plan,
+        dry_run=False,
+        runner=lambda *_args, **_kwargs: pytest.fail("source must not run"),
+        acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+    )
+    assert evidence["passed"] is False
+    assert evidence["failure"]["check_id"] == check_id
+    assert evidence["mutating_stages_executed"] == []
+    assert evidence["source_authorization_marker"] is None
+    assert evidence["authorization"]["source_authorization_consumed"] is False
+    assert evidence["authorization"]["cohort_retirement_triggered"] is False
+
+
+def test_duplicate_atlas_flag_cannot_override_pinned_binding(tmp_path: Path) -> None:
+    args = _fixture_args(tmp_path, tag="duplicate-client-root")
+    plan = build_plan(args)
+    atlas_command = next(
+        step["command"] for step in plan["commands"] if step["stage"] == "atlas-build"
+    )
+    atlas_command.extend(("--client-root", str(tmp_path / "wrong-client")))
+
+    evidence = run_plan(
+        plan,
+        dry_run=False,
+        runner=lambda *_args, **_kwargs: pytest.fail("source must not run"),
+        acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+    )
+    assert evidence["passed"] is False
+    assert evidence["failure"]["check_id"] == "parser-conformance"
+    assert "exactly once; found 2" in evidence["failure"]["message"]
+    assert evidence["mutating_stages_executed"] == []
+    assert evidence["source_authorization_marker"] is None
+    assert evidence["authorization"]["source_authorization_consumed"] is False
 
 
 def test_out_of_range_oracle_batch_timeout_is_runner_configuration_defect(
@@ -356,14 +528,14 @@ def test_plan_requires_exact_active_declaration_path_and_identity(
 def test_non_retired_final_cohort_id_is_not_hard_refused(tmp_path: Path) -> None:
     """The next unused cohort ID is not permanent tool semantics."""
 
-    args = _fixture_args(tmp_path, tag="id-71448")
+    args = _fixture_args(tmp_path, tag="id-71449")
     payload = json.loads(args.declaration.read_text())
     # Keep fresh maps/seeds; only rename the cohort identity to the milestone ID.
-    payload["cohort_id"] = "b2g26_final_71448"
+    payload["cohort_id"] = "b2g26_final_71449"
     args.declaration.write_bytes(canonical_bytes(payload))
     _activate_fixture_declaration(args.declaration)
     plan = build_plan(args)
-    assert plan["cohort_id"] == "b2g26_final_71448"
+    assert plan["cohort_id"] == "b2g26_final_71449"
     evidence = run_plan(plan, dry_run=True)
     assert evidence["passed"] is True
     assert evidence["authorization"]["source_authorization_consumed"] is False

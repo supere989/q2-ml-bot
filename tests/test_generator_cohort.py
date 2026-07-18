@@ -27,7 +27,7 @@ DECLARATION_71448 = (
 )
 HISTORICAL_DECLARATIONS = tuple(
     ROOT / f"docs/multires/B2-GENERATED-COHORT-{number}-DECLARATION.json"
-    for number in range(71427, 71448)
+    for number in range(71427, 71449)
 )
 HEX64 = "a" * 64
 GIT40 = "b" * 40
@@ -240,6 +240,7 @@ def test_authoritative_declaration_is_canonical_balanced_and_no_salvage() -> Non
     historical_rows = [
         row
         for path in HISTORICAL_DECLARATIONS
+        if path != DECLARATION_71448
         for row in cohort.load_declaration(path)[0]["maps"]
     ]
     assert {row["seed"] for row in declaration["maps"]}.isdisjoint(

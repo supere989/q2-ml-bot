@@ -153,8 +153,12 @@ STAGE_REQUIRED_OPTIONS: dict[str, tuple[str, ...]] = {
         "--analysis-dir",
         "--diagnostics-dir",
         "--output",
+        "--client-root",
+        "--lithium-root",
         "--hook-attestation",
         "--fall-oracle",
+        "--packer",
+        "--verifier",
     ),
     "generated-promotion": (
         "--declaration",
@@ -345,6 +349,13 @@ def _arg(command: list[str], name: str, value: Path | str | int | float) -> None
 
 def _tool(repo: Path, name: str) -> Path:
     return repo / "tools" / name
+
+
+def _same_file_bytes(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    return (
+        left.get("bytes") == right.get("bytes")
+        and left.get("sha256") == right.get("sha256")
+    )
 
 
 def _require(condition: bool, message: str, *, check_id: str = "plan-validation") -> None:
@@ -563,12 +574,12 @@ def _stage_parser(stage: str) -> argparse.ArgumentParser:
         parser.add_argument("--analysis-dir", type=Path, required=True)
         parser.add_argument("--diagnostics-dir", type=Path, required=True)
         parser.add_argument("--output", type=Path, required=True)
-        parser.add_argument("--client-root", type=Path, default=None)
-        parser.add_argument("--lithium-root", type=Path, default=None)
-        parser.add_argument("--hook-attestation", type=Path, default=None)
-        parser.add_argument("--fall-oracle", type=Path, default=None)
-        parser.add_argument("--packer", type=Path, default=None)
-        parser.add_argument("--verifier", type=Path, default=None)
+        parser.add_argument("--client-root", type=Path, required=True)
+        parser.add_argument("--lithium-root", type=Path, required=True)
+        parser.add_argument("--hook-attestation", type=Path, required=True)
+        parser.add_argument("--fall-oracle", type=Path, required=True)
+        parser.add_argument("--packer", type=Path, required=True)
+        parser.add_argument("--verifier", type=Path, required=True)
         return parser
     if stage == "generated-promotion":
         sub = parser.add_subparsers(dest="phase", required=True)
@@ -606,9 +617,11 @@ def parse_stage_command(stage: str, command: Sequence[str]) -> argparse.Namespac
                 check_id="parser-conformance",
             )
     for option in STAGE_REQUIRED_OPTIONS[stage]:
-        if option not in argv:
+        count = argv.count(option)
+        if count != 1:
             raise FinalCohortPlanError(
-                f"{stage} command missing required option {option}",
+                f"{stage} command must contain required option {option} exactly once; "
+                f"found {count}",
                 check_id="parser-conformance",
             )
     parser = _stage_parser(stage)
@@ -757,6 +770,8 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     _require_unretired(declaration, declaration_obj, declaration_sha256)
     _require_active_declaration(declaration, declaration_obj, declaration_sha256)
 
+    client_root = _existing_dir(args.client_root, "Atlas client root")
+    lithium_root = _existing_dir(args.lithium_root, "Atlas lithium root")
     pinned_inputs = {
         "declaration": declaration_record,
         "python": _regular_file(python, "python runtime", executable=True),
@@ -775,7 +790,36 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             args.hook_attestation, "hook parity attestation"
         ),
         "b1_gate": _regular_file(args.b1_gate, "B1 gate"),
+        "packer": _regular_file(args.packer, "Atlas packer", executable=True),
+        "verifier": _regular_file(
+            args.verifier, "Atlas verifier", executable=True
+        ),
+        "atlas_cm_oracle": _regular_file(
+            client_root / "release/q2-cm-oracle",
+            "canonical Atlas CM oracle",
+            executable=True,
+        ),
+        "atlas_pmove_oracle": _regular_file(
+            client_root / "release/q2-pmove-oracle",
+            "canonical Atlas Pmove oracle",
+            executable=True,
+        ),
+        "atlas_hook_oracle": _regular_file(
+            lithium_root / "tools/q2-hook-oracle",
+            "canonical Atlas hook oracle",
+            executable=True,
+        ),
     }
+    for supplied, atlas in (
+        ("cm_oracle", "atlas_cm_oracle"),
+        ("pmove_oracle", "atlas_pmove_oracle"),
+        ("hook_oracle", "atlas_hook_oracle"),
+    ):
+        if not _same_file_bytes(pinned_inputs[supplied], pinned_inputs[atlas]):
+            raise FinalCohortPlanError(
+                f"canonical Atlas {supplied} bytes differ from supplied authority",
+                check_id="atlas-release-closure",
+            )
     basedir = _existing_dir(args.basedir, "basedir")
 
     tool_records: dict[str, dict[str, Any]] = {}
@@ -969,14 +1013,10 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         ("--fall-oracle", _absolute(args.fall_oracle)),
     ):
         _arg(command, name, value)
-    if args.client_root is not None:
-        _arg(command, "--client-root", _absolute(args.client_root))
-    if args.lithium_root is not None:
-        _arg(command, "--lithium-root", _absolute(args.lithium_root))
-    if args.packer is not None:
-        _arg(command, "--packer", _absolute(args.packer))
-    if args.verifier is not None:
-        _arg(command, "--verifier", _absolute(args.verifier))
+    _arg(command, "--client-root", client_root)
+    _arg(command, "--lithium-root", lithium_root)
+    _arg(command, "--packer", _absolute(args.packer))
+    _arg(command, "--verifier", _absolute(args.verifier))
     commands.append(_step("atlas-build", command, report_paths["atlas-build"]))
 
     command = [
@@ -1380,6 +1420,11 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
             "fall_oracle",
             "hook_attestation",
             "b1_gate",
+            "packer",
+            "verifier",
+            "atlas_cm_oracle",
+            "atlas_pmove_oracle",
+            "atlas_hook_oracle",
         }.issubset(pinned),
         "pinned inputs incomplete",
     )
@@ -1389,12 +1434,137 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
             path,
             name,
             executable=name
-            in {"python", "q2tool", "cm_oracle", "pmove_oracle", "hook_oracle", "fall_oracle"},
+            in {
+                "python",
+                "q2tool",
+                "cm_oracle",
+                "pmove_oracle",
+                "hook_oracle",
+                "fall_oracle",
+                "packer",
+                "verifier",
+                "atlas_cm_oracle",
+                "atlas_pmove_oracle",
+                "atlas_hook_oracle",
+            },
         )
         record(
             f"pinned-digest:{name}",
             live_record["sha256"] == record_value["sha256"],
             f"pinned input drifted: {name}",
+        )
+
+    pinned_paths = {
+        name: str(_absolute(Path(str(value["path"]))))
+        for name, value in pinned.items()
+    }
+
+    # A digest table is not sufficient by itself: every mutating command must
+    # still consume the exact paths represented by that table when execution
+    # revalidates the plan immediately before writing the source journal.
+    for step in plan["commands"]:
+        stage = str(step["stage"])
+        command = step["command"]
+        record(
+            f"stage-input-binding:{stage}-python",
+            command[0] == pinned_paths["python"],
+            f"{stage} Python runtime does not match the pinned runtime",
+        )
+        record(
+            f"stage-input-binding:{stage}-tool",
+            command[1] == str(tools[stage]["path"]),
+            f"{stage} command does not match its digest-pinned tool",
+        )
+
+    def record_flag_binding(
+        check_id: str,
+        command: Sequence[str],
+        flag: str,
+        expected: str,
+        detail: str,
+    ) -> None:
+        record(
+            check_id,
+            flag in command and command[command.index(flag) + 1] == expected,
+            detail,
+        )
+
+    record_flag_binding(
+        "stage-input-binding:compile-q2tool",
+        compile_cmd,
+        "--q2tool",
+        pinned_paths["q2tool"],
+        "compile q2tool does not match the pinned compiler",
+    )
+    record_flag_binding(
+        "stage-input-binding:compile-basedir",
+        compile_cmd,
+        "--basedir",
+        str(Path(pinned_paths["base_pak"]).parent),
+        "compile basedir does not contain the pinned base PAK",
+    )
+    record_flag_binding(
+        "stage-input-binding:cm-oracle",
+        cm_cmd,
+        "--cm-oracle",
+        pinned_paths["cm_oracle"],
+        "compiled-CM command does not match the pinned CM oracle",
+    )
+    for flag, pinned_name in (
+        ("--cm-oracle", "cm_oracle"),
+        ("--pmove-oracle", "pmove_oracle"),
+        ("--hook-oracle", "hook_oracle"),
+        ("--fall-oracle", "fall_oracle"),
+        ("--hook-parity-attestation", "hook_attestation"),
+    ):
+        record_flag_binding(
+            f"stage-input-binding:materialize-{pinned_name}",
+            mat_cmd,
+            flag,
+            pinned_paths[pinned_name],
+            f"materialization {flag} does not match pinned {pinned_name}",
+        )
+
+    atlas_client_root = str(Path(pinned_paths["atlas_cm_oracle"]).parent.parent)
+    atlas_lithium_root = str(Path(pinned_paths["atlas_hook_oracle"]).parent.parent)
+    for flag, expected, label in (
+        ("--client-root", atlas_client_root, "client release root"),
+        ("--lithium-root", atlas_lithium_root, "Lithium root"),
+        ("--hook-attestation", pinned_paths["hook_attestation"], "hook attestation"),
+        ("--fall-oracle", pinned_paths["fall_oracle"], "fall oracle"),
+        ("--packer", pinned_paths["packer"], "packer"),
+        ("--verifier", pinned_paths["verifier"], "verifier"),
+    ):
+        record_flag_binding(
+            f"stage-input-binding:atlas-{flag.removeprefix('--')}",
+            atlas_cmd,
+            flag,
+            expected,
+            f"Atlas {label} does not match the pinned release closure",
+        )
+    record(
+        "stage-input-binding:atlas-client-release-pair",
+        Path(pinned_paths["atlas_pmove_oracle"]).parent.parent
+        == Path(atlas_client_root),
+        "pinned Atlas CM and Pmove oracles do not share one client release root",
+    )
+    record_flag_binding(
+        "stage-input-binding:promotion-b1-gate",
+        promo_cmd,
+        "--b1-gate",
+        pinned_paths["b1_gate"],
+        "generated promotion does not match the pinned B1 gate",
+    )
+
+    for supplied, atlas in (
+        ("cm_oracle", "atlas_cm_oracle"),
+        ("pmove_oracle", "atlas_pmove_oracle"),
+        ("hook_oracle", "atlas_hook_oracle"),
+    ):
+        record(
+            f"atlas-release-closure:{supplied}",
+            _same_file_bytes(pinned[supplied], pinned[atlas]),
+            f"canonical Atlas {supplied} bytes differ from supplied authority",
         )
 
     return checks
@@ -1661,10 +1831,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--fall-oracle", type=Path, required=True)
     parser.add_argument("--hook-attestation", type=Path, required=True)
     parser.add_argument("--b1-gate", type=Path, required=True)
-    parser.add_argument("--client-root", type=Path, default=None)
-    parser.add_argument("--lithium-root", type=Path, default=None)
-    parser.add_argument("--packer", type=Path, default=None)
-    parser.add_argument("--verifier", type=Path, default=None)
+    parser.add_argument("--client-root", type=Path, required=True)
+    parser.add_argument("--lithium-root", type=Path, required=True)
+    parser.add_argument("--packer", type=Path, required=True)
+    parser.add_argument("--verifier", type=Path, required=True)
     parser.add_argument("--source-root", type=Path, default=None)
     parser.add_argument("--source-cold", type=Path, default=None)
     parser.add_argument("--compile-staging", type=Path, default=None)

@@ -218,6 +218,24 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "71448600..71448603",
         "b2q26_ae41232_71805000",
         "c7a623eed20eea7c115c6167391158be90bb70bd4914e1d591ecee9c1f2ff3d8",
+        "Retired 71448 final attempt",
+        "B2-GENERATED-COHORT-71448-FAILURE.json",
+        "5af6539207d41bfffe4d98404a6cc96de7b14fbc17907d3ab3f7256cf2574350",
+        "atlas-build-missing-canonical-client-release-closure",
+        "permanently-failed-atlas-build-b1-client-release-closure",
+        "source-only staged q2-ml-client root",
+        "release/q2-cm-oracle",
+        "release/q2-pmove-oracle",
+        "Cohort 71447 is permanently retired",
+        "Cohort 71448 is permanently retired",
+        "`ACTIVE_FINAL_AUTHORITY = None`",
+        "there is currently no active final cohort",
+        "historical and non-executable until a successor activation",
+        "Lithium hook oracle",
+        "byte identity of the CM, Pmove, and hook oracles",
+        "separately committed immutable declaration",
+        "fresh green disposable qualification",
+        "Commands must never name retired cohorts 71426 through 71448",
         "4b26c670ed54585787505cf7dfbb35bdc1830fdfbd42585a16d0484622ea306f",
         "oracle batch timeout must be finite and in (0, 60]",
         "not a 3,600-second runtime timeout",
@@ -254,6 +272,13 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
     assert all(fragment in contract for fragment in required_contract)
     assert "--glob 'b2claim_*.map'" not in contract
     assert "--expected-count 20" not in contract
+    for stale_claim in (
+        "Active 71448 final cohort",
+        "The active final `COHORT_ID` is `b2g26_final_71448`",
+        "`ACTIVE_FINAL_AUTHORITY` explicitly pins",
+        "Commands must never name retired cohorts 71426 through 71447",
+    ):
+        assert stale_claim not in contract
 
 
 def test_71427_failure_record_is_canonical_exact_and_no_salvage() -> None:

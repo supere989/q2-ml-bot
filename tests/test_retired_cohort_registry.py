@@ -65,6 +65,9 @@ FAILURE_71446 = (
 FAILURE_71447 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71447-FAILURE.json"
 )
+FAILURE_71448 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71448-FAILURE.json"
+)
 RETIRED_DECLARATIONS = (
     NAMED_71438,
     NAMED_71439,
@@ -76,6 +79,7 @@ RETIRED_DECLARATIONS = (
     NAMED_71445,
     NAMED_71446,
     NAMED_71447,
+    NAMED_71448,
 )
 
 
@@ -297,17 +301,47 @@ def test_named_71447_is_retired(declaration_path: Path) -> None:
         )
 
 
-def test_current_alias_and_named_71448_are_active_and_unretired() -> None:
-    current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
+@pytest.mark.parametrize("declaration_path", [CURRENT_ALIAS, NAMED_71448])
+def test_current_alias_and_named_71448_are_retired(
+    declaration_path: Path,
+) -> None:
+    current, current_sha256 = cohort.load_declaration(declaration_path)
 
     assert current["cohort_id"] == "b2g26_final_71448"
     assert CURRENT_ALIAS.read_bytes() == NAMED_71448.read_bytes()
     assert current_sha256 == (
         "0b48462a8cd8dfb752a73b711954616dd22d45d857748d316505bd17c976262a"
     )
-    registry.require_unretired_declaration(
-        CURRENT_ALIAS, current, current_sha256
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71448.*permanently retired"
+    ):
+        registry.require_unretired_declaration(
+            declaration_path, current, current_sha256
+        )
+
+
+def test_71448_terminal_failure_authority_is_canonical_and_exact() -> None:
+    payload = FAILURE_71448.read_bytes()
+    authority = json.loads(payload)
+
+    assert payload == cohort.canonical_bytes(authority)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "5af6539207d41bfffe4d98404a6cc96de7b14fbc17907d3ab3f7256cf2574350"
     )
+    assert authority["schema"] == registry.FAILURE_SCHEMA
+    assert authority["status"] == (
+        "permanently-failed-atlas-build-b1-client-release-closure"
+    )
+    assert authority["cohort_id"] == "b2g26_final_71448"
+    assert authority["failure"]["phase"] == (
+        "atlas-build-missing-canonical-client-release-closure"
+    )
+    atlas = authority["evidence"]["final_campaign"]["atlas_build"]
+    assert atlas["maps_attempted"] == 28
+    assert atlas["pass_count"] == 0
+    assert atlas["analysis_stage_published"] is False
+    assert authority["evidence"]["source_authorization"]["consumed"] is True
+    assert authority["admission"]["retry_under_same_declaration_allowed"] is False
 
 
 def test_71447_terminal_failure_authority_is_canonical_and_exact() -> None:
@@ -738,6 +772,12 @@ def test_atlas_build_cli_reports_retirement_without_traceback_or_outputs(
         "--analysis-dir", str(root / "analysis"),
         "--diagnostics-dir", str(root / "diagnostics"),
         "--output", str(root / "report.json"),
+        "--client-root", str(root / "client"),
+        "--lithium-root", str(root / "lithium"),
+        "--hook-attestation", str(root / "hook-attestation.json"),
+        "--fall-oracle", str(root / "q2-fall-oracle"),
+        "--packer", str(root / "q2-atlas-pack"),
+        "--verifier", str(root / "q2-atlas-verify"),
     ]) == 1
 
     captured = capsys.readouterr()
