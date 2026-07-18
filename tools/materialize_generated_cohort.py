@@ -58,7 +58,7 @@ MAX_MATERIALIZER_TIMEOUT_SECONDS = 3600
 AT_FDCWD = -100
 RENAME_NOREPLACE = 1
 CURRENT_B1_GATE_SHA256 = (
-    "2bb95a41bde7df8a5cfb78153e67b91242b4d26b9461ffdc55283d60ec562fde"
+    "055c693027a4091178705331d1bf6c64a81638995f041e978aaf95e33effd354"
 )
 
 # Compatibility constants used by the report/test helpers.  Final producer
