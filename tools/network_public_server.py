@@ -37,6 +37,7 @@ STOP = False
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~+/=-]{32,63}\Z")
 _MAP_PATTERN = re.compile(r"[A-Za-z0-9_]{1,63}\Z")
 _SAFE_CVAR_PATTERN = re.compile(r"[^\s\"';\\]{1,255}\Z")
+_ADMIN_CODE_PATTERN = re.compile(r"[0-9]{1,5}\Z")
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,15 @@ def _telemetry_from_env(environ: dict[str, str] | None = None) -> TelemetrySetti
     return TelemetrySettings(port=port, token=token)
 
 
+def _admin_code_from_env(environ: dict[str, str] | None = None) -> str:
+    """Load the local-only Lithium menu code without logging it."""
+    source = os.environ if environ is None else environ
+    code = source.get("Q2_LITHIUM_ADMIN_CODE", "")
+    if not _ADMIN_CODE_PATTERN.fullmatch(code) or int(code) == 0:
+        raise ValueError("Q2_LITHIUM_ADMIN_CODE must be a nonzero 1-5 digit code")
+    return code
+
+
 def _safe_map_name(value: str) -> str:
     if not _MAP_PATTERN.fullmatch(value):
         raise ValueError("map name contains unsafe cfg characters")
@@ -86,6 +96,7 @@ def _write_config(
     args: argparse.Namespace,
     first_map: str,
     telemetry: TelemetrySettings,
+    admin_code: str = "0",
 ) -> Path:
     """Write the only secret-bearing artifact atomically and mode 0600."""
     first_map = _safe_map_name(first_map)
@@ -93,6 +104,8 @@ def _write_config(
         raise ValueError("maxclients must be between 1 and 64")
     if args.dlserver:
         _safe_cvar_value("download server", args.dlserver)
+    if not _ADMIN_CODE_PATTERN.fullmatch(admin_code):
+        raise ValueError("admin code must contain 1-5 digits")
 
     path = q2_root / "lithium" / f"ml_network_public_{args.port}.cfg"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,6 +113,7 @@ def _write_config(
         "set dedicated 1",
         "set deathmatch 1",
         "set cheats 1",
+        f"set admin_code {admin_code}",
         f"set timelimit {args.timelimit:g}",
         f"set fraglimit {args.fraglimit}",
         "set use_mapqueue 0",
@@ -245,6 +259,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         telemetry = _telemetry_from_env()
+        admin_code = _admin_code_from_env()
     except ValueError as error:
         parser.error(str(error))
     if args.port == telemetry.port:
@@ -266,7 +281,7 @@ def main() -> int:
     mapgen = FarmMapGenerator(args.map_farm_url, prefix=LIVE_MAP_PREFIX)
     first_map = stock.next()
     try:
-        config = _write_config(q2_root, args, first_map, telemetry)
+        config = _write_config(q2_root, args, first_map, telemetry, admin_code)
     except (OSError, ValueError) as error:
         parser.error(str(error))
     command = _build_command(q2ded, q2_root, args, config)

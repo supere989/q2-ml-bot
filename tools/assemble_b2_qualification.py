@@ -61,6 +61,32 @@ QUALIFICATION_SCHEMA = "q2-b2-toolchain-qualification-v1"
 DECLARATION_SCHEMA = "q2-b2-qualification-declaration-v1"
 STAGE_SCHEMA = "q2-b2-qualification-stage-v1"
 INFRASTRUCTURE_SCHEMA = "q2-b2-qualification-infrastructure-v2"
+ACTIVATION_SUCCESSOR_POLICY_SCHEMA = "q2-b2-final-activation-successor-policy-v1"
+# This policy is part of the clean implementation that is qualified, not a
+# knob on the later activation declaration.  The activation commit may only
+# carry this literal declaration-only successor delta; an authority constant
+# cannot expand it after qualification has completed.
+FINAL_71454_ACTIVATION_SUCCESSOR_POLICY = {
+    "schema": ACTIVATION_SUCCESSOR_POLICY_SCHEMA,
+    "cohort_id": "b2g26_final_71454",
+    "immutable_declaration_path": (
+        "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
+    ),
+    "allowed_changed_paths": [
+        "AGENTS.md",
+        "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
+        "docs/multires/B2-GATE-ASSEMBLY.md",
+        "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json",
+        "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
+        "schemas/q2-multires-b2-gate-v1.schema.json",
+        "tests/test_b2_gate.py",
+        "tests/test_b2_operational_docs.py",
+        "tests/test_generator_claim_campaign.py",
+        "tests/test_generator_cohort.py",
+        "tests/test_retired_cohort_registry.py",
+        "tools/assemble_b2_gate.py",
+    ],
+}
 EXPECTED_MAP_COUNT = 28
 REQUIRED_END_TO_END_PASSES = 20
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -92,12 +118,30 @@ REQUIRED_INFRASTRUCTURE_CHECKS = {
     "exclusive-create",
     "python310-syntax-floor",
     "resource-bounds",
+    "stock-provenance-writer-format",
     "timeout-fail-closed",
 }
 
 
 class B2QualificationError(ValueError):
     """Any input which cannot prove qualification fails closed."""
+
+
+def activation_successor_policy() -> dict[str, Any]:
+    """Return the sole final activation delta frozen by qualification."""
+
+    return {
+        "schema": FINAL_71454_ACTIVATION_SUCCESSOR_POLICY["schema"],
+        "cohort_id": FINAL_71454_ACTIVATION_SUCCESSOR_POLICY["cohort_id"],
+        "immutable_declaration_path": (
+            FINAL_71454_ACTIVATION_SUCCESSOR_POLICY[
+                "immutable_declaration_path"
+            ]
+        ),
+        "allowed_changed_paths": list(
+            FINAL_71454_ACTIVATION_SUCCESSOR_POLICY["allowed_changed_paths"]
+        ),
+    }
 
 
 def _require(condition: bool, message: str) -> None:
@@ -136,6 +180,48 @@ def _digest(value: object, label: str) -> str:
     if not isinstance(value, str) or HEX64.fullmatch(value) is None:
         raise B2QualificationError(f"{label} must be a lowercase SHA-256")
     return value
+
+
+def validate_activation_successor_policy(value: object) -> dict[str, Any]:
+    """Reject any activation policy other than the qualified 71454 literal.
+
+    The policy deliberately has no declaration digest: the declaration cannot
+    exist while the disposable qualification is assembled.  Its immutable
+    repository path and the complete, fixed changed-path set are nevertheless
+    replayed as part of that qualified report.
+    """
+
+    policy = _mapping(value, "final activation-successor policy")
+    _exact_keys(
+        policy,
+        {
+            "schema",
+            "cohort_id",
+            "immutable_declaration_path",
+            "allowed_changed_paths",
+        },
+        "final activation-successor policy",
+    )
+    expected = activation_successor_policy()
+    _require(
+        policy.get("schema") == ACTIVATION_SUCCESSOR_POLICY_SCHEMA,
+        "final activation-successor policy schema differs",
+    )
+    paths = _array(
+        policy.get("allowed_changed_paths"),
+        "final activation-successor policy changed paths",
+    )
+    _require(
+        all(isinstance(path, str) and path for path in paths)
+        and len(paths) == len(set(paths))
+        and paths == sorted(paths),
+        "final activation-successor policy changed paths are malformed",
+    )
+    _require(
+        dict(policy) == expected,
+        "final activation-successor policy differs from the qualified 71454 policy",
+    )
+    return expected
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -863,6 +949,7 @@ def _validate_retained_stage_evidence(
                 "generated-promotion": Path(roots["promotion_evidence_root"]),
             },
             syntax_report=Path(roots["syntax_report"]),
+            repo_root=repo_root,
         )
     except (ValueError, RuntimeError, OSError, KeyError, TypeError) as error:
         raise B2QualificationError(
@@ -1001,6 +1088,7 @@ def assemble_qualification(
             "failed_count": EXPECTED_MAP_COUNT - len(end_to_end),
             "passed_maps": sorted(end_to_end),
         },
+        "activation_successor_policy": activation_successor_policy(),
         "authorization": {
             "final_declaration_allowed_by_this_report": False,
             "qualification_artifact_reuse_as_final_evidence": False,
@@ -1021,7 +1109,8 @@ def validate_qualification(value: object) -> dict[str, Any]:
             "implementation", "b1_authority", "compiled_boundary",
             "toolchain_authority", "declaration", "stages",
             "infrastructure", "end_to_end",
-            "authorization", "raw_evidence", "failures",
+            "activation_successor_policy", "authorization", "raw_evidence",
+            "failures",
         },
         "B2 qualification",
     )
@@ -1127,6 +1216,7 @@ def validate_qualification(value: object) -> dict[str, Any]:
     _require(pass_count >= REQUIRED_END_TO_END_PASSES, "B2 qualification has fewer than 20 end-to-end passes")
     _require(pass_count + failed_count == EXPECTED_MAP_COUNT, "B2 qualification end-to-end counts differ")
     _require(len(passed_maps) == pass_count and len(set(passed_maps)) == pass_count, "B2 qualification passed-map membership differs")
+    validate_activation_successor_policy(report["activation_successor_policy"])
     authorization = _mapping(report["authorization"], "B2 qualification authorization")
     _require(
         authorization == {

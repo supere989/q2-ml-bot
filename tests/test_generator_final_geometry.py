@@ -10,8 +10,10 @@ import sys
 import pytest
 
 from maps.generator import (
+    ARENA_STYLES,
     DM_SPAWN_COUNT,
     LAVA_DEPTH,
+    MAX_ATLAS_HURT_BOUNDARY_COLUMNS,
     MIN_SAFE_HEADROOM,
     MIN_SPAWN_SEPARATION,
     MapGenerator,
@@ -22,6 +24,7 @@ from maps.generator import (
     SolidBox,
     generate_map,
 )
+from harness.atlas_analyzer import _claimed_hurt_boundary_chunks
 from maps.routes import source_endpoint_components
 from tools.source_route_contract import load_source_route_contract
 from tools.validate_maps import (
@@ -83,6 +86,141 @@ def test_spawn_placement_fails_when_no_component_can_span_the_map() -> None:
     assert "legal_candidates=" in diagnostic
     assert "component_bounds=[" in diagnostic
     assert "span=" in diagnostic
+
+
+def test_zero_arena_promotion_is_deterministic_and_rng_neutral() -> None:
+    generator = MapGenerator(seed=17, style="pits")
+    generator.rooms = [
+        Room(4, 2, 2048, 1024, 1024, 512, 0, 320, "room"),
+        Room(3, 3, 1536, 1536, 1024, 1024, 0, 379, "room"),
+        Room(3, 1, 1536, 512, 512, 1024, 96, 267, "corridor"),
+    ]
+    rng_state = generator.rng.getstate()
+
+    generator._ensure_spawn_arena(5)
+
+    assert generator.rng.getstate() == rng_state
+    promoted = generator.rooms[1]
+    assert (
+        promoted.kind,
+        promoted.w,
+        promoted.d,
+        promoted.floor_z,
+        promoted.ceil_z,
+    ) == ("arena", 1536, 1536, 0, 384)
+    assert generator.rooms[0].kind == "room"
+    assert generator.rooms[2].kind == "corridor"
+
+
+def test_failed_71813_pits_member_gets_protected_spanning_spawn_component() -> None:
+    generator = MapGenerator(seed=71_813_302, style="pits")
+    generator.generate(5)
+
+    anchor = generator._spawn_protected_anchor
+    assert anchor is not None
+    assert (anchor.gx, anchor.gy, anchor.kind, anchor.w, anchor.d) == (
+        3, 3, "arena", 1536, 1536,
+    )
+    assert generator.spawn_points == generator._spawn_protected_witnesses
+    assert len(generator.spawn_points) == DM_SPAWN_COUNT
+    assert generator._spawn_span_ok(generator.spawn_points)
+    assert generator._shared_spawn_source_component(
+        generator.spawn_points
+    ) is not None
+    assert min(
+        math.hypot(left[0] - right[0], left[1] - right[1])
+        for index, left in enumerate(generator.spawn_points)
+        for right in generator.spawn_points[index + 1:]
+    ) >= MIN_SPAWN_SEPARATION
+
+
+@pytest.mark.parametrize(
+    ("style", "seed"),
+    (
+        ("arena_open", 71814400),
+        ("arena_open", 71814401),
+        ("arena_vertical", 71814500),
+        ("arena_lanes", 71814600),
+        # Greedy nominal-grid deletion used to reject these ordinary layouts.
+        # They exercise the canonical retained-footprint search, including a
+        # hallway reclassification when an outer corridor is compacted.
+        ("arena_open", 812031),
+        ("arena_vertical", 812025),
+        # Regression band: these layouts used to retain an authored terrace
+        # but flatten after the spawn-floor pass.  Vertical style now promotes
+        # and preserves a highest combat terrace inside the same L0 cap.
+        ("arena_vertical", 814014),
+        ("arena_vertical", 814017),
+        ("arena_vertical", 814020),
+        ("arena_lanes", 812011),
+        ("arena_lanes", 812029),
+        ("arena_open", 813009),
+        ("arena_lanes", 813010),
+    ),
+)
+def test_atlas_footprint_compaction_preserves_arena_contracts(
+    style: str, seed: int,
+) -> None:
+    """Retain all safety evidence while bounding generated L0 hurt scope."""
+
+    first = MapGenerator(seed=seed, style=style)
+    first.generate(5)
+    second = MapGenerator(seed=seed, style=style)
+    second.generate(5)
+
+    assert first.stats() == second.stats()
+    assert first.lethal_edges == second.lethal_edges
+    assert first.writer.brushes == second.writer.brushes
+    assert first.writer.entities == second.writer.entities
+    assert first.atlas_hurt_boundary_columns <= MAX_ATLAS_HURT_BOUNDARY_COLUMNS
+    assert len(first.lethal_edges) == len(first.lethal_guard_walls)
+    assert sum(room.kind == "arena" for room in first.rooms) >= 3
+    assert first.stats()["hallways"] >= 2
+    assert len(first.spawn_points) == DM_SPAWN_COUNT
+    assert first._shared_spawn_source_component(first.spawn_points) is not None
+
+    # The source estimator is translation-invariant while the analyzer emits
+    # origin-relative 3D chunk keys.  Their exact XY cardinalities must agree
+    # for the actual emitted safety candidates.
+    source_columns = first._atlas_hurt_columns(first.lethal_edges)
+    for origin in ((-512, -512, -512), (0, 0, 0), (256, -256, 512)):
+        analyzer_columns = {
+            (chunk_x, chunk_y)
+            for chunk_x, chunk_y, _ in _claimed_hurt_boundary_chunks(
+                first.safety_manifest(), origin
+            )
+        }
+        assert len(source_columns) == len(analyzer_columns)
+    assert len(source_columns) <= first.atlas_hurt_boundary_columns
+
+    if style == "arena_vertical":
+        assert first.stats()["max_elevation"] > 0
+    if style == "arena_lanes":
+        assert first.lane_wall_count >= 2
+
+
+@pytest.mark.parametrize("style", ARENA_STYLES)
+def test_atlas_footprint_compaction_bounds_arena_seed_matrix(style: str) -> None:
+    for seed in range(810000, 810008):
+        generator = MapGenerator(seed=seed, style=style)
+        generator.generate(5)
+        assert generator.atlas_hurt_boundary_columns <= MAX_ATLAS_HURT_BOUNDARY_COLUMNS
+        assert sum(room.kind == "arena" for room in generator.rooms) >= 3
+        assert generator.stats()["hallways"] >= 2
+
+
+@pytest.mark.parametrize("style", ARENA_STYLES)
+def test_atlas_footprint_compaction_source_property_window(style: str) -> None:
+    """Exercise source-only normalization beyond the hand-picked regressions."""
+
+    for seed in (*range(812000, 812016), *range(813000, 813012)):
+        generator = MapGenerator(seed=seed, style=style)
+        generator.build_layout(5)
+        assert generator.atlas_hurt_boundary_columns <= MAX_ATLAS_HURT_BOUNDARY_COLUMNS
+        assert sum(room.kind == "arena" for room in generator.rooms) >= 3
+        assert sum(room.kind == "corridor" for room in generator.rooms) >= 2
+        if style == "arena_vertical":
+            assert len(generator._post_spawn_floor_levels(generator.rooms)) >= 2
 
 
 def test_spawn_arena_floor_normalization_preserves_height_and_nonoverlap() -> None:

@@ -48,6 +48,11 @@ from tools.generator_claim_validator import (  # noqa: E402
 from harness.atlas_analyzer import _snapped_origin  # noqa: E402
 from tools.bind_b2_dyn_origin import _load_atlas_compact  # noqa: E402
 from tools.run_generator_cohort import STAGE_SUFFIXES  # noqa: E402
+from tools.assemble_b2_gate import (  # noqa: E402
+    B2GateError,
+    STOCK_PROVENANCE_RELATIVE_PATH,
+    stock_provenance_writer_evidence,
+)
 
 
 PINNED_PYTHON_VERSION = [3, 11, 4]
@@ -57,8 +62,19 @@ SYNTAX_PYTHON_SHA256 = "7d51cd6b48b521277f5caa4610a82126e315fa2be4df069823a8b1ee
 CHECK_IDS = (
     "deterministic-cold-rebuild", "dyn-phase-b-atlas-manifest-binding",
     "exact-stage-membership", "exclusive-create", "python310-syntax-floor",
-    "resource-bounds", "timeout-fail-closed",
+    "resource-bounds", "stock-provenance-writer-format", "timeout-fail-closed",
 )
+
+
+def _stock_provenance_evidence(repo_root: Path) -> dict[str, Any]:
+    try:
+        return stock_provenance_writer_evidence(
+            repo_root / STOCK_PROVENANCE_RELATIVE_PATH
+        )
+    except B2GateError as exc:
+        raise QualificationStageError(
+            f"stock provenance writer-format check failed: {exc}"
+        ) from exc
 
 
 def validate_infrastructure_evidence(
@@ -67,6 +83,7 @@ def validate_infrastructure_evidence(
     stage_reports: Mapping[str, Mapping[str, Any]] | None = None,
     roots: Mapping[str, Path] | None = None,
     syntax_report: Path | None = None,
+    repo_root: Path = ROOT,
     runtime_provider: Callable[[], Mapping[str, Any]] = pinned_runtime_record,
 ) -> None:
     """Replay retained check bytes and, when supplied, every live predicate."""
@@ -108,6 +125,7 @@ def validate_infrastructure_evidence(
         stage_reports, roots["atlas-build"], roots["generated-promotion"]
     )
     syntax = _syntax_evidence(syntax_report, dict(runtime_provider()))
+    stock_provenance = _stock_provenance_evidence(repo_root)
     probe_root = Path(tempfile.mkdtemp(prefix=".b2q-exclusive-replay-"))
     try:
         exclusive = _exclusive_probe(probe_root)
@@ -121,6 +139,7 @@ def validate_infrastructure_evidence(
         "exclusive-create": exclusive,
         "python310-syntax-floor": syntax,
         "resource-bounds": resources,
+        "stock-provenance-writer-format": stock_provenance,
         "timeout-fail-closed": timeout,
     }
     for check_id in CHECK_IDS:
@@ -509,6 +528,7 @@ def produce_infrastructure_report(
             reports, paths["analysis root"], paths["promotion evidence root"]
         )
         syntax = _syntax_evidence(paths["syntax report"], runtime)
+        stock_provenance = _stock_provenance_evidence(repo_root)
         exclusive = _exclusive_probe(stage)
         timeout = timeout_probe()
         require(timeout.get("timed_out") is True and timeout.get("process_group_killed") is True,
@@ -520,6 +540,7 @@ def produce_infrastructure_report(
             "exclusive-create": exclusive,
             "python310-syntax-floor": syntax,
             "resource-bounds": resources,
+            "stock-provenance-writer-format": stock_provenance,
             "timeout-fail-closed": timeout,
         }
         checks: list[dict[str, Any]] = []

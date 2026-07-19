@@ -57,6 +57,23 @@ The channel-by-channel sufficiency review is in
 `docs/TELEMETRY-AUDIT-2026-07-14.md`.
 The implemented redesign and cutover gates are in
 `docs/TARGET-THERMAL-LATTICE-PROTOTYPE-2026-07-14.md`.
+The final B2 operational lane is driven only by the hash-reviewed, one-shot
+`tools/validate_b2_final_cohort_plan.py` lifecycle. It binds the direct
+versioned declaration path through all producers, Dyn, tests, and assembly and
+includes atomic stock q2dm1..q2dm8 publication. It also requires a green
+preactivation full-suite report from the qualified implementation and an
+explicit, private `0700` source-authorization journal bound to
+`DESKTOP-RTX2080` WSL's hostname, exact WSL2 kernel release, machine identity,
+and executing UID. Its declaration leaf is accessed only relative to a
+validated directory file descriptor, binds the qualified implementation and
+the exact source outputs, and is consumed before source generation. Assembly
+also requires the driver's canonical `q2-b2-final-lifecycle-preassembly-v1`
+preassembly lifecycle evidence; manual
+report collection cannot publish a gate. This is an operational attestation,
+not protection against a hostile same-UID local writer: the state root,
+workspace, and repository must remain private with no concurrent writers.
+This tooling does not itself authorize a final cohort; consult `AGENTS.md` and
+`docs/multires/B2-GATE-ASSEMBLY.md` for the current pre-declaration status.
 
 ## Architecture
 

@@ -651,14 +651,17 @@ so a byte-order rewrite is rejected even if both manifests are changed
 together. The correction must pass a completely fresh disposable
 qualification that exercises real writer bytes through Phase B, followed by a
 separately committed disjoint successor declaration. Qualification
-infrastructure now requires seven retained checks; the additional
+infrastructure now requires eight retained checks. The existing
 `dyn-phase-b-atlas-manifest-binding` evidence drives every promoted map's real
 writer bytes through the production compact loader, replays both exact
 manifest digests sealed in that map's promotion evidence, and re-derives
-snapped origin from `model0_mins`. Final Phase B also refuses any identity in
-the retired-cohort registry before artifact binding.
+snapped origin from `model0_mins`. The additional
+`stock-provenance-writer-format` check drives the real committed stock
+provenance bytes through the production gate predicate and retains the raw
+writer SHA-256. Final Phase B also refuses any identity in the retired-cohort
+registry before artifact binding.
 
-### Active 71453 final cohort
+### Retired 71453 final attempt and 71454 successor preparation
 
 Corrective commit `14dfc409b047611cb0722e53cad57d8c8584acb5`, tree
 `725815ca68b1a44cbb8699656e214f4d19e60409`, passed fresh disposable
@@ -675,12 +678,176 @@ The separately committed immutable declaration
 byte-identical with SHA-256
 `5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810`.
 They name `b2g26_final_71453` and seed blocks 71453000..71453003 through
-71453600..71453603. `ACTIVE_FINAL_AUTHORITY` explicitly pins only that cohort,
-digest, immutable path, and the
-exact twelve-path declaration/gate/schema/direct-test/agent-guidance successor delta from the
-qualified commit. Its first source-generation invocation consumes its sole
-authorization; retry, repair, resume, salvage, and substitution are forbidden.
-Retired 71452 and qualification bytes cannot enter the final root.
+71453600..71453603. The first and only authorized final gate invocation used
+the current alias while the compiled-CM report bound the byte-identical
+immutable versioned declaration path. Strict path binding failed with
+`compiled-CM declaration binding differs` and zero gate publication. That
+first invocation is the terminal event. A second invocation using the
+versioned path was an unauthorized diagnostic replay only; it could not reopen
+the lifecycle and also published no gate.
+
+The diagnostic replay exposed a separate successor blocker: `_validate_stock`
+routed the exact provenance writer artifact through the generic compact/sorted
+JSON loader. The raw file is
+4,989 bytes, pretty/sorted JSON plus LF, SHA-256
+`3ed2e930dcccf3abdabc7b5e1d9a1a95d74db4915a481bd523c51688c2bad030`;
+the loader expected a distinct 4,193-byte compact rewrite, SHA-256
+`c6ed658e80a4667d36a72a3367a6f0c9c25d5020c24edfd54f00d15b8d74995a`.
+Stock reports bind the raw writer SHA, so rewriting the file is forbidden.
+
+`B2-GENERATED-COHORT-71453-FAILURE.json`, SHA-256
+`34e4f74b4ccb9de41f29688546baa0ea1866dd28de29b78431d6a1afda7e9733`,
+is the canonical terminal authority. `ACTIVE_FINAL_AUTHORITY = None`; the
+current alias remains byte-identical for forensics but the retirement registry
+rejects it before evidence. No 71453 byte may be retried, repaired, resumed,
+reused, copied forward, salvaged, substituted, or admitted.
+
+The 71454 successor is deliberately pre-declaration. Its final plan must
+preauthorize the exact immutable declaration path. The dedicated loader now
+strictly rejects duplicate keys and non-finite tokens, requires the committed
+pretty/sorted writer form, and pins the raw digest above. A completely fresh
+disposable qualification must pass 28/28 and all eight retained infrastructure
+checks, including `stock-provenance-writer-format`, before a separate commit
+may add an immutable, disjoint 71454 declaration, update the schema, and set
+active authority. No green gate, declaration, cohort run, deployment, or
+training authority exists yet.
+
+The fresh qualification report itself freezes the only permitted activation
+successor in `q2-b2-final-activation-successor-policy-v1`:
+`b2g26_final_71454`, the direct immutable
+`docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json` path, and its exact
+twelve changed paths. The later `ACTIVE_FINAL_AUTHORITY` may identify the
+declaration digest, but cannot add paths to that replayed policy.
+
+The successor's operational lane is implemented as one complete preauthorized
+lifecycle in `tools/validate_b2_final_cohort_plan.py`; it is not a collection of
+operator-run stage commands. The canonical plan orders Dyn's no-write Phase A
+before the source authorization boundary, then source, compile, compiled
+membership/static/CM, materialization and membership, claims, generated Atlas
+and promotion, one atomic q2dm1..q2dm8 stock campaign, Dyn origin binding and
+the sole Dyn execution, the atomic final test publisher, and assembly. The
+driver pins the clean repository and every tool/input digest, validates every
+stage CLI before source, and refuses execute mode unless its rebuilt plan hash
+equals the SHA-256 reviewed from dry-run evidence and the explicit mutating
+acknowledgement is present. Source authorization is journaled before source
+bytes can be produced; any later failure is terminal and cannot be resumed by
+running a stage separately. All declaration consumers receive the same
+absolute immutable versioned declaration path. The current alias, symlinks,
+copies, post-plan mutations, retired identities, and filename/cohort mismatch
+are rejected. This lifecycle tooling creates no 71454 authority by itself.
+Before the source boundary, the driver also requires a direct canonical
+repository/tool path and proves its planned assembly command hash is exactly
+the hash the child assembler will reconstruct from its actual argv.
+
+The final driver additionally requires an explicit
+`--authorization-state-root` on `DESKTOP-RTX2080` WSL. The root must already
+exist outside the repository and final workspace, be owned by the executing
+UID, and have mode `0700`. Its device/inode, that UID, the fixed hostname, the
+WSL2 kernel release, and strict `/etc/machine-id` digest become part of the
+reviewed plan and are revalidated before every stage and source-marker
+operation. This closes the
+LAN/account replay hole of a home-relative marker: an exact reviewed plan
+copied elsewhere fails before Dyn Phase A. The exclusive declaration marker is
+`q2-b2-source-authorization-consumed-v4` canonical evidence containing the same execution binding, plan
+digest, implementation identity, immutable declaration, and exact
+primary/cold/source-freeze outputs; any legacy, unreadable, malformed, or
+pre-existing marker remains a terminal tombstone.
+
+Immediately after the atomic post-source test suite succeeds and before the
+assembly process starts, the driver writes one canonical
+`q2-b2-final-lifecycle-preassembly-v1` record inside the final workspace. It
+contains the ordered zero-exit prefix from Dyn Phase A through the test suite,
+the source-marker file record, execution binding, implementation and plan
+digests, and the exact assembly-command digest. `assemble_b2_gate.py` requires
+that file through `--final-lifecycle-evidence`; it reopens the marker through
+its bound descriptor and verifies it authorizes the supplied immutable
+declaration and exact source, cold, and source-freeze paths. A hand-collected
+set of reports, a missing lifecycle record, a reordered/failed stage, or a
+rebound assembly argv cannot publish a gate. This is an operational
+same-principal attestation, not a cryptographic guarantee against a hostile
+actor who controls the same UID.
+
+`tools/run_b2_stock_campaign.py` is the stock producer used by that plan. It
+builds and validates exactly q2dm1 through q2dm8 in a private root, checks exact
+BSP/analysis/validation membership and repository stability, then publishes the
+three-directory stock root with one no-replace rename and a canonical reserved
+report. It leaves no partially published stock root on a builder or validation
+failure.
+
+Before the activation commit adds its immutable final declaration, the exact
+clean implementation that will be qualified must run the full atomic suite
+through `tools/run_b2_test_suite.py` and retain its external
+`b2-test-report.json` plus all eight raw logs. Final assembly requires that
+report separately as `--preactivation-test-report`. It replays the 28/28
+qualification, requires the preactivation report to bind that *qualified*
+implementation exactly, and then proves the active declaration-bearing commit
+is only the authorized qualification successor. The post-source
+`--test-report` remains a separate final-implementation report; it cannot
+substitute for the preactivation report. Both evidence roots must remain
+outside the repository and the final workspace.
+
+Backend-correct qualification `b2q26_ede2bff_71812000`, plan SHA-256
+`57ee59f442d2ccb0b545b1f18988ab8aba57bf7be762c73f16cb6dc24ddddcdf`,
+completed all 28 source, compile, compiled-CM, materialization, and claims
+rows, all eight infrastructure checks, and 27/28 Atlas/promotion rows. Its
+report SHA-256 is
+`84c72c24628a4b64e335d62fcd70d30bac63dc633f46c19e8008be003668cd48`.
+Although this is generic green under the normative 20-map qualification
+threshold, it is explicitly insufficient for the stricter 71454 final lane
+and cannot authorize that declaration. The failed member
+`b2q26_ede2bff_71812000_towers_71812102` had raised lethal-edge witnesses at
+Z=96 while the compiled global kill-plane trigger occupied Z=-240..-64; the
+historical one-chunk-lower sparse permit therefore had no vertical
+intersection and emitted no retained hurt evidence. The correction preserves
+the exact lethal-edge XY permit and projects it only through the compiled
+trigger's exact linked Z range, never through the intervening air gap. The
+original failed BSP completes a real Atlas build with the correction. Final
+assembly now independently requires a 28/28 qualification, while the generic
+disposable-qualification threshold remains unchanged. A new implementation
+commit and wholly fresh qualification ID, workspace, and seed range are
+required.
+
+Disposable qualification `b2q26_926efb4_71813000`, canonical plan SHA-256
+`eaac7db4d962f79e00da8fe9bed3f00e2d438f517924fc4caf697bbcd76fa228`,
+subsequently stopped during primary source generation with no stage report,
+27 complete primary members, and no cold population. Member
+`b2q26_926efb4_71813000_pits_71813302` had 446 locally legal candidates split
+across nine source standing components; no component satisfied the unchanged
+1024-by-1024 dual-span contract. It was the only zero-arena member in the
+28-map plan, so no protected 1536-by-1536 spawn domain existed. The workspace,
+qualification ID, and seed range are forensic-only and cannot be resumed or
+reused. The implementation now deterministically promotes the nearest widest
+ordinary room to standard arena geometry when stochastic assignment creates
+zero arenas, before any derived geometry and without consuming RNG. The exact
+failed seed now passes the unchanged clearance, separation, dual-span, and
+single-source-component gates as a regression fixture only. A new committed
+implementation and a disjoint qualification remain mandatory.
+
+### Active 71454 final cohort
+
+Corrective commit `7c482c9087262f065add58461a2b6f00644bb83a`, tree
+`f1f19982e382c95cb2ea30fc285cb2d44956cf3b`, passed fresh disposable
+qualification `b2q26_7c482c9_71815000` 28/28 end to end with all eight retained
+infrastructure checks green. The canonical green, non-admissible report
+SHA-256 is
+`e33b0a469b98fb11ab05603b54d29484d07d7a3a1fd629f345ac8c766eeff2fb`;
+its reviewed qualification plan SHA-256 is
+`9e63790c6fe350f1462e4787eec82faa4cbcbe08ae433d0f5d387ddf4626358f`.
+The same qualified implementation passed the atomic eight-part preactivation
+suite, report SHA-256
+`568648911b135102a6ddb3bd0d5938c906ccd047be720c1aff93fa056283336a`.
+Qualification and test outputs remain non-admissible final inputs.
+
+The separately committed immutable
+`B2-GENERATED-COHORT-71454-DECLARATION.json` and current alias are
+byte-identical with SHA-256
+`8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986`.
+They name `b2g26_final_71454` and seed blocks 71454000..71454003 through
+71454600..71454603. `ACTIVE_FINAL_AUTHORITY` explicitly pins only that cohort,
+digest, direct immutable path, and the exact twelve-path successor delta
+frozen by the green qualification. Its first source invocation consumes its
+sole authorization; retry, repair, resume, salvage, and substitution are
+forbidden. Retired 71453 and qualification bytes cannot enter the final root.
 
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
@@ -763,6 +930,17 @@ That runtime supplies zstandard 0.19.0 through `__init__.py` SHA-256
 `8a65cd4ab44112e1433a097daee7ce8600047995f3289f13d758bb001c06a553`
 and the active C backend SHA-256
 `40ece7fa91097e53ee4785cef01baae3f220f8dc891e20d94d4e07a1d77c9120`.
+The active backend is specifically
+`zstandard/backend_c.cpython-311-x86_64-linux-gnu.so`; the neighboring
+`zstandard/_cffi.cpython-311-x86_64-linux-gnu.so` is not an admissible
+substitute. Disposable qualification `b2q26_825984f_71811000` bound that
+inactive `_cffi` file and was stopped during compile, before qualification
+assembly or any final authorization. Its workspace and seed range beginning
+at `71811000` are forensic-only and must never be resumed or reused. The
+qualification driver now imports `zstandard` and `zstandard.backend_c` with
+the pinned interpreter before it may create a workspace, requires the supplied
+paths and bytes to equal those exact fixed authorities, and repeats the probe
+when validating or resuming a plan.
 The neighboring `/home/raymond/miniconda3/bin/python` convenience symlink
 resolves to the same executable but is not an admissible input; the gate binds
 the regular `python3.11` file directly.
@@ -784,12 +962,13 @@ while the infrastructure producer and materializer remain bound to the
 separate CPython 3.11.4 executable and zstandard module digests above. The
 syntax report must never be required to identify the execution runtime.
 
-The assembler rejects declarations for retired cohorts 71426 through 71452
+The assembler rejects declarations for retired cohorts 71426 through 71453
 before reading campaign evidence. The immutable 71447, 71448, 71449, 71450,
-71451, and 71452 declarations are historical only.
-The active authority and schema pin only 71453, and executable authority still requires replay of the
-exact qualified-successor relation and all one-shot evidence; neither the
-schema nor a declaration can infer authority by itself.
+71451, 71452, and 71453 declarations are historical only.
+The active authority and schema pin only 71454. Executable authority still
+requires replay of the exact qualified-successor relation, preactivation test
+binding, and all one-shot lifecycle evidence; neither the schema nor a
+declaration can infer authority by itself.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -1006,19 +1185,19 @@ reuse of any retired cohort byte.
 
 ## Assembly template
 
-This template is active only for the exact 71453 authority. All values are
-exact paths, `OUT` must not exist, and both two-phase Dyn authority reports are
-mandatory.
+This 71453 template is historical and disabled. It must not be executed or
+edited into a 71454 command. A new exact template may be published only with a
+separately committed, freshly qualified successor declaration.
 
 The qualified parent is commit `14dfc409b047611cb0722e53cad57d8c8584acb5`,
 tree `725815ca68b1a44cbb8699656e214f4d19e60409`. Qualification
-`b2q26_14dfc40_71810000` passed 28/28 end to end and all seven infrastructure
+`b2q26_14dfc40_71810000` historically passed 28/28 end to end and all seven infrastructure
 checks; its green non-admissible report SHA-256 is
 `30e9e6e044ef49ec6b3352b7c57580833ff182b11cfddc909c32b840c3297d0d`.
 Its B1 authority is the byte-identical immutable `055c6930-r2` bundle. It
 cannot admit qualification artifacts, passing subsets, retired bytes,
-deployment, or training; it authorizes only the separately committed 71453
-declaration through the exact successor check.
+deployment, training, or a successor declaration. The 71453 relation is
+forensic only.
 
 ```sh
 python tools/assemble_b2_gate.py \
@@ -1056,8 +1235,10 @@ python tools/assemble_b2_gate.py \
   --dyn-argv-preflight-report "$DYN_ARGV_PREFLIGHT_REPORT" \
   --dyn-origin-binding-report "$DYN_ORIGIN_BINDING_REPORT" \
   --dyn-evidence-report "$DYN_EVIDENCE/b2-dyn-evidence.json" \
+  --preactivation-test-report "$PREACTIVATION_TEST_EVIDENCE/b2-test-report.json" \
   --test-report "$TEST_EVIDENCE/b2-test-report.json" \
   --qualification-report "$QUALIFICATION_REPORT" \
+  --final-lifecycle-evidence "$FINAL_LIFECYCLE_EVIDENCE" \
   --output "$OUT"
 ```
 

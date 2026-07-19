@@ -42,10 +42,126 @@ def _isolated_source_authorization_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> object:
     previous_authority = plan_tool.b2_gate.ACTIVE_FINAL_AUTHORITY
+    implementation = {
+        "repository_commit": "1" * 40,
+        "repository_tree": "2" * 40,
+        "git_clean": True,
+        "atlas_analyzer_authority_sha256": "3" * 64,
+        "atlas_analyzer_authority_file_count": 1,
+        "generator_sha256": "4" * 64,
+        "routes_sha256": "5" * 64,
+    }
     monkeypatch.setattr(
         plan_tool,
-        "SOURCE_AUTHORIZATION_STATE_ROOT",
-        tmp_path / "source-authorization-state",
+        "repository_binding",
+        lambda _repo_root: dict(implementation),
+    )
+
+    def fixture_execution_binding(*, state_root, repo_root, workspace):
+        del repo_root, workspace
+        root = Path(state_root)
+        return {
+            "schema": "fixture-final-execution-binding-v1",
+            "host": {"hostname": "fixture", "euid": 1000},
+            "state_root": {"path": str(root)},
+        }
+
+    def validate_fixture_execution_binding(binding, *, repo_root, workspace):
+        del repo_root, workspace
+        return dict(binding)
+
+    class FixtureJournal:
+        def __init__(self, binding, *, repo_root, workspace):
+            del repo_root, workspace
+            self.root = Path(binding["state_root"]["path"])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            del exc_type, exc, traceback
+
+        def marker_path(self, declaration_sha256):
+            return self.root / f"{declaration_sha256}.json"
+
+        def exists(self, declaration_sha256):
+            return self.marker_path(declaration_sha256).exists()
+
+        def read(self, declaration_sha256):
+            path = self.marker_path(declaration_sha256)
+            return path.read_bytes() if path.exists() else None
+
+        def create(self, declaration_sha256, payload):
+            path = self.marker_path(declaration_sha256)
+            try:
+                with path.open("xb") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    plan_tool.os.fsync(stream.fileno())
+            except FileExistsError:
+                return path.read_bytes(), False
+            except BaseException as error:
+                raise plan_tool.SourceAuthorizationJournalError(
+                    "fixture journal creation incomplete", consumed=True
+                ) from error
+            return payload, True
+
+        def revalidate_path_binding(self):
+            return None
+
+    def fixture_marker(
+        *, binding, cohort_id, declaration_sha256, plan_sha256, workspace,
+        repo_root, declaration_path, implementation, source_output, source_cold,
+        source_report,
+    ):
+        del repo_root, declaration_path, implementation, source_output, source_cold, source_report
+        return canonical_bytes({
+            "schema": "fixture-source-authorization-v3",
+            "cohort_id": cohort_id,
+            "declaration_sha256": declaration_sha256,
+            "plan_sha256": plan_sha256,
+            "workspace": str(workspace),
+            "execution_binding": binding,
+        })
+
+    def verify_fixture_marker(
+        payload, *, binding, cohort_id, declaration_sha256, repo_root, workspace,
+    ):
+        del repo_root, workspace
+        loaded = json.loads(payload)
+        if (
+            loaded.get("cohort_id") != cohort_id
+            or loaded.get("declaration_sha256") != declaration_sha256
+            or loaded.get("execution_binding") != binding
+        ):
+            raise plan_tool.FinalExecutionBindingError("fixture marker differs")
+        return loaded
+
+    def fixture_preactivation_binding(**kwargs):
+        report = Path(kwargs["preactivation_test_report"])
+        payload = report.read_bytes()
+        return {
+            "report": {
+                "path": str(report),
+                "bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            },
+            "implementation": dict(kwargs["implementation"]),
+        }
+
+    monkeypatch.setattr(plan_tool, "build_execution_binding", fixture_execution_binding)
+    monkeypatch.setattr(
+        plan_tool, "validate_execution_binding", validate_fixture_execution_binding
+    )
+    monkeypatch.setattr(plan_tool, "open_secure_marker_journal", FixtureJournal)
+    monkeypatch.setattr(plan_tool, "build_source_authorization_marker", fixture_marker)
+    monkeypatch.setattr(
+        plan_tool, "verify_source_authorization_marker", verify_fixture_marker
+    )
+    monkeypatch.setattr(
+        plan_tool.b2_gate,
+        "validate_preactivation_test_binding",
+        fixture_preactivation_binding,
     )
     yield
     plan_tool.b2_gate.ACTIVE_FINAL_AUTHORITY = previous_authority
@@ -56,6 +172,10 @@ def _write(path: Path, payload: bytes = b"fixture\n") -> Path:
     path.write_bytes(payload)
     path.chmod(0o755)
     return path
+
+
+def _reviewed_plan_sha256(plan: object) -> str:
+    return hashlib.sha256(canonical_bytes(plan)).hexdigest()
 
 
 def _activate_fixture_declaration(path: Path) -> None:
@@ -79,16 +199,27 @@ def _fixture_args(
 ) -> argparse.Namespace:
     root = tmp_path / tag
     root.mkdir(parents=True, exist_ok=True)
+    repo = root / "repo"
+    (repo / "tools").mkdir(parents=True)
+    for tool_name in set(plan_tool.TOOL_FILES.values()):
+        (repo / "tools" / tool_name).write_bytes(
+            (ROOT / "tools" / tool_name).read_bytes()
+        )
     workspace = root / "final-workspace"
     basedir = root / "baseq2"
     basedir.mkdir(exist_ok=True)
     (basedir / "pak0.pak").write_bytes(b"fixture:pak0\n")
-    declaration = root / "declaration.json"
-    declaration.write_bytes(declaration_src.read_bytes())
+    declaration_value = json.loads(declaration_src.read_bytes())
     if declaration_src == FIXTURE_DECLARATION:
-        fixture_value = json.loads(declaration.read_bytes())
-        fixture_value["cohort_id"] = "b2g26_final_99000"
-        declaration.write_bytes(canonical_bytes(fixture_value))
+        declaration_value["cohort_id"] = "b2g26_final_99000"
+    declaration_number = str(declaration_value["cohort_id"]).rsplit("_", 1)[-1]
+    declaration = (
+        repo
+        / "docs/multires"
+        / f"B2-GENERATED-COHORT-{declaration_number}-DECLARATION.json"
+    )
+    declaration.parent.mkdir(parents=True)
+    declaration.write_bytes(canonical_bytes(declaration_value))
     python = _write(root / "python-bin", b"#!/bin/sh\n")
     q2tool = _write(root / "q2tool", b"#!/bin/sh\n")
     cm = _write(root / "cm-oracle", b"oracle-cm\n")
@@ -106,13 +237,35 @@ def _fixture_args(
     attestation.write_bytes(b'{"schema":"fixture-hook-attestation"}\n')
     b1_gate = root / "b1-gate.json"
     b1_gate.write_bytes((ROOT / "docs/multires/B1-GATE.json").read_bytes())
+    design = _write(root / "B2-design.md")
+    execution_plan = _write(root / "B2-plan.md")
+    qualification_report = _write(root / "qualification-report.json")
+    preactivation_test_report = _write(root / "preactivation-test-report.json")
+    authorization_state_root = root / "source-authorization-state"
+    authorization_state_root.mkdir(mode=0o700)
+    authorization_state_root.chmod(0o700)
+    stock_pak = _write(root / "stock-pak0.pak")
+    stock_provenance = _write(root / "stock-provenance.json")
+    stock_inventory = _write(root / "stock-inventory.json")
+    dyn_evidence_executable = _write(
+        root / "q2-lattice-evidence",
+        b"#!/bin/sh\nexit 0\n",
+    )
     result = argparse.Namespace(
         workspace=workspace,
-        repo_root=ROOT,
+        repo_root=repo,
         declaration=declaration,
+        design=design,
+        plan=execution_plan,
+        qualification_report=qualification_report,
+        preactivation_test_report=preactivation_test_report,
+        authorization_state_root=authorization_state_root,
         python=python,
         q2tool=q2tool,
         basedir=basedir,
+        stock_pak=stock_pak,
+        stock_provenance=stock_provenance,
+        stock_inventory=stock_inventory,
         cm_oracle=cm,
         pmove_oracle=pmove,
         hook_oracle=hook,
@@ -123,6 +276,7 @@ def _fixture_args(
         lithium_root=lithium_root,
         packer=packer,
         verifier=verifier,
+        dyn_evidence_executable=dyn_evidence_executable,
         source_root=None,
         source_cold=None,
         compile_staging=None,
@@ -134,6 +288,13 @@ def _fixture_args(
         claims_root=None,
         analysis_root=None,
         atlas_diagnostics=None,
+        stock_root=None,
+        dyn_evidence_root=None,
+        test_evidence_root=None,
+        gate_output=None,
+        dyn_map_epoch=1,
+        dyn_environment_steps=4000,
+        dyn_samples=4000,
         compile_timeout_seconds=3600.0,
         oracle_batch_timeout_seconds=10.0,
         materialize_timeout_seconds=900,
@@ -141,6 +302,7 @@ def _fixture_args(
         dry_run=True,
         execute=False,
         acknowledge_mutating_execution=None,
+        expected_plan_sha256=None,
     )
     _activate_fixture_declaration(declaration)
     return result
@@ -154,12 +316,28 @@ def _cli_base(args: argparse.Namespace) -> list[str]:
         str(args.repo_root),
         "--declaration",
         str(args.declaration),
+        "--design",
+        str(args.design),
+        "--plan",
+        str(args.plan),
+        "--qualification-report",
+        str(args.qualification_report),
+        "--preactivation-test-report",
+        str(args.preactivation_test_report),
+        "--authorization-state-root",
+        str(args.authorization_state_root),
         "--python",
         str(args.python),
         "--q2tool",
         str(args.q2tool),
         "--basedir",
         str(args.basedir),
+        "--stock-pak",
+        str(args.stock_pak),
+        "--stock-provenance",
+        str(args.stock_provenance),
+        "--stock-inventory",
+        str(args.stock_inventory),
         "--cm-oracle",
         str(args.cm_oracle),
         "--pmove-oracle",
@@ -180,6 +358,8 @@ def _cli_base(args: argparse.Namespace) -> list[str]:
         str(args.packer),
         "--verifier",
         str(args.verifier),
+        "--dyn-evidence-executable",
+        str(args.dyn_evidence_executable),
     ]
 
 
@@ -520,9 +700,111 @@ def test_plan_requires_exact_active_declaration_path_and_identity(
     copied = tmp_path / "byte-identical-copy.json"
     copied.write_bytes(args.declaration.read_bytes())
     args.declaration = copied
-    with pytest.raises(FinalCohortPlanError, match="path/cohort/digest") as raised:
+    with pytest.raises(
+        FinalCohortPlanError, match="versioned immutable repository path"
+    ) as raised:
         build_plan(args)
-    assert raised.value.check_id == "active-authority"
+    assert raised.value.check_id == "declaration-binding"
+
+
+@pytest.mark.parametrize("kind", ("current-alias", "wrong-number", "symlink"))
+def test_plan_rejects_nonimmutable_named_declaration_paths(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    args = _fixture_args(tmp_path, tag=f"declaration-{kind}")
+    immutable = args.declaration
+    if kind == "current-alias":
+        candidate = immutable.parent / "B2-GENERATED-COHORT-DECLARATION.json"
+        candidate.write_bytes(immutable.read_bytes())
+    elif kind == "wrong-number":
+        candidate = (
+            immutable.parent / "B2-GENERATED-COHORT-99001-DECLARATION.json"
+        )
+        candidate.write_bytes(immutable.read_bytes())
+    else:
+        candidate = (
+            immutable.parent / "B2-GENERATED-COHORT-99000-DECLARATION-LINK.json"
+        )
+        candidate.symlink_to(immutable)
+    args.declaration = candidate
+    _activate_fixture_declaration(candidate)
+
+    with pytest.raises(FinalCohortPlanError) as raised:
+        build_plan(args)
+    assert raised.value.check_id in {"declaration-binding", "path-identity"}
+
+
+def test_plan_rejects_output_roots_outside_the_workspace(tmp_path: Path) -> None:
+    args = _fixture_args(tmp_path, tag="escaped-output")
+    args.source_root = ROOT / ".forbidden-final-source-output"
+
+    with pytest.raises(
+        FinalCohortPlanError, match="escapes the final-cohort workspace"
+    ) as raised:
+        build_plan(args)
+    assert raised.value.check_id == "path-identity"
+
+
+def test_plan_rejects_output_roots_through_workspace_symlinks(
+    tmp_path: Path,
+) -> None:
+    args = _fixture_args(tmp_path, tag="symlinked-output")
+    args.workspace.mkdir()
+    external = tmp_path / "external-output"
+    external.mkdir()
+    redirect = args.workspace / "redirect"
+    redirect.symlink_to(external, target_is_directory=True)
+    args.source_root = redirect / "source"
+
+    with pytest.raises(
+        FinalCohortPlanError, match="symlinked ancestor"
+    ) as raised:
+        build_plan(args)
+    assert raised.value.check_id == "path-identity"
+
+
+def test_plan_rejects_a_symlinked_repository_root_before_source(
+    tmp_path: Path,
+) -> None:
+    args = _fixture_args(tmp_path, tag="symlinked-repository")
+    linked_repo = tmp_path / "repo-link"
+    linked_repo.symlink_to(args.repo_root, target_is_directory=True)
+    args.repo_root = linked_repo
+
+    with pytest.raises(
+        FinalCohortPlanError, match="direct canonical directory"
+    ) as raised:
+        build_plan(args)
+    assert raised.value.check_id == "path-identity"
+    assert not args.workspace.exists()
+
+
+def test_rebound_assembly_command_is_rejected_before_source(
+    tmp_path: Path,
+) -> None:
+    args = _fixture_args(tmp_path, tag="rebound-assembly")
+    plan = build_plan(args)
+    assembly = next(
+        step for step in plan["commands"] if step["stage"] == "assembly"
+    )
+    plan_index = assembly["command"].index("--plan") + 1
+    assembly["command"][plan_index] = str(tmp_path / "rebound-plan.md")
+
+    with pytest.raises(FinalCohortPlanError) as raised:
+        validate_plan(plan)
+    assert raised.value.check_id == "assembly-command-binding"
+
+    evidence = run_plan(
+        plan,
+        dry_run=False,
+        runner=lambda *_args, **_kwargs: pytest.fail("source must not run"),
+        acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+    )
+    assert evidence["passed"] is False
+    assert evidence["failure"]["check_id"] == "assembly-command-binding"
+    assert evidence["mutating_stages_executed"] == []
+    assert evidence["authorization"]["source_authorization_consumed"] is False
 
 
 def test_retired_final_cohort_id_is_hard_refused(tmp_path: Path) -> None:
@@ -532,6 +814,11 @@ def test_retired_final_cohort_id_is_hard_refused(tmp_path: Path) -> None:
     payload = json.loads(args.declaration.read_text())
     # Keep fresh maps/seeds; only reuse the permanently retired cohort identity.
     payload["cohort_id"] = "b2g26_final_71451"
+    retired_identity_path = (
+        args.declaration.parent / "B2-GENERATED-COHORT-71451-DECLARATION.json"
+    )
+    args.declaration.rename(retired_identity_path)
+    args.declaration = retired_identity_path
     args.declaration.write_bytes(canonical_bytes(payload))
     _activate_fixture_declaration(args.declaration)
     with pytest.raises(FinalCohortPlanError) as raised:
@@ -633,7 +920,16 @@ def test_no_mutating_stage_runs_before_full_plan_validation(tmp_path: Path) -> N
     calls: list[str] = []
 
     def runner(command, *, stage, plan):
-        del command, plan
+        del command
+        marker = (
+            args.authorization_state_root
+            / f"{plan['declaration']['sha256']}.json"
+        )
+        if stage == "dyn-shape-preflight":
+            assert (args.workspace / "reports").is_dir()
+            assert not marker.exists()
+        if stage == "source":
+            assert marker.is_file()
         calls.append(stage)
         return SimpleNamespace(returncode=0)
 
@@ -661,7 +957,12 @@ def test_no_mutating_stage_runs_before_full_plan_validation(tmp_path: Path) -> N
 
     # Execute without acknowledgement must not mutate even with a runner.
     calls.clear()
-    evidence = run_plan(plan, dry_run=False, runner=runner)
+    evidence = run_plan(
+        plan,
+        dry_run=False,
+        runner=runner,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
+    )
     assert evidence["passed"] is False
     assert evidence["failure"]["check_id"] == "execute-acknowledgement"
     assert calls == []
@@ -674,11 +975,78 @@ def test_no_mutating_stage_runs_before_full_plan_validation(tmp_path: Path) -> N
         dry_run=False,
         runner=runner,
         acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
     )
     assert evidence["passed"] is True
     assert calls == list(DRIVER_STAGES)
     assert evidence["mutating_stages_executed"] == list(DRIVER_STAGES)
     assert evidence["authorization"]["source_authorization_consumed"] is True
+
+
+def test_driver_publishes_exact_preassembly_lifecycle_before_assembly(
+    tmp_path: Path,
+) -> None:
+    """Assembly can consume only the one driver-produced completed prefix."""
+
+    args = _fixture_args(tmp_path)
+    plan = build_plan(args)
+    seen: dict[str, object] = {}
+
+    def runner(command, *, stage, plan):
+        if stage == "assembly":
+            lifecycle_path = Path(plan["stage_roots"]["lifecycle_evidence"])
+            payload = lifecycle_path.read_bytes()
+            lifecycle = json.loads(payload)
+            assert payload == canonical_bytes(lifecycle)
+            assert lifecycle["schema"] == plan_tool.PREASSEMBLY_LIFECYCLE_SCHEMA
+            assert lifecycle["status"] == "ready-for-assembly"
+            assert lifecycle["cohort_id"] == plan["cohort_id"]
+            assert lifecycle["declaration"] == {
+                "path": plan["declaration"]["path"],
+                "sha256": plan["declaration"]["sha256"],
+            }
+            assert lifecycle["plan_sha256"] == _reviewed_plan_sha256(plan)
+            assert lifecycle["implementation"] == plan["repository"]
+            assert lifecycle["execution_binding"] == plan["authorization"][
+                "execution_binding"
+            ]
+            assert lifecycle["completed_stages"] == list(DRIVER_STAGES[:-1])
+            assert [entry["stage"] for entry in lifecycle["stage_executions"]] == list(
+                DRIVER_STAGES[:-1]
+            )
+            assert all(entry["returncode"] == 0 for entry in lifecycle["stage_executions"])
+            assert lifecycle["assembly_command_sha256"] == hashlib.sha256(
+                canonical_bytes(command)
+            ).hexdigest()
+            source_marker = lifecycle["source_authorization_marker"]
+            assert source_marker["path"] == str(
+                args.authorization_state_root
+                / f"{plan['declaration']['sha256']}.json"
+            )
+            seen["lifecycle"] = lifecycle
+        return SimpleNamespace(returncode=0, stdout=b"stage-out", stderr=b"stage-err")
+
+    evidence = run_plan(
+        plan,
+        dry_run=False,
+        runner=runner,
+        acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
+    )
+    assert evidence["passed"] is True
+    assert "lifecycle" in seen
+
+
+def test_source_command_receives_the_exact_bound_journal_leaf(tmp_path: Path) -> None:
+    args = _fixture_args(tmp_path)
+    plan = build_plan(args)
+    source_command = next(
+        step["command"] for step in plan["commands"] if step["stage"] == "source"
+    )
+    marker_index = source_command.index("--final-source-authorization")
+    assert source_command[marker_index + 1] == str(
+        args.authorization_state_root / f"{plan['declaration']['sha256']}.json"
+    )
 
 
 def test_stage_failure_after_source_is_cohort_artifact_no_retry(
@@ -698,16 +1066,164 @@ def test_stage_failure_after_source_is_cohort_artifact_no_retry(
         dry_run=False,
         runner=runner,
         acknowledge_mutating_execution=True,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
     )
     assert evidence["passed"] is False
     assert evidence["defect_class"] == DEFECT_COHORT_ARTIFACT
-    assert evidence["mutating_stages_executed"] == ["source", "compile"]
+    assert evidence["mutating_stages_executed"] == [
+        "dyn-shape-preflight",
+        "source",
+        "compile",
+    ]
     assert evidence["authorization"]["source_authorization_consumed"] is True
     assert evidence["authorization"]["cohort_retirement_triggered"] is True
     assert evidence["authorization"]["retry_under_same_declaration_allowed"] is False
     marker = evidence["source_authorization_marker"]
     assert marker["path"].endswith(f"/{plan['declaration']['sha256']}.json")
     assert Path(marker["path"]).is_file()
+
+
+def test_library_execute_requires_the_reviewed_plan_hash(tmp_path: Path) -> None:
+    args = _fixture_args(tmp_path)
+    plan = build_plan(args)
+    calls: list[str] = []
+
+    def runner(_command, *, stage, plan):
+        del plan
+        calls.append(stage)
+        return SimpleNamespace(returncode=0)
+
+    for expected in (None, "0" * 64):
+        evidence = run_plan(
+            plan,
+            dry_run=False,
+            runner=runner,
+            acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+            expected_plan_sha256=expected,
+        )
+        assert evidence["passed"] is False
+        assert evidence["failure"]["check_id"] == "expected-plan-sha256"
+        assert evidence["mutating_stages_executed"] == []
+        assert evidence["authorization"]["source_authorization_consumed"] is False
+        assert calls == []
+
+
+def test_phase_a_input_mutation_is_rejected_before_source_journal(
+    tmp_path: Path,
+) -> None:
+    args = _fixture_args(tmp_path)
+    plan = build_plan(args)
+    calls: list[str] = []
+
+    def runner(_command, *, stage, plan):
+        del plan
+        calls.append(stage)
+        assert stage == "dyn-shape-preflight"
+        args.stock_inventory.write_bytes(b"mutated after Phase A\n")
+        return SimpleNamespace(returncode=0)
+
+    evidence = run_plan(
+        plan,
+        dry_run=False,
+        runner=runner,
+        acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
+    )
+    assert evidence["passed"] is False
+    assert evidence["failure"]["check_id"].startswith(
+        "stage-revalidation:source:pinned-digest:stock_inventory"
+    )
+    assert calls == ["dyn-shape-preflight"]
+    assert evidence["mutating_stages_executed"] == ["dyn-shape-preflight"]
+    assert evidence["authorization"]["source_authorization_consumed"] is False
+    marker = args.authorization_state_root / f"{plan['declaration']['sha256']}.json"
+    assert not marker.exists()
+
+
+def test_preactivation_evidence_drift_is_rejected_before_source_journal(
+    tmp_path: Path,
+) -> None:
+    args = _fixture_args(tmp_path)
+    plan = build_plan(args)
+    calls: list[str] = []
+
+    def runner(_command, *, stage, plan):
+        del plan
+        calls.append(stage)
+        assert stage == "dyn-shape-preflight"
+        args.preactivation_test_report.write_bytes(b"mutated preactivation evidence\n")
+        return SimpleNamespace(returncode=0)
+
+    evidence = run_plan(
+        plan,
+        dry_run=False,
+        runner=runner,
+        acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
+    )
+
+    assert evidence["passed"] is False
+    assert evidence["failure"]["check_id"].startswith(
+        "stage-revalidation:source:pinned-digest:preactivation_test_report"
+    )
+    assert calls == ["dyn-shape-preflight"]
+    assert evidence["authorization"]["source_authorization_consumed"] is False
+    marker = args.authorization_state_root / f"{plan['declaration']['sha256']}.json"
+    assert not marker.exists()
+
+
+def test_execution_binding_drift_rejects_before_phase_a(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _fixture_args(tmp_path)
+    plan = build_plan(args)
+
+    def rejected_binding(*_args, **_kwargs):
+        raise plan_tool.FinalExecutionBindingError("fixture host changed")
+
+    monkeypatch.setattr(plan_tool, "validate_execution_binding", rejected_binding)
+    evidence = run_plan(
+        plan,
+        dry_run=False,
+        runner=lambda *_args, **_kwargs: pytest.fail("Phase A must not run"),
+        acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
+    )
+
+    assert evidence["passed"] is False
+    assert evidence["failure"]["check_id"] == "execution-authorization-binding"
+    assert evidence["mutating_stages_executed"] == []
+    assert evidence["authorization"]["source_authorization_consumed"] is False
+
+
+def test_post_source_input_mutation_is_terminal_before_next_stage(
+    tmp_path: Path,
+) -> None:
+    args = _fixture_args(tmp_path)
+    plan = build_plan(args)
+    calls: list[str] = []
+
+    def runner(_command, *, stage, plan):
+        del plan
+        calls.append(stage)
+        if stage == "source":
+            args.stock_inventory.write_bytes(b"mutated after source\n")
+        return SimpleNamespace(returncode=0)
+
+    evidence = run_plan(
+        plan,
+        dry_run=False,
+        runner=runner,
+        acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
+    )
+    assert evidence["passed"] is False
+    assert evidence["failure"]["check_id"].startswith(
+        "stage-revalidation:compile:pinned-digest:stock_inventory"
+    )
+    assert calls == ["dyn-shape-preflight", "source"]
+    assert evidence["authorization"]["source_authorization_consumed"] is True
+    assert evidence["authorization"]["cohort_retirement_triggered"] is True
 
 
 def test_source_authorization_marker_prevents_second_execution(
@@ -727,6 +1243,7 @@ def test_source_authorization_marker_prevents_second_execution(
         dry_run=False,
         runner=runner,
         acknowledge_mutating_execution=True,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
     )
     assert first["passed"] is True
     assert calls == list(DRIVER_STAGES)
@@ -737,6 +1254,7 @@ def test_source_authorization_marker_prevents_second_execution(
         dry_run=False,
         runner=runner,
         acknowledge_mutating_execution=True,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
     )
     assert second["passed"] is False
     assert calls == []
@@ -759,10 +1277,12 @@ def test_declaration_tombstone_blocks_a_different_workspace(
         dry_run=False,
         runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
         acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
     )
     assert first["passed"] is True
 
     other_args = _fixture_args(tmp_path, tag="other-workspace")
+    other_args.authorization_state_root = args.authorization_state_root
     other_args.declaration.write_bytes(args.declaration.read_bytes())
     _activate_fixture_declaration(other_args.declaration)
     other_plan = build_plan(other_args)
@@ -772,6 +1292,7 @@ def test_declaration_tombstone_blocks_a_different_workspace(
         dry_run=False,
         runner=lambda *_args, **_kwargs: pytest.fail("source must not run"),
         acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+        expected_plan_sha256=_reviewed_plan_sha256(other_plan),
     )
     assert evidence["passed"] is False
     assert evidence["failure"]["check_id"] == "source-authorization-already-consumed"
@@ -787,12 +1308,14 @@ def test_incomplete_source_authorization_journal_is_terminal_tombstone(
     plan = build_plan(args)
     calls: list[str] = []
     real_fsync = plan_tool.os.fsync
-    failed = False
+    fsync_calls = 0
 
     def interrupted_fsync(descriptor: int) -> None:
-        nonlocal failed
-        if not failed:
-            failed = True
+        nonlocal fsync_calls
+        fsync_calls += 1
+        # The driver durably creates workspace/reports before Phase A. Fail the
+        # next fsync, which is the source-journal inode after O_EXCL.
+        if fsync_calls == 3:
             raise OSError("simulated journal fsync failure")
         real_fsync(descriptor)
 
@@ -807,17 +1330,15 @@ def test_incomplete_source_authorization_journal_is_terminal_tombstone(
         dry_run=False,
         runner=runner,
         acknowledge_mutating_execution=True,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
     )
     assert first["passed"] is False
-    assert calls == []
+    assert calls == ["dyn-shape-preflight"]
     assert first["failure"]["check_id"] == (
         "source-authorization-journal-incomplete"
     )
     assert first["authorization"]["source_authorization_consumed"] is True
-    marker = (
-        plan_tool.SOURCE_AUTHORIZATION_STATE_ROOT
-        / f"{plan['declaration']['sha256']}.json"
-    )
+    marker = args.authorization_state_root / f"{plan['declaration']['sha256']}.json"
     assert marker.is_file()
 
     calls.clear()
@@ -826,6 +1347,7 @@ def test_incomplete_source_authorization_journal_is_terminal_tombstone(
         dry_run=False,
         runner=runner,
         acknowledge_mutating_execution=True,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
     )
     assert second["passed"] is False
     assert calls == []
@@ -843,6 +1365,8 @@ def test_source_stage_exception_is_recorded_write_ahead_and_retires(
 
     def runner(_command, *, stage, plan):
         del plan
+        if stage == "dyn-shape-preflight":
+            return SimpleNamespace(returncode=0)
         assert stage == "source"
         raise RuntimeError("crash after first source byte")
 
@@ -851,12 +1375,16 @@ def test_source_stage_exception_is_recorded_write_ahead_and_retires(
         dry_run=False,
         runner=runner,
         acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
     )
 
     assert evidence["passed"] is False
     assert evidence["failure"]["check_id"] == "stage-exception:source"
     assert evidence["failure"]["exception_type"] == "RuntimeError"
-    assert evidence["mutating_stages_executed"] == ["source"]
+    assert evidence["mutating_stages_executed"] == [
+        "dyn-shape-preflight",
+        "source",
+    ]
     assert evidence["authorization"]["source_authorization_consumed"] is True
     assert evidence["authorization"]["cohort_retirement_triggered"] is True
     assert evidence["authorization"]["retry_under_same_declaration_allowed"] is False
@@ -875,25 +1403,34 @@ def test_pre_marker_journal_failure_does_not_claim_durable_consumption(
         )
 
     monkeypatch.setattr(plan_tool, "_source_authorization_marker", fail_before_create)
+    def runner(_command, *, stage, plan):
+        del plan
+        if stage == "dyn-shape-preflight":
+            return SimpleNamespace(returncode=0)
+        pytest.fail("source must not run")
+
     evidence = run_plan(
         plan,
         dry_run=False,
-        runner=lambda *_args, **_kwargs: pytest.fail("source must not run"),
+        runner=runner,
         acknowledge_mutating_execution=MUTATING_EXECUTION_ACK,
+        expected_plan_sha256=_reviewed_plan_sha256(plan),
     )
 
     assert evidence["passed"] is False
     assert evidence["failure"]["check_id"] == "source-authorization-journal"
-    assert evidence["mutating_stages_executed"] == []
+    assert evidence["mutating_stages_executed"] == ["dyn-shape-preflight"]
     assert evidence["source_authorization_marker"] is None
     assert evidence["authorization"]["source_authorization_consumed"] is False
     assert evidence["authorization"]["cohort_retirement_triggered"] is False
 
 
-def test_cli_execute_without_ack_or_runner_does_not_mutate(
-    tmp_path: Path, capsys
+def test_cli_execute_requires_reviewed_hash_and_ack_then_runs_complete_plan(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     args = _fixture_args(tmp_path)
+    plan_sha256 = hashlib.sha256(canonical_bytes(build_plan(args))).hexdigest()
+
     code = plan_tool.main([*_cli_base(args), "--execute"])
     assert code == 1
     loaded = json.loads(capsys.readouterr().out)
@@ -901,7 +1438,7 @@ def test_cli_execute_without_ack_or_runner_does_not_mutate(
     assert loaded["mutating_stages_executed"] == []
     assert loaded["authorization"]["source_authorization_consumed"] is False
     assert loaded["defect_class"] == DEFECT_RUNNER_CONFIGURATION
-    assert loaded["failure"]["check_id"] == "execute-acknowledgement"
+    assert loaded["failure"]["check_id"] == "expected-plan-sha256"
     assert not (args.workspace / "source").exists()
     assert not (args.workspace / "compiled").exists()
 
@@ -909,8 +1446,8 @@ def test_cli_execute_without_ack_or_runner_does_not_mutate(
         [
             *_cli_base(args),
             "--execute",
-            "--acknowledge-mutating-execution",
-            MUTATING_EXECUTION_ACK,
+            "--expected-plan-sha256",
+            plan_sha256,
         ]
     )
     assert code == 1
@@ -918,13 +1455,38 @@ def test_cli_execute_without_ack_or_runner_does_not_mutate(
     assert loaded["passed"] is False
     assert loaded["mutating_stages_executed"] == []
     assert loaded["authorization"]["source_authorization_consumed"] is False
-    assert loaded["failure"]["check_id"] == "execute-runner"
-    assert not (args.workspace / "source").exists()
+    assert loaded["failure"]["check_id"] == "execute-acknowledgement"
+
+    calls: list[str] = []
+
+    def runner(_command, *, stage, plan):
+        del plan
+        calls.append(stage)
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(plan_tool, "_subprocess_stage_runner", runner)
+    code = plan_tool.main(
+        [
+            *_cli_base(args),
+            "--execute",
+            "--expected-plan-sha256",
+            plan_sha256,
+            "--acknowledge-mutating-execution",
+            MUTATING_EXECUTION_ACK,
+        ]
+    )
+    assert code == 0
+    loaded = json.loads(capsys.readouterr().out)
+    assert loaded["passed"] is True
+    assert loaded["mutating_stages_executed"] == list(DRIVER_STAGES)
+    assert loaded["authorization"]["source_authorization_consumed"] is True
+    assert calls == list(DRIVER_STAGES)
+    assert [row["stage"] for row in loaded["stage_executions"]] == list(DRIVER_STAGES)
 
 
 def test_workspace_must_be_outside_repository(tmp_path: Path) -> None:
     args = _fixture_args(tmp_path)
-    args.workspace = ROOT / "docs" / "multires" / "would-be-final-workspace"
+    args.workspace = args.repo_root / "would-be-final-workspace"
     with pytest.raises(FinalCohortPlanError) as raised:
         build_plan(args)
     assert "outside the repository" in str(raised.value)

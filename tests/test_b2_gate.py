@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 import struct
+import sys
 
 import pytest
 import zstandard
@@ -20,8 +21,9 @@ from harness.hook_claims_v4 import (
 from harness.atlas_analyzer import _rust_struct_json
 import tools.assemble_b2_gate as b2_gate
 import tools.run_b2_test_suite as b2_test_suite
+import tools.validate_b2_final_cohort_plan as final_plan
 from tools.assemble_b2_gate import (
-    ACTIVE_71453_QUALIFICATION_SUCCESSOR_PATHS,
+    ACTIVE_71454_QUALIFICATION_SUCCESSOR_PATHS,
     ACTIVE_FINAL_AUTHORITY,
     ActiveFinalAuthority,
     B2GateError,
@@ -34,6 +36,7 @@ from tools.assemble_b2_gate import (
     RETIRED_71450_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_71451_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_71452_QUALIFICATION_SUCCESSOR_PATHS,
+    RETIRED_71453_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_COHORT_71446,
     RETIRED_COHORT_71447,
     RETIRED_COHORT_71448,
@@ -41,6 +44,9 @@ from tools.assemble_b2_gate import (
     RETIRED_COHORT_71450,
     RETIRED_COHORT_71451,
     RETIRED_COHORT_71452,
+    RETIRED_COHORT_71453,
+    STOCK_PROVENANCE_COMPACT_SHA256,
+    STOCK_PROVENANCE_SHA256,
     assemble_gate,
     _exact_directory_files,
     _decode_dyn_snapshot,
@@ -56,11 +62,14 @@ from tools.assemble_b2_gate import (
     _validate_source_spawn_origin_binding,
     _validate_source_spawn_origin_binding_pass_count,
     _validate_test_report,
+    validate_preactivation_test_binding,
     _parser,
+    _load_stock_provenance,
     _require_active_final_authority,
     validate_gate,
 )
 from tools.run_generator_cohort import STAGE_SUFFIXES, canonical_bytes
+from tools.assemble_b2_qualification import activation_successor_policy
 from tools.run_b2_test_suite import (
     B2TestSuiteError,
     _commands,
@@ -125,8 +134,11 @@ def _paths(tmp_path: Path) -> B2GatePaths:
         dyn_argv_preflight_report=tmp_path / "dyn-argv-preflight.json",
         dyn_origin_binding_report=tmp_path / "dyn-origin-binding.json",
         dyn_evidence_report=tmp_path / "dyn/b2-dyn-evidence.json",
+        preactivation_test_report=dummy,
         test_report=dummy,
         qualification_report=dummy,
+        final_lifecycle_evidence=dummy,
+        expected_assembly_command_sha256="ab" * 32,
     )
 
 
@@ -870,7 +882,9 @@ def test_retired_71446_identity_remains_readable_and_cli_is_explicit() -> None:
     assert "--dyn-evidence-report" in options
     assert "--dyn-origin-binding-report" in options
     assert "--compiled-cm-preflight-report" in options
+    assert "--preactivation-test-report" in options
     assert "--qualification-report" in options
+    assert "--final-lifecycle-evidence" in options
     assert "--glob" not in options
     assert "--generated-dir" not in options
     assert "--expected-count" not in options
@@ -939,6 +953,10 @@ def test_retired_71446_identity_remains_readable_and_cli_is_explicit() -> None:
             ROOT / "docs/multires/B2-GENERATED-COHORT-71452-DECLARATION.json",
             "71452",
         ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json",
+            "71453",
+        ),
     ],
 )
 def test_gate_refuses_retired_declaration_before_evidence(
@@ -948,19 +966,24 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_71452_is_retired_and_71453_is_the_active_final_authority() -> None:
+def test_71453_is_retired_and_71454_is_the_active_final_authority() -> None:
     authority = _require_active_final_authority()
     assert ACTIVE_FINAL_AUTHORITY == authority
-    assert authority.cohort_id == "b2g26_final_71453"
+    assert authority.cohort_id == "b2g26_final_71454"
     assert authority.declaration_sha256 == (
-        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810"
+        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"
     )
     assert authority.immutable_declaration_path == (
-        "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
+        "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
     )
     assert (
         authority.qualification_successor_paths
-        == ACTIVE_71453_QUALIFICATION_SUCCESSOR_PATHS
+        == ACTIVE_71454_QUALIFICATION_SUCCESSOR_PATHS
+    )
+    assert RETIRED_COHORT_71453 == "b2g26_final_71453"
+    assert (
+        "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
+        in RETIRED_71453_QUALIFICATION_SUCCESSOR_PATHS
     )
     assert RETIRED_COHORT_71452 == "b2g26_final_71452"
     assert (
@@ -994,20 +1017,101 @@ def test_71452_is_retired_and_71453_is_the_active_final_authority() -> None:
     )
 
 
-def test_current_alias_is_byte_identical_to_active_71453() -> None:
-    declaration, digest = _validate_declaration(
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
-    assert declaration["cohort_id"] == "b2g26_final_71453"
+def test_current_alias_is_byte_identical_but_only_immutable_71454_is_active() -> None:
+    alias = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+    immutable = ROOT / "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
+    assert alias.read_bytes() == immutable.read_bytes()
+    with pytest.raises(B2GateError, match="explicitly activated immutable path"):
+        _validate_declaration(alias)
+    declaration, digest = _validate_declaration(immutable)
+    assert declaration["cohort_id"] == "b2g26_final_71454"
     assert digest == ACTIVE_FINAL_AUTHORITY.declaration_sha256
-    assert (
-        ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    ).read_bytes() == (
-        ROOT / "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
-    ).read_bytes()
 
 
-def test_retired_71446_qualification_delta_remains_historically_readable(
+def test_gate_requires_the_exact_activated_immutable_declaration_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declaration = json.loads(
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
+        ).read_bytes()
+    )
+    declaration["cohort_id"] = "b2g26_final_99001"
+    for row in declaration["maps"]:
+        row["map"] = f"b2g26_fresh_path_{row['ordinal']:02d}"
+        row["seed"] = 99_001_000 + row["ordinal"]
+    immutable = tmp_path / "immutable-declaration.json"
+    immutable.write_bytes(canonical_bytes(declaration))
+    digest = hashlib.sha256(immutable.read_bytes()).hexdigest()
+    alias = tmp_path / "byte-identical-alias.json"
+    alias.write_bytes(immutable.read_bytes())
+    monkeypatch.setattr(
+        b2_gate,
+        "ACTIVE_FINAL_AUTHORITY",
+        ActiveFinalAuthority(
+            cohort_id=declaration["cohort_id"],
+            declaration_sha256=digest,
+            immutable_declaration_path=str(immutable),
+            qualification_successor_paths=frozenset({str(immutable)}),
+        ),
+    )
+
+    with pytest.raises(B2GateError, match="activated immutable path"):
+        _validate_declaration(alias)
+    loaded, loaded_digest = _validate_declaration(immutable)
+    assert loaded == declaration
+    assert loaded_digest == digest
+
+
+def test_real_stock_provenance_uses_exact_committed_writer_bytes() -> None:
+    path = ROOT / "docs/multires/stock-q2dm1-q2dm8.provenance.json"
+    raw = path.read_bytes()
+    provenance = _load_stock_provenance(path)
+
+    assert hashlib.sha256(raw).hexdigest() == STOCK_PROVENANCE_SHA256
+    assert len(raw) == 4989
+    assert [row["canonical_id"] for row in provenance["records"]] == [
+        f"q2dm{number}" for number in range(1, 9)
+    ]
+    compact = canonical_bytes(provenance)
+    assert hashlib.sha256(compact).hexdigest() == STOCK_PROVENANCE_COMPACT_SHA256
+    assert len(compact) == 4193
+    assert compact != raw
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (b'{"schema":"x","schema":"y","records":[]}\n', "duplicate JSON key"),
+        (b'{"records":[NaN],"schema":"q2-corpus-provenance-v1"}\n', "non-finite JSON token"),
+        (b'{"records":[],"schema":"q2-corpus-provenance-v1"}\n', "writer-canonical"),
+    ],
+)
+def test_stock_provenance_loader_rejects_non_writer_artifacts(
+    tmp_path: Path, payload: bytes, message: str,
+) -> None:
+    path = tmp_path / "provenance.json"
+    path.write_bytes(payload)
+    with pytest.raises(B2GateError, match=message):
+        _load_stock_provenance(path)
+
+
+def test_stock_provenance_loader_rejects_writer_canonical_semantic_rewrite(
+    tmp_path: Path,
+) -> None:
+    source = ROOT / "docs/multires/stock-q2dm1-q2dm8.provenance.json"
+    provenance = json.loads(source.read_bytes())
+    provenance["records"][0]["author"] += " rewritten"
+    path = tmp_path / "provenance.json"
+    path.write_text(
+        json.dumps(provenance, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(B2GateError, match="exact committed digest differs"):
+        _load_stock_provenance(path)
+
+
+def test_qualification_successor_uses_the_frozen_71454_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     qualified = _implementation()
@@ -1015,8 +1119,8 @@ def test_retired_71446_qualification_delta_remains_historically_readable(
     current["repository_commit"] = "ab" * 20
     current["repository_tree"] = "cd" * 20
     diff = "".join(
-        f"{'A' if path.endswith('71446-DECLARATION.json') else 'M'}\t{path}\n"
-        for path in sorted(RETIRED_71446_QUALIFICATION_SUCCESSOR_PATHS)
+        f"{'A' if path.endswith('71454-DECLARATION.json') else 'M'}\t{path}\n"
+        for path in activation_successor_policy()["allowed_changed_paths"]
     ).encode("utf-8")
 
     def capture(_root: Path, arguments: list[str]):
@@ -1025,22 +1129,12 @@ def test_retired_71446_qualification_delta_remains_historically_readable(
         return b2_gate.subprocess.CompletedProcess(arguments, 0, diff, b"")
 
     monkeypatch.setattr(b2_gate, "_git_capture", capture)
-    historical = ActiveFinalAuthority(
-        cohort_id=RETIRED_COHORT_71446,
-        declaration_sha256=(
-            "58d52bd958249a70bf8115ab1c442fb6888a6d69b290a636303986f69acb658f"
-        ),
-        immutable_declaration_path=(
-            "docs/multires/B2-GENERATED-COHORT-71446-DECLARATION.json"
-        ),
-        qualification_successor_paths=RETIRED_71446_QUALIFICATION_SUCCESSOR_PATHS,
-    )
     relation = _validate_qualification_successor(
-        ROOT, qualified, current, historical
+        ROOT, qualified, current, activation_successor_policy()
     )
     assert relation["stable_authority_equal"] is True
     assert relation["changed_paths"] == sorted(
-        RETIRED_71446_QUALIFICATION_SUCCESSOR_PATHS
+        activation_successor_policy()["allowed_changed_paths"]
     )
 
 
@@ -1062,13 +1156,43 @@ def test_qualification_successor_rejects_unqualified_producer_change(
             ROOT,
             qualified,
             current,
-            ActiveFinalAuthority(
-                cohort_id="fixture",
-                declaration_sha256="00" * 32,
-                immutable_declaration_path="fixture.json",
-                qualification_successor_paths=frozenset({"fixture.json"}),
-            ),
+            activation_successor_policy(),
         )
+
+
+def test_qualification_successor_rejects_authority_expanded_extra_tool_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The later authority object cannot self-authorize an extra tool edit."""
+
+    qualified = _implementation()
+    current = dict(qualified)
+    current["repository_commit"] = "ab" * 20
+    current["repository_tree"] = "cd" * 20
+    policy = activation_successor_policy()
+    extra_path = "tools/unauthorized_activation_tool.py"
+    expanded_authority = ActiveFinalAuthority(
+        cohort_id=policy["cohort_id"],
+        declaration_sha256="00" * 32,
+        immutable_declaration_path=policy["immutable_declaration_path"],
+        qualification_successor_paths=frozenset(
+            [*policy["allowed_changed_paths"], extra_path]
+        ),
+    )
+    diff = "".join(
+        f"{'A' if path == policy['immutable_declaration_path'] else 'M'}\t{path}\n"
+        for path in [*policy["allowed_changed_paths"], extra_path]
+    ).encode("utf-8")
+
+    def capture(_root: Path, arguments: list[str]):
+        if arguments[0] == "merge-base":
+            return b2_gate.subprocess.CompletedProcess(arguments, 0, b"", b"")
+        return b2_gate.subprocess.CompletedProcess(arguments, 0, diff, b"")
+
+    monkeypatch.setattr(b2_gate, "ACTIVE_FINAL_AUTHORITY", expanded_authority)
+    monkeypatch.setattr(b2_gate, "_git_capture", capture)
+    with pytest.raises(B2GateError, match="changed files differ"):
+        _validate_qualification_successor(ROOT, qualified, current, policy)
 
 
 def _write_compiled_cm_gate_fixture(
@@ -1523,10 +1647,16 @@ def test_fake_magic_only_dyn_snapshot_is_rejected() -> None:
         )
 
 
-def test_test_report_recomputes_log_hash_and_rejects_tamper(tmp_path: Path) -> None:
-    report_path = tmp_path / "b2-test-report.json"
+def _write_green_test_report(
+    evidence_root: Path,
+    implementation: dict,
+) -> tuple[Path, dict]:
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    report_path = evidence_root / "b2-test-report.json"
     runs = []
-    cargo_target = (tmp_path.parent / f".{tmp_path.name}.cargo-target").resolve()
+    cargo_target = (
+        evidence_root.parent / f".{evidence_root.name}.cargo-target"
+    ).resolve()
     for name, command in _commands("python3", cargo_target):
         if name == "python-syntax-floor":
             payload = canonical_bytes({
@@ -1555,7 +1685,7 @@ def test_test_report_recomputes_log_hash_and_rejects_tamper(tmp_path: Path) -> N
         else:
             payload = b""
             counts = (1, 0, 0)
-        log = tmp_path / f"{name}.log"
+        log = evidence_root / f"{name}.log"
         log.write_bytes(payload)
         runs.append({
             "name": name,
@@ -1572,7 +1702,7 @@ def test_test_report_recomputes_log_hash_and_rejects_tamper(tmp_path: Path) -> N
         })
     report = {
         "schema": b2_test_suite.REPORT_SCHEMA,
-        "implementation": _implementation(),
+        "implementation": implementation,
         "execution_environment": {
             b2_test_suite.CARGO_TARGET_ENV: str(
                 cargo_target
@@ -1583,6 +1713,11 @@ def test_test_report_recomputes_log_hash_and_rejects_tamper(tmp_path: Path) -> N
         "passed": True,
     }
     report_path.write_bytes(canonical_bytes(report))
+    return report_path, report
+
+
+def test_test_report_recomputes_log_hash_and_rejects_tamper(tmp_path: Path) -> None:
+    report_path, report = _write_green_test_report(tmp_path, _implementation())
     assert _validate_test_report(report_path, _implementation())["passed_count"] == 16
 
     expected_target = Path(
@@ -1619,6 +1754,295 @@ def test_test_report_recomputes_log_hash_and_rejects_tamper(tmp_path: Path) -> N
         _validate_test_report(report_path, _implementation())
 
 
+def test_preactivation_tests_bind_the_qualified_not_final_implementation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qualified = _implementation()
+    final = dict(qualified)
+    final["repository_commit"] = "ab" * 20
+    final["repository_tree"] = "cd" * 20
+    report_path, test_report = _write_green_test_report(
+        tmp_path / "preactivation-tests", qualified
+    )
+    qualification_path = tmp_path / "qualification.json"
+    qualification_path.write_bytes(b"qualification fixture\n")
+    replayed = {
+        "implementation": qualified,
+        "qualification_id": "b2q26_preactivation_fixture",
+        "end_to_end": {"pass_count": 28, "required_pass_count": 20},
+        "activation_successor_policy": activation_successor_policy(),
+    }
+    relation = {
+        "qualified_repository_commit": qualified["repository_commit"],
+        "qualified_repository_tree": qualified["repository_tree"],
+        "final_repository_commit": final["repository_commit"],
+        "final_repository_tree": final["repository_tree"],
+        "stable_authority_equal": True,
+        "changed_paths": ["fixture-declaration.json"],
+    }
+    monkeypatch.setattr(
+        b2_gate,
+        "_replay_final_qualification",
+        lambda **_kwargs: (replayed, relation),
+    )
+    authority = ActiveFinalAuthority(
+        cohort_id="b2g26_final_99000",
+        declaration_sha256="ef" * 32,
+        immutable_declaration_path="fixture-declaration.json",
+        qualification_successor_paths=frozenset({"fixture-declaration.json"}),
+    )
+    kwargs = {
+        "design": ROOT / "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md",
+        "plan": ROOT / "docs/MULTIRES-LATTICE-MAP-ATLAS-PLAN-2026-07-14.md",
+        "repo_root": ROOT,
+        "b1_gate": ROOT / "docs/multires/B1-GATE.json",
+        "qualification_report": qualification_path,
+        "preactivation_test_report": report_path,
+        "implementation": final,
+        "authority": authority,
+    }
+    binding = validate_preactivation_test_binding(**kwargs)
+    assert binding["preactivation_tests"]["run_count"] == 8
+    assert binding["preactivation_tests"]["passed_count"] == 16
+    assert binding["activation_successor_policy"] == activation_successor_policy()
+
+    replayed["activation_successor_policy"]["allowed_changed_paths"].append(
+        "tools/unauthorized_activation_tool.py"
+    )
+    with pytest.raises(B2GateError, match="activation-successor policy"):
+        validate_preactivation_test_binding(**kwargs)
+    replayed["activation_successor_policy"] = activation_successor_policy()
+
+    test_report["implementation"] = final
+    report_path.write_bytes(canonical_bytes(test_report))
+    with pytest.raises(B2GateError, match="implementation is stale"):
+        validate_preactivation_test_binding(**kwargs)
+
+
+def _write_final_lifecycle_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[B2GatePaths, dict, ActiveFinalAuthority, dict]:
+    """Create a canonical preassembly record with host I/O stubbed at its edge."""
+
+    declaration_path = tmp_path / "B2-GENERATED-COHORT-99000-DECLARATION.json"
+    declaration_path.write_bytes(b"immutable declaration fixture\n")
+    declaration_sha256 = _sha256(declaration_path.read_bytes())
+    implementation = _implementation()
+    authority = ActiveFinalAuthority(
+        cohort_id="b2g26_final_99000",
+        declaration_sha256=declaration_sha256,
+        immutable_declaration_path=str(declaration_path),
+        qualification_successor_paths=frozenset({
+            str(declaration_path),
+        }),
+    )
+    source = tmp_path / "source"
+    source_cold = tmp_path / "source-cold"
+    source_report = tmp_path / "source-freeze.json"
+    marker_path = tmp_path / "state" / f"{declaration_sha256}.json"
+    marker_path.parent.mkdir()
+    marker_path.write_bytes(canonical_bytes({"marker": "fixture"}))
+    binding = {
+        "schema": "q2-b2-final-execution-binding-v2",
+        "host": {
+            "hostname": "DESKTOP-RTX2080",
+            "kernel_release": "5.15.153.1-microsoft-standard-WSL2",
+            "machine_identity": {
+                "path": "/etc/machine-id",
+                "sha256": "ab" * 32,
+            },
+            "euid": 1000,
+        },
+        "state_root": {
+            "path": str(marker_path.parent),
+            "owner_uid": 1000,
+            "mode": "0700",
+            "device": 1,
+            "inode": 2,
+        },
+    }
+    command_sha256 = "cd" * 32
+    stage_executions = [
+        {
+            "stage": stage,
+            "command_sha256": "ef" * 32,
+            "returncode": 0,
+            "stdout": {"bytes": 0, "sha256": "01" * 32},
+            "stderr": {"bytes": 0, "sha256": "02" * 32},
+        }
+        for stage in b2_gate.FINAL_LIFECYCLE_PREASSEMBLY_STAGES
+    ]
+    lifecycle = {
+        "schema": b2_gate.FINAL_LIFECYCLE_EVIDENCE_SCHEMA,
+        "status": "ready-for-assembly",
+        "cohort_id": authority.cohort_id,
+        "declaration": {
+            "path": str(declaration_path),
+            "sha256": declaration_sha256,
+        },
+        "plan_sha256": "03" * 32,
+        "implementation": implementation,
+        "execution_binding": binding,
+        "source_authorization_marker": {
+            "path": str(marker_path),
+            **b2_gate._file_record(marker_path),
+        },
+        "completed_stages": list(b2_gate.FINAL_LIFECYCLE_PREASSEMBLY_STAGES),
+        "stage_executions": stage_executions,
+        "assembly_command_sha256": command_sha256,
+    }
+    evidence_path = tmp_path / "lifecycle-preassembly.json"
+    evidence_path.write_bytes(canonical_bytes(lifecycle))
+    paths = replace(
+        _paths(tmp_path),
+        declaration=declaration_path,
+        source_dir=source,
+        source_cold_dir=source_cold,
+        source_freeze_report=source_report,
+        final_lifecycle_evidence=evidence_path,
+        expected_assembly_command_sha256=command_sha256,
+    )
+    seen: dict[str, object] = {}
+
+    def validate(marker, **kwargs):
+        seen["marker"] = marker
+        seen.update(kwargs)
+        return {
+            "plan_sha256": lifecycle["plan_sha256"],
+            "execution_binding": binding,
+            "implementation": implementation,
+        }
+
+    monkeypatch.setattr(b2_gate, "validate_final_source_authorization", validate)
+    return paths, lifecycle, authority, seen
+
+
+def test_final_lifecycle_evidence_binds_the_completed_prefix_and_source_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, lifecycle, authority, seen = _write_final_lifecycle_fixture(
+        tmp_path, monkeypatch
+    )
+    declaration = {"cohort_id": authority.cohort_id}
+    summary = b2_gate._validate_final_lifecycle_evidence(
+        paths, declaration, authority.declaration_sha256, _implementation(), authority
+    )
+
+    assert summary["evidence"] == b2_gate._file_record(
+        paths.final_lifecycle_evidence
+    )
+    assert summary["completed_stages"] == list(
+        b2_gate.FINAL_LIFECYCLE_PREASSEMBLY_STAGES
+    )
+    assert seen["marker"] == Path(lifecycle["source_authorization_marker"]["path"])
+    assert seen["declaration_path"] == paths.declaration
+    assert seen["source_output"] == paths.source_dir
+    assert seen["source_cold"] == paths.source_cold_dir
+    assert seen["source_report"] == paths.source_freeze_report
+    assert seen["implementation"] == _implementation()
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda record: record["completed_stages"].pop(),
+            "completed-stage prefix/order differs",
+        ),
+        (
+            lambda record: record["stage_executions"][3].update({"returncode": 1}),
+            "did not exit zero",
+        ),
+        (
+            lambda record: record.update({"assembly_command_sha256": "ff" * 32}),
+            "assembly command differs",
+        ),
+    ],
+)
+def test_final_lifecycle_evidence_rejects_incomplete_or_rebound_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutate,
+    message: str,
+) -> None:
+    paths, lifecycle, authority, _seen = _write_final_lifecycle_fixture(
+        tmp_path, monkeypatch
+    )
+    mutate(lifecycle)
+    paths.final_lifecycle_evidence.write_bytes(canonical_bytes(lifecycle))
+    with pytest.raises(B2GateError, match=message):
+        b2_gate._validate_final_lifecycle_evidence(
+            paths, {"cohort_id": authority.cohort_id},
+            authority.declaration_sha256, _implementation(), authority,
+        )
+
+
+def test_final_lifecycle_evidence_rejects_marker_file_record_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, lifecycle, authority, _seen = _write_final_lifecycle_fixture(
+        tmp_path, monkeypatch
+    )
+    lifecycle["source_authorization_marker"]["sha256"] = "ff" * 32
+    paths.final_lifecycle_evidence.write_bytes(canonical_bytes(lifecycle))
+    with pytest.raises(B2GateError, match="marker file record differs"):
+        b2_gate._validate_final_lifecycle_evidence(
+            paths, {"cohort_id": authority.cohort_id},
+            authority.declaration_sha256, _implementation(), authority,
+        )
+
+
+def test_final_lifecycle_gate_summary_rejects_missing_prefix_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, lifecycle, authority, _seen = _write_final_lifecycle_fixture(
+        tmp_path, monkeypatch
+    )
+    summary = b2_gate._validate_final_lifecycle_evidence(
+        paths, {"cohort_id": authority.cohort_id},
+        authority.declaration_sha256, _implementation(), authority,
+    )
+    summary["completed_stages"].pop()
+    with pytest.raises(B2GateError, match="completed-stage prefix/order differs"):
+        b2_gate._validate_gate_final_lifecycle_summary(
+            summary, authority=authority, implementation=_implementation()
+        )
+
+
+def test_final_lifecycle_gate_summary_requires_v2_wsl_execution_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _lifecycle, authority, _seen = _write_final_lifecycle_fixture(
+        tmp_path, monkeypatch
+    )
+    summary = b2_gate._validate_final_lifecycle_evidence(
+        paths, {"cohort_id": authority.cohort_id},
+        authority.declaration_sha256, _implementation(), authority,
+    )
+    summary["execution_binding"]["schema"] = "q2-b2-final-execution-binding-v1"
+    with pytest.raises(B2GateError, match="execution binding schema differs"):
+        b2_gate._validate_gate_final_lifecycle_summary(
+            summary, authority=authority, implementation=_implementation()
+        )
+
+
+def test_actual_assembly_command_digest_binds_ordered_argv() -> None:
+    argv = ["--design", "/tmp/design", "--output", "/tmp/gate"]
+    expected = _sha256(canonical_bytes([
+        str(Path(sys.executable).resolve()),
+        str(Path(b2_gate.__file__).resolve()),
+        *argv,
+    ]))
+    assert b2_gate._actual_assembly_command_sha256(argv) == expected
+    assert b2_gate._actual_assembly_command_sha256(list(reversed(argv))) != expected
+
+
 def test_b2_gate_schemas_are_strict() -> None:
     gate_schema = json.loads(
         (ROOT / "schemas/q2-multires-b2-gate-v1.schema.json").read_text()
@@ -1631,11 +2055,11 @@ def test_b2_gate_schemas_are_strict() -> None:
     cohort_schema = gate_schema["properties"]["generated_cohort"]["properties"][
         "cohort_id"
     ]
-    assert cohort_schema["const"] == "b2g26_final_71453"
+    assert cohort_schema["const"] == "b2g26_final_71454"
     assert gate_schema["properties"]["generated_cohort"]["properties"][
         "declaration_sha256"
     ]["const"] == (
-        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810"
+        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"
     )
     assert gate_schema["properties"]["generated_cohort"]["properties"][
         "compiled_cm_preflight"
@@ -1643,6 +2067,30 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert gate_schema["properties"]["toolchain_qualification"][
         "$ref"
     ] == "#/$defs/toolchain_qualification"
+    assert "final_lifecycle" in gate_schema["required"]
+    assert gate_schema["properties"]["final_lifecycle"][
+        "$ref"
+    ] == "#/$defs/final_lifecycle"
+    assert gate_schema["$defs"]["final_lifecycle"]["required"] == [
+        "evidence",
+        "schema",
+        "status",
+        "cohort_id",
+        "declaration",
+        "plan_sha256",
+        "implementation",
+        "execution_binding",
+        "source_authorization_marker",
+        "completed_stages",
+        "stage_executions",
+        "assembly_command_sha256",
+    ]
+    assert gate_schema["$defs"]["final_lifecycle"]["properties"][
+        "status"
+    ]["const"] == "ready-for-assembly"
+    assert gate_schema["$defs"]["final_lifecycle"]["properties"][
+        "stage_executions"
+    ]["minItems"] == len(b2_gate.FINAL_LIFECYCLE_PREASSEMBLY_STAGES)
     assert gate_schema["properties"]["dyn_evidence"]["properties"][
         "argv_preflight"
     ]["required"] == ["shape_preflight", "origin_binding"]
@@ -1652,11 +2100,26 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert "implementation_successor" in gate_schema["$defs"][
         "toolchain_qualification"
     ]["required"]
+    assert "activation_successor_policy" in gate_schema["$defs"][
+        "toolchain_qualification"
+    ]["required"]
+    assert "preactivation_tests" in gate_schema["$defs"][
+        "toolchain_qualification"
+    ]["required"]
+    assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
+        "preactivation_tests"
+    ]["$ref"] == "#/properties/tests"
     assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
         "implementation_successor"
-    ]["properties"]["changed_paths"]["minItems"] == len(
-        ACTIVE_71453_QUALIFICATION_SUCCESSOR_PATHS
-    )
+    ]["properties"]["changed_paths"]["const"] == activation_successor_policy()[
+        "allowed_changed_paths"
+    ]
+    assert gate_schema["$defs"]["toolchain_qualification"]["properties"][
+        "activation_successor_policy"
+    ]["$ref"] == "#/$defs/activation_successor_policy"
+    assert gate_schema["$defs"]["activation_successor_policy"]["properties"][
+        "allowed_changed_paths"
+    ]["const"] == activation_successor_policy()["allowed_changed_paths"]
     assert gate_schema["$defs"]["compiled_cm_preflight_stage"]["properties"][
         "pass_count"
     ]["const"] == 28
@@ -1667,6 +2130,17 @@ def test_b2_gate_schemas_are_strict() -> None:
     assert test_schema["properties"]["passed"]["const"] is True
     assert test_schema["properties"]["runs"]["minItems"] == 8
     assert test_schema["properties"]["runs"]["maxItems"] == 8
+
+
+def test_final_lifecycle_stage_contract_is_shared_by_driver_gate_and_schema() -> None:
+    gate_schema = json.loads(
+        (ROOT / "schemas/q2-multires-b2-gate-v1.schema.json").read_text()
+    )
+    expected = list(final_plan.PREASSEMBLY_LIFECYCLE_STAGES)
+    assert expected == list(b2_gate.FINAL_LIFECYCLE_PREASSEMBLY_STAGES)
+    assert gate_schema["$defs"]["final_lifecycle"]["properties"][
+        "completed_stages"
+    ]["const"] == expected
 
 
 def test_test_evidence_adapter_has_fixed_suites_and_parses_counts() -> None:

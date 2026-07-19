@@ -81,19 +81,23 @@ passing component tests or an isolated staging checkout cannot. The old
 in-process public ONNX runtime is retired and has no operational selector or
 rollback role.
 
-**Current B2 authority (updated 2026-07-18):** final cohort 71452 remains
-permanently retired under
-`docs/multires/B2-GENERATED-COHORT-71452-FAILURE.json`; none of its bytes may be
-retried, repaired, or reused. Corrective commit
-`14dfc409b047611cb0722e53cad57d8c8584acb5` passed fresh disposable
-qualification `b2q26_14dfc40_71810000` 28/28 plus all seven infrastructure
-checks, including production Phase-B replay of real compact Atlas writer bytes
-and both promotion-sealed manifest digests. Qualification bytes remain
-non-admissible. `ACTIVE_FINAL_AUTHORITY` now pins only fresh disjoint cohort
-`b2g26_final_71453`, declaration SHA-256
-`5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810`,
+**Current B2 authority (updated 2026-07-18):** final cohorts through 71453
+remain permanently retired. Corrective commit
+`7c482c9087262f065add58461a2b6f00644bb83a`, tree
+`f1f19982e382c95cb2ea30fc285cb2d44956cf3b`, passed fresh disposable
+qualification `b2q26_7c482c9_71815000` 28/28 plus all eight retained
+infrastructure checks. Its canonical green, non-admissible report SHA-256 is
+`e33b0a469b98fb11ab05603b54d29484d07d7a3a1fd629f345ac8c766eeff2fb`.
+The same qualified implementation passed the complete eight-part
+preactivation suite; report SHA-256
+`568648911b135102a6ddb3bd0d5938c906ccd047be720c1aff93fa056283336a`.
+Qualification and test bytes remain non-admissible. `ACTIVE_FINAL_AUTHORITY`
+now pins only fresh disjoint cohort `b2g26_final_71454`, immutable declaration
+`docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json`, declaration
+SHA-256
+`8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986`,
 and the exact twelve-path qualified-successor delta. Its first source attempt
-consumes its sole authorization. Gate assembly, deployment, trainer, and
+consumes its sole authorization. Gate publication, deployment, trainer, and
 TensorBoard remain forbidden until that one-shot final cohort and every B2-B6
 cutover gate pass. Even a green B6 aggregate is not a launch selector:
 `train.multires_service` requires the v2 immutable integration envelope/report
@@ -101,6 +105,89 @@ and cold-start bindings in `docs/multires/PRIMARY-TRAINER-ADMISSION.md`, reruns
 the complete verifier before runtime-state mutation and again before process
 creation, and requires the current clean bot commit/tree to equal the source
 frozen through B3-B6.
+
+The qualified implementation freezes the sole 71454 activation-successor
+policy in the qualification report: its cohort, direct immutable declaration
+path, and exact twelve-path delta. `ACTIVE_FINAL_AUTHORITY` supplies the later
+declaration digest only; it cannot self-authorize an extra activation edit.
+
+The 71454 pre-declaration lifecycle is now a single hash-reviewed driver,
+`tools/validate_b2_final_cohort_plan.py`. Its immutable plan covers, in order,
+Dyn Phase A, source generation, compile and both membership checks, static and
+compiled-CM checks, materialization, claims, generated Atlas/promotion, the
+atomic q2dm1..q2dm8 stock campaign, Dyn Phase B binding and the sole Dyn
+execution, the atomic test suite, and gate assembly. A dry run must be reviewed
+first; execute mode requires that exact plan SHA-256 plus
+`I_ACKNOWLEDGE_MUTATING_FINAL_COHORT_EXECUTION`. Every declaration-bearing
+stage receives the absolute direct
+`docs/multires/B2-GENERATED-COHORT-<N>-DECLARATION.json` path. The current alias,
+symlinks, byte-identical copies, changed bytes, and filename/cohort mismatches
+are rejected. Do not run or retry individual final-lane stages manually. This
+tooling does not create or activate 71454 and does not weaken the fresh 28/28
+qualification and separate declaration commit requirements above.
+
+The reviewed final plan is executable only on `DESKTOP-RTX2080` WSL. It requires
+an explicit, pre-provisioned `--authorization-state-root` outside both the
+repository and final workspace, owned by the executing UID with mode `0700`.
+The plan pins that directory's device/inode, the effective UID, hostname, exact
+WSL2 kernel release, and canonical `/etc/machine-id` digest; each validation
+and the write-ahead source journal recheck all of them. Marker leaves are
+opened only through the validated root directory descriptor, bind the exact
+qualified implementation plus declaration/source-output identities, and are
+created exclusively before source bytes exist. A legacy, malformed, partial,
+or pre-existing marker is terminal. The final assembler additionally requires
+the driver's canonical preassembly lifecycle evidence, including the reviewed
+plan digest, source marker, ordered stage executions, and exact assembly argv.
+Before source, the driver rejects a symlinked repository/tool identity and
+proves its planned assembly hash equals the child assembler's actual argv hash;
+manual report collection cannot publish a gate. Consequently a copied reviewed
+plan cannot run on another LAN host or account. This is operational
+attestation, not a cryptographic defense against a hostile same-UID local
+writer: keep the state root, workspace, and repository private and free of
+concurrent writers. Before the separate activation commit, the clean qualified
+implementation must also publish a green external
+`b2-test-report.json`; final planning and assembly replay the 28/28
+qualification and require that preactivation report to bind the qualified
+implementation, never the declaration-bearing successor.
+
+Disposable qualification `b2q26_825984f_71811000` and seed range beginning
+at `71811000` are also permanently forensic-only and must not be resumed or
+reused. Its plan bound zstandard's inactive `_cffi` extension even though the
+materializer imports `zstandard.backend_c`; the run was stopped during compile
+with no qualification report or final authority. The qualification driver now
+probes the pinned interpreter before workspace creation, requires the exact
+imported `__init__.py` and `backend_c` paths plus the fixed version/digests,
+and replays that complete binding during validation and resume. Any successor
+qualification must use a fresh ID, workspace, and disjoint seed range.
+
+Backend-correct disposable qualification `b2q26_ede2bff_71812000` completed
+27/28 maps end to end and all eight infrastructure checks. That is generic
+green under the normative 20-map toolchain threshold, but it is deliberately
+insufficient for the stricter 71454 final lane and is marked `DO-NOT-USE`.
+Its sole failed member, `towers_71812102`, exposed a raised-terrace kill-plane
+projection bug: lethal-edge witnesses supplied the correct sparse XY columns
+at the terrace height, but none intersected the compiled trigger_hurt below
+the global lowest floor. The analyzer now preserves those exact sparse XY
+columns while projecting Z only through the compiled trigger's linked AABB;
+it does not admit the intervening air gap or widen the hurt region. The exact
+failed BSP now completes a real Atlas build under the correction. A new clean
+commit and fresh 28/28 qualification remain mandatory before 71454 activation.
+
+Disposable qualification `b2q26_926efb4_71813000`, plan SHA-256
+`eaac7db4d962f79e00da8fe9bed3f00e2d438f517924fc4caf697bbcd76fa228`,
+then stopped fail-closed during primary source generation. It published no
+stage report: 27 complete primary members and zero cold members existed when
+`pits_71813302` refused placement because its 446 locally legal candidates
+were split across nine source standing components and none met the unchanged
+1024-by-1024 dual-span requirement. That layout was the cohort's sole
+zero-arena member, so the protected 1536-by-1536 spawn domain had never been
+created. The failed workspace, ID, and seed range are forensic-only and must
+not be resumed or reused. Zero-arena layouts now deterministically promote the
+nearest widest existing room to the standard arena geometry before any
+connections, platforms, lighting, or blockers are derived, consuming no RNG
+and leaving all clearance, separation, span, and component gates unchanged.
+The exact failed seed is a regression fixture only. Another new clean commit,
+workspace, qualification ID, and disjoint seed range remain required.
 
 ## Training Topology
 

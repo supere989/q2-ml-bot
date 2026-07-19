@@ -13,9 +13,13 @@ from tools.assemble_b2_qualification import STAGES, _validate_infrastructure
 from tools.b2_qualification_stage_support import QualificationStageError
 from tools.run_b2_qualification_infrastructure import (
     PINNED_PYTHON_SHA256, _timeout_probe as real_timeout_probe,
-    _membership_evidence, _syntax_evidence, produce_infrastructure_report,
+    _membership_evidence, _stock_provenance_evidence, _syntax_evidence,
+    produce_infrastructure_report,
 )
 from tools.run_generator_cohort import STAGE_SUFFIXES, canonical_bytes
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _inputs(tmp_path: Path, *, sparse: bool = False) -> dict[str, object]:
@@ -193,7 +197,7 @@ def _run(paths):
         analysis_root=roots["atlas-build"],
         promotion_evidence_root=roots["generated-promotion"],
         syntax_report_path=paths["syntax"], evidence_root=paths["evidence"],
-        report_path=paths["report"], repo_root=Path("/fixture"),
+        report_path=paths["report"], repo_root=ROOT,
         implementation_provider=lambda _root: IMPLEMENTATION,
         timeout_probe=_timeout_probe,
         runtime_provider=lambda: {
@@ -204,10 +208,10 @@ def _run(paths):
     )
 
 
-def test_infrastructure_retains_seven_actual_evidence_documents(tmp_path: Path):
+def test_infrastructure_retains_eight_actual_evidence_documents(tmp_path: Path):
     paths = _inputs(tmp_path)
     report = _run(paths)
-    assert report["pass_count"] == 7
+    assert report["pass_count"] == 8
     assert sorted(path.stem for path in paths["evidence"].iterdir()) == sorted(
         check["id"] for check in report["checks"]
     )
@@ -220,6 +224,21 @@ def test_infrastructure_retains_seven_actual_evidence_documents(tmp_path: Path):
     assert binding["pass_count"] == 20
     assert binding["contract"] == (
         "production-phase-b-compact-atlas-manifest-and-promotion-seal"
+    )
+    stock = json.loads(
+        (
+            paths["evidence"] / "stock-provenance-writer-format.json"
+        ).read_bytes()
+    )["evidence"]
+    assert stock["writer_format"] == "json-indent-2-sorted-plus-lf"
+    assert stock["writer_artifact"] == {
+        "bytes": 4989,
+        "sha256": (
+            "3ed2e930dcccf3abdabc7b5e1d9a1a95d74db4915a481bd523c51688c2bad030"
+        ),
+    }
+    assert stock["compact_sorted_sha256"] == (
+        "c6ed658e80a4667d36a72a3367a6f0c9c25d5020c24edfd54f00d15b8d74995a"
     )
 
 
@@ -250,7 +269,7 @@ def test_infrastructure_rejects_manifest_digest_rewritten_in_sealed_promotion(
 def test_infrastructure_accepts_exact_sparse_stage_membership(tmp_path: Path):
     paths = _inputs(tmp_path, sparse=True)
     report = _run(paths)
-    assert report["pass_count"] == 7
+    assert report["pass_count"] == 8
     exact = next(
         check for check in report["checks"]
         if check["id"] == "exact-stage-membership"
@@ -275,6 +294,21 @@ def test_infrastructure_rejects_ambient_or_forged_syntax_runtime(tmp_path: Path)
     with pytest.raises(QualificationStageError, match="WSL CPython 3.10.12"):
         _run(paths)
     assert not paths["evidence"].exists()
+
+
+def test_infrastructure_rejects_compact_stock_provenance_rewrite(
+    tmp_path: Path,
+) -> None:
+    source = ROOT / "docs/multires/stock-q2dm1-q2dm8.provenance.json"
+    target = (
+        tmp_path / "docs/multires/stock-q2dm1-q2dm8.provenance.json"
+    )
+    target.parent.mkdir(parents=True)
+    target.write_bytes(canonical_bytes(json.loads(source.read_bytes())))
+    with pytest.raises(
+        QualificationStageError, match="stock provenance writer-format check failed"
+    ):
+        _stock_provenance_evidence(tmp_path)
 
 
 def test_syntax_floor_and_execution_runtime_are_distinct_authorities(tmp_path: Path):

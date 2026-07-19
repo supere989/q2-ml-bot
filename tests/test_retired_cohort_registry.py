@@ -65,6 +65,9 @@ NAMED_71452 = (
 NAMED_71453 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
 )
+NAMED_71454 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
+)
 FAILURE_71443 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71443-FAILURE.json"
 )
@@ -95,6 +98,9 @@ FAILURE_71451 = (
 FAILURE_71452 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71452-FAILURE.json"
 )
+FAILURE_71453 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71453-FAILURE.json"
+)
 RETIRED_DECLARATIONS = (
     NAMED_71438,
     NAMED_71439,
@@ -111,6 +117,7 @@ RETIRED_DECLARATIONS = (
     NAMED_71450,
     NAMED_71451,
     NAMED_71452,
+    NAMED_71453,
 )
 
 
@@ -377,17 +384,25 @@ def test_named_71450_is_retired() -> None:
         )
 
 
-def test_current_alias_is_active_71453_while_named_71452_remains_retired() -> None:
+def test_current_alias_is_active_71454_while_named_71453_remains_retired() -> None:
     current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
 
-    assert current["cohort_id"] == "b2g26_final_71453"
-    assert CURRENT_ALIAS.read_bytes() == NAMED_71453.read_bytes()
+    assert current["cohort_id"] == "b2g26_final_71454"
+    assert CURRENT_ALIAS.read_bytes() == NAMED_71454.read_bytes()
     assert current_sha256 == (
-        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810"
+        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"
     )
     registry.require_unretired_declaration(
         CURRENT_ALIAS, current, current_sha256
     )
+
+    named, named_sha256 = cohort.load_declaration(NAMED_71453)
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71453.*permanently retired"
+    ):
+        registry.require_unretired_declaration(
+            NAMED_71453, named, named_sha256
+        )
 
     retired, retired_sha256 = cohort.load_declaration(NAMED_71452)
     with pytest.raises(
@@ -396,6 +411,46 @@ def test_current_alias_is_active_71453_while_named_71452_remains_retired() -> No
         registry.require_unretired_declaration(
             NAMED_71452, retired, retired_sha256
         )
+
+
+def test_71453_terminal_failure_authority_is_canonical_and_exact() -> None:
+    payload = FAILURE_71453.read_bytes()
+    authority = json.loads(payload)
+
+    assert payload == cohort.canonical_bytes(authority)
+    assert hashlib.sha256(payload).hexdigest() == (
+        "34e4f74b4ccb9de41f29688546baa0ea1866dd28de29b78431d6a1afda7e9733"
+    )
+    assert authority["schema"] == registry.FAILURE_SCHEMA
+    assert authority["status"] == (
+        "permanently-failed-gate-assembly-compiled-cm-declaration-binding"
+    )
+    assert authority["cohort_id"] == "b2g26_final_71453"
+    assert authority["declaration"]["sha256"] == (
+        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810"
+    )
+    assembly = authority["evidence"]["final_gate_assembly"]
+    assert assembly["attempt_count"] == 2
+    assert assembly["authorized_attempt_count"] == 1
+    assert assembly["diagnostic_replay_count"] == 1
+    assert assembly["passed"] is False
+    assert assembly["report_published"] is False
+    terminal, diagnostic = assembly["attempts"]
+    assert terminal["disposition"] == "terminal-authorized-final-invocation"
+    assert terminal["error"] == "compiled-CM declaration binding differs"
+    assert terminal["report_published"] is False
+    assert diagnostic["disposition"] == "unauthorized-diagnostic-replay-only"
+    assert diagnostic["report_published"] is False
+    provenance = assembly["stock_provenance_diagnostic"]
+    assert provenance["raw_sha256"] == (
+        "3ed2e930dcccf3abdabc7b5e1d9a1a95d74db4915a481bd523c51688c2bad030"
+    )
+    assert provenance["generic_compact_sorted_rewrite_sha256"] == (
+        "c6ed658e80a4667d36a72a3367a6f0c9c25d5020c24edfd54f00d15b8d74995a"
+    )
+    assert provenance["writer_bytes_valid"] is True
+    assert provenance["generic_compact_loader_accepted"] is False
+    assert authority["admission"]["retry_under_same_declaration_allowed"] is False
 
 
 def test_71452_terminal_failure_authority_is_canonical_and_exact() -> None:

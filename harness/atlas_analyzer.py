@@ -3246,6 +3246,40 @@ def _claimed_hurt_boundary_chunks(
     return tuple(sorted(chunks, key=_zyx))
 
 
+def _project_generated_hurt_chunks(
+    boundary_chunks: Iterable[tuple[int, int, int]],
+    bounds: Aabb,
+    origin: tuple[int, int, int],
+) -> tuple[tuple[int, int, int], ...]:
+    """Project generated lethal-edge columns onto an exact hurt volume.
+
+    A generated kill plane is placed below the *lowest* playable floor, while
+    a void-facing edge may belong to a higher terrace.  The edge's historical
+    one-chunk-lower permit then has no vertical intersection with the compiled
+    trigger even though the compiled safety challenge proves that the same
+    trigger catches the complete void drop.  Preserve the sparse XY authority
+    from the lethal-edge witnesses, but take Z only from the exact linked AABB.
+    No cells in the air gap between the edge and trigger are admitted.
+    """
+
+    lower = _l0_chunk_key(_grid_index(bounds.mins, origin, 4))
+    upper = _l0_chunk_key(_grid_index(bounds.maxs, origin, 4))
+    columns = {
+        (chunk[0], chunk[1])
+        for chunk in boundary_chunks
+        if lower[0] <= chunk[0] <= upper[0]
+        and lower[1] <= chunk[1] <= upper[1]
+    }
+    return tuple(sorted(
+        (
+            (chunk_x, chunk_y, chunk_z)
+            for chunk_x, chunk_y in columns
+            for chunk_z in range(lower[2], upper[2] + 1)
+        ),
+        key=_zyx,
+    ))
+
+
 def _surface_request_upper_bound(
     groups: Sequence[SurfaceCandidateGroup],
 ) -> int:
@@ -3797,9 +3831,20 @@ def _l0_chunks(
                     result.append((chunk, clipped_low, clipped_high))
                 return result
 
-            clips.extend(intersect(retained_chunks))
-            if not clips:
-                clips.extend(intersect(hurt_boundary_chunks))
+            if generated_safety is not None:
+                # Generated safety metadata supplies only a sparse horizontal
+                # permit.  The compiled trigger supplies the complete exact Z
+                # range, including raised-terrace edges above the global kill
+                # plane.  Union with ordinary retained chunks so exact hazards
+                # already adjacent to reachable surfaces remain represented.
+                permits = retained_chunks | set(_project_generated_hurt_chunks(
+                    hurt_boundary_chunks, bounds, origin,
+                ))
+                clips.extend(intersect(permits))
+            else:
+                clips.extend(intersect(retained_chunks))
+                if not clips:
+                    clips.extend(intersect(hurt_boundary_chunks))
 
             # Reserve this field's complete affected plane set before its first
             # cell is allocated. The authoritative 1,200-chunk/16-MiB budget,

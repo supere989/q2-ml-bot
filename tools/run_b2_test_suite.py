@@ -324,11 +324,15 @@ def run_suite(output: Path, *, python: str = sys.executable) -> dict[str, Any]:
             shutil.rmtree(stage, ignore_errors=True)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--python", default=sys.executable)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
     try:
         report = run_suite(args.output, python=args.python)
     except (B2TestSuiteError, OSError, subprocess.SubprocessError, ValueError) as exc:

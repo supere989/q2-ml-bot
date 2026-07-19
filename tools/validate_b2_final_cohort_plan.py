@@ -29,6 +29,8 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+import subprocess
 import sys
 from typing import Any, Callable, Mapping, Sequence
 
@@ -42,6 +44,15 @@ from tools.materialize_generated_cohort import (  # noqa: E402
 )
 from tools.compile_generated_cohort import MAX_MAP_TIMEOUT_SECONDS  # noqa: E402
 import tools.assemble_b2_gate as b2_gate  # noqa: E402
+from tools.final_execution_binding import (  # noqa: E402
+    FinalExecutionBindingError,
+    SourceAuthorizationJournalError,
+    build_execution_binding,
+    build_source_authorization_marker,
+    open_secure_marker_journal,
+    validate_execution_binding,
+    verify_source_authorization_marker,
+)
 from tools.retired_cohort_registry import (  # noqa: E402
     RetiredCohortRegistryError,
     require_unretired_declaration,
@@ -54,28 +65,40 @@ from tools.run_generator_cohort import (  # noqa: E402
     GeneratorCohortError,
     canonical_bytes,
     load_declaration,
+    repository_binding,
 )
 
 
-PLAN_SCHEMA = "q2-b2-final-cohort-preauthorization-plan-v1"
+PLAN_SCHEMA = "q2-b2-final-cohort-preauthorization-plan-v4"
 EVIDENCE_SCHEMA = "q2-b2-final-cohort-preauthorization-evidence-v1"
-SOURCE_AUTHORIZATION_SCHEMA = "q2-b2-source-authorization-consumed-v1"
-SOURCE_AUTHORIZATION_STATE_ROOT = (
-    Path.home() / ".local/state/q2-ml-bot/final-cohort-authorizations"
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+VERSIONED_DECLARATION_NAME = re.compile(
+    r"^B2-GENERATED-COHORT-([0-9]+)-DECLARATION\.json$"
 )
-HEX64 = __import__("re").compile(r"^[0-9a-f]{64}$")
 
-# Normative final-lane order through compiled promotion (design/plan lifecycle).
+# Complete final-lane order. Phase A is intentionally before the source
+# authorization boundary; every later stage is terminal/no-retry once source
+# begins.
 DRIVER_STAGES = (
+    "dyn-shape-preflight",
     "source",
     "compile",
+    "compiled-membership",
     "compiled-static",
     "compiled-cm-preflight",
     "materialization",
+    "materialized-membership",
     "claims-prepare",
     "atlas-build",
     "generated-promotion",
+    "stock-campaign",
+    "dyn-origin-binding",
+    "dyn-execute",
+    "test-suite",
+    "assembly",
 )
+PREASSEMBLY_LIFECYCLE_SCHEMA = "q2-b2-final-lifecycle-preassembly-v1"
+PREASSEMBLY_LIFECYCLE_STAGES = DRIVER_STAGES[:-1]
 
 # Per-stage CLI argument domains accepted by the real final tools.
 # Bounds that stage tools publish as module constants are imported and bound
@@ -94,19 +117,43 @@ DEFECT_RUNNER_CONFIGURATION = "runner_configuration_defect"
 DEFECT_COHORT_ARTIFACT = "cohort_artifact_failure"
 
 TOOL_FILES = {
+    "dyn-shape-preflight": "preflight_b2_dyn_invocation.py",
     "source": "run_generator_cohort.py",
     "compile": "compile_generated_cohort.py",
+    "compiled-membership": "run_generator_cohort.py",
     "compiled-static": "run_compiled_static_campaign.py",
     "compiled-cm-preflight": "run_compiled_cm_preflight.py",
     "materialization": "materialize_generated_cohort.py",
+    "materialized-membership": "run_generator_cohort.py",
     "claims-prepare": "run_generator_claim_campaign.py",
     "atlas-build": "run_generated_atlas_campaign.py",
     "generated-promotion": "run_generator_claim_campaign.py",
+    "stock-campaign": "run_b2_stock_campaign.py",
+    "dyn-origin-binding": "bind_b2_dyn_origin.py",
+    "dyn-execute": "run_preflighted_b2_dyn.py",
+    "test-suite": "run_b2_test_suite.py",
+    "assembly": "assemble_b2_gate.py",
 }
+
+DECLARATION_STAGES = frozenset({
+    "source", "compile", "compiled-membership", "compiled-static",
+    "compiled-cm-preflight", "materialization", "materialized-membership",
+    "claims-prepare", "atlas-build", "generated-promotion",
+    "dyn-origin-binding", "dyn-execute", "assembly",
+})
 
 # Option names constructed for each stage; tested against live parsers.
 STAGE_REQUIRED_OPTIONS: dict[str, tuple[str, ...]] = {
-    "source": ("--declaration", "--output-dir", "--cold-dir", "--report"),
+    "dyn-shape-preflight": (
+        "--executable", "--repo-root", "--atlas", "--manifest", "--bsp",
+        "--expected-map-id", "--expected-analyzer-authority",
+        "--expected-crate-commit", "--map-epoch", "--environment-steps",
+        "--samples", "--output", "--report",
+    ),
+    "source": (
+        "--declaration", "--output-dir", "--cold-dir", "--report",
+        "--final-source-authorization",
+    ),
     "compile": (
         "--declaration",
         "--source-root",
@@ -119,6 +166,9 @@ STAGE_REQUIRED_OPTIONS: dict[str, tuple[str, ...]] = {
         "--timeout-seconds",
     ),
     "compiled-static": ("--declaration", "--compiled-dir", "--output"),
+    "compiled-membership": (
+        "--declaration", "--stage", "--directory", "--output",
+    ),
     "compiled-cm-preflight": (
         "--declaration",
         "--compiled-dir",
@@ -140,6 +190,9 @@ STAGE_REQUIRED_OPTIONS: dict[str, tuple[str, ...]] = {
         "--fall-oracle",
         "--hook-parity-attestation",
         "--timeout-seconds",
+    ),
+    "materialized-membership": (
+        "--declaration", "--stage", "--directory", "--output",
     ),
     "claims-prepare": (
         "--declaration",
@@ -167,17 +220,57 @@ STAGE_REQUIRED_OPTIONS: dict[str, tuple[str, ...]] = {
         "--b1-gate",
         "--output",
     ),
+    "stock-campaign": (
+        "--repo-root", "--python", "--stock-pak", "--provenance",
+        "--stock-inventory",
+        "--b1-gate", "--client-root", "--lithium-root",
+        "--hook-attestation", "--fall-oracle", "--packer", "--verifier",
+        "--output-root", "--report",
+    ),
+    "dyn-origin-binding": (
+        "--shape-preflight-report", "--generated-promotion-report",
+        "--declaration", "--report",
+    ),
+    "dyn-execute": (
+        "--shape-preflight-report", "--origin-binding-report", "--declaration",
+    ),
+    "test-suite": ("--output", "--python"),
+    "assembly": tuple(
+        f"--{name.replace('_', '-')}" for name in (
+            "design", "plan", "repo_root", "b1_gate", "cm_oracle",
+            "pmove_oracle", "hook_oracle", "fall_oracle", "hook_attestation",
+            "atlas_verifier", "declaration", "source_dir", "source_cold_dir",
+            "source_freeze_report", "compiled_dir", "compiled_membership_report",
+            "compiled_static_report", "compiled_cm_preflight_report",
+            "materialized_dir", "materialized_membership_report", "claims_dir",
+            "claims_prepare_report", "analysis_dir", "generated_build_report",
+            "generated_validation_report", "stock_provenance", "stock_inventory",
+            "stock_bsp_dir", "stock_analysis_dir", "stock_validation_dir",
+            "dyn_evidence_executable", "dyn_argv_preflight_report",
+            "dyn_origin_binding_report", "dyn_evidence_report", "test_report",
+            "preactivation_test_report", "qualification_report",
+            "final_lifecycle_evidence", "output",
+        )
+    ),
 }
 
 STAGE_SUBCOMMANDS: dict[str, str | None] = {
+    "dyn-shape-preflight": None,
     "source": "generate",
     "compile": None,
+    "compiled-membership": "verify-stage",
     "compiled-static": None,
     "compiled-cm-preflight": None,
     "materialization": None,
+    "materialized-membership": "verify-stage",
     "claims-prepare": "prepare",
     "atlas-build": None,
     "generated-promotion": "validate",
+    "stock-campaign": None,
+    "dyn-origin-binding": None,
+    "dyn-execute": None,
+    "test-suite": None,
+    "assembly": None,
 }
 
 
@@ -190,10 +283,12 @@ class FinalCohortPlanError(RuntimeError):
         *,
         defect_class: str = DEFECT_RUNNER_CONFIGURATION,
         check_id: str = "plan-validation",
+        consumed: bool = False,
     ) -> None:
         super().__init__(message)
         self.defect_class = defect_class
         self.check_id = check_id
+        self.consumed = consumed
 
 
 def _absolute(path: Path) -> Path:
@@ -216,131 +311,426 @@ def _canonical(value: object) -> bytes:
     return canonical_bytes(value)
 
 
-def _source_authorization_marker(plan: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
-    """Persist the one-shot source boundary before the source runner starts."""
+def _execution_binding(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the live-validated WSL execution/journal binding.
 
-    workspace = _absolute(Path(str(plan.get("workspace", ""))))
-    if not workspace.parent.is_dir() or workspace.parent.is_symlink():
+    The binding is part of the reviewed plan rather than an ambient home
+    directory.  This makes an exact plan unusable on another LAN host or
+    account before Phase A, and prevents a caller from redirecting the
+    declaration tombstone to a fresh private journal.
+    """
+
+    authorization = plan.get("authorization")
+    if not isinstance(authorization, Mapping):
         raise FinalCohortPlanError(
-            "source authorization workspace parent is absent or a symlink",
-            check_id="source-authorization-journal",
+            "authorization contract is incomplete",
+            check_id="execution-authorization-binding",
         )
-    if workspace.exists():
-        if workspace.is_symlink() or not workspace.is_dir():
-            raise FinalCohortPlanError(
-                "source authorization workspace is invalid",
-                check_id="source-authorization-journal",
-            )
-    else:
-        try:
-            workspace.mkdir(mode=0o700)
-        except OSError as error:
-            raise FinalCohortPlanError(
-                "source authorization workspace could not be created",
-                check_id="source-authorization-journal",
-            ) from error
+    binding = authorization.get("execution_binding")
+    if not isinstance(binding, Mapping):
+        raise FinalCohortPlanError(
+            "execution authorization binding is absent",
+            check_id="execution-authorization-binding",
+        )
+    try:
+        return validate_execution_binding(
+            binding,
+            repo_root=Path(str(plan.get("repo_root", ""))),
+            workspace=Path(str(plan.get("workspace", ""))),
+        )
+    except FinalExecutionBindingError as error:
+        raise FinalCohortPlanError(
+            f"execution authorization binding rejected: {error}",
+            check_id="execution-authorization-binding",
+        ) from error
+
+
+def _declaration_identity(plan: Mapping[str, Any]) -> tuple[str, str]:
     declaration = plan.get("declaration")
     declaration_sha256 = (
         declaration.get("sha256") if isinstance(declaration, Mapping) else None
     )
+    cohort_id = plan.get("cohort_id")
     if not isinstance(declaration_sha256, str) or HEX64.fullmatch(
         declaration_sha256
-    ) is None:
+    ) is None or not isinstance(cohort_id, str):
         raise FinalCohortPlanError(
             "source authorization declaration identity is malformed",
             check_id="source-authorization-journal",
         )
-    state_root = _absolute(SOURCE_AUTHORIZATION_STATE_ROOT)
-    try:
-        state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    except OSError as error:
+    return cohort_id, declaration_sha256
+
+
+def _source_authorization_inputs(
+    plan: Mapping[str, Any],
+) -> tuple[dict[str, Any], str, str, Path, Path, Path, Path, dict[str, Any]]:
+    """Return the exact plan-bound inputs for the source capability marker."""
+
+    binding = _execution_binding(plan)
+    cohort_id, declaration_sha256 = _declaration_identity(plan)
+    declaration = plan.get("declaration")
+    roots = plan.get("stage_roots")
+    implementation = plan.get("repository")
+    source_step = next(
+        (
+            step for step in plan.get("commands", [])
+            if isinstance(step, Mapping) and step.get("stage") == "source"
+        ),
+        None,
+    )
+    if (
+        not isinstance(declaration, Mapping)
+        or not isinstance(declaration.get("path"), str)
+        or not isinstance(roots, Mapping)
+        or not isinstance(roots.get("source"), str)
+        or not isinstance(roots.get("source_cold"), str)
+        or not isinstance(source_step, Mapping)
+        or not isinstance(source_step.get("report"), str)
+        or not isinstance(implementation, Mapping)
+    ):
         raise FinalCohortPlanError(
-            "source authorization state root could not be created",
-            check_id="source-authorization-journal",
-        ) from error
-    if state_root.is_symlink() or not state_root.is_dir():
-        raise FinalCohortPlanError(
-            "source authorization state root is invalid",
+            "source authorization contract is incomplete",
             check_id="source-authorization-journal",
         )
-    marker = state_root / f"{declaration_sha256}.json"
-    body = {
-        "schema": SOURCE_AUTHORIZATION_SCHEMA,
-        "status": "source-authorization-consumed",
-        "cohort_id": plan.get("cohort_id"),
-        "declaration_sha256": declaration_sha256,
-        "plan_sha256": _sha256(_canonical(plan)),
-        "workspace": str(workspace),
-        "stage_started": "source",
-        "immutable_no_retry": True,
-    }
-    payload = _canonical(body)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    return (
+        binding,
+        cohort_id,
+        declaration_sha256,
+        _absolute(Path(declaration["path"])),
+        _absolute(Path(roots["source"])),
+        _absolute(Path(roots["source_cold"])),
+        _absolute(Path(source_step["report"])),
+        dict(implementation),
+    )
+
+
+def _existing_source_authorization_marker(
+    plan: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Fail closed on an already-consumed declaration before Phase A runs."""
+
+    (
+        binding,
+        cohort_id,
+        declaration_sha256,
+        _declaration,
+        _source_root,
+        _source_cold,
+        _source_report,
+        _implementation,
+    ) = _source_authorization_inputs(plan)
+    present = False
     try:
-        descriptor = os.open(marker, flags, 0o600)
-    except FileExistsError:
-        if marker.is_symlink() or not marker.is_file():
-            raise FinalCohortPlanError(
-                "declaration-scoped source authorization tombstone is invalid",
-                defect_class=DEFECT_COHORT_ARTIFACT,
-                check_id="source-authorization-already-consumed",
+        with open_secure_marker_journal(
+            binding,
+            repo_root=Path(str(plan["repo_root"])),
+            workspace=Path(str(plan["workspace"])),
+        ) as journal:
+            present = journal.exists(declaration_sha256)
+            if not present:
+                return None
+            existing = journal.read(declaration_sha256)
+            if existing is None:
+                raise SourceAuthorizationJournalError(
+                    "source authorization marker disappeared after existence check",
+                    consumed=True,
+                )
+            verify_source_authorization_marker(
+                existing,
+                binding=binding,
+                cohort_id=cohort_id,
+                declaration_sha256=declaration_sha256,
+                repo_root=Path(str(plan["repo_root"])),
+                workspace=Path(str(plan["workspace"])),
             )
-        existing = marker.read_bytes()
-        try:
-            loaded = json.loads(existing)
-        except (UnicodeError, json.JSONDecodeError) as error:
-            raise FinalCohortPlanError(
-                "declaration-scoped source authorization tombstone is unreadable",
-                defect_class=DEFECT_COHORT_ARTIFACT,
-                check_id="source-authorization-already-consumed",
-            ) from error
-        if (
-            existing != _canonical(loaded)
-            or not isinstance(loaded, Mapping)
-            or loaded.get("schema") != SOURCE_AUTHORIZATION_SCHEMA
-            or loaded.get("status") != "source-authorization-consumed"
-            or loaded.get("cohort_id") != plan.get("cohort_id")
-            or loaded.get("declaration_sha256") != declaration_sha256
-            or loaded.get("immutable_no_retry") is not True
-        ):
-            raise FinalCohortPlanError(
-                "declaration-scoped source authorization tombstone differs",
-                defect_class=DEFECT_COHORT_ARTIFACT,
-                check_id="source-authorization-already-consumed",
-            )
-        return {
-            "path": str(marker),
-            "sha256": _sha256(existing),
-            "bytes": len(existing),
-        }, False
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(marker, 0o600)
-        directory_fd = os.open(state_root, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except BaseException as error:
-        # O_EXCL has already consumed this declaration.  Never unlink a short,
-        # partially written, or not-yet-directory-synced journal: its continued
-        # presence is the fail-closed tombstone that prevents a second source
-        # invocation after an I/O or process failure at this boundary.
+            journal.revalidate_path_binding()
+            marker = journal.marker_path(declaration_sha256)
+    except SourceAuthorizationJournalError as error:
         raise FinalCohortPlanError(
-            "source authorization journal creation was incomplete; declaration remains consumed",
+            f"declaration-scoped source authorization tombstone differs: {error}",
             defect_class=DEFECT_COHORT_ARTIFACT,
-            check_id="source-authorization-journal-incomplete",
+            check_id="source-authorization-already-consumed",
+            consumed=True,
+        ) from error
+    except FinalExecutionBindingError as error:
+        raise FinalCohortPlanError(
+            f"declaration-scoped source authorization tombstone differs: {error}",
+            defect_class=(
+                DEFECT_COHORT_ARTIFACT if present else DEFECT_RUNNER_CONFIGURATION
+            ),
+            check_id=(
+                "source-authorization-already-consumed"
+                if present else "source-authorization-journal"
+            ),
+            consumed=present,
         ) from error
     return {
         "path": str(marker),
+        "sha256": _sha256(existing),
+        "bytes": len(existing),
+    }
+
+
+def _source_authorization_marker(plan: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Persist the one-shot source boundary before the source runner starts."""
+
+    (
+        binding,
+        cohort_id,
+        declaration_sha256,
+        declaration_path,
+        source_root,
+        source_cold,
+        source_report,
+        implementation,
+    ) = _source_authorization_inputs(plan)
+    created: bool | None = None
+    try:
+        payload = build_source_authorization_marker(
+            binding=binding,
+            cohort_id=cohort_id,
+            declaration_sha256=declaration_sha256,
+            declaration_path=declaration_path,
+            plan_sha256=_sha256(_canonical(plan)),
+            workspace=Path(str(plan["workspace"])),
+            repo_root=Path(str(plan["repo_root"])),
+            implementation=implementation,
+            source_output=source_root,
+            source_cold=source_cold,
+            source_report=source_report,
+        )
+    except FinalExecutionBindingError as error:
+        raise FinalCohortPlanError(
+            f"source authorization journal rejected: {error}",
+            check_id="source-authorization-journal",
+        ) from error
+    try:
+        with open_secure_marker_journal(
+            binding,
+            repo_root=Path(str(plan["repo_root"])),
+            workspace=Path(str(plan["workspace"])),
+        ) as journal:
+            existing, created = journal.create(declaration_sha256, payload)
+            verify_source_authorization_marker(
+                existing,
+                binding=binding,
+                cohort_id=cohort_id,
+                declaration_sha256=declaration_sha256,
+                repo_root=Path(str(plan["repo_root"])),
+                workspace=Path(str(plan["workspace"])),
+            )
+            journal.revalidate_path_binding()
+            marker = journal.marker_path(declaration_sha256)
+    except SourceAuthorizationJournalError as error:
+        raise FinalCohortPlanError(
+            f"source authorization journal creation was incomplete: {error}",
+            defect_class=DEFECT_COHORT_ARTIFACT,
+            check_id="source-authorization-journal-incomplete",
+            consumed=True,
+        ) from error
+    except FinalExecutionBindingError as error:
+        raise FinalCohortPlanError(
+            (
+                f"declaration-scoped source authorization tombstone differs: {error}"
+                if created is False
+                else f"source authorization journal rejected: {error}"
+            ),
+            defect_class=(
+                DEFECT_COHORT_ARTIFACT
+                if created is False else DEFECT_RUNNER_CONFIGURATION
+            ),
+            check_id=(
+                "source-authorization-already-consumed"
+                if created is False else "source-authorization-journal"
+            ),
+            consumed=created is False,
+        ) from error
+    return {
+        "path": str(marker),
+        "sha256": _sha256(existing),
+        "bytes": len(existing),
+    }, created
+
+
+def _prepare_execution_workspace(plan: Mapping[str, Any]) -> None:
+    """Create the only two driver-owned directories needed before Phase A."""
+
+    workspace = _absolute(Path(str(plan.get("workspace", ""))))
+    if not workspace.parent.is_dir() or workspace.parent.is_symlink():
+        raise FinalCohortPlanError(
+            "execution workspace parent is absent or a symlink",
+            check_id="execution-workspace",
+        )
+    if workspace.exists() or workspace.is_symlink():
+        if workspace.is_symlink() or not workspace.is_dir():
+            raise FinalCohortPlanError(
+                "execution workspace is not a plain directory",
+                check_id="execution-workspace",
+            )
+    else:
+        workspace.mkdir(mode=0o700)
+    reports = workspace / "reports"
+    unexpected = {
+        path.name for path in workspace.iterdir() if path.name != reports.name
+    }
+    if unexpected:
+        raise FinalCohortPlanError(
+            f"execution workspace is not empty: {sorted(unexpected)!r}",
+            check_id="execution-workspace",
+        )
+    if reports.exists() or reports.is_symlink():
+        if reports.is_symlink() or not reports.is_dir() or any(reports.iterdir()):
+            raise FinalCohortPlanError(
+                "execution reports directory is not a plain empty directory",
+                check_id="execution-workspace",
+            )
+    else:
+        reports.mkdir(mode=0o700)
+    directory_fd = os.open(reports, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    directory_fd = os.open(workspace, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _exclusive_canonical_write(path: Path, payload: bytes) -> None:
+    """Publish a final-lane evidence record once, durably, without overwrite."""
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("short canonical evidence write")
+            offset += written
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _publish_preassembly_lifecycle_evidence(
+    plan: Mapping[str, Any],
+    *,
+    source_authorization_marker: Mapping[str, Any] | None,
+    executed: Sequence[str],
+    stage_executions: Sequence[Mapping[str, Any]],
+    assembly_command: Sequence[str],
+) -> dict[str, Any]:
+    """Write the driver-only attestation consumed by the final gate assembler."""
+
+    if list(executed) != list(PREASSEMBLY_LIFECYCLE_STAGES):
+        raise FinalCohortPlanError(
+            "cannot publish preassembly lifecycle evidence before every prior stage succeeds",
+            defect_class=DEFECT_COHORT_ARTIFACT,
+            check_id="preassembly-lifecycle-order",
+            consumed=True,
+        )
+    if source_authorization_marker is None:
+        raise FinalCohortPlanError(
+            "cannot publish preassembly lifecycle evidence without the source marker",
+            defect_class=DEFECT_COHORT_ARTIFACT,
+            check_id="preassembly-lifecycle-marker",
+            consumed=True,
+        )
+    roots = plan.get("stage_roots")
+    declaration = plan.get("declaration")
+    authorization = plan.get("authorization")
+    implementation = plan.get("repository")
+    assembly_invocation = plan.get("assembly_invocation")
+    if (
+        not isinstance(roots, Mapping)
+        or not isinstance(roots.get("lifecycle_evidence"), str)
+        or not isinstance(declaration, Mapping)
+        or not isinstance(authorization, Mapping)
+        or not isinstance(authorization.get("execution_binding"), Mapping)
+        or not isinstance(implementation, Mapping)
+        or not isinstance(assembly_invocation, Mapping)
+    ):
+        raise FinalCohortPlanError(
+            "preassembly lifecycle evidence contract is incomplete",
+            defect_class=DEFECT_COHORT_ARTIFACT,
+            check_id="preassembly-lifecycle-contract",
+            consumed=True,
+        )
+    try:
+        current_assembly_invocation = _assembly_command_binding(
+            assembly_command,
+            repo=_direct_canonical_directory(
+                Path(str(plan.get("repo_root", ""))),
+                "final-cohort repository root",
+            ),
+        )
+    except FinalCohortPlanError as error:
+        raise FinalCohortPlanError(
+            f"cannot publish preassembly lifecycle evidence: {error}",
+            defect_class=DEFECT_COHORT_ARTIFACT,
+            check_id="assembly-command-binding",
+            consumed=True,
+        ) from error
+    if dict(assembly_invocation) != current_assembly_invocation:
+        raise FinalCohortPlanError(
+            "planned assembly command binding drifted before lifecycle publication",
+            defect_class=DEFECT_COHORT_ARTIFACT,
+            check_id="assembly-command-binding",
+            consumed=True,
+        )
+    expected_marker_keys = {"path", "sha256", "bytes"}
+    if set(source_authorization_marker) != expected_marker_keys:
+        raise FinalCohortPlanError(
+            "source marker evidence shape differs before assembly",
+            defect_class=DEFECT_COHORT_ARTIFACT,
+            check_id="preassembly-lifecycle-marker",
+            consumed=True,
+        )
+    payload_value = {
+        "schema": PREASSEMBLY_LIFECYCLE_SCHEMA,
+        "status": "ready-for-assembly",
+        "cohort_id": plan.get("cohort_id"),
+        "declaration": {
+            "path": declaration.get("path"),
+            "sha256": declaration.get("sha256"),
+        },
+        "plan_sha256": _sha256(_canonical(plan)),
+        "implementation": dict(implementation),
+        "execution_binding": dict(authorization["execution_binding"]),
+        "source_authorization_marker": dict(source_authorization_marker),
+        "completed_stages": list(executed),
+        "stage_executions": [dict(item) for item in stage_executions],
+        "assembly_command_sha256": current_assembly_invocation[
+            "command_sha256"
+        ],
+    }
+    payload = _canonical(payload_value)
+    path = _absolute(Path(roots["lifecycle_evidence"]))
+    try:
+        _exclusive_canonical_write(path, payload)
+    except OSError as error:
+        raise FinalCohortPlanError(
+            f"cannot publish preassembly lifecycle evidence: {error}",
+            defect_class=DEFECT_COHORT_ARTIFACT,
+            check_id="preassembly-lifecycle-publish",
+            consumed=True,
+        ) from error
+    return {
+        "path": str(path),
         "sha256": _sha256(payload),
         "bytes": len(payload),
-    }, True
+    }
 
 
 def _arg(command: list[str], name: str, value: Path | str | int | float) -> None:
@@ -382,6 +772,109 @@ def _regular_file(path: Path, label: str, *, executable: bool = False) -> dict[s
     }
 
 
+def _direct_canonical_directory(path: Path, label: str) -> Path:
+    """Require a direct spelling with no symlinked repo ancestry."""
+
+    absolute = _absolute(path)
+    try:
+        resolved = absolute.resolve(strict=True)
+    except OSError as error:
+        raise FinalCohortPlanError(
+            f"{label} cannot be resolved: {error}",
+            check_id="path-identity",
+        ) from error
+    if absolute != resolved or absolute.is_symlink() or not absolute.is_dir():
+        raise FinalCohortPlanError(
+            f"{label} must be a direct canonical directory: {absolute}",
+            check_id="path-identity",
+        )
+    return absolute
+
+
+def _direct_assembly_tool(repo: Path) -> tuple[Path, dict[str, Any]]:
+    """Bind the planned assembler to a direct repo leaf and loaded bytes."""
+
+    tool = repo / "tools" / TOOL_FILES["assembly"]
+    try:
+        resolved = tool.resolve(strict=True)
+    except OSError as error:
+        raise FinalCohortPlanError(
+            f"assembly tool cannot be resolved: {error}",
+            check_id="assembly-command-binding",
+        ) from error
+    if tool != resolved or tool.is_symlink() or not tool.is_file():
+        raise FinalCohortPlanError(
+            f"assembly tool must be the direct canonical repository file: {tool}",
+            check_id="assembly-command-binding",
+        )
+    record = _regular_file(tool, "assembly tool assemble_b2_gate.py")
+    try:
+        loaded = _regular_file(
+            Path(b2_gate.__file__).resolve(strict=True),
+            "loaded assembly gate tool",
+        )
+    except (OSError, TypeError) as error:
+        raise FinalCohortPlanError(
+            f"loaded assembly gate tool cannot be resolved: {error}",
+            check_id="assembly-command-binding",
+        ) from error
+    if not _same_file_bytes(record, loaded):
+        raise FinalCohortPlanError(
+            "assembly tool bytes differ from the loaded gate assembler",
+            check_id="assembly-command-binding",
+        )
+    return tool, record
+
+
+def _assembly_command_binding(
+    command: Sequence[str],
+    *,
+    repo: Path,
+) -> dict[str, str]:
+    """Compute the child assembler's exact argv digest before source exists."""
+
+    if len(command) < 2:
+        raise FinalCohortPlanError(
+            "assembly command is too short",
+            check_id="assembly-command-binding",
+        )
+    tool, _record = _direct_assembly_tool(repo)
+    try:
+        interpreter = Path(str(command[0])).resolve(strict=True)
+    except OSError as error:
+        raise FinalCohortPlanError(
+            f"assembly interpreter cannot be resolved: {error}",
+            check_id="assembly-command-binding",
+        ) from error
+    if (
+        str(interpreter) != str(command[0])
+        or str(tool) != str(command[1])
+    ):
+        raise FinalCohortPlanError(
+            "assembly command must use canonical direct interpreter and tool paths",
+            check_id="assembly-command-binding",
+        )
+    try:
+        command_sha256 = b2_gate.assembly_command_sha256(
+            interpreter, tool, [str(part) for part in command[2:]]
+        )
+    except b2_gate.B2GateError as error:
+        raise FinalCohortPlanError(
+            f"assembly command hash cannot be bound: {error}",
+            check_id="assembly-command-binding",
+        ) from error
+    if command_sha256 != _sha256(_canonical(list(command))):
+        raise FinalCohortPlanError(
+            "planned assembly command hash differs from the assembler argv hash",
+            check_id="assembly-command-binding",
+        )
+    return {
+        "interpreter": str(interpreter),
+        "tool": str(tool),
+        "command_sha256": command_sha256,
+    }
+
+
 def _existing_dir(path: Path, label: str) -> Path:
     absolute = _absolute(path)
     if absolute.is_symlink() or not absolute.is_dir():
@@ -390,6 +883,43 @@ def _existing_dir(path: Path, label: str) -> Path:
             check_id="path-identity",
         )
     return absolute
+
+
+def _require_versioned_final_declaration(
+    repo: Path,
+    declaration_path: Path,
+    declaration: Mapping[str, Any],
+) -> None:
+    """Require the direct immutable declaration leaf, never a current alias."""
+
+    expected_parent = _absolute(repo / "docs/multires")
+    try:
+        resolved = declaration_path.resolve(strict=True)
+        resolved_parent = expected_parent.resolve(strict=True)
+    except OSError as error:
+        raise FinalCohortPlanError(
+            f"versioned declaration path cannot be resolved: {error}",
+            check_id="declaration-binding",
+        ) from error
+    matched = VERSIONED_DECLARATION_NAME.fullmatch(declaration_path.name)
+    cohort_id = declaration.get("cohort_id")
+    _require(
+        declaration_path.is_absolute()
+        and not declaration_path.is_symlink()
+        and declaration_path.parent == expected_parent
+        and resolved == declaration_path
+        and resolved.parent == resolved_parent
+        and matched is not None,
+        "declaration must be the direct versioned immutable repository path",
+        check_id="declaration-binding",
+    )
+    _require(
+        isinstance(cohort_id, str)
+        and matched is not None
+        and cohort_id.endswith(f"_{matched.group(1)}"),
+        "versioned declaration number differs from cohort identity",
+        check_id="declaration-binding",
+    )
 
 
 def _format_bound(value: float) -> str:
@@ -517,6 +1047,10 @@ def _stage_parser(stage: str) -> argparse.ArgumentParser:
     """
 
     parser = argparse.ArgumentParser(exit_on_error=False, add_help=False)
+    if stage == "dyn-shape-preflight":
+        from tools.preflight_b2_dyn_invocation import _parser as dyn_shape_parser
+
+        return dyn_shape_parser()
     if stage == "source":
         sub = parser.add_subparsers(dest="command", required=True)
         generate = sub.add_parser("generate", exit_on_error=False, add_help=False)
@@ -524,6 +1058,7 @@ def _stage_parser(stage: str) -> argparse.ArgumentParser:
         generate.add_argument("--output-dir", type=Path, required=True)
         generate.add_argument("--cold-dir", type=Path, required=True)
         generate.add_argument("--report", type=Path, required=True)
+        generate.add_argument("--final-source-authorization", type=Path, required=True)
         return parser
     if stage == "compile":
         parser.add_argument("--declaration", type=Path, required=True)
@@ -535,6 +1070,18 @@ def _stage_parser(stage: str) -> argparse.ArgumentParser:
         parser.add_argument("--q2tool", type=Path, required=True)
         parser.add_argument("--basedir", type=Path, required=True)
         parser.add_argument("--timeout-seconds", type=float, required=True)
+        return parser
+    if stage in {"compiled-membership", "materialized-membership"}:
+        sub = parser.add_subparsers(dest="command", required=True)
+        verify = sub.add_parser(
+            "verify-stage", exit_on_error=False, add_help=False
+        )
+        verify.add_argument("--declaration", type=Path, required=True)
+        verify.add_argument(
+            "--stage", choices=("compiled", "materialized"), required=True
+        )
+        verify.add_argument("--directory", type=Path, required=True)
+        verify.add_argument("--output", type=Path, required=True)
         return parser
     if stage == "compiled-static":
         parser.add_argument("--declaration", type=Path, required=True)
@@ -590,6 +1137,24 @@ def _stage_parser(stage: str) -> argparse.ArgumentParser:
         validate.add_argument("--b1-gate", type=Path, required=True)
         validate.add_argument("--output", type=Path, required=True)
         return parser
+    if stage == "stock-campaign":
+        from tools.run_b2_stock_campaign import _parser as stock_parser
+
+        return stock_parser()
+    if stage == "dyn-origin-binding":
+        from tools.bind_b2_dyn_origin import _parser as dyn_binding_parser
+
+        return dyn_binding_parser()
+    if stage == "dyn-execute":
+        from tools.run_preflighted_b2_dyn import _parser as dyn_execute_parser
+
+        return dyn_execute_parser()
+    if stage == "test-suite":
+        from tools.run_b2_test_suite import _parser as test_parser
+
+        return test_parser()
+    if stage == "assembly":
+        return b2_gate._parser()
     raise FinalCohortPlanError(
         f"no parser binding for stage {stage!r}",
         check_id="parser-conformance",
@@ -679,11 +1244,34 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
 
     _assert_domain_constant_binding()
 
-    repo = _absolute(args.repo_root)
+    repo = _direct_canonical_directory(
+        args.repo_root, "final-cohort repository root"
+    )
     workspace = _absolute(args.workspace)
-    python = _absolute(Path(args.python) if args.python else Path(sys.executable))
+    requested_python = _absolute(
+        Path(args.python) if args.python else Path(sys.executable)
+    )
+    try:
+        python = requested_python.resolve(strict=True)
+    except OSError as error:
+        raise FinalCohortPlanError(
+            f"python runtime cannot be resolved: {error}",
+            check_id="path-identity",
+        ) from error
     declaration = _absolute(args.declaration)
     reports = workspace / "reports"
+    try:
+        implementation = repository_binding(repo)
+    except GeneratorCohortError as error:
+        raise FinalCohortPlanError(
+            f"final-cohort repository binding failed: {error}",
+            check_id="repository-binding",
+        ) from error
+    _require(
+        implementation.get("git_clean") is True,
+        "final-cohort repository must be clean",
+        check_id="repository-binding",
+    )
 
     # Argument domains first — catch the 71446 timeout defect before binding work.
     compile_timeout = _finite_open_interval(
@@ -714,9 +1302,37 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         label="compiled-cm jobs",
         check_id="timeout-domain",
     )
+    dyn_map_epoch = _integer_closed_interval(
+        args.dyn_map_epoch,
+        low=1,
+        high=2**63 - 1,
+        label="Dyn map epoch",
+        check_id="dyn-domain",
+    )
+    dyn_environment_steps = _integer_closed_interval(
+        args.dyn_environment_steps,
+        low=0,
+        high=2**63 - 1,
+        label="Dyn environment steps",
+        check_id="dyn-domain",
+    )
+    dyn_samples = _integer_closed_interval(
+        args.dyn_samples,
+        low=2000,
+        high=2**63 - 1,
+        label="Dyn samples",
+        check_id="dyn-domain",
+    )
 
+    resolved_repo = repo.resolve(strict=True)
+    resolved_workspace = workspace.resolve(strict=False)
+    if resolved_workspace != workspace:
+        raise FinalCohortPlanError(
+            "final-cohort workspace traverses a symlinked ancestor",
+            check_id="path-identity",
+        )
     try:
-        workspace.relative_to(repo)
+        resolved_workspace.relative_to(resolved_repo)
     except ValueError:
         pass
     else:
@@ -729,6 +1345,17 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             "final-cohort workspace must not live under a qualification path",
             check_id="path-identity",
         )
+    try:
+        execution_binding = build_execution_binding(
+            state_root=args.authorization_state_root,
+            repo_root=repo,
+            workspace=workspace,
+        )
+    except FinalExecutionBindingError as error:
+        raise FinalCohortPlanError(
+            f"execution authorization binding rejected: {error}",
+            check_id="execution-authorization-binding",
+        ) from error
 
     declaration_record = _regular_file(declaration, "declaration")
     try:
@@ -748,6 +1375,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "declaration schema differs",
         check_id="declaration-binding",
     )
+    _require_versioned_final_declaration(repo, declaration, declaration_obj)
     maps = declaration_obj.get("maps")
     _require(
         isinstance(maps, list) and len(maps) == 28,
@@ -760,6 +1388,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "declaration cohort_id is invalid",
         check_id="declaration-binding",
     )
+    representative_map = str(maps[0]["map"])
     # Admission against the shared retired cohort/map/seed registry.  Validation
     # never invents a successor ID; it only refuses identities already retired.
     _require(
@@ -779,6 +1408,24 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "base_pak": _regular_file(
             _existing_dir(args.basedir, "basedir") / "pak0.pak",
             "basedir/pak0.pak",
+        ),
+        "stock_pak": _regular_file(args.stock_pak, "stock PAK"),
+        "design": _regular_file(args.design, "normative design"),
+        "execution_plan": _regular_file(args.plan, "normative execution plan"),
+        "qualification_report": _regular_file(
+            args.qualification_report, "qualification report"
+        ),
+        "preactivation_test_report": _regular_file(
+            args.preactivation_test_report, "preactivation test report"
+        ),
+        "stock_provenance": _regular_file(
+            args.stock_provenance, "stock provenance"
+        ),
+        "stock_inventory": _regular_file(args.stock_inventory, "stock inventory"),
+        "dyn_evidence_executable": _regular_file(
+            args.dyn_evidence_executable,
+            "Dyn evidence executable",
+            executable=True,
         ),
         "cm_oracle": _regular_file(args.cm_oracle, "CM oracle", executable=True),
         "pmove_oracle": _regular_file(
@@ -822,10 +1469,44 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             )
     basedir = _existing_dir(args.basedir, "basedir")
 
+    preactivation_path = _absolute(args.preactivation_test_report)
+    try:
+        preactivation_path.relative_to(workspace)
+    except ValueError:
+        pass
+    else:
+        raise FinalCohortPlanError(
+            "preactivation test report must be outside the final-cohort workspace",
+            check_id="path-identity",
+        )
+    if preactivation_path.resolve(strict=True) != preactivation_path:
+        raise FinalCohortPlanError(
+            "preactivation test report traverses a symlinked ancestor",
+            check_id="path-identity",
+        )
+    try:
+        preactivation_tests = b2_gate.validate_preactivation_test_binding(
+            design=_absolute(args.design),
+            plan=_absolute(args.plan),
+            repo_root=repo,
+            b1_gate=_absolute(args.b1_gate),
+            qualification_report=_absolute(args.qualification_report),
+            preactivation_test_report=preactivation_path,
+            implementation=implementation,
+        )
+    except b2_gate.B2GateError as error:
+        raise FinalCohortPlanError(
+            f"preactivation test binding rejected: {error}",
+            check_id="preactivation-test-binding",
+        ) from error
+
+    assembly_tool, assembly_tool_record = _direct_assembly_tool(repo)
     tool_records: dict[str, dict[str, Any]] = {}
     for stage, tool_name in TOOL_FILES.items():
-        tool_records[stage] = _regular_file(
-            _tool(repo, tool_name), f"{stage} tool {tool_name}"
+        tool_records[stage] = (
+            assembly_tool_record
+            if stage == "assembly"
+            else _regular_file(_tool(repo, tool_name), f"{stage} tool {tool_name}")
         )
 
     source_root = _absolute(args.source_root or workspace / "source")
@@ -843,17 +1524,37 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     atlas_diagnostics = _absolute(
         args.atlas_diagnostics or workspace / "atlas-diagnostics"
     )
+    stock = _absolute(args.stock_root or workspace / "stock")
+    dyn_evidence = _absolute(args.dyn_evidence_root or workspace / "dyn-evidence")
+    test_evidence = _absolute(args.test_evidence_root or workspace / "test-evidence")
+    gate_output = _absolute(args.gate_output or workspace / "B2-GATE.json")
 
     report_paths = {
+        "dyn-shape-preflight": reports / "dyn-argv-shape-preflight.json",
         "source": reports / "source-freeze.json",
         "compile": reports / "compile.json",
+        "compiled-membership": reports / "compiled-membership.json",
         "compiled-static": reports / "compiled-static.json",
         "compiled-cm-preflight": reports / "compiled-cm-preflight.json",
         "materialization": reports / "materialize.json",
+        "materialized-membership": reports / "materialized-membership.json",
         "claims-prepare": reports / "claims-prepare.json",
         "atlas-build": reports / "atlas-build.json",
         "generated-promotion": reports / "generated-promotion.json",
+        "stock-campaign": reports / "stock-campaign.json",
+        "dyn-origin-binding": reports / "dyn-origin-binding.json",
+        "dyn-execute": dyn_evidence / "b2-dyn-evidence.json",
+        "test-suite": test_evidence / "b2-test-report.json",
+        "assembly": gate_output,
     }
+    lifecycle_evidence = reports / "lifecycle-preassembly.json"
+    # The source producer receives this spelling as a capability argument, but
+    # the journal itself always opens and reads it relative to the bound root
+    # descriptor.  No security-sensitive marker I/O follows this Path object.
+    source_authorization_marker = (
+        Path(str(execution_binding["state_root"]["path"]))
+        / f"{declaration_sha256}.json"
+    )
 
     # Output leaves must be exclusive and absent so a later stage cannot clobber
     # an earlier one under a mis-bound path.
@@ -869,8 +1570,35 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         claims,
         analysis,
         atlas_diagnostics,
-        *report_paths.values(),
+        stock,
+        dyn_evidence,
+        test_evidence,
+        gate_output,
+        lifecycle_evidence,
+        *(
+            path
+            for stage, path in report_paths.items()
+            if stage not in {"dyn-execute", "test-suite", "assembly"}
+        ),
     ]
+    for path in planned_outputs:
+        try:
+            relative = path.relative_to(workspace)
+        except ValueError as error:
+            raise FinalCohortPlanError(
+                f"planned output escapes the final-cohort workspace: {path}",
+                check_id="path-identity",
+            ) from error
+        if not relative.parts:
+            raise FinalCohortPlanError(
+                "planned output cannot equal the final-cohort workspace",
+                check_id="path-identity",
+            )
+        if path.resolve(strict=False) != path:
+            raise FinalCohortPlanError(
+                f"planned output traverses a symlinked ancestor: {path}",
+                check_id="path-identity",
+            )
     _disjoint_paths(planned_outputs, "planned output")
     for path, label in (
         (source_root, "source_root"),
@@ -884,7 +1612,16 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         (claims, "claims_root"),
         (analysis, "analysis_root"),
         (atlas_diagnostics, "atlas_diagnostics"),
-        *[(path, f"report:{stage}") for stage, path in report_paths.items()],
+        (stock, "stock_root"),
+        (dyn_evidence, "dyn_evidence_root"),
+        (test_evidence, "test_evidence_root"),
+        (gate_output, "gate_output"),
+        (lifecycle_evidence, "lifecycle_evidence"),
+        *[
+            (path, f"report:{stage}")
+            for stage, path in report_paths.items()
+            if stage not in {"dyn-execute", "test-suite", "assembly"}
+        ],
     ):
         # Workspace itself may be fresh; parents of report leaves must exist or
         # be the workspace reports directory that dry-run does not create.
@@ -910,6 +1647,37 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
 
     command = [
         str(python),
+        str(_tool(repo, TOOL_FILES["dyn-shape-preflight"])),
+    ]
+    for name, value in (
+        ("--executable", _absolute(args.dyn_evidence_executable)),
+        ("--repo-root", repo),
+        ("--atlas", analysis / f"{representative_map}.atlas.bin"),
+        ("--manifest", analysis / f"{representative_map}.atlas.manifest.json"),
+        ("--bsp", claims / f"{representative_map}.bsp"),
+        ("--expected-map-id", representative_map),
+        (
+            "--expected-analyzer-authority",
+            implementation["atlas_analyzer_authority_sha256"],
+        ),
+        ("--expected-crate-commit", implementation["repository_commit"]),
+        ("--map-epoch", dyn_map_epoch),
+        ("--environment-steps", dyn_environment_steps),
+        ("--samples", dyn_samples),
+        ("--output", dyn_evidence),
+        ("--report", report_paths["dyn-shape-preflight"]),
+    ):
+        _arg(command, name, value)
+    commands.append(
+        _step(
+            "dyn-shape-preflight",
+            command,
+            report_paths["dyn-shape-preflight"],
+        )
+    )
+
+    command = [
+        str(python),
         str(_tool(repo, TOOL_FILES["source"])),
         "generate",
     ]
@@ -918,6 +1686,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         ("--output-dir", source_root),
         ("--cold-dir", source_cold),
         ("--report", report_paths["source"]),
+        ("--final-source-authorization", source_authorization_marker),
     ):
         _arg(command, name, value)
     commands.append(_step("source", command, report_paths["source"]))
@@ -936,6 +1705,24 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     ):
         _arg(command, name, value)
     commands.append(_step("compile", command, report_paths["compile"]))
+
+    command = [
+        str(python),
+        str(_tool(repo, TOOL_FILES["compiled-membership"])),
+        "verify-stage",
+    ]
+    for name, value in (
+        ("--declaration", declaration),
+        ("--stage", "compiled"),
+        ("--directory", compiled),
+        ("--output", report_paths["compiled-membership"]),
+    ):
+        _arg(command, name, value)
+    commands.append(
+        _step(
+            "compiled-membership", command, report_paths["compiled-membership"]
+        )
+    )
 
     command = [str(python), str(_tool(repo, TOOL_FILES["compiled-static"]))]
     for name, value in (
@@ -988,6 +1775,26 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
 
     command = [
         str(python),
+        str(_tool(repo, TOOL_FILES["materialized-membership"])),
+        "verify-stage",
+    ]
+    for name, value in (
+        ("--declaration", declaration),
+        ("--stage", "materialized"),
+        ("--directory", materialized),
+        ("--output", report_paths["materialized-membership"]),
+    ):
+        _arg(command, name, value)
+    commands.append(
+        _step(
+            "materialized-membership",
+            command,
+            report_paths["materialized-membership"],
+        )
+    )
+
+    command = [
+        str(python),
         str(_tool(repo, TOOL_FILES["claims-prepare"])),
         "prepare",
     ]
@@ -1036,11 +1843,122 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         _step("generated-promotion", command, report_paths["generated-promotion"])
     )
 
+    command = [str(python), str(_tool(repo, TOOL_FILES["stock-campaign"]))]
+    for name, value in (
+        ("--repo-root", repo),
+        ("--python", python),
+        ("--stock-pak", _absolute(args.stock_pak)),
+        ("--provenance", _absolute(args.stock_provenance)),
+        ("--stock-inventory", _absolute(args.stock_inventory)),
+        ("--b1-gate", _absolute(args.b1_gate)),
+        ("--client-root", client_root),
+        ("--lithium-root", lithium_root),
+        ("--hook-attestation", _absolute(args.hook_attestation)),
+        ("--fall-oracle", _absolute(args.fall_oracle)),
+        ("--packer", _absolute(args.packer)),
+        ("--verifier", _absolute(args.verifier)),
+        ("--output-root", stock),
+        ("--report", report_paths["stock-campaign"]),
+    ):
+        _arg(command, name, value)
+    commands.append(
+        _step("stock-campaign", command, report_paths["stock-campaign"])
+    )
+
+    command = [
+        str(python), str(_tool(repo, TOOL_FILES["dyn-origin-binding"]))
+    ]
+    for name, value in (
+        ("--shape-preflight-report", report_paths["dyn-shape-preflight"]),
+        ("--generated-promotion-report", report_paths["generated-promotion"]),
+        ("--declaration", declaration),
+        ("--report", report_paths["dyn-origin-binding"]),
+    ):
+        _arg(command, name, value)
+    commands.append(
+        _step(
+            "dyn-origin-binding", command, report_paths["dyn-origin-binding"]
+        )
+    )
+
+    command = [str(python), str(_tool(repo, TOOL_FILES["dyn-execute"]))]
+    for name, value in (
+        ("--shape-preflight-report", report_paths["dyn-shape-preflight"]),
+        ("--origin-binding-report", report_paths["dyn-origin-binding"]),
+        ("--declaration", declaration),
+    ):
+        _arg(command, name, value)
+    commands.append(_step("dyn-execute", command, report_paths["dyn-execute"]))
+
+    command = [str(python), str(_tool(repo, TOOL_FILES["test-suite"]))]
+    for name, value in (
+        ("--output", test_evidence),
+        ("--python", python),
+    ):
+        _arg(command, name, value)
+    commands.append(_step("test-suite", command, report_paths["test-suite"]))
+
+    command = [str(python), str(assembly_tool)]
+    for name, value in (
+        ("--design", _absolute(args.design)),
+        ("--plan", _absolute(args.plan)),
+        ("--repo-root", repo),
+        ("--b1-gate", _absolute(args.b1_gate)),
+        ("--cm-oracle", _absolute(args.cm_oracle)),
+        ("--pmove-oracle", _absolute(args.pmove_oracle)),
+        ("--hook-oracle", _absolute(args.hook_oracle)),
+        ("--fall-oracle", _absolute(args.fall_oracle)),
+        ("--hook-attestation", _absolute(args.hook_attestation)),
+        ("--atlas-verifier", _absolute(args.verifier)),
+        ("--declaration", declaration),
+        ("--source-dir", source_root),
+        ("--source-cold-dir", source_cold),
+        ("--source-freeze-report", report_paths["source"]),
+        ("--compiled-dir", compiled),
+        ("--compiled-membership-report", report_paths["compiled-membership"]),
+        ("--compiled-static-report", report_paths["compiled-static"]),
+        (
+            "--compiled-cm-preflight-report",
+            report_paths["compiled-cm-preflight"],
+        ),
+        ("--materialized-dir", materialized),
+        (
+            "--materialized-membership-report",
+            report_paths["materialized-membership"],
+        ),
+        ("--claims-dir", claims),
+        ("--claims-prepare-report", report_paths["claims-prepare"]),
+        ("--analysis-dir", analysis),
+        ("--generated-build-report", report_paths["atlas-build"]),
+        (
+            "--generated-validation-report",
+            report_paths["generated-promotion"],
+        ),
+        ("--stock-provenance", _absolute(args.stock_provenance)),
+        ("--stock-inventory", _absolute(args.stock_inventory)),
+        ("--stock-bsp-dir", stock / "bsp"),
+        ("--stock-analysis-dir", stock / "analysis"),
+        ("--stock-validation-dir", stock / "validation"),
+        ("--dyn-evidence-executable", _absolute(args.dyn_evidence_executable)),
+        ("--dyn-argv-preflight-report", report_paths["dyn-shape-preflight"]),
+        ("--dyn-origin-binding-report", report_paths["dyn-origin-binding"]),
+        ("--dyn-evidence-report", report_paths["dyn-execute"]),
+        ("--preactivation-test-report", preactivation_path),
+        ("--test-report", report_paths["test-suite"]),
+        ("--qualification-report", _absolute(args.qualification_report)),
+        ("--final-lifecycle-evidence", lifecycle_evidence),
+        ("--output", gate_output),
+    ):
+        _arg(command, name, value)
+    commands.append(_step("assembly", command, report_paths["assembly"]))
+    assembly_invocation = _assembly_command_binding(command, repo=repo)
+
     plan = {
         "schema": PLAN_SCHEMA,
         "cohort_id": cohort_id,
         "repo_root": str(repo),
         "workspace": str(workspace),
+        "repository": implementation,
         "declaration": {
             "path": declaration_record["path"],
             "sha256": declaration_record["sha256"],
@@ -1065,9 +1983,23 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "domain": f"[{CM_JOBS_MIN}, {CM_JOBS_MAX}]",
                 "value": cm_jobs,
             },
+            "dyn.map_epoch": {
+                "domain": "[1, 2^63-1]",
+                "value": dyn_map_epoch,
+            },
+            "dyn.environment_steps": {
+                "domain": "[0, 2^63-1]",
+                "value": dyn_environment_steps,
+            },
+            "dyn.samples": {
+                "domain": "[2000, 2^63-1]",
+                "value": dyn_samples,
+            },
         },
         "pinned_inputs": pinned_inputs,
+        "preactivation_tests": preactivation_tests,
         "tools": tool_records,
+        "assembly_invocation": assembly_invocation,
         "stage_roots": {
             "source": str(source_root),
             "source_cold": str(source_cold),
@@ -1080,9 +2012,20 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             "claims": str(claims),
             "analysis": str(analysis),
             "atlas_diagnostics": str(atlas_diagnostics),
+            "stock": str(stock),
+            "stock_bsp": str(stock / "bsp"),
+            "stock_analysis": str(stock / "analysis"),
+            "stock_validation": str(stock / "validation"),
+            "dyn_evidence": str(dyn_evidence),
+            "test_evidence": str(test_evidence),
+            "gate_output": str(gate_output),
+            "lifecycle_evidence": str(lifecycle_evidence),
         },
         "commands": commands,
-        "authorization": _authorization_contract(consumed=False),
+        "authorization": {
+            **_authorization_contract(consumed=False),
+            "execution_binding": execution_binding,
+        },
     }
     # Parse-only conformance against stage CLI surfaces before returning a plan.
     for step in commands:
@@ -1120,6 +2063,38 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         stages == list(DRIVER_STAGES),
         f"final-lane stage order differs: {stages!r}",
     )
+    record(
+        "stage-mutation-contract",
+        [step.get("mutating") for step in plan.get("commands", [])]
+        == [True] * len(DRIVER_STAGES),
+        "every lifecycle stage must remain explicitly mutating",
+    )
+    try:
+        direct_repo = _direct_canonical_directory(
+            Path(str(plan.get("repo_root", ""))),
+            "final-cohort repository root",
+        )
+        record(
+            "repository-path-identity",
+            str(direct_repo) == plan.get("repo_root"),
+            "final-cohort repository root is not a direct canonical path",
+        )
+    except FinalCohortPlanError as error:
+        record(error.check_id, False, str(error))
+    try:
+        live_repository = repository_binding(direct_repo)
+    except GeneratorCohortError as error:
+        raise FinalCohortPlanError(
+            f"final-cohort repository binding failed: {error}",
+            check_id="repository-binding",
+        ) from error
+    record(
+        "repository-binding",
+        isinstance(plan.get("repository"), Mapping)
+        and dict(plan["repository"]) == live_repository
+        and plan["repository"].get("git_clean") is True,
+        "final-lane repository binding differs or is not clean",
+    )
     declaration = plan.get("declaration")
     record(
         "declaration-binding",
@@ -1144,6 +2119,17 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     except (GeneratorCohortError, OSError, ValueError) as error:
         record("declaration-load", False, f"declaration reload failed: {error}")
         return checks
+    try:
+        _require_versioned_final_declaration(
+            Path(str(plan["repo_root"])), declaration_path, declaration_obj
+        )
+        record(
+            "declaration-versioned-path",
+            True,
+            "declaration is the direct versioned immutable repository path",
+        )
+    except FinalCohortPlanError as error:
+        record(error.check_id, False, str(error))
     record(
         "declaration-identity",
         declaration_obj.get("cohort_id") == plan.get("cohort_id")
@@ -1191,6 +2177,9 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
             "compiled_cm_preflight.oracle_batch_timeout_seconds",
             "materialization.timeout_seconds",
             "compiled_cm_preflight.jobs",
+            "dyn.map_epoch",
+            "dyn.environment_steps",
+            "dyn.samples",
         }.issubset(domains),
         "argument domain table is incomplete",
     )
@@ -1235,14 +2224,42 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         "materialize timeout is within [1, 3600]",
     )
 
+    for name, low in (
+        ("dyn.map_epoch", 1),
+        ("dyn.environment_steps", 0),
+        ("dyn.samples", 2000),
+    ):
+        _integer_closed_interval(
+            domains[name].get("value"),
+            low=low,
+            high=2**63 - 1,
+            label=name,
+            check_id="dyn-domain",
+        )
+        record(
+            f"dyn-domain-{name.removeprefix('dyn.')}",
+            True,
+            f"{name} is within the admitted domain",
+        )
+
     authorization = plan.get("authorization")
     expected_auth = _authorization_contract(consumed=False)
     record(
         "authorization-contract",
         isinstance(authorization, Mapping)
-        and all(authorization.get(key) == value for key, value in expected_auth.items()),
+        and all(authorization.get(key) == value for key, value in expected_auth.items())
+        and isinstance(authorization.get("execution_binding"), Mapping),
         "authorization contract weakened or incomplete",
     )
+    try:
+        _execution_binding(plan)
+        record(
+            "execution-authorization-binding",
+            True,
+            "final execution host, UID, machine identity, and journal root remain bound",
+        )
+    except FinalCohortPlanError as error:
+        record(error.check_id, False, str(error))
 
     tools = plan.get("tools")
     record(
@@ -1262,6 +2279,17 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
             and Path(str(tool_record["path"])).name == TOOL_FILES[stage],
             f"tool digest drifted for {stage}",
         )
+    try:
+        direct_assembly_tool, direct_assembly_record = _direct_assembly_tool(
+            direct_repo
+        )
+        record(
+            "assembly-tool-identity",
+            tools["assembly"] == direct_assembly_record,
+            "assembly tool record differs from the direct canonical repository assembler",
+        )
+    except FinalCohortPlanError as error:
+        record(error.check_id, False, str(error))
 
     declaration_flag = str(declaration["path"])
     for step in plan["commands"]:
@@ -1276,20 +2304,20 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
             and not Path(command[1]).is_symlink(),
             f"{stage} tool identity differs",
         )
-        # Every mutating stage must bind the same declaration path.
-        if "--declaration" not in command:
+        if stage in DECLARATION_STAGES:
+            if "--declaration" not in command:
+                record(
+                    f"stage-input-binding:{stage}",
+                    False,
+                    f"{stage} command lacks --declaration",
+                )
+            decl_index = command.index("--declaration")
+            bound = command[decl_index + 1]
             record(
                 f"stage-input-binding:{stage}",
-                False,
-                f"{stage} command lacks --declaration",
+                bound == declaration_flag,
+                f"{stage} declaration binding differs: {bound!r}",
             )
-        decl_index = command.index("--declaration")
-        bound = command[decl_index + 1]
-        record(
-            f"stage-input-binding:{stage}",
-            bound == declaration_flag,
-            f"{stage} declaration binding differs: {bound!r}",
-        )
         try:
             parse_stage_command(str(stage), command)
             record(
@@ -1339,10 +2367,24 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         isinstance(roots, Mapping)
         and {
             "source",
+            "source_cold",
+            "compile_staging",
             "compiled",
+            "compile_logs",
+            "materialize_staging",
             "materialized",
+            "materialize_logs",
             "claims",
             "analysis",
+            "atlas_diagnostics",
+            "stock",
+            "stock_bsp",
+            "stock_analysis",
+            "stock_validation",
+            "dyn_evidence",
+            "test_evidence",
+            "gate_output",
+            "lifecycle_evidence",
         }.issubset(roots),
         "stage roots are incomplete",
     )
@@ -1353,6 +2395,21 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         "stage-input-binding:compile-source",
         compile_cmd[compile_cmd.index("--source-root") + 1] == roots["source"],
         "compile source-root does not match source stage output",
+    )
+    compiled_membership_cmd = next(
+        step["command"]
+        for step in plan["commands"]
+        if step["stage"] == "compiled-membership"
+    )
+    record(
+        "stage-input-binding:compiled-membership",
+        compiled_membership_cmd[
+            compiled_membership_cmd.index("--directory") + 1
+        ] == roots["compiled"]
+        and compiled_membership_cmd[
+            compiled_membership_cmd.index("--stage") + 1
+        ] == "compiled",
+        "compiled membership does not consume the compiled publication root",
     )
     cm_cmd = next(
         step["command"]
@@ -1373,6 +2430,21 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         "stage-input-binding:materialize-compiled",
         mat_cmd[mat_cmd.index("--compiled-dir") + 1] == roots["compiled"],
         "materialization compiled-dir does not match compile publication root",
+    )
+    materialized_membership_cmd = next(
+        step["command"]
+        for step in plan["commands"]
+        if step["stage"] == "materialized-membership"
+    )
+    record(
+        "stage-input-binding:materialized-membership",
+        materialized_membership_cmd[
+            materialized_membership_cmd.index("--directory") + 1
+        ] == roots["materialized"]
+        and materialized_membership_cmd[
+            materialized_membership_cmd.index("--stage") + 1
+        ] == "materialized",
+        "materialized membership does not consume the materialized root",
     )
     claims_cmd = next(
         step["command"]
@@ -1414,6 +2486,14 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
             "python",
             "q2tool",
             "base_pak",
+            "stock_pak",
+            "design",
+            "execution_plan",
+            "qualification_report",
+            "preactivation_test_report",
+            "stock_provenance",
+            "stock_inventory",
+            "dyn_evidence_executable",
             "cm_oracle",
             "pmove_oracle",
             "hook_oracle",
@@ -1446,6 +2526,7 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "atlas_cm_oracle",
                 "atlas_pmove_oracle",
                 "atlas_hook_oracle",
+                "dyn_evidence_executable",
             },
         )
         record(
@@ -1458,6 +2539,45 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         name: str(_absolute(Path(str(value["path"]))))
         for name, value in pinned.items()
     }
+    preactivation_path = Path(pinned_paths["preactivation_test_report"])
+    workspace_path = _absolute(Path(str(plan["workspace"])))
+    try:
+        preactivation_path.relative_to(workspace_path)
+    except ValueError:
+        record(
+            "preactivation-test-location",
+            True,
+            "preactivation test evidence remains outside the final workspace",
+        )
+    else:
+        record(
+            "preactivation-test-location",
+            False,
+            "preactivation test evidence must be outside the final workspace",
+        )
+    try:
+        preactivation_binding = b2_gate.validate_preactivation_test_binding(
+            design=Path(pinned_paths["design"]),
+            plan=Path(pinned_paths["execution_plan"]),
+            repo_root=Path(str(plan["repo_root"])),
+            b1_gate=Path(pinned_paths["b1_gate"]),
+            qualification_report=Path(pinned_paths["qualification_report"]),
+            preactivation_test_report=Path(
+                pinned_paths["preactivation_test_report"]
+            ),
+            implementation=live_repository,
+        )
+        record(
+            "preactivation-test-binding",
+            plan.get("preactivation_tests") == preactivation_binding,
+            "preactivation test binding differs from the qualified implementation",
+        )
+    except b2_gate.B2GateError as error:
+        record(
+            "preactivation-test-binding",
+            False,
+            f"preactivation test binding rejected: {error}",
+        )
 
     # A digest table is not sufficient by itself: every mutating command must
     # still consume the exact paths represented by that table when execution
@@ -1488,6 +2608,78 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
             flag in command and command[command.index(flag) + 1] == expected,
             detail,
         )
+
+    commands_by_stage = {
+        str(step["stage"]): step["command"] for step in plan["commands"]
+    }
+    reports_by_stage = {
+        str(step["stage"]): str(step["report"]) for step in plan["commands"]
+    }
+    authorization_binding = plan["authorization"]["execution_binding"]
+    expected_source_marker = str(
+        Path(str(authorization_binding["state_root"]["path"]))
+        / f"{declaration['sha256']}.json"
+    )
+    for stage, flag, expected in (
+        ("source", "--output-dir", roots["source"]),
+        ("source", "--cold-dir", roots["source_cold"]),
+        ("source", "--final-source-authorization", expected_source_marker),
+        ("compile", "--staging-root", roots["compile_staging"]),
+        ("compile", "--publish-root", roots["compiled"]),
+        ("compile", "--log-root", roots["compile_logs"]),
+        ("compiled-static", "--compiled-dir", roots["compiled"]),
+        ("compiled-cm-preflight", "--compiled-dir", roots["compiled"]),
+        ("materialization", "--stage-dir", roots["materialize_staging"]),
+        ("materialization", "--materialized-dir", roots["materialized"]),
+        ("materialization", "--log-dir", roots["materialize_logs"]),
+        ("claims-prepare", "--claims-dir", roots["claims"]),
+        ("atlas-build", "--analysis-dir", roots["analysis"]),
+        ("atlas-build", "--diagnostics-dir", roots["atlas_diagnostics"]),
+        ("generated-promotion", "--claims-dir", roots["claims"]),
+        ("generated-promotion", "--analysis-dir", roots["analysis"]),
+    ):
+        record_flag_binding(
+            f"stage-output-binding:{stage}-{flag.removeprefix('--')}",
+            commands_by_stage[stage],
+            flag,
+            expected,
+            f"{stage} {flag} differs from the preauthorized stage root",
+        )
+    for stage, flag in (
+        ("dyn-shape-preflight", "--report"),
+        ("source", "--report"),
+        ("compile", "--report"),
+        ("compiled-membership", "--output"),
+        ("compiled-static", "--output"),
+        ("compiled-cm-preflight", "--output"),
+        ("materialization", "--report"),
+        ("materialized-membership", "--output"),
+        ("claims-prepare", "--output"),
+        ("atlas-build", "--output"),
+        ("generated-promotion", "--output"),
+        ("stock-campaign", "--report"),
+        ("dyn-origin-binding", "--report"),
+        ("assembly", "--output"),
+    ):
+        record_flag_binding(
+            f"stage-report-binding:{stage}",
+            commands_by_stage[stage],
+            flag,
+            reports_by_stage[stage],
+            f"{stage} report differs from its preauthorized report path",
+        )
+    record(
+        "stage-report-binding:dyn-execute",
+        reports_by_stage["dyn-execute"]
+        == str(Path(roots["dyn_evidence"]) / "b2-dyn-evidence.json"),
+        "Dyn evidence report differs from the Dyn output contract",
+    )
+    record(
+        "stage-report-binding:test-suite",
+        reports_by_stage["test-suite"]
+        == str(Path(roots["test_evidence"]) / "b2-test-report.json"),
+        "test report differs from the atomic test publisher contract",
+    )
 
     record_flag_binding(
         "stage-input-binding:compile-q2tool",
@@ -1556,6 +2748,215 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         "generated promotion does not match the pinned B1 gate",
     )
 
+    stock_cmd = next(
+        step["command"]
+        for step in plan["commands"]
+        if step["stage"] == "stock-campaign"
+    )
+    for flag, pinned_name in (
+        ("--stock-pak", "stock_pak"),
+        ("--provenance", "stock_provenance"),
+        ("--stock-inventory", "stock_inventory"),
+        ("--b1-gate", "b1_gate"),
+        ("--hook-attestation", "hook_attestation"),
+        ("--fall-oracle", "fall_oracle"),
+        ("--packer", "packer"),
+        ("--verifier", "verifier"),
+    ):
+        record_flag_binding(
+            f"stage-input-binding:stock-{pinned_name}",
+            stock_cmd,
+            flag,
+            pinned_paths[pinned_name],
+            f"stock {flag} does not match pinned {pinned_name}",
+        )
+    for flag, expected in (
+        ("--repo-root", str(_absolute(Path(str(plan["repo_root"]))))),
+        ("--python", pinned_paths["python"]),
+        ("--client-root", atlas_client_root),
+        ("--lithium-root", atlas_lithium_root),
+    ):
+        record_flag_binding(
+            f"stage-input-binding:stock-{flag.removeprefix('--')}",
+            stock_cmd,
+            flag,
+            expected,
+            f"stock {flag} differs from the preauthorized release closure",
+        )
+    record_flag_binding(
+        "stage-input-binding:stock-output",
+        stock_cmd,
+        "--output-root",
+        roots["stock"],
+        "stock campaign publication root differs",
+    )
+
+    dyn_shape_cmd = next(
+        step["command"]
+        for step in plan["commands"]
+        if step["stage"] == "dyn-shape-preflight"
+    )
+    record_flag_binding(
+        "stage-input-binding:dyn-executable",
+        dyn_shape_cmd,
+        "--executable",
+        pinned_paths["dyn_evidence_executable"],
+        "Dyn Phase A executable differs from pinned bytes",
+    )
+    record_flag_binding(
+        "stage-input-binding:dyn-repository",
+        dyn_shape_cmd,
+        "--expected-crate-commit",
+        str(plan["repository"]["repository_commit"]),
+        "Dyn Phase A commit differs from repository binding",
+    )
+    for flag, expected in (
+        ("--repo-root", str(_absolute(Path(str(plan["repo_root"]))))),
+        (
+            "--expected-analyzer-authority",
+            str(plan["repository"]["atlas_analyzer_authority_sha256"]),
+        ),
+        ("--output", roots["dyn_evidence"]),
+    ):
+        record_flag_binding(
+            f"stage-input-binding:dyn-shape-{flag.removeprefix('--')}",
+            dyn_shape_cmd,
+            flag,
+            expected,
+            f"Dyn Phase A {flag} differs from the preauthorized binding",
+        )
+    dyn_binding_cmd = next(
+        step["command"]
+        for step in plan["commands"]
+        if step["stage"] == "dyn-origin-binding"
+    )
+    dyn_execute_cmd = next(
+        step["command"]
+        for step in plan["commands"]
+        if step["stage"] == "dyn-execute"
+    )
+    record(
+        "stage-input-binding:dyn-authorities",
+        dyn_binding_cmd[
+            dyn_binding_cmd.index("--shape-preflight-report") + 1
+        ]
+        == dyn_execute_cmd[
+            dyn_execute_cmd.index("--shape-preflight-report") + 1
+        ]
+        and dyn_binding_cmd[dyn_binding_cmd.index("--report") + 1]
+        == dyn_execute_cmd[
+            dyn_execute_cmd.index("--origin-binding-report") + 1
+        ],
+        "Dyn Phase A/B/execution report chain differs",
+    )
+    record(
+        "stage-input-binding:dyn-promotion",
+        dyn_binding_cmd[
+            dyn_binding_cmd.index("--generated-promotion-report") + 1
+        ]
+        == reports_by_stage["generated-promotion"],
+        "Dyn Phase B does not consume the preauthorized promotion report",
+    )
+
+    test_cmd = next(
+        step["command"]
+        for step in plan["commands"]
+        if step["stage"] == "test-suite"
+    )
+    record_flag_binding(
+        "stage-input-binding:test-output",
+        test_cmd,
+        "--output",
+        roots["test_evidence"],
+        "test suite output root differs",
+    )
+
+    assembly_cmd = next(
+        step["command"]
+        for step in plan["commands"]
+        if step["stage"] == "assembly"
+    )
+    try:
+        bound_assembly_invocation = _assembly_command_binding(
+            assembly_cmd, repo=direct_repo
+        )
+        record(
+            "assembly-command-binding",
+            isinstance(plan.get("assembly_invocation"), Mapping)
+            and dict(plan["assembly_invocation"]) == bound_assembly_invocation,
+            "planned assembly command hash differs from the assembler argv hash",
+        )
+    except FinalCohortPlanError as error:
+        record(error.check_id, False, str(error))
+    for flag, expected in (
+        ("--design", pinned_paths["design"]),
+        ("--plan", pinned_paths["execution_plan"]),
+        ("--repo-root", str(_absolute(Path(str(plan["repo_root"]))))),
+        ("--b1-gate", pinned_paths["b1_gate"]),
+        ("--cm-oracle", pinned_paths["cm_oracle"]),
+        ("--pmove-oracle", pinned_paths["pmove_oracle"]),
+        ("--hook-oracle", pinned_paths["hook_oracle"]),
+        ("--fall-oracle", pinned_paths["fall_oracle"]),
+        ("--hook-attestation", pinned_paths["hook_attestation"]),
+        ("--atlas-verifier", pinned_paths["verifier"]),
+        ("--qualification-report", pinned_paths["qualification_report"]),
+        (
+            "--preactivation-test-report",
+            pinned_paths["preactivation_test_report"],
+        ),
+        ("--stock-provenance", pinned_paths["stock_provenance"]),
+        ("--stock-inventory", pinned_paths["stock_inventory"]),
+        ("--dyn-evidence-executable", pinned_paths["dyn_evidence_executable"]),
+        ("--source-dir", roots["source"]),
+        ("--source-cold-dir", roots["source_cold"]),
+        ("--source-freeze-report", reports_by_stage["source"]),
+        ("--compiled-dir", roots["compiled"]),
+        (
+            "--compiled-membership-report",
+            reports_by_stage["compiled-membership"],
+        ),
+        ("--compiled-static-report", reports_by_stage["compiled-static"]),
+        (
+            "--compiled-cm-preflight-report",
+            reports_by_stage["compiled-cm-preflight"],
+        ),
+        ("--materialized-dir", roots["materialized"]),
+        (
+            "--materialized-membership-report",
+            reports_by_stage["materialized-membership"],
+        ),
+        ("--claims-dir", roots["claims"]),
+        ("--claims-prepare-report", reports_by_stage["claims-prepare"]),
+        ("--analysis-dir", roots["analysis"]),
+        ("--generated-build-report", reports_by_stage["atlas-build"]),
+        (
+            "--generated-validation-report",
+            reports_by_stage["generated-promotion"],
+        ),
+        ("--stock-bsp-dir", roots["stock_bsp"]),
+        ("--stock-analysis-dir", roots["stock_analysis"]),
+        ("--stock-validation-dir", roots["stock_validation"]),
+        (
+            "--dyn-argv-preflight-report",
+            reports_by_stage["dyn-shape-preflight"],
+        ),
+        (
+            "--dyn-origin-binding-report",
+            reports_by_stage["dyn-origin-binding"],
+        ),
+        ("--dyn-evidence-report", reports_by_stage["dyn-execute"]),
+        ("--test-report", reports_by_stage["test-suite"]),
+        ("--final-lifecycle-evidence", roots["lifecycle_evidence"]),
+        ("--output", roots["gate_output"]),
+    ):
+        record_flag_binding(
+            f"stage-input-binding:assembly-{flag.removeprefix('--')}",
+            assembly_cmd,
+            flag,
+            expected,
+            f"assembly {flag} differs from the preauthorized input",
+        )
+
     for supplied, atlas in (
         ("cm_oracle", "atlas_cm_oracle"),
         ("pmove_oracle", "atlas_pmove_oracle"),
@@ -1578,6 +2979,7 @@ def build_evidence(
     mutating_stages_executed: Sequence[str],
     failure: Mapping[str, Any] | None = None,
     source_authorization_marker: Mapping[str, Any] | None = None,
+    stage_executions: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Emit canonical pre-authorization evidence."""
 
@@ -1608,6 +3010,19 @@ def build_evidence(
         cohort_retirement_triggered = False
         retry_under_same_declaration_allowed = not authorization_consumed
 
+    plan_authorization = plan.get("authorization")
+    execution_binding = (
+        plan_authorization.get("execution_binding")
+        if isinstance(plan_authorization, Mapping)
+        and isinstance(plan_authorization.get("execution_binding"), Mapping)
+        else None
+    )
+    authorization_evidence = _authorization_contract(
+        consumed=authorization_consumed
+    )
+    if execution_binding is not None:
+        authorization_evidence["execution_binding"] = dict(execution_binding)
+
     evidence = {
         "schema": EVIDENCE_SCHEMA,
         "passed": passed,
@@ -1620,6 +3035,7 @@ def build_evidence(
         "declaration": plan.get("declaration"),
         "checks": list(checks),
         "mutating_stages_executed": list(mutating_stages_executed),
+        "stage_executions": [dict(row) for row in stage_executions],
         "source_authorization_marker": (
             dict(source_authorization_marker)
             if source_authorization_marker is not None else None
@@ -1627,7 +3043,7 @@ def build_evidence(
         "failure": failure,
         "defect_class": defect_class,
         "authorization": {
-            **_authorization_contract(consumed=authorization_consumed),
+            **authorization_evidence,
             "cohort_retirement_triggered": cohort_retirement_triggered,
             "retry_under_same_declaration_allowed": retry_under_same_declaration_allowed,
         },
@@ -1645,6 +3061,7 @@ def run_plan(
     dry_run: bool = True,
     runner: Callable[..., Any] | None = None,
     acknowledge_mutating_execution: object = False,
+    expected_plan_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Validate the full plan, then optionally execute stages in order.
 
@@ -1686,6 +3103,28 @@ def run_plan(
             mutating_stages_executed=[],
         )
 
+    plan_sha256 = _sha256(_canonical(plan))
+    if (
+        not isinstance(expected_plan_sha256, str)
+        or HEX64.fullmatch(expected_plan_sha256) is None
+        or expected_plan_sha256 != plan_sha256
+    ):
+        failure = {
+            "defect_class": DEFECT_RUNNER_CONFIGURATION,
+            "check_id": "expected-plan-sha256",
+            "message": (
+                "execute mode requires the exact reviewed dry-run plan SHA-256; "
+                f"actual={plan_sha256}"
+            ),
+        }
+        return build_evidence(
+            plan,
+            checks,
+            dry_run=False,
+            mutating_stages_executed=[],
+            failure=failure,
+        )
+
     if not _acknowledged_mutating_execution(acknowledge_mutating_execution):
         failure = {
             "defect_class": DEFECT_RUNNER_CONFIGURATION,
@@ -1717,43 +3156,118 @@ def run_plan(
             failure=failure,
         )
 
+    try:
+        prior_authorization_marker = _existing_source_authorization_marker(plan)
+    except FinalCohortPlanError as error:
+        consumed = error.consumed
+        return build_evidence(
+            plan,
+            checks,
+            dry_run=False,
+            mutating_stages_executed=["source"] if consumed else [],
+            failure={
+                "defect_class": (
+                    DEFECT_COHORT_ARTIFACT if consumed else error.defect_class
+                ),
+                "check_id": error.check_id,
+                "message": str(error),
+                "stage": "source",
+            },
+        )
+    if prior_authorization_marker is not None:
+        return build_evidence(
+            plan,
+            checks,
+            dry_run=False,
+            mutating_stages_executed=["source"],
+            failure={
+                "defect_class": DEFECT_COHORT_ARTIFACT,
+                "check_id": "source-authorization-already-consumed",
+                "message": "source authorization marker already exists",
+                "stage": "source",
+            },
+            source_authorization_marker=prior_authorization_marker,
+        )
+    try:
+        _prepare_execution_workspace(plan)
+    except (FinalCohortPlanError, OSError) as error:
+        check_id = (
+            error.check_id
+            if isinstance(error, FinalCohortPlanError)
+            else "execution-workspace"
+        )
+        return build_evidence(
+            plan,
+            checks,
+            dry_run=False,
+            mutating_stages_executed=[],
+            failure={
+                "defect_class": DEFECT_RUNNER_CONFIGURATION,
+                "check_id": check_id,
+                "message": str(error),
+            },
+        )
+
     # This list is deliberately write-ahead: entering a mutating stage consumes
     # its one-shot authorization before the runner can create its first byte.
     # Recording only after return would make a crash during source generation
     # appear pre-source and incorrectly reopen the immutable declaration.
     executed: list[str] = []
+    stage_executions: list[dict[str, Any]] = []
     authorization_marker: Mapping[str, Any] | None = None
     for step in plan["commands"]:
         stage = str(step["stage"])
+        try:
+            validate_plan(plan)
+        except FinalCohortPlanError as error:
+            consumed = "source" in executed
+            return build_evidence(
+                plan,
+                checks,
+                dry_run=False,
+                mutating_stages_executed=executed,
+                failure={
+                    "defect_class": (
+                        DEFECT_COHORT_ARTIFACT
+                        if consumed
+                        else DEFECT_RUNNER_CONFIGURATION
+                    ),
+                    "check_id": f"stage-revalidation:{stage}:{error.check_id}",
+                    "message": str(error),
+                    "stage": stage,
+                },
+                source_authorization_marker=authorization_marker,
+                stage_executions=stage_executions,
+            )
         if stage == "source":
             try:
                 authorization_marker, created = _source_authorization_marker(plan)
             except FinalCohortPlanError as error:
-                current_declaration_consumed = (
-                    error.check_id == "source-authorization-journal-incomplete"
-                )
+                current_declaration_consumed = error.consumed
                 return build_evidence(
                     plan,
                     checks,
                     dry_run=False,
                     # Source has not been invoked yet. Claim consumption only
                     # when O_EXCL left a durable marker/tombstone on disk.
-                    mutating_stages_executed=(
-                        ["source"] if current_declaration_consumed else []
-                    ),
+                    mutating_stages_executed=[
+                        *executed,
+                        *(["source"] if current_declaration_consumed else []),
+                    ],
                     failure={
                         "defect_class": error.defect_class,
                         "check_id": error.check_id,
                         "message": str(error),
                         "stage": "source",
                     },
+                    stage_executions=stage_executions,
                 )
             if not created:
                 return build_evidence(
                     plan,
                     checks,
                     dry_run=False,
-                    mutating_stages_executed=["source"],
+                    mutating_stages_executed=[*executed, "source"],
                     failure={
                         "defect_class": DEFECT_COHORT_ARTIFACT,
                         "check_id": "source-authorization-already-consumed",
@@ -1761,6 +3275,48 @@ def run_plan(
                         "stage": "source",
                     },
                     source_authorization_marker=authorization_marker,
+                    stage_executions=stage_executions,
+                )
+            try:
+                validate_plan(plan)
+            except FinalCohortPlanError as error:
+                return build_evidence(
+                    plan,
+                    checks,
+                    dry_run=False,
+                    mutating_stages_executed=[*executed, "source"],
+                    failure={
+                        "defect_class": DEFECT_COHORT_ARTIFACT,
+                        "check_id": f"stage-revalidation:source:{error.check_id}",
+                        "message": str(error),
+                        "stage": "source",
+                    },
+                    source_authorization_marker=authorization_marker,
+                    stage_executions=stage_executions,
+                )
+        if stage == "assembly":
+            try:
+                _publish_preassembly_lifecycle_evidence(
+                    plan,
+                    source_authorization_marker=authorization_marker,
+                    executed=executed,
+                    stage_executions=stage_executions,
+                    assembly_command=step["command"],
+                )
+            except FinalCohortPlanError as error:
+                return build_evidence(
+                    plan,
+                    checks,
+                    dry_run=False,
+                    mutating_stages_executed=executed,
+                    failure={
+                        "defect_class": DEFECT_COHORT_ARTIFACT,
+                        "check_id": error.check_id,
+                        "message": str(error),
+                        "stage": stage,
+                    },
+                    source_authorization_marker=authorization_marker,
+                    stage_executions=stage_executions,
                 )
         executed.append(stage)
         try:
@@ -1784,8 +3340,22 @@ def run_plan(
                     "exception_type": type(error).__name__,
                 },
                 source_authorization_marker=authorization_marker,
+                stage_executions=stage_executions,
             )
         returncode = getattr(completed, "returncode", completed)
+        stdout = getattr(completed, "stdout", b"") or b""
+        stderr = getattr(completed, "stderr", b"") or b""
+        if isinstance(stdout, str):
+            stdout = stdout.encode("utf-8")
+        if isinstance(stderr, str):
+            stderr = stderr.encode("utf-8")
+        stage_executions.append({
+            "stage": stage,
+            "command_sha256": _sha256(_canonical(list(step["command"]))),
+            "returncode": int(returncode),
+            "stdout": {"bytes": len(stdout), "sha256": _sha256(stdout)},
+            "stderr": {"bytes": len(stderr), "sha256": _sha256(stderr)},
+        })
         if int(returncode) != 0:
             # After source has run, a non-zero exit is a consumed no-retry failure.
             defect = (
@@ -1806,6 +3376,7 @@ def run_plan(
                     "returncode": int(returncode),
                 },
                 source_authorization_marker=authorization_marker,
+                stage_executions=stage_executions,
             )
 
     return build_evidence(
@@ -1814,6 +3385,7 @@ def run_plan(
         dry_run=False,
         mutating_stages_executed=executed,
         source_authorization_marker=authorization_marker,
+        stage_executions=stage_executions,
     )
 
 
@@ -1822,9 +3394,25 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, default=ROOT)
     parser.add_argument("--declaration", type=Path, required=True)
+    parser.add_argument("--design", type=Path, required=True)
+    parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--qualification-report", type=Path, required=True)
+    parser.add_argument("--preactivation-test-report", type=Path, required=True)
+    parser.add_argument(
+        "--authorization-state-root",
+        type=Path,
+        required=True,
+        help=(
+            "pre-provisioned 0700 final-cohort source-authorization journal "
+            "on DESKTOP-RTX2080 WSL"
+        ),
+    )
     parser.add_argument("--python", type=Path, default=None)
     parser.add_argument("--q2tool", type=Path, required=True)
     parser.add_argument("--basedir", type=Path, required=True)
+    parser.add_argument("--stock-pak", type=Path, required=True)
+    parser.add_argument("--stock-provenance", type=Path, required=True)
+    parser.add_argument("--stock-inventory", type=Path, required=True)
     parser.add_argument("--cm-oracle", type=Path, required=True)
     parser.add_argument("--pmove-oracle", type=Path, required=True)
     parser.add_argument("--hook-oracle", type=Path, required=True)
@@ -1835,6 +3423,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--lithium-root", type=Path, required=True)
     parser.add_argument("--packer", type=Path, required=True)
     parser.add_argument("--verifier", type=Path, required=True)
+    parser.add_argument("--dyn-evidence-executable", type=Path, required=True)
     parser.add_argument("--source-root", type=Path, default=None)
     parser.add_argument("--source-cold", type=Path, default=None)
     parser.add_argument("--compile-staging", type=Path, default=None)
@@ -1846,6 +3435,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--claims-root", type=Path, default=None)
     parser.add_argument("--analysis-root", type=Path, default=None)
     parser.add_argument("--atlas-diagnostics", type=Path, default=None)
+    parser.add_argument("--stock-root", type=Path, default=None)
+    parser.add_argument("--dyn-evidence-root", type=Path, default=None)
+    parser.add_argument("--test-evidence-root", type=Path, default=None)
+    parser.add_argument("--gate-output", type=Path, default=None)
+    parser.add_argument("--dyn-map-epoch", type=int, default=1)
+    parser.add_argument("--dyn-environment-steps", type=int, default=4000)
+    parser.add_argument("--dyn-samples", type=int, default=4000)
     parser.add_argument(
         "--compile-timeout-seconds",
         type=float,
@@ -1876,7 +3472,8 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "after full-plan validation, request mutating stage execution; "
-            "requires --acknowledge-mutating-execution and an injected runner"
+            "requires --expected-plan-sha256 and "
+            "--acknowledge-mutating-execution"
         ),
     )
     parser.add_argument(
@@ -1888,7 +3485,32 @@ def _parser() -> argparse.ArgumentParser:
             f"{MUTATING_EXECUTION_ACK} when --execute is set"
         ),
     )
+    parser.add_argument(
+        "--expected-plan-sha256",
+        default=None,
+        metavar="HEX64",
+        help="required in execute mode; must equal the reviewed dry-run plan hash",
+    )
     return parser
+
+
+def _subprocess_stage_runner(
+    command: Sequence[str],
+    *,
+    stage: str,
+    plan: Mapping[str, Any],
+) -> subprocess.CompletedProcess[bytes]:
+    """Execute one already-validated argv without a shell or implicit input."""
+
+    del stage
+    return subprocess.run(
+        list(command),
+        cwd=Path(str(plan["repo_root"])),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1899,8 +3521,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         evidence = run_plan(
             plan,
             dry_run=dry_run,
-            runner=None,
+            runner=_subprocess_stage_runner if args.execute else None,
             acknowledge_mutating_execution=args.acknowledge_mutating_execution,
+            expected_plan_sha256=args.expected_plan_sha256,
         )
     except FinalCohortPlanError as error:
         evidence = {
@@ -1922,6 +3545,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             ],
             "mutating_stages_executed": [],
+            "stage_executions": [],
+            "source_authorization_marker": None,
             "failure": {
                 "defect_class": error.defect_class,
                 "check_id": error.check_id,

@@ -57,6 +57,7 @@ from tools.assemble_b2_qualification import (  # noqa: E402
     B2QualificationError,
     QUALIFICATION_SCHEMA,
     replay_qualification,
+    validate_activation_successor_policy,
 )
 from tools.run_generator_claim_campaign import (  # noqa: E402
     CAMPAIGN_SCHEMA,
@@ -81,6 +82,13 @@ from tools.bind_b2_dyn_origin import (  # noqa: E402
     DynOriginBindingError,
     _load_atlas_compact,
 )
+from tools.final_execution_binding import (  # noqa: E402
+    EXECUTION_BINDING_SCHEMA,
+    EXPECTED_EXECUTION_HOSTNAME,
+    EXPECTED_WSL_KERNEL_FRAGMENT,
+    FinalExecutionBindingError,
+    validate_final_source_authorization,
+)
 from tools.source_route_contract import ROUTE_CONTRACT_SCHEMA  # noqa: E402
 from tools.validate_maps import deathmatch_spawn_origins  # noqa: E402
 
@@ -93,6 +101,7 @@ RETIRED_COHORT_71449 = "b2g26_final_71449"
 RETIRED_COHORT_71450 = "b2g26_final_71450"
 RETIRED_COHORT_71451 = "b2g26_final_71451"
 RETIRED_COHORT_71452 = "b2g26_final_71452"
+RETIRED_COHORT_71453 = "b2g26_final_71453"
 EXPECTED_DESIGN_SHA256 = (
     "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
 )
@@ -102,6 +111,28 @@ EXPECTED_PLAN_SHA256 = (
 COMPILED_CM_PREFLIGHT_SCHEMA = "q2-b2-compiled-cm-preflight-v1"
 COMPILED_CM_PREFLIGHT_STAGE = "post-q2tool-compiled-cm-preflight"
 COMPILED_CM_PREFLIGHT_STATUS = "non-admissible-preflight-only"
+FINAL_LIFECYCLE_EVIDENCE_SCHEMA = "q2-b2-final-lifecycle-preassembly-v1"
+# This is deliberately local rather than imported from the lifecycle driver:
+# that driver imports this gate to replay qualification evidence.  Keeping the
+# full required prefix here prevents a circular import while making final
+# assembly fail closed if the driver's execution order changes.
+FINAL_LIFECYCLE_PREASSEMBLY_STAGES = (
+    "dyn-shape-preflight",
+    "source",
+    "compile",
+    "compiled-membership",
+    "compiled-static",
+    "compiled-cm-preflight",
+    "materialization",
+    "materialized-membership",
+    "claims-prepare",
+    "atlas-build",
+    "generated-promotion",
+    "stock-campaign",
+    "dyn-origin-binding",
+    "dyn-execute",
+    "test-suite",
+)
 PREFLIGHT_IMPLEMENTATION_PATHS = (
     "tools/run_compiled_cm_preflight.py",
     "harness/atlas_analyzer.py",
@@ -113,6 +144,16 @@ PREFLIGHT_IMPLEMENTATION_PATHS = (
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 STOCK_IDS = tuple(f"q2dm{number}" for number in range(1, 9))
+STOCK_PROVENANCE_RELATIVE_PATH = (
+    "docs/multires/stock-q2dm1-q2dm8.provenance.json"
+)
+STOCK_PROVENANCE_WRITER_FORMAT = "json-indent-2-sorted-plus-lf"
+STOCK_PROVENANCE_SHA256 = (
+    "3ed2e930dcccf3abdabc7b5e1d9a1a95d74db4915a481bd523c51688c2bad030"
+)
+STOCK_PROVENANCE_COMPACT_SHA256 = (
+    "c6ed658e80a4667d36a72a3367a6f0c9c25d5020c24edfd54f00d15b8d74995a"
+)
 STOCK_ANALYSIS_SUFFIXES = STAGE_SUFFIXES["analysis"]
 MAX_L0_CHUNKS = 1200
 MAX_L0_BYTES = 16 * 1024 * 1024
@@ -218,11 +259,25 @@ RETIRED_71452_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
-ACTIVE_71453_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+RETIRED_71453_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "AGENTS.md",
     "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
     "docs/multires/B2-GATE-ASSEMBLY.md",
     "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json",
+    "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
+    "schemas/q2-multires-b2-gate-v1.schema.json",
+    "tests/test_b2_gate.py",
+    "tests/test_b2_operational_docs.py",
+    "tests/test_generator_claim_campaign.py",
+    "tests/test_generator_cohort.py",
+    "tests/test_retired_cohort_registry.py",
+    "tools/assemble_b2_gate.py",
+})
+ACTIVE_71454_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+    "AGENTS.md",
+    "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
+    "docs/multires/B2-GATE-ASSEMBLY.md",
+    "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json",
     "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
     "schemas/q2-multires-b2-gate-v1.schema.json",
     "tests/test_b2_gate.py",
@@ -246,21 +301,28 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Corrective commit 14dfc409b047611cb0722e53cad57d8c8584acb5 passed a
-# completely fresh disposable qualification 28/28 with all seven retained
-# infrastructure checks. Cohort 71453 is the separately committed, disjoint,
-# one-shot successor; qualification bytes and retired 71452 bytes remain
+# Corrective commit 7c482c9087262f065add58461a2b6f00644bb83a passed a
+# completely fresh disposable qualification 28/28 with all eight retained
+# infrastructure checks. Cohort 71454 is the separately committed, disjoint,
+# one-shot successor; qualification bytes and retired 71453 bytes remain
 # inadmissible.
 ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
-    cohort_id="b2g26_final_71453",
+    cohort_id="b2g26_final_71454",
     declaration_sha256=(
-        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810"
+        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"
     ),
     immutable_declaration_path=(
-        "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
+        "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
     ),
-    qualification_successor_paths=ACTIVE_71453_QUALIFICATION_SUCCESSOR_PATHS,
+    qualification_successor_paths=ACTIVE_71454_QUALIFICATION_SUCCESSOR_PATHS,
 )
+
+# The reusable disposable-qualification contract remains green at 20/28, as
+# required by the normative plan.  Final-cohort assembly is intentionally
+# stricter: the activated 71454 successor may consume only a complete 28/28
+# qualification.  Keeping this check in the final gate prevents an operator
+# from mistaking a generic-green partial qualification for cutover authority.
+FINAL_QUALIFICATION_END_TO_END_PASSES = 28
 
 
 def _require_active_final_authority() -> ActiveFinalAuthority:
@@ -281,11 +343,6 @@ def _require_active_final_authority() -> ActiveFinalAuthority:
         )
     except RetiredCohortRegistryError as exc:
         raise B2GateError(f"B2 active authority is retired: {exc}") from exc
-    _require(
-        authority.immutable_declaration_path
-        in authority.qualification_successor_paths,
-        "B2 active immutable declaration is outside the qualification delta",
-    )
     return authority
 
 
@@ -325,8 +382,15 @@ class B2GatePaths:
     dyn_argv_preflight_report: Path
     dyn_origin_binding_report: Path
     dyn_evidence_report: Path
+    preactivation_test_report: Path
     test_report: Path
     qualification_report: Path
+    final_lifecycle_evidence: Path
+    # This is constructed by ``main`` from the actual argv sequence.  The
+    # lifecycle record contains the same digest, preventing an operator from
+    # replaying the preassembly record through a differently-bound assembler
+    # invocation.
+    expected_assembly_command_sha256: str
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -380,6 +444,51 @@ def _load_json_and_raw(
 
 def _load_json(path: Path, *, canonical: bool = True) -> Any:
     return _load_json_and_raw(path, canonical=canonical)[0]
+
+
+def _stock_provenance_writer_bytes(value: object) -> bytes:
+    try:
+        return (
+            json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise B2GateError(
+            f"stock provenance cannot be encoded by the committed writer: {exc}"
+        ) from exc
+
+
+def _load_stock_provenance(path: Path) -> Mapping[str, Any]:
+    """Load only the exact, hash-pinned corpus-writer provenance artifact."""
+
+    value, raw = _load_json_and_raw(path, canonical=False)
+    provenance = _mapping(value, "stock provenance")
+    writer_bytes = _stock_provenance_writer_bytes(provenance)
+    _require(
+        raw == writer_bytes,
+        "stock provenance is not writer-canonical pretty/sorted JSON plus LF",
+    )
+    _require(
+        _sha256_bytes(raw) == STOCK_PROVENANCE_SHA256,
+        "stock provenance exact committed digest differs",
+    )
+    return provenance
+
+
+def stock_provenance_writer_evidence(path: Path) -> dict[str, Any]:
+    """Return the qualification evidence for the production provenance loader."""
+
+    provenance = _load_stock_provenance(path)
+    records = _list(provenance.get("records"), "stock provenance records")
+    return {
+        "schema": provenance.get("schema"),
+        "record_ids": [
+            _mapping(record, "stock provenance record").get("canonical_id")
+            for record in records
+        ],
+        "writer_format": STOCK_PROVENANCE_WRITER_FORMAT,
+        "writer_artifact": _file_record(path),
+        "compact_sorted_sha256": _sha256_bytes(canonical_bytes(provenance)),
+    }
 
 
 def _mapping(value: object, label: str) -> Mapping[str, Any]:
@@ -484,9 +593,17 @@ def _require_report_equals(path: Path, expected: object, label: str) -> None:
         raise B2GateError(f"{label} differs from independently recomputed evidence")
 
 
-def _validate_normative_documents(paths: B2GatePaths) -> dict[str, Any]:
-    design = _file_record(paths.design)
-    plan = _file_record(paths.plan)
+def _validate_normative_document_paths(design_path: Path, plan_path: Path) -> dict[str, Any]:
+    """Return the exact accepted normative-document records for a caller.
+
+    The pre-source lifecycle needs the same document binding as final assembly,
+    but it must establish that binding before source authorization is consumed.
+    Keep the digest check here rather than allowing a caller to supply a
+    precomputed mapping.
+    """
+
+    design = _file_record(design_path)
+    plan = _file_record(plan_path)
     _require(
         design["sha256"] == EXPECTED_DESIGN_SHA256,
         "normative design digest differs from accepted specification",
@@ -496,6 +613,10 @@ def _validate_normative_documents(paths: B2GatePaths) -> dict[str, Any]:
         "normative plan digest differs from accepted execution plan",
     )
     return {"design": design, "plan": plan}
+
+
+def _validate_normative_documents(paths: B2GatePaths) -> dict[str, Any]:
+    return _validate_normative_document_paths(paths.design, paths.plan)
 
 
 def _validate_implementation(
@@ -655,10 +776,14 @@ def _validate_qualification_successor(
     repo_root: Path,
     qualified: Mapping[str, Any],
     current: Mapping[str, Any],
-    authority: ActiveFinalAuthority | None = None,
+    activation_successor_policy: Mapping[str, Any],
 ) -> dict[str, Any]:
-    if authority is None:
-        authority = _require_active_final_authority()
+    try:
+        policy = validate_activation_successor_policy(activation_successor_policy)
+    except B2QualificationError as exc:
+        raise B2GateError(
+            f"B2 qualification activation-successor policy rejected: {exc}"
+        ) from exc
     expected_keys = QUALIFICATION_STABLE_IMPLEMENTATION_KEYS | {
         "repository_commit", "repository_tree"
     }
@@ -698,11 +823,11 @@ def _validate_qualification_successor(
         )
         changed[parts[1]] = parts[0]
     _require(
-        set(changed) == authority.qualification_successor_paths,
-        "B2 qualification successor changed files differ from the declaration-only authority",
+        set(changed) == set(policy["allowed_changed_paths"]),
+        "B2 qualification successor changed files differ from the qualified activation policy",
     )
     _require(
-        changed.get(authority.immutable_declaration_path) == "A",
+        changed.get(policy["immutable_declaration_path"]) == "A",
         "B2 qualification successor did not add its immutable active declaration",
     )
     return {
@@ -715,15 +840,26 @@ def _validate_qualification_successor(
     }
 
 
-def _validate_qualification_report(
-    paths: B2GatePaths,
+def _replay_final_qualification(
+    *,
+    qualification_report: Path,
+    repo_root: Path,
+    b1_gate_path: Path | None,
     normative: Mapping[str, Any],
     implementation: Mapping[str, Any],
     authority: ActiveFinalAuthority,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Replay the qualified lane and prove its only permitted successor.
+
+    This deliberately has no final-cohort artifact inputs.  It is shared by
+    final assembly and the pre-source lifecycle binding so both consumers
+    enforce exactly the same 28/28 qualification, B1 reseal, and
+    declaration-only successor relation.
+    """
+
     try:
         report = replay_qualification(
-            _load_json(paths.qualification_report), repo_root=paths.repo_root,
+            _load_json(qualification_report), repo_root=repo_root,
             use_reported_implementation=True,
         )
     except B2QualificationError as exc:
@@ -732,11 +868,41 @@ def _validate_qualification_report(
         report["normative_documents"] == normative,
         "B2 qualification normative document binding differs",
     )
+    end_to_end = _mapping(
+        report.get("end_to_end"), "B2 final qualification end-to-end result"
+    )
+    _require(
+        end_to_end.get("pass_count") == FINAL_QUALIFICATION_END_TO_END_PASSES
+        and end_to_end.get("failed_count") == 0
+        and len(_list(
+            end_to_end.get("passed_maps"),
+            "B2 final qualification passed maps",
+        )) == FINAL_QUALIFICATION_END_TO_END_PASSES,
+        "B2 final cohort requires a complete 28/28 qualification",
+    )
+    try:
+        activation_policy = validate_activation_successor_policy(
+            report["activation_successor_policy"]
+        )
+    except B2QualificationError as exc:
+        raise B2GateError(
+            f"B2 qualification activation-successor policy rejected: {exc}"
+        ) from exc
+    _require(
+        activation_policy["cohort_id"] == authority.cohort_id
+        and activation_policy["immutable_declaration_path"]
+        == authority.immutable_declaration_path,
+        "B2 active final authority differs from the qualified activation policy",
+    )
     relation = _validate_qualification_successor(
-        paths.repo_root, report["implementation"], implementation, authority
+        repo_root, report["implementation"], implementation, activation_policy
+    )
+    _require(
+        b1_gate_path is not None,
+        "B2 qualification B1 gate path is missing",
     )
     b1_gate = _mapping(
-        _load_json(paths.b1_gate, canonical=False), "B1 gate"
+        _load_json(b1_gate_path, canonical=False), "B1 gate"
     )
     requalification = _mapping(
         b1_gate.get("authority_requalification"),
@@ -756,7 +922,7 @@ def _validate_qualification_report(
         live.get("collision"), "B1 requalification collision identity"
     )
     expected_b1 = {
-        "gate": _file_record(paths.b1_gate),
+        "gate": _file_record(b1_gate_path),
         "requalification_sha256": _sha256_bytes(canonical_bytes(requalification)),
         "runtime_authority_seal_sha256": _sha256_bytes(
             canonical_bytes(runtime_seal)
@@ -771,8 +937,78 @@ def _validate_qualification_report(
         report["b1_authority"] == expected_b1,
         "B2 qualification B1 reseal binding differs",
     )
+    return report, relation
+
+
+def validate_preactivation_test_binding(
+    *,
+    design: Path,
+    plan: Path,
+    repo_root: Path,
+    b1_gate: Path,
+    qualification_report: Path,
+    preactivation_test_report: Path,
+    implementation: Mapping[str, Any],
+    authority: ActiveFinalAuthority | None = None,
+) -> dict[str, Any]:
+    """Bind green full-suite evidence to the qualified implementation.
+
+    The disposable qualification deliberately does not execute final-lane
+    lifecycle, stock, or Dyn authority tests.  A full suite therefore runs on
+    the exact clean qualified implementation *before* the declaration-bearing
+    activation commit.  This verifier proves that relationship: the test
+    evidence must be green and bind the replayed qualification implementation,
+    while that qualified implementation must have the sole permitted active
+    declaration successor.
+
+    The post-source test report remains separate and binds the final
+    declaration-bearing implementation.  Accepting it here would make this
+    pre-source protection vacuous.
+    """
+
+    if authority is None:
+        authority = _require_active_final_authority()
+    normative = _validate_normative_document_paths(design, plan)
+    report, relation = _replay_final_qualification(
+        qualification_report=qualification_report,
+        repo_root=repo_root,
+        b1_gate_path=b1_gate,
+        normative=normative,
+        implementation=implementation,
+        authority=authority,
+    )
+    preactivation = _validate_test_report(
+        preactivation_test_report,
+        report["implementation"],
+        repo_root=repo_root,
+    )
+    return _qualification_preactivation_summary(
+        qualification_report=qualification_report,
+        report=report,
+        relation=relation,
+        preactivation=preactivation,
+    )
+
+
+def _qualification_preactivation_summary(
+    *,
+    qualification_report: Path,
+    report: Mapping[str, Any],
+    relation: Mapping[str, Any],
+    preactivation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Render the exact gate payload shared by both binding callers."""
+
+    try:
+        activation_policy = validate_activation_successor_policy(
+            report["activation_successor_policy"]
+        )
+    except B2QualificationError as exc:
+        raise B2GateError(
+            f"B2 qualification activation-successor policy rejected: {exc}"
+        ) from exc
     return {
-        "report": _file_record(paths.qualification_report),
+        "report": _file_record(qualification_report),
         "schema": QUALIFICATION_SCHEMA,
         "qualification_id": report["qualification_id"],
         "status": "green",
@@ -783,8 +1019,39 @@ def _validate_qualification_report(
         "required_end_to_end_pass_count": report["end_to_end"][
             "required_pass_count"
         ],
+        "activation_successor_policy": dict(activation_policy),
         "implementation_successor": relation,
+        "preactivation_tests": preactivation,
     }
+
+
+def _validate_qualification_report(
+    paths: B2GatePaths,
+    normative: Mapping[str, Any],
+    implementation: Mapping[str, Any],
+    authority: ActiveFinalAuthority,
+) -> dict[str, Any]:
+    """Assembly adapter for the shared qualification/test binding verifier."""
+
+    report, relation = _replay_final_qualification(
+        qualification_report=paths.qualification_report,
+        repo_root=paths.repo_root,
+        b1_gate_path=getattr(paths, "b1_gate", None),
+        normative=normative,
+        implementation=implementation,
+        authority=authority,
+    )
+    preactivation = _validate_test_report(
+        paths.preactivation_test_report,
+        report["implementation"],
+        repo_root=paths.repo_root,
+    )
+    return _qualification_preactivation_summary(
+        qualification_report=paths.qualification_report,
+        report=report,
+        relation=relation,
+        preactivation=preactivation,
+    )
 
 
 def _historical_71446_rows() -> list[dict[str, Any]]:
@@ -812,6 +1079,11 @@ def _validate_declaration(path: Path) -> tuple[dict[str, Any], str]:
     except RetiredCohortRegistryError as exc:
         raise B2GateError(f"B2 declaration admission refused: {exc}") from exc
     authority = _require_active_final_authority()
+    expected_path = (ROOT / authority.immutable_declaration_path).resolve()
+    _require(
+        path.resolve() == expected_path,
+        "B2 declaration path differs from the explicitly activated immutable path",
+    )
     _require(
         declaration["cohort_id"] == authority.cohort_id,
         "B2 declaration does not name the explicitly active final cohort",
@@ -2087,7 +2359,7 @@ def _validate_stock(
     implementation: Mapping[str, Any],
     binaries: Mapping[str, str],
 ) -> dict[str, Any]:
-    provenance = _mapping(_load_json(paths.stock_provenance), "stock provenance")
+    provenance = _load_stock_provenance(paths.stock_provenance)
     inventory = _mapping(_load_json(paths.stock_inventory), "stock inventory")
     _require(provenance.get("schema") == "q2-corpus-provenance-v1", "stock provenance schema differs")
     _require(inventory.get("schema") == "q2-stock-map-fixtures-v1", "stock inventory schema differs")
@@ -2985,7 +3257,12 @@ def _validate_dyn_evidence(
     return evidence, budget
 
 
-def _validate_test_report(path: Path, implementation: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_test_report(
+    path: Path,
+    implementation: Mapping[str, Any],
+    *,
+    repo_root: Path = ROOT,
+) -> dict[str, Any]:
     from tools.run_b2_test_suite import (
         B2TestSuiteError,
         CARGO_TARGET_ENV,
@@ -2994,7 +3271,12 @@ def _validate_test_report(path: Path, implementation: Mapping[str, Any]) -> dict
         _path_is_within,
     )
 
+    _file_record(path)
     _require(path.name == "b2-test-report.json", "B2 test report filename differs")
+    _require(
+        not _path_is_within(path, repo_root),
+        "B2 test evidence root is inside the implementation repository",
+    )
     report = _mapping(_load_json(path), "B2 test report")
     _exact_keys(
         report,
@@ -3023,7 +3305,7 @@ def _validate_test_report(path: Path, implementation: Mapping[str, Any]) -> dict
         "B2 Cargo target path differs from the exact evidence sibling",
     )
     _require(
-        not _path_is_within(cargo_target, ROOT),
+        not _path_is_within(cargo_target, repo_root),
         "B2 Cargo target path is inside the implementation repository",
     )
     _require(
@@ -3127,6 +3409,252 @@ def _validate_test_report(path: Path, implementation: Mapping[str, Any]) -> dict
     return {"report": _file_record(path), "run_count": len(runs), "passed_count": sum(run["passed_count"] for run in runs)}
 
 
+def _validate_lifecycle_file_record(
+    value: object,
+    label: str,
+    *,
+    require_path: bool,
+) -> dict[str, Any]:
+    """Validate one canonical file record used by lifecycle evidence."""
+
+    record = _mapping(value, label)
+    expected = {"bytes", "sha256"}
+    if require_path:
+        expected.add("path")
+    _exact_keys(record, expected, label)
+    result: dict[str, Any] = {}
+    if require_path:
+        raw_path = record["path"]
+        _require(
+            isinstance(raw_path, str) and raw_path,
+            f"{label} path is malformed",
+        )
+        path = Path(raw_path)
+        _require(path.is_absolute(), f"{label} path must be absolute")
+        _require(
+            str(Path(os.path.abspath(path))) == raw_path,
+            f"{label} path must be normalized",
+        )
+        result["path"] = raw_path
+    result["bytes"] = _integer(record["bytes"], f"{label} bytes")
+    result["sha256"] = _digest(record["sha256"], f"{label} digest")
+    return result
+
+
+def _validate_final_lifecycle_evidence(
+    paths: B2GatePaths,
+    declaration: Mapping[str, Any],
+    declaration_sha256: str,
+    implementation: Mapping[str, Any],
+    authority: ActiveFinalAuthority,
+) -> dict[str, Any]:
+    """Require the canonical, completed driver record before B2 assembly.
+
+    Final B2 evidence is one literal lifecycle, not a pile of independently
+    runnable reports.  The record is published immediately before the assembly
+    command by the hash-reviewed driver.  This consumer validates every
+    completed prefix stage, proves the source tombstone authorizes the exact
+    source inputs assembled here, and binds the recorded assembly argv to the
+    invocation presently being made.
+
+    This is an operational attestation by the execution principal.  It is not
+    a cryptographic proof against a hostile actor with the same execution UID.
+    """
+
+    evidence_record = _file_record(paths.final_lifecycle_evidence)
+    evidence = _mapping(
+        _load_json(paths.final_lifecycle_evidence), "final lifecycle evidence"
+    )
+    _exact_keys(
+        evidence,
+        {
+            "schema",
+            "status",
+            "cohort_id",
+            "declaration",
+            "plan_sha256",
+            "implementation",
+            "execution_binding",
+            "source_authorization_marker",
+            "completed_stages",
+            "stage_executions",
+            "assembly_command_sha256",
+        },
+        "final lifecycle evidence",
+    )
+    _require(
+        evidence["schema"] == FINAL_LIFECYCLE_EVIDENCE_SCHEMA,
+        "final lifecycle evidence schema differs",
+    )
+    _require(
+        evidence["status"] == "ready-for-assembly",
+        "final lifecycle evidence is not ready for assembly",
+    )
+    _require(
+        evidence["cohort_id"] == authority.cohort_id
+        and evidence["cohort_id"] == declaration.get("cohort_id"),
+        "final lifecycle evidence cohort differs from active declaration",
+    )
+
+    declaration_record = _mapping(
+        evidence["declaration"], "final lifecycle declaration"
+    )
+    _exact_keys(
+        declaration_record, {"path", "sha256"}, "final lifecycle declaration"
+    )
+    record_declaration_path = declaration_record["path"]
+    _require(
+        isinstance(record_declaration_path, str)
+        and Path(record_declaration_path).is_absolute()
+        and str(Path(os.path.abspath(record_declaration_path)))
+        == record_declaration_path,
+        "final lifecycle declaration path is malformed",
+    )
+    supplied_declaration = Path(os.path.abspath(paths.declaration))
+    _file_record(supplied_declaration)
+    _require(
+        record_declaration_path == str(supplied_declaration),
+        "final lifecycle declaration path differs from assembly declaration",
+    )
+    _require(
+        declaration_record["sha256"] == declaration_sha256,
+        "final lifecycle declaration digest differs from active declaration",
+    )
+    _digest(declaration_record["sha256"], "final lifecycle declaration digest")
+
+    plan_sha256 = _digest(evidence["plan_sha256"], "final lifecycle plan digest")
+    lifecycle_implementation = _mapping(
+        evidence["implementation"], "final lifecycle implementation"
+    )
+    _require(
+        dict(lifecycle_implementation) == dict(implementation),
+        "final lifecycle implementation differs from assembly implementation",
+    )
+    execution_binding = _mapping(
+        evidence["execution_binding"], "final lifecycle execution binding"
+    )
+    marker_record = _validate_lifecycle_file_record(
+        evidence["source_authorization_marker"],
+        "final lifecycle source authorization marker",
+        require_path=True,
+    )
+    marker_path = Path(str(marker_record["path"]))
+    _require(
+        _file_record(marker_path)
+        == {"bytes": marker_record["bytes"], "sha256": marker_record["sha256"]},
+        "final lifecycle source authorization marker file record differs",
+    )
+    try:
+        marker = validate_final_source_authorization(
+            marker_path,
+            declaration_path=supplied_declaration,
+            declaration_sha256=declaration_sha256,
+            cohort_id=authority.cohort_id,
+            source_output=paths.source_dir,
+            source_cold=paths.source_cold_dir,
+            source_report=paths.source_freeze_report,
+            repo_root=paths.repo_root,
+            implementation=implementation,
+        )
+    except FinalExecutionBindingError as exc:
+        raise B2GateError(
+            f"final lifecycle source authorization rejected: {exc}"
+        ) from exc
+    _require(
+        marker.get("plan_sha256") == plan_sha256,
+        "final lifecycle plan digest differs from source authorization marker",
+    )
+    _require(
+        canonical_bytes(marker.get("execution_binding"))
+        == canonical_bytes(execution_binding),
+        "final lifecycle execution binding differs from source authorization marker",
+    )
+    _require(
+        canonical_bytes(marker.get("implementation"))
+        == canonical_bytes(lifecycle_implementation),
+        "final lifecycle implementation differs from source authorization marker",
+    )
+
+    completed_stages = _list(
+        evidence["completed_stages"], "final lifecycle completed stages"
+    )
+    _require(
+        completed_stages == list(FINAL_LIFECYCLE_PREASSEMBLY_STAGES),
+        "final lifecycle completed-stage prefix/order differs",
+    )
+    stage_executions = _list(
+        evidence["stage_executions"], "final lifecycle stage executions"
+    )
+    _require(
+        len(stage_executions) == len(FINAL_LIFECYCLE_PREASSEMBLY_STAGES),
+        "final lifecycle stage execution count differs",
+    )
+    normalized_executions: list[dict[str, Any]] = []
+    for expected_stage, raw_execution in zip(
+        FINAL_LIFECYCLE_PREASSEMBLY_STAGES, stage_executions
+    ):
+        execution = _mapping(raw_execution, "final lifecycle stage execution")
+        _exact_keys(
+            execution,
+            {"stage", "command_sha256", "returncode", "stdout", "stderr"},
+            "final lifecycle stage execution",
+        )
+        _require(
+            execution["stage"] == expected_stage,
+            "final lifecycle stage execution order differs",
+        )
+        _digest(
+            execution["command_sha256"], "final lifecycle stage command digest"
+        )
+        _require(
+            execution["returncode"] == 0,
+            f"final lifecycle stage did not exit zero: {expected_stage}",
+        )
+        stdout = _validate_lifecycle_file_record(
+            execution["stdout"], "final lifecycle stage stdout", require_path=False
+        )
+        stderr = _validate_lifecycle_file_record(
+            execution["stderr"], "final lifecycle stage stderr", require_path=False
+        )
+        normalized_executions.append({
+            "stage": expected_stage,
+            "command_sha256": execution["command_sha256"],
+            "returncode": 0,
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+
+    expected_command_sha256 = _digest(
+        paths.expected_assembly_command_sha256,
+        "expected assembly command digest",
+    )
+    _require(
+        evidence["assembly_command_sha256"] == expected_command_sha256,
+        "final lifecycle assembly command differs from this invocation",
+    )
+    _digest(
+        evidence["assembly_command_sha256"],
+        "final lifecycle assembly command digest",
+    )
+    return {
+        "evidence": evidence_record,
+        "schema": FINAL_LIFECYCLE_EVIDENCE_SCHEMA,
+        "status": "ready-for-assembly",
+        "cohort_id": authority.cohort_id,
+        "declaration": {
+            "path": record_declaration_path,
+            "sha256": declaration_sha256,
+        },
+        "plan_sha256": plan_sha256,
+        "implementation": dict(lifecycle_implementation),
+        "execution_binding": dict(execution_binding),
+        "source_authorization_marker": marker_record,
+        "completed_stages": list(completed_stages),
+        "stage_executions": normalized_executions,
+        "assembly_command_sha256": expected_command_sha256,
+    }
+
+
 def assemble_gate(
     paths: B2GatePaths, *, implementation_binding: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -3161,7 +3689,12 @@ def assemble_gate(
     dyn, budgets = _validate_dyn_evidence(
         paths.dyn_evidence_report, implementation, declaration, paths
     )
-    tests = _validate_test_report(paths.test_report, implementation)
+    tests = _validate_test_report(
+        paths.test_report, implementation, repo_root=paths.repo_root
+    )
+    final_lifecycle = _validate_final_lifecycle_evidence(
+        paths, declaration, declaration_sha256, implementation, authority
+    )
     gate = {
         "schema": GATE_SCHEMA,
         "batch": "B2",
@@ -3176,6 +3709,7 @@ def assemble_gate(
         "implementation": implementation,
         "b1_authority": b1,
         "toolchain_qualification": qualification,
+        "final_lifecycle": final_lifecycle,
         "generated_cohort": {
             "cohort_id": authority.cohort_id,
             "declaration": _file_record(paths.declaration),
@@ -3220,12 +3754,187 @@ def assemble_gate(
     return gate
 
 
+def _validate_gate_final_lifecycle_summary(
+    value: object,
+    *,
+    authority: ActiveFinalAuthority,
+    implementation: Mapping[str, Any],
+) -> None:
+    """Validate the self-contained final-lifecycle summary in a gate output.
+
+    The assembly-time validator above performs the live marker and source-path
+    verification.  A published gate is also independently parseable away from
+    that WSL journal, so this companion validates the exact retained summary
+    shape and all immutable relationships without reopening host state.
+    """
+
+    lifecycle = _mapping(value, "B2 final lifecycle")
+    _exact_keys(
+        lifecycle,
+        {
+            "evidence",
+            "schema",
+            "status",
+            "cohort_id",
+            "declaration",
+            "plan_sha256",
+            "implementation",
+            "execution_binding",
+            "source_authorization_marker",
+            "completed_stages",
+            "stage_executions",
+            "assembly_command_sha256",
+        },
+        "B2 final lifecycle",
+    )
+    _validate_lifecycle_file_record(
+        lifecycle["evidence"], "B2 final lifecycle evidence", require_path=False
+    )
+    _require(
+        lifecycle["schema"] == FINAL_LIFECYCLE_EVIDENCE_SCHEMA
+        and lifecycle["status"] == "ready-for-assembly",
+        "B2 final lifecycle disposition differs",
+    )
+    _require(
+        lifecycle["cohort_id"] == authority.cohort_id,
+        "B2 final lifecycle cohort differs",
+    )
+    declaration = _mapping(
+        lifecycle["declaration"], "B2 final lifecycle declaration"
+    )
+    _exact_keys(
+        declaration, {"path", "sha256"}, "B2 final lifecycle declaration"
+    )
+    expected_declaration_path = str(
+        (ROOT / authority.immutable_declaration_path).resolve()
+    )
+    _require(
+        declaration.get("path") == expected_declaration_path
+        and declaration.get("sha256") == authority.declaration_sha256,
+        "B2 final lifecycle declaration differs from active authority",
+    )
+    _digest(lifecycle["plan_sha256"], "B2 final lifecycle plan digest")
+    lifecycle_implementation = _mapping(
+        lifecycle["implementation"], "B2 final lifecycle implementation"
+    )
+    _require(
+        dict(lifecycle_implementation) == dict(implementation),
+        "B2 final lifecycle implementation differs",
+    )
+
+    binding = _mapping(
+        lifecycle["execution_binding"], "B2 final lifecycle execution binding"
+    )
+    _exact_keys(binding, {"schema", "host", "state_root"}, "B2 final lifecycle execution binding")
+    _require(
+        binding.get("schema") == EXECUTION_BINDING_SCHEMA,
+        "B2 final lifecycle execution binding schema differs",
+    )
+    host = _mapping(binding.get("host"), "B2 final lifecycle execution host")
+    _exact_keys(
+        host, {"hostname", "kernel_release", "machine_identity", "euid"},
+        "B2 final lifecycle execution host",
+    )
+    _require(
+        host.get("hostname") == EXPECTED_EXECUTION_HOSTNAME,
+        "B2 final lifecycle execution host differs",
+    )
+    _require(
+        isinstance(host.get("kernel_release"), str)
+        and EXPECTED_WSL_KERNEL_FRAGMENT in host["kernel_release"],
+        "B2 final lifecycle execution kernel differs",
+    )
+    _integer(host.get("euid"), "B2 final lifecycle execution UID")
+    machine = _mapping(
+        host.get("machine_identity"), "B2 final lifecycle machine identity"
+    )
+    _exact_keys(
+        machine, {"path", "sha256"}, "B2 final lifecycle machine identity"
+    )
+    _require(
+        machine.get("path") == "/etc/machine-id",
+        "B2 final lifecycle machine identity path differs",
+    )
+    _digest(machine.get("sha256"), "B2 final lifecycle machine identity digest")
+    state_root = _mapping(
+        binding.get("state_root"), "B2 final lifecycle state root"
+    )
+    _exact_keys(
+        state_root, {"path", "owner_uid", "mode", "device", "inode"},
+        "B2 final lifecycle state root",
+    )
+    _require(
+        isinstance(state_root.get("path"), str)
+        and Path(str(state_root["path"])).is_absolute()
+        and str(Path(os.path.abspath(str(state_root["path"]))))
+        == state_root["path"],
+        "B2 final lifecycle state-root path differs",
+    )
+    _integer(state_root.get("owner_uid"), "B2 final lifecycle state-root owner")
+    _require(
+        state_root.get("mode") == "0700",
+        "B2 final lifecycle state-root mode differs",
+    )
+    _integer(state_root.get("device"), "B2 final lifecycle state-root device")
+    _integer(state_root.get("inode"), "B2 final lifecycle state-root inode", minimum=1)
+
+    _validate_lifecycle_file_record(
+        lifecycle["source_authorization_marker"],
+        "B2 final lifecycle source authorization marker",
+        require_path=True,
+    )
+    completed_stages = _list(
+        lifecycle["completed_stages"], "B2 final lifecycle completed stages"
+    )
+    _require(
+        completed_stages == list(FINAL_LIFECYCLE_PREASSEMBLY_STAGES),
+        "B2 final lifecycle completed-stage prefix/order differs",
+    )
+    executions = _list(
+        lifecycle["stage_executions"], "B2 final lifecycle stage executions"
+    )
+    _require(
+        len(executions) == len(FINAL_LIFECYCLE_PREASSEMBLY_STAGES),
+        "B2 final lifecycle stage execution count differs",
+    )
+    for expected_stage, raw_execution in zip(
+        FINAL_LIFECYCLE_PREASSEMBLY_STAGES, executions
+    ):
+        execution = _mapping(raw_execution, "B2 final lifecycle stage execution")
+        _exact_keys(
+            execution,
+            {"stage", "command_sha256", "returncode", "stdout", "stderr"},
+            "B2 final lifecycle stage execution",
+        )
+        _require(
+            execution.get("stage") == expected_stage
+            and execution.get("returncode") == 0,
+            "B2 final lifecycle stage execution differs",
+        )
+        _digest(
+            execution.get("command_sha256"),
+            "B2 final lifecycle stage command digest",
+        )
+        _validate_lifecycle_file_record(
+            execution.get("stdout"), "B2 final lifecycle stage stdout",
+            require_path=False,
+        )
+        _validate_lifecycle_file_record(
+            execution.get("stderr"), "B2 final lifecycle stage stderr",
+            require_path=False,
+        )
+    _digest(
+        lifecycle["assembly_command_sha256"],
+        "B2 final lifecycle assembly command digest",
+    )
+
+
 def validate_gate(value: object) -> dict[str, Any]:
     authority = _require_active_final_authority()
     gate = _mapping(value, "B2 gate")
     _exact_keys(
         gate,
-        {"schema", "batch", "status", "owner_directive", "normative_documents", "implementation", "b1_authority", "toolchain_qualification", "generated_cohort", "stock_corpus", "representative_budgets", "dyn_evidence", "tests", "deployment", "gate"},
+        {"schema", "batch", "status", "owner_directive", "normative_documents", "implementation", "b1_authority", "toolchain_qualification", "final_lifecycle", "generated_cohort", "stock_corpus", "representative_budgets", "dyn_evidence", "tests", "deployment", "gate"},
         "B2 gate",
     )
     _require(gate["schema"] == GATE_SCHEMA and gate["batch"] == "B2", "B2 gate identity differs")
@@ -3244,8 +3953,75 @@ def validate_gate(value: object) -> dict[str, Any]:
         qualification.get("schema") == QUALIFICATION_SCHEMA
         and qualification.get("non_admissible") is True
         and qualification.get("retryable") is True
-        and qualification.get("final_cohort_authorized") is False,
+        and qualification.get("final_cohort_authorized") is False
+        and qualification.get("end_to_end_pass_count")
+        == FINAL_QUALIFICATION_END_TO_END_PASSES,
         "B2 toolchain qualification disposition differs",
+    )
+    try:
+        activation_policy = validate_activation_successor_policy(
+            _mapping(
+                qualification.get("activation_successor_policy"),
+                "B2 activation-successor policy",
+            )
+        )
+    except B2QualificationError as exc:
+        raise B2GateError(
+            f"B2 gate activation-successor policy rejected: {exc}"
+        ) from exc
+    _require(
+        activation_policy["cohort_id"] == authority.cohort_id
+        and activation_policy["immutable_declaration_path"]
+        == authority.immutable_declaration_path,
+        "B2 gate activation-successor policy differs from active authority",
+    )
+    implementation_successor = _mapping(
+        qualification.get("implementation_successor"),
+        "B2 implementation successor",
+    )
+    _require(
+        implementation_successor.get("changed_paths")
+        == sorted(activation_policy["allowed_changed_paths"]),
+        "B2 implementation successor paths differ from activation policy",
+    )
+    preactivation_tests = _mapping(
+        qualification.get("preactivation_tests"),
+        "B2 preactivation test evidence",
+    )
+    _exact_keys(
+        preactivation_tests,
+        {"report", "run_count", "passed_count"},
+        "B2 preactivation test evidence",
+    )
+    preactivation_report = _mapping(
+        preactivation_tests["report"], "B2 preactivation test report"
+    )
+    _exact_keys(
+        preactivation_report,
+        {"bytes", "sha256"},
+        "B2 preactivation test report",
+    )
+    _integer(
+        preactivation_report["bytes"],
+        "B2 preactivation test report bytes",
+        minimum=1,
+    )
+    _digest(
+        preactivation_report["sha256"], "B2 preactivation test report digest"
+    )
+    _require(
+        preactivation_tests["run_count"] == 8,
+        "B2 preactivation test suite count differs",
+    )
+    _integer(
+        preactivation_tests["passed_count"],
+        "B2 preactivation test pass count",
+        minimum=8,
+    )
+    _validate_gate_final_lifecycle_summary(
+        gate["final_lifecycle"],
+        authority=authority,
+        implementation=_mapping(gate["implementation"], "B2 implementation"),
     )
     generated = _mapping(gate["generated_cohort"], "generated cohort")
     _require(
@@ -3305,18 +4081,58 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dyn-argv-preflight-report", type=Path, required=True)
     parser.add_argument("--dyn-origin-binding-report", type=Path, required=True)
     parser.add_argument("--dyn-evidence-report", type=Path, required=True)
+    parser.add_argument("--preactivation-test-report", type=Path, required=True)
     parser.add_argument("--test-report", type=Path, required=True)
     parser.add_argument("--qualification-report", type=Path, required=True)
+    parser.add_argument("--final-lifecycle-evidence", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
 
+def assembly_command_sha256(
+    interpreter: str | Path,
+    tool: str | Path,
+    raw_argv: Sequence[str],
+) -> str:
+    """Digest one canonical direct assembler invocation.
+
+    The lifecycle driver uses this same identity function *before source* to
+    prove that its planned ``[python, tool, *argv]`` will be the argv shape the
+    child assembler independently reconstructs.  Both identities are resolved
+    to direct filesystem paths so a symlink spelling cannot create a second
+    accepted digest.
+    """
+
+    try:
+        canonical_interpreter = str(Path(interpreter).resolve(strict=True))
+        canonical_tool = str(Path(tool).resolve(strict=True))
+    except OSError as exc:
+        raise B2GateError(
+            f"assembly command identity cannot be resolved: {exc}"
+        ) from exc
+    return _sha256_bytes(canonical_bytes([
+        canonical_interpreter,
+        canonical_tool,
+        *raw_argv,
+    ]))
+
+
+def _actual_assembly_command_sha256(raw_argv: Sequence[str]) -> str:
+    """Digest the exact argv shape emitted by the final lifecycle driver."""
+
+    return assembly_command_sha256(sys.executable, __file__, raw_argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
     output = args.output
     values = vars(args).copy()
     del values["output"]
+    values["expected_assembly_command_sha256"] = _actual_assembly_command_sha256(
+        raw_argv
+    )
     try:
         if output.exists() or output.is_symlink():
             raise B2GateError("B2 gate output already exists; refusing overwrite")
