@@ -101,6 +101,9 @@ FAILURE_71452 = (
 FAILURE_71453 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71453-FAILURE.json"
 )
+FAILURE_71454 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71454-FAILURE.json"
+)
 RETIRED_DECLARATIONS = (
     NAMED_71438,
     NAMED_71439,
@@ -118,6 +121,7 @@ RETIRED_DECLARATIONS = (
     NAMED_71451,
     NAMED_71452,
     NAMED_71453,
+    NAMED_71454,
 )
 
 
@@ -384,7 +388,7 @@ def test_named_71450_is_retired() -> None:
         )
 
 
-def test_current_alias_is_active_71454_while_named_71453_remains_retired() -> None:
+def test_current_alias_and_named_71454_are_retired() -> None:
     current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
 
     assert current["cohort_id"] == "b2g26_final_71454"
@@ -392,9 +396,20 @@ def test_current_alias_is_active_71454_while_named_71453_remains_retired() -> No
     assert current_sha256 == (
         "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"
     )
-    registry.require_unretired_declaration(
-        CURRENT_ALIAS, current, current_sha256
-    )
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71454.*permanently retired"
+    ):
+        registry.require_unretired_declaration(
+            CURRENT_ALIAS, current, current_sha256
+        )
+
+    named_71454, named_71454_sha256 = cohort.load_declaration(NAMED_71454)
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71454.*permanently retired"
+    ):
+        registry.require_unretired_declaration(
+            NAMED_71454, named_71454, named_71454_sha256
+        )
 
     named, named_sha256 = cohort.load_declaration(NAMED_71453)
     with pytest.raises(
@@ -450,6 +465,30 @@ def test_71453_terminal_failure_authority_is_canonical_and_exact() -> None:
     )
     assert provenance["writer_bytes_valid"] is True
     assert provenance["generic_compact_loader_accepted"] is False
+    assert authority["admission"]["retry_under_same_declaration_allowed"] is False
+
+
+def test_71454_terminal_failure_authority_is_canonical_and_exact() -> None:
+    payload = FAILURE_71454.read_bytes()
+    authority = json.loads(payload)
+
+    assert payload == cohort.canonical_bytes(authority)
+    assert authority["schema"] == registry.FAILURE_SCHEMA
+    assert authority["status"] == (
+        "permanently-failed-stock-pak-authority-post-source"
+    )
+    assert authority["cohort_id"] == "b2g26_final_71454"
+    assert authority["declaration"]["sha256"] == (
+        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"
+    )
+    stock = authority["evidence"]["stock_authority"]
+    assert stock["actual_pak_path"].endswith("/baseq2/pak0.pak")
+    assert stock["actual_pak_sha256"] == (
+        "1ce99eb11e7e251ccdf690858effba79836dbe5e32a4083ad00a13ecda491679"
+    )
+    assert stock["expected_pak_sha256"] == (
+        "678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad"
+    )
     assert authority["admission"]["retry_under_same_declaration_allowed"] is False
 
 

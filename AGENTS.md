@@ -81,32 +81,31 @@ passing component tests or an isolated staging checkout cannot. The old
 in-process public ONNX runtime is retired and has no operational selector or
 rollback role.
 
-**Current B2 authority (updated 2026-07-18):** final cohorts through 71453
-remain permanently retired. Corrective commit
-`7c482c9087262f065add58461a2b6f00644bb83a`, tree
-`f1f19982e382c95cb2ea30fc285cb2d44956cf3b`, passed fresh disposable
-qualification `b2q26_7c482c9_71815000` 28/28 plus all eight retained
-infrastructure checks. Its canonical green, non-admissible report SHA-256 is
-`e33b0a469b98fb11ab05603b54d29484d07d7a3a1fd629f345ac8c766eeff2fb`.
-The same qualified implementation passed the complete eight-part
-preactivation suite; report SHA-256
-`568648911b135102a6ddb3bd0d5938c906ccd047be720c1aff93fa056283336a`.
-Qualification and test bytes remain non-admissible. `ACTIVE_FINAL_AUTHORITY`
-now pins only fresh disjoint cohort `b2g26_final_71454`, immutable declaration
-`docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json`, declaration
-SHA-256
-`8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986`,
-and the exact twelve-path qualified-successor delta. Its first source attempt
-consumes its sole authorization. Gate publication, deployment, trainer, and
-TensorBoard remain forbidden until that one-shot final cohort and every B2-B6
-cutover gate pass.
+**Current B2 authority (updated 2026-07-18):** final cohorts through 71454
+remain permanently retired and `ACTIVE_FINAL_AUTHORITY` is `None`. Cohort
+`b2g26_final_71454` completed its generated lifecycle 28/28, then failed the
+atomic stock campaign because the reviewed plan supplied base `pak0.pak`
+(SHA-256 `1ce99eb11e7e251ccdf690858effba79836dbe5e32a4083ad00a13ecda491679`)
+instead of the q2dm1-through-q2dm8 retail `pak1.pak` required by both stock
+authorities (SHA-256
+`678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad`).
+Its source authorization was consumed. Every 71454 byte and passing subset is
+forensic-only: no retry, resume, regeneration, repair, salvage, substitution,
+or successor reuse is permitted. The canonical terminal record is
+`docs/multires/B2-GENERATED-COHORT-71454-FAILURE.json`.
 
-The qualified implementation freezes the sole 71454 activation-successor
-policy in the qualification report: its cohort, direct immutable declaration
-path, and exact twelve-path delta. `ACTIVE_FINAL_AUTHORITY` supplies the later
-declaration digest only; it cannot self-authorize an extra activation edit.
+The correction binds the supplied stock PAK digest to both committed stock
+provenance and inventory before workspace creation or source authorization,
+and carries bounded nested stderr into terminal driver evidence. A future
+`b2g26_final_71455` may be activated only after this corrected implementation
+passes a completely fresh disjoint 28/28 disposable qualification and the
+complete preactivation suite. Its declaration must then be added in a
+separate commit whose complete Git delta is exactly the frozen twelve-path
+71455 activation-successor policy. Gate publication, deployment, trainer, and
+TensorBoard remain forbidden until a new one-shot final cohort and every
+B2-through-B6 cutover gate pass.
 
-The 71454 pre-declaration lifecycle is now a single hash-reviewed driver,
+The final pre-declaration lifecycle is a single hash-reviewed driver,
 `tools/validate_b2_final_cohort_plan.py`. Its immutable plan covers, in order,
 Dyn Phase A, source generation, compile and both membership checks, static and
 compiled-CM checks, materialization, claims, generated Atlas/promotion, the
@@ -118,7 +117,7 @@ stage receives the absolute direct
 `docs/multires/B2-GENERATED-COHORT-<N>-DECLARATION.json` path. The current alias,
 symlinks, byte-identical copies, changed bytes, and filename/cohort mismatches
 are rejected. Do not run or retry individual final-lane stages manually. This
-tooling does not create or activate 71454 and does not weaken the fresh 28/28
+tooling does not create or activate 71455 and does not weaken the fresh 28/28
 qualification and separate declaration commit requirements above.
 
 The reviewed final plan is executable only on `DESKTOP-RTX2080` WSL. It requires
@@ -157,8 +156,8 @@ qualification must use a fresh ID, workspace, and disjoint seed range.
 
 Backend-correct disposable qualification `b2q26_ede2bff_71812000` completed
 27/28 maps end to end and all eight infrastructure checks. That is generic
-green under the normative 20-map toolchain threshold, but it is deliberately
-insufficient for the stricter 71454 final lane and is marked `DO-NOT-USE`.
+green under the normative 20-map toolchain threshold, but it was deliberately
+insufficient for the then-pending 71454 final lane and is marked `DO-NOT-USE`.
 Its sole failed member, `towers_71812102`, exposed a raised-terrace kill-plane
 projection bug: lethal-edge witnesses supplied the correct sparse XY columns
 at the terrace height, but none intersected the compiled trigger_hurt below
@@ -166,7 +165,8 @@ the global lowest floor. The analyzer now preserves those exact sparse XY
 columns while projecting Z only through the compiled trigger's linked AABB;
 it does not admit the intervening air gap or widen the hurt region. The exact
 failed BSP now completes a real Atlas build under the correction. A new clean
-commit and fresh 28/28 qualification remain mandatory before 71454 activation.
+commit and fresh 28/28 qualification were mandatory before 71454 activation;
+that later activation and its failed one-shot execution are retired above.
 
 Disposable qualification `b2q26_926efb4_71813000`, plan SHA-256
 `eaac7db4d962f79e00da8fe9bed3f00e2d438f517924fc4caf697bbcd76fa228`,

@@ -1378,7 +1378,7 @@ clearance, separation, span, or component admission checks. The failed seed is
 retained only as a regression; a new clean commit and disjoint qualification
 are required.
 
-### Active 71454 final cohort
+### Retired 71454 final attempt and 71455 successor preparation
 
 Corrective commit `7c482c9087262f065add58461a2b6f00644bb83a`, tree
 `f1f19982e382c95cb2ea30fc285cb2d44956cf3b`, passed completely fresh
@@ -1394,16 +1394,27 @@ preactivation suite, report SHA-256
 Neither qualification nor test evidence is final-cohort population evidence.
 
 The separately committed immutable
-`B2-GENERATED-COHORT-71454-DECLARATION.json` and current alias are
-byte-identical with SHA-256
+`B2-GENERATED-COHORT-71454-DECLARATION.json` and current alias remain
+byte-identical forensic records with SHA-256
 `8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986`.
 They name `b2g26_final_71454`; its 28 disjoint members use seed blocks
-71454000..71454003 through 71454600..71454603. `ACTIVE_FINAL_AUTHORITY`
-explicitly pins only that identity, digest, immutable path, and the exact twelve-path
-qualification-successor delta frozen in the green report. Cohort
-71454 has exactly one source authorization and no repair, resume, salvage,
-substitution, or retry lane after consumption. Retired 71453 and qualification
-bytes cannot cross into its final root.
+71454000..71454003 through 71454600..71454603. Source through generated
+promotion completed 28/28, but the atomic stock campaign rejected the supplied
+base `pak0.pak` SHA-256
+`1ce99eb11e7e251ccdf690858effba79836dbe5e32a4083ad00a13ecda491679`
+against the retail `pak1.pak` authority SHA-256
+`678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad`.
+The consumed source authorization makes all 71454 inputs and outputs
+forensic-only. The canonical terminal record is
+`B2-GENERATED-COHORT-71454-FAILURE.json`; no retry, repair, resume,
+regeneration, salvage, substitution, or reuse is permitted.
+
+`ACTIVE_FINAL_AUTHORITY` is `None`. Before any future source authorization,
+the corrected driver binds the supplied stock PAK digest to both committed
+stock provenance and inventory and preserves bounded nested stderr in terminal
+evidence. Only a completely fresh disjoint 28/28 qualification plus the full
+preactivation suite may authorize a separate exact twelve-path declaration
+commit for `b2g26_final_71455`. No 71455 declaration exists or is active yet.
 
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
@@ -1503,9 +1514,9 @@ check.
 
 `ACTIVE_FINAL_AUTHORITY = None`. The command templates in this section are
 disabled until a separately committed, freshly qualified successor replaces
-all historical paths. Cohorts 71449, 71450, 71451, 71452, and 71453 are terminally
-retired under their canonical failure records. Commands must never name
-retired cohorts 71426 through 71453. No retired or qualification population,
+all historical paths. Cohorts 71449, 71450, 71451, 71452, 71453, and 71454 are
+terminally retired under their canonical failure records. Commands must never name
+retired cohorts 71426 through 71454. No retired or qualification population,
 report, Dyn evidence, compiled byte, partial stock artifact, or passing subset
 may be copied into a successor root.
 

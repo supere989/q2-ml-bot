@@ -823,7 +823,7 @@ failed seed now passes the unchanged clearance, separation, dual-span, and
 single-source-component gates as a regression fixture only. A new committed
 implementation and a disjoint qualification remain mandatory.
 
-### Active 71454 final cohort
+### Retired 71454 final attempt and 71455 successor preparation
 
 Corrective commit `7c482c9087262f065add58461a2b6f00644bb83a`, tree
 `f1f19982e382c95cb2ea30fc285cb2d44956cf3b`, passed fresh disposable
@@ -839,15 +839,30 @@ suite, report SHA-256
 Qualification and test outputs remain non-admissible final inputs.
 
 The separately committed immutable
-`B2-GENERATED-COHORT-71454-DECLARATION.json` and current alias are
-byte-identical with SHA-256
+`B2-GENERATED-COHORT-71454-DECLARATION.json` and current alias remain
+byte-identical forensic records with SHA-256
 `8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986`.
 They name `b2g26_final_71454` and seed blocks 71454000..71454003 through
-71454600..71454603. `ACTIVE_FINAL_AUTHORITY` explicitly pins only that cohort,
-digest, direct immutable path, and the exact twelve-path successor delta
-frozen by the green qualification. Its first source invocation consumes its
-sole authorization; retry, repair, resume, salvage, and substitution are
-forbidden. Retired 71453 and qualification bytes cannot enter the final root.
+71454600..71454603. That cohort completed source, compile, materialization,
+claims, generated Atlas, and generated promotion 28/28, then failed the atomic
+stock campaign. The reviewed command supplied `pak0.pak` with SHA-256
+`1ce99eb11e7e251ccdf690858effba79836dbe5e32a4083ad00a13ecda491679`;
+both committed q2dm1-through-q2dm8 authorities require retail `pak1.pak` with
+SHA-256
+`678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad`.
+Source authorization was consumed, so every declaration, seed, map, stage
+output, report, marker, and passing subset from 71454 is permanently retired.
+The canonical terminal evidence is
+`B2-GENERATED-COHORT-71454-FAILURE.json`. No retry, repair, resume,
+regeneration, salvage, substitution, or reuse is permitted.
+
+`ACTIVE_FINAL_AUTHORITY` is now `None`. The corrected pre-declaration driver
+must bind the supplied stock PAK digest to both committed stock provenance and
+inventory before workspace creation or source authorization, and must preserve
+bounded nested stderr in terminal evidence. Only a fresh disjoint 28/28
+qualification and the complete preactivation suite may freeze the 71455
+activation-successor relation. A separate exact twelve-path commit may then
+declare `b2g26_final_71455`; no 71455 declaration exists or is active yet.
 
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
@@ -962,13 +977,13 @@ while the infrastructure producer and materializer remain bound to the
 separate CPython 3.11.4 executable and zstandard module digests above. The
 syntax report must never be required to identify the execution runtime.
 
-The assembler rejects declarations for retired cohorts 71426 through 71453
+The assembler rejects declarations for retired cohorts 71426 through 71454
 before reading campaign evidence. The immutable 71447, 71448, 71449, 71450,
-71451, 71452, and 71453 declarations are historical only.
-The active authority and schema pin only 71454. Executable authority still
-requires replay of the exact qualified-successor relation, preactivation test
-binding, and all one-shot lifecycle evidence; neither the schema nor a
-declaration can infer authority by itself.
+71451, 71452, 71453, and 71454 declarations are historical only.
+There is no active final authority. A later 71455 activation must still require
+replay of the exact qualified-successor relation, preactivation test binding,
+and all one-shot lifecycle evidence; neither the schema nor a declaration can
+infer authority by itself.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.
@@ -1186,8 +1201,8 @@ reuse of any retired cohort byte.
 ## Assembly template
 
 This 71453 template is historical and disabled. It must not be executed or
-edited into a 71454 command. A new exact template may be published only with a
-separately committed, freshly qualified successor declaration.
+edited into a successor command. A new exact template may be published only
+with a separately committed, freshly qualified successor declaration.
 
 The qualified parent is commit `14dfc409b047611cb0722e53cad57d8c8584acb5`,
 tree `725815ca68b1a44cbb8699656e214f4d19e60409`. Qualification

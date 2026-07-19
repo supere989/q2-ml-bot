@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:q2-ml:q2-multires-b2-gate-v1",
   "title": "Fail-closed multi-resolution Atlas Batch B2 gate",
-  "$comment": "Active 71454 field pins are executable only through the assembler's exact qualified-successor and one-shot evidence checks; the schema alone grants no authority.",
+  "$comment": "Historical 71454 field pins remain forensic only. A future 71455 activation is executable only through the assembler's exact qualified-successor and one-shot evidence checks; the schema alone grants no authority.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -362,7 +362,7 @@
                 "AGENTS.md",
                 "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
                 "docs/multires/B2-GATE-ASSEMBLY.md",
-                "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json",
+                "docs/multires/B2-GENERATED-COHORT-71455-DECLARATION.json",
                 "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
                 "schemas/q2-multires-b2-gate-v1.schema.json",
                 "tests/test_b2_gate.py",
@@ -384,14 +384,14 @@
       "required": ["schema", "cohort_id", "immutable_declaration_path", "allowed_changed_paths"],
       "properties": {
         "schema": {"const": "q2-b2-final-activation-successor-policy-v1"},
-        "cohort_id": {"const": "b2g26_final_71454"},
-        "immutable_declaration_path": {"const": "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"},
+        "cohort_id": {"const": "b2g26_final_71455"},
+        "immutable_declaration_path": {"const": "docs/multires/B2-GENERATED-COHORT-71455-DECLARATION.json"},
         "allowed_changed_paths": {
           "const": [
             "AGENTS.md",
             "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
             "docs/multires/B2-GATE-ASSEMBLY.md",
-            "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json",
+            "docs/multires/B2-GENERATED-COHORT-71455-DECLARATION.json",
             "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
             "schemas/q2-multires-b2-gate-v1.schema.json",
             "tests/test_b2_gate.py",

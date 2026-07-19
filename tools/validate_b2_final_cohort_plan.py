@@ -311,6 +311,94 @@ def _canonical(value: object) -> bytes:
     return canonical_bytes(value)
 
 
+def _stock_pak_authority(
+    stock_pak: Mapping[str, Any],
+    provenance_path: Path,
+    inventory_path: Path,
+) -> dict[str, Any]:
+    """Bind the supplied stock PAK to both committed corpus authorities.
+
+    This check intentionally runs while the immutable plan is being built and
+    is replayed by every validation pass.  Merely pinning an arbitrary PAK
+    digest is insufficient: selecting base ``pak0.pak`` instead of the retail
+    deathmatch ``pak1.pak`` otherwise survives dry-run review and fails only
+    after the one-shot source authorization has been consumed.
+    """
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise FinalCohortPlanError(
+                    f"stock corpus authority contains duplicate key {key!r}",
+                    check_id="stock-pak-authority",
+                )
+            result[key] = value
+        return result
+
+    def load(path: Path, label: str) -> Mapping[str, Any]:
+        try:
+            value = json.loads(
+                path.read_bytes(),
+                object_pairs_hook=reject_duplicates,
+                parse_constant=lambda token: (_ for _ in ()).throw(
+                    ValueError(f"non-finite JSON token {token}")
+                ),
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+            raise FinalCohortPlanError(
+                f"cannot read {label}: {error}",
+                check_id="stock-pak-authority",
+            ) from error
+        if not isinstance(value, Mapping):
+            raise FinalCohortPlanError(
+                f"{label} is not an object",
+                check_id="stock-pak-authority",
+            )
+        return value
+
+    provenance = load(provenance_path, "stock provenance")
+    inventory = load(inventory_path, "stock inventory")
+    records = provenance.get("records")
+    maps = inventory.get("maps")
+    if not isinstance(records, list) or not isinstance(maps, list):
+        raise FinalCohortPlanError(
+            "stock corpus authorities do not contain record/map lists",
+            check_id="stock-pak-authority",
+        )
+    provenance_hashes = {
+        row.get("archive_sha256")
+        for row in records
+        if isinstance(row, Mapping)
+    }
+    inventory_hash = inventory.get("archive_sha256")
+    if (
+        len(records) != 8
+        or len(maps) != 8
+        or len(provenance_hashes) != 1
+        or not isinstance(inventory_hash, str)
+        or provenance_hashes != {inventory_hash}
+    ):
+        raise FinalCohortPlanError(
+            "stock PAK authorities disagree or do not bind exactly eight maps",
+            check_id="stock-pak-authority",
+        )
+    expected = inventory_hash
+    actual = stock_pak.get("sha256")
+    if actual != expected:
+        raise FinalCohortPlanError(
+            f"stock PAK digest differs from corpus authority: expected={expected} actual={actual}",
+            check_id="stock-pak-authority",
+        )
+    return {
+        "schema": "q2-b2-stock-pak-authority-v1",
+        "map_count": 8,
+        "stock_pak_sha256": expected,
+        "provenance_sha256": _sha256(provenance_path.read_bytes()),
+        "inventory_sha256": _sha256(inventory_path.read_bytes()),
+    }
+
+
 def _execution_binding(plan: Mapping[str, Any]) -> dict[str, Any]:
     """Return the live-validated WSL execution/journal binding.
 
@@ -1457,6 +1545,11 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             executable=True,
         ),
     }
+    stock_pak_authority = _stock_pak_authority(
+        pinned_inputs["stock_pak"],
+        _absolute(args.stock_provenance),
+        _absolute(args.stock_inventory),
+    )
     for supplied, atlas in (
         ("cm_oracle", "atlas_cm_oracle"),
         ("pmove_oracle", "atlas_pmove_oracle"),
@@ -1997,6 +2090,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             },
         },
         "pinned_inputs": pinned_inputs,
+        "stock_pak_authority": stock_pak_authority,
         "preactivation_tests": preactivation_tests,
         "tools": tool_records,
         "assembly_invocation": assembly_invocation,
@@ -2534,6 +2628,20 @@ def validate_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
             live_record["sha256"] == record_value["sha256"],
             f"pinned input drifted: {name}",
         )
+
+    try:
+        stock_pak_authority = _stock_pak_authority(
+            pinned["stock_pak"],
+            Path(str(pinned["stock_provenance"]["path"])),
+            Path(str(pinned["stock_inventory"]["path"])),
+        )
+        record(
+            "stock-pak-authority",
+            plan.get("stock_pak_authority") == stock_pak_authority,
+            "stock PAK authority binding differs",
+        )
+    except FinalCohortPlanError as error:
+        record(error.check_id, False, str(error))
 
     pinned_paths = {
         name: str(_absolute(Path(str(value["path"]))))
@@ -3363,6 +3471,7 @@ def run_plan(
                 if "source" in executed or stage == "source"
                 else DEFECT_RUNNER_CONFIGURATION
             )
+            stderr_excerpt = stderr[:4096].decode("utf-8", errors="replace").strip()
             return build_evidence(
                 plan,
                 checks,
@@ -3374,6 +3483,8 @@ def run_plan(
                     "message": f"stage {stage} exited {returncode}",
                     "stage": stage,
                     "returncode": int(returncode),
+                    "stderr_excerpt": stderr_excerpt,
+                    "stderr_truncated": len(stderr) > 4096,
                 },
                 source_authorization_marker=authorization_marker,
                 stage_executions=stage_executions,

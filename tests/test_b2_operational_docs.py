@@ -196,7 +196,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
 
-def test_current_gate_contract_retires_71453_and_activates_71454() -> None:
+def test_current_gate_contract_retires_71454_and_prepares_71455() -> None:
     text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
         encoding="utf-8"
     )
@@ -289,7 +289,7 @@ def test_current_gate_contract_retires_71453_and_activates_71454() -> None:
         "byte identity of the CM, Pmove, and hook oracles",
         "separately committed immutable declaration",
         "fresh green disposable qualification",
-        "The assembler rejects declarations for retired cohorts 71426 through 71453",
+        "The assembler rejects declarations for retired cohorts 71426 through 71454",
         "Retired 71452 final attempt",
         "b2g26_final_71452",
         "B2-GENERATED-COHORT-71452-DECLARATION.json",
@@ -337,9 +337,10 @@ def test_current_gate_contract_retires_71453_and_activates_71454() -> None:
         "14dfc409b047611cb0722e53cad57d8c8584acb5",
         "725815ca68b1a44cbb8699656e214f4d19e60409",
         "28/28",
-        "Active 71454 final cohort",
+        "Retired 71454 final attempt and 71455 successor preparation",
         "b2g26_final_71454",
         "B2-GENERATED-COHORT-71454-DECLARATION.json",
+        "B2-GENERATED-COHORT-71454-FAILURE.json",
         "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986",
         "71454000..71454003",
         "71454600..71454603",
@@ -349,7 +350,11 @@ def test_current_gate_contract_retires_71453_and_activates_71454() -> None:
         "f1f19982e382c95cb2ea30fc285cb2d44956cf3b",
         "568648911b135102a6ddb3bd0d5938c906ccd047be720c1aff93fa056283336a",
         "exact twelve-path",
-        "The active authority and schema pin only 71454",
+        "1ce99eb11e7e251ccdf690858effba79836dbe5e32a4083ad00a13ecda491679",
+        "678210ecd1b27dde1c645660333a1a7b139d849425793859657f804d379b62ad",
+        "`ACTIVE_FINAL_AUTHORITY` is now `None`",
+        "b2g26_final_71455",
+        "no 71455 declaration exists or is active yet",
     ):
         assert required in text
     for stale_claim in (

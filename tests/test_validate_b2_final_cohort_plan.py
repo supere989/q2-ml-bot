@@ -244,9 +244,28 @@ def _fixture_args(
     authorization_state_root = root / "source-authorization-state"
     authorization_state_root.mkdir(mode=0o700)
     authorization_state_root.chmod(0o700)
-    stock_pak = _write(root / "stock-pak0.pak")
-    stock_provenance = _write(root / "stock-provenance.json")
-    stock_inventory = _write(root / "stock-inventory.json")
+    stock_pak = _write(root / "stock-pak1.pak", b"fixture:stock-pak1\n")
+    stock_pak_sha256 = hashlib.sha256(stock_pak.read_bytes()).hexdigest()
+    stock_provenance = root / "stock-provenance.json"
+    stock_provenance.write_bytes(canonical_bytes({
+        "schema": "q2-corpus-provenance-v1",
+        "records": [
+            {
+                "canonical_id": f"q2dm{number}",
+                "archive_sha256": stock_pak_sha256,
+            }
+            for number in range(1, 9)
+        ],
+    }))
+    stock_inventory = root / "stock-inventory.json"
+    stock_inventory.write_bytes(canonical_bytes({
+        "schema": "q2-stock-map-fixtures-v1",
+        "archive_sha256": stock_pak_sha256,
+        "maps": [
+            {"canonical_id": f"q2dm{number}"}
+            for number in range(1, 9)
+        ],
+    }))
     dyn_evidence_executable = _write(
         root / "q2-lattice-evidence",
         b"#!/bin/sh\nexit 0\n",
@@ -393,6 +412,22 @@ def test_canonical_atlas_authority_must_match_supplied_bytes(
 
     assert raised.value.defect_class == DEFECT_RUNNER_CONFIGURATION
     assert raised.value.check_id == "atlas-release-closure"
+    assert not args.workspace.exists()
+
+
+def test_stock_pak_must_match_provenance_before_workspace_creation(
+    tmp_path: Path,
+) -> None:
+    args = _fixture_args(tmp_path, tag="wrong-stock-pak")
+    args.stock_pak.write_bytes(b"fixture:base-pak0-not-deathmatch\n")
+
+    with pytest.raises(
+        FinalCohortPlanError, match="stock PAK digest differs from corpus authority"
+    ) as raised:
+        build_plan(args)
+
+    assert raised.value.check_id == "stock-pak-authority"
+    assert raised.value.defect_class == DEFECT_RUNNER_CONFIGURATION
     assert not args.workspace.exists()
 
 
@@ -1058,7 +1093,11 @@ def test_stage_failure_after_source_is_cohort_artifact_no_retry(
     def runner(command, *, stage, plan):
         del command, plan
         if stage == "compile":
-            return SimpleNamespace(returncode=7)
+            return SimpleNamespace(
+                returncode=7,
+                stdout=b"",
+                stderr=b"nested producer explained the exact failure\n",
+            )
         return SimpleNamespace(returncode=0)
 
     evidence = run_plan(
@@ -1078,6 +1117,10 @@ def test_stage_failure_after_source_is_cohort_artifact_no_retry(
     assert evidence["authorization"]["source_authorization_consumed"] is True
     assert evidence["authorization"]["cohort_retirement_triggered"] is True
     assert evidence["authorization"]["retry_under_same_declaration_allowed"] is False
+    assert evidence["failure"]["stderr_excerpt"] == (
+        "nested producer explained the exact failure"
+    )
+    assert evidence["failure"]["stderr_truncated"] is False
     marker = evidence["source_authorization_marker"]
     assert marker["path"].endswith(f"/{plan['declaration']['sha256']}.json")
     assert Path(marker["path"]).is_file()

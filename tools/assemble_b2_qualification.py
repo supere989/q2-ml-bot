@@ -66,17 +66,17 @@ ACTIVATION_SUCCESSOR_POLICY_SCHEMA = "q2-b2-final-activation-successor-policy-v1
 # knob on the later activation declaration.  The activation commit may only
 # carry this literal declaration-only successor delta; an authority constant
 # cannot expand it after qualification has completed.
-FINAL_71454_ACTIVATION_SUCCESSOR_POLICY = {
+FINAL_71455_ACTIVATION_SUCCESSOR_POLICY = {
     "schema": ACTIVATION_SUCCESSOR_POLICY_SCHEMA,
-    "cohort_id": "b2g26_final_71454",
+    "cohort_id": "b2g26_final_71455",
     "immutable_declaration_path": (
-        "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
+        "docs/multires/B2-GENERATED-COHORT-71455-DECLARATION.json"
     ),
     "allowed_changed_paths": [
         "AGENTS.md",
         "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
         "docs/multires/B2-GATE-ASSEMBLY.md",
-        "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json",
+        "docs/multires/B2-GENERATED-COHORT-71455-DECLARATION.json",
         "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
         "schemas/q2-multires-b2-gate-v1.schema.json",
         "tests/test_b2_gate.py",
@@ -131,15 +131,15 @@ def activation_successor_policy() -> dict[str, Any]:
     """Return the sole final activation delta frozen by qualification."""
 
     return {
-        "schema": FINAL_71454_ACTIVATION_SUCCESSOR_POLICY["schema"],
-        "cohort_id": FINAL_71454_ACTIVATION_SUCCESSOR_POLICY["cohort_id"],
+        "schema": FINAL_71455_ACTIVATION_SUCCESSOR_POLICY["schema"],
+        "cohort_id": FINAL_71455_ACTIVATION_SUCCESSOR_POLICY["cohort_id"],
         "immutable_declaration_path": (
-            FINAL_71454_ACTIVATION_SUCCESSOR_POLICY[
+            FINAL_71455_ACTIVATION_SUCCESSOR_POLICY[
                 "immutable_declaration_path"
             ]
         ),
         "allowed_changed_paths": list(
-            FINAL_71454_ACTIVATION_SUCCESSOR_POLICY["allowed_changed_paths"]
+            FINAL_71455_ACTIVATION_SUCCESSOR_POLICY["allowed_changed_paths"]
         ),
     }
 
@@ -183,7 +183,7 @@ def _digest(value: object, label: str) -> str:
 
 
 def validate_activation_successor_policy(value: object) -> dict[str, Any]:
-    """Reject any activation policy other than the qualified 71454 literal.
+    """Reject any activation policy other than the qualified 71455 literal.
 
     The policy deliberately has no declaration digest: the declaration cannot
     exist while the disposable qualification is assembled.  Its immutable
@@ -219,7 +219,7 @@ def validate_activation_successor_policy(value: object) -> dict[str, Any]:
     )
     _require(
         dict(policy) == expected,
-        "final activation-successor policy differs from the qualified 71454 policy",
+        "final activation-successor policy differs from the qualified 71455 policy",
     )
     return expected
 

@@ -207,8 +207,12 @@ def run_stock_campaign(
             check=False,
         )
         if completed.returncode != 0:
+            nested_stderr = completed.stderr[:4096].decode(
+                "utf-8", errors="replace"
+            ).strip()
+            detail = f": {nested_stderr}" if nested_stderr else ""
             raise B2StockCampaignError(
-                f"stock Atlas builder failed with exit {completed.returncode}"
+                f"stock Atlas builder failed with exit {completed.returncode}{detail}"
             )
         try:
             summary = json.loads(completed.stdout)

@@ -102,6 +102,7 @@ RETIRED_COHORT_71450 = "b2g26_final_71450"
 RETIRED_COHORT_71451 = "b2g26_final_71451"
 RETIRED_COHORT_71452 = "b2g26_final_71452"
 RETIRED_COHORT_71453 = "b2g26_final_71453"
+RETIRED_COHORT_71454 = "b2g26_final_71454"
 EXPECTED_DESIGN_SHA256 = (
     "c55fc7ffc32bd0e88410b8493b46c179f3333f3806632ff8e6530f1c717508e6"
 )
@@ -273,7 +274,7 @@ RETIRED_71453_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
-ACTIVE_71454_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+RETIRED_71454_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "AGENTS.md",
     "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
     "docs/multires/B2-GATE-ASSEMBLY.md",
@@ -301,25 +302,17 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Corrective commit 7c482c9087262f065add58461a2b6f00644bb83a passed a
-# completely fresh disposable qualification 28/28 with all eight retained
-# infrastructure checks. Cohort 71454 is the separately committed, disjoint,
-# one-shot successor; qualification bytes and retired 71453 bytes remain
-# inadmissible.
-ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
-    cohort_id="b2g26_final_71454",
-    declaration_sha256=(
-        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"
-    ),
-    immutable_declaration_path=(
-        "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
-    ),
-    qualification_successor_paths=ACTIVE_71454_QUALIFICATION_SUCCESSOR_PATHS,
-)
+# Cohort 71454 consumed its sole source authorization and then failed the
+# stock campaign because the reviewed plan bound base pak0.pak while the
+# q2dm1..q2dm8 authorities require retail pak1.pak.  Its declaration and every
+# produced byte are permanently forensic-only.  A disjoint 71455 declaration
+# must not exist until this corrective implementation passes a completely
+# fresh disposable qualification and separate preactivation suite.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
 
 # The reusable disposable-qualification contract remains green at 20/28, as
 # required by the normative plan.  Final-cohort assembly is intentionally
-# stricter: the activated 71454 successor may consume only a complete 28/28
+# stricter: any activated final successor may consume only a complete 28/28
 # qualification.  Keeping this check in the final gate prevents an operator
 # from mistaking a generic-green partial qualification for cutover authority.
 FINAL_QUALIFICATION_END_TO_END_PASSES = 28

@@ -23,7 +23,6 @@ import tools.assemble_b2_gate as b2_gate
 import tools.run_b2_test_suite as b2_test_suite
 import tools.validate_b2_final_cohort_plan as final_plan
 from tools.assemble_b2_gate import (
-    ACTIVE_71454_QUALIFICATION_SUCCESSOR_PATHS,
     ACTIVE_FINAL_AUTHORITY,
     ActiveFinalAuthority,
     B2GateError,
@@ -37,6 +36,7 @@ from tools.assemble_b2_gate import (
     RETIRED_71451_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_71452_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_71453_QUALIFICATION_SUCCESSOR_PATHS,
+    RETIRED_71454_QUALIFICATION_SUCCESSOR_PATHS,
     RETIRED_COHORT_71446,
     RETIRED_COHORT_71447,
     RETIRED_COHORT_71448,
@@ -45,6 +45,7 @@ from tools.assemble_b2_gate import (
     RETIRED_COHORT_71451,
     RETIRED_COHORT_71452,
     RETIRED_COHORT_71453,
+    RETIRED_COHORT_71454,
     STOCK_PROVENANCE_COMPACT_SHA256,
     STOCK_PROVENANCE_SHA256,
     assemble_gate,
@@ -957,6 +958,10 @@ def test_retired_71446_identity_remains_readable_and_cli_is_explicit() -> None:
             ROOT / "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json",
             "71453",
         ),
+        (
+            ROOT / "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json",
+            "71454",
+        ),
     ],
 )
 def test_gate_refuses_retired_declaration_before_evidence(
@@ -966,20 +971,19 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_71453_is_retired_and_71454_is_the_active_final_authority() -> None:
-    authority = _require_active_final_authority()
-    assert ACTIVE_FINAL_AUTHORITY == authority
-    assert authority.cohort_id == "b2g26_final_71454"
-    assert authority.declaration_sha256 == (
-        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"
-    )
-    assert authority.immutable_declaration_path == (
-        "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
-    )
+def test_71454_is_retired_and_71455_is_predeclaration() -> None:
+    assert ACTIVE_FINAL_AUTHORITY is None
+    with pytest.raises(B2GateError, match="no active final cohort"):
+        _require_active_final_authority()
+    assert RETIRED_COHORT_71454 == "b2g26_final_71454"
     assert (
-        authority.qualification_successor_paths
-        == ACTIVE_71454_QUALIFICATION_SUCCESSOR_PATHS
+        "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
+        in RETIRED_71454_QUALIFICATION_SUCCESSOR_PATHS
     )
+    assert activation_successor_policy()["cohort_id"] == "b2g26_final_71455"
+    assert not (
+        ROOT / "docs/multires/B2-GENERATED-COHORT-71455-DECLARATION.json"
+    ).exists()
     assert RETIRED_COHORT_71453 == "b2g26_final_71453"
     assert (
         "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
@@ -1017,15 +1021,14 @@ def test_71453_is_retired_and_71454_is_the_active_final_authority() -> None:
     )
 
 
-def test_current_alias_is_byte_identical_but_only_immutable_71454_is_active() -> None:
+def test_current_alias_and_immutable_71454_are_both_retired() -> None:
     alias = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
     immutable = ROOT / "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
     assert alias.read_bytes() == immutable.read_bytes()
-    with pytest.raises(B2GateError, match="explicitly activated immutable path"):
+    with pytest.raises(B2GateError, match="permanently retired"):
         _validate_declaration(alias)
-    declaration, digest = _validate_declaration(immutable)
-    assert declaration["cohort_id"] == "b2g26_final_71454"
-    assert digest == ACTIVE_FINAL_AUTHORITY.declaration_sha256
+    with pytest.raises(B2GateError, match="permanently retired"):
+        _validate_declaration(immutable)
 
 
 def test_gate_requires_the_exact_activated_immutable_declaration_path(
@@ -1111,7 +1114,7 @@ def test_stock_provenance_loader_rejects_writer_canonical_semantic_rewrite(
         _load_stock_provenance(path)
 
 
-def test_qualification_successor_uses_the_frozen_71454_policy(
+def test_qualification_successor_uses_the_frozen_71455_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     qualified = _implementation()
@@ -1119,7 +1122,7 @@ def test_qualification_successor_uses_the_frozen_71454_policy(
     current["repository_commit"] = "ab" * 20
     current["repository_tree"] = "cd" * 20
     diff = "".join(
-        f"{'A' if path.endswith('71454-DECLARATION.json') else 'M'}\t{path}\n"
+        f"{'A' if path.endswith('71455-DECLARATION.json') else 'M'}\t{path}\n"
         for path in activation_successor_policy()["allowed_changed_paths"]
     ).encode("utf-8")
 

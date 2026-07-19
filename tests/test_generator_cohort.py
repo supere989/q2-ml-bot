@@ -204,7 +204,7 @@ def static_pass(map_path: Path) -> dict[str, object]:
     return {"map": map_path.stem, "static_ok": True}
 
 
-def test_authoritative_71454_alias_is_canonical_balanced_disjoint_and_fresh() -> None:
+def test_authoritative_alias_retains_canonical_retired_71454_bytes() -> None:
     declaration, digest = cohort.load_declaration(AUTHORITATIVE_DECLARATION)
     declaration_bytes = AUTHORITATIVE_DECLARATION.read_bytes()
     assert declaration_bytes == DECLARATION_71454.read_bytes()
@@ -265,9 +265,22 @@ def test_authoritative_71454_alias_is_canonical_balanced_disjoint_and_fresh() ->
     assert {row["map"] for row in declaration["maps"]}.isdisjoint(
         row["map"] for row in historical_rows
     )
-    registry.require_unretired_declaration(
-        AUTHORITATIVE_DECLARATION, declaration, digest
-    )
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71454.*permanently retired"
+    ):
+        registry.require_unretired_declaration(
+            AUTHORITATIVE_DECLARATION, declaration, digest
+        )
+
+
+def test_named_71454_declaration_is_permanently_retired() -> None:
+    declaration, digest = cohort.load_declaration(DECLARATION_71454)
+    with pytest.raises(
+        registry.RetiredCohortRegistryError, match="71454.*permanently retired"
+    ):
+        registry.require_unretired_declaration(
+            DECLARATION_71454, declaration, digest
+        )
 
 
 def test_named_71453_declaration_is_permanently_retired() -> None:

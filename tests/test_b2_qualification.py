@@ -385,7 +385,7 @@ def test_final_gate_rejects_generic_green_27_of_28_qualification(
             report["normative_documents"],
             report["implementation"],
             final_gate.ActiveFinalAuthority(
-                cohort_id="b2g26_final_71454",
+                cohort_id="b2g26_final_71455",
                 declaration_sha256="ab" * 32,
                 immutable_declaration_path="fixture-declaration.json",
                 qualification_successor_paths=frozenset(

@@ -162,7 +162,9 @@ def test_stock_builder_failure_publishes_no_partial_root(
         ),
     )
 
-    with pytest.raises(B2StockCampaignError, match="failed with exit 7"):
+    with pytest.raises(
+        B2StockCampaignError, match="failed with exit 7: failed"
+    ):
         run_stock_campaign(**{
             name: value
             for name, value in paths.items()
