@@ -6,6 +6,7 @@ import pytest
 
 from tools.network_public_server import (
     TelemetrySettings,
+    _admin_code_from_env,
     _build_command,
     _telemetry_from_env,
     _write_config,
@@ -57,6 +58,26 @@ def test_telemetry_contract_fails_closed_without_disclosing_value(environment):
     assert environment.get("Q2_ML_CLIENT_TELEMETRY_TOKEN", "absent") not in str(
         failure.value
     )
+
+
+@pytest.mark.parametrize("code", ("", "0", "00000", "123456", "12;quit"))
+def test_lithium_admin_code_rejects_disabled_or_unsafe_environment_values(code):
+    with pytest.raises(ValueError) as failure:
+        _admin_code_from_env({"Q2_LITHIUM_ADMIN_CODE": code})
+    if code:
+        assert code not in str(failure.value)
+
+
+def test_lithium_admin_code_is_env_only_and_written_before_map(tmp_path):
+    code = _admin_code_from_env({"Q2_LITHIUM_ADMIN_CODE": "31415"})
+    config = _write_config(
+        tmp_path / "runtime", _args(), "q2dm1",
+        TelemetrySettings(port=28049, token=SECRET), code,
+    )
+
+    text = config.read_text()
+    assert "set admin_code 31415" in text
+    assert text.index("set admin_code 31415") < text.index("map q2dm1")
 
 
 def test_secret_config_is_0600_and_enables_conduit_before_map(tmp_path):
