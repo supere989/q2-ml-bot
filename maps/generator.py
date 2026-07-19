@@ -24,6 +24,7 @@ import math
 import random
 import sys
 from dataclasses import dataclass, field
+from itertools import combinations
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -157,6 +158,21 @@ LAVA_MIN, LAVA_MAX = 224, 384   # pool edge length
 
 ARENA_STYLES = ("arena_open", "arena_vertical", "arena_lanes")
 STYLES = ("open", "towers", "canyon", "pits", *ARENA_STYLES, "mixed")
+# The Atlas prototype has a fixed sparse-L0 envelope.  An arena anchor on the
+# outer authoring ring grows the playable floor union sharply once its 3x3
+# bowl is emitted, leaving less space for the independent hurt and hook
+# evidence.  Arena presets first demote those outer anchors; the exact
+# footprint normalizer below remains the authority for the final bound.
+ARENA_FOOTPRINT_BORDER_CELLS = 1
+# A generated kill-plane projects every retained boundary XY column through
+# four L0 Z chunks.  185 columns therefore reserve at most 740 chunks for
+# hurt evidence, leaving practical capacity for the independently proved
+# surface, spawn, and hook planes beneath the frozen 1200-chunk Atlas limit.
+MAX_ATLAS_HURT_BOUNDARY_COLUMNS = 185
+ATLAS_L0_CHUNK_UNITS = 64
+MIN_ARENA_STYLE_LAYOUT_ROOMS = 8
+MIN_ARENA_STYLE_ARENAS = 3
+MIN_ARENA_STYLE_HALLWAYS = 2
 
 # ── Data structures ───────────────────────────────────────────────────────────
 
@@ -697,6 +713,8 @@ class MapGenerator:
         self.hallway_count = 0
         self.corner_count = 0
         self.large_building_count = 0
+        self.atlas_l0_compaction_count = 0
+        self.atlas_hurt_boundary_columns = 0
 
         # Resolve style → feature knobs (mixed rolls per map)
         r = self.rng
@@ -877,6 +895,42 @@ class MapGenerator:
             and first.wy + first.d > second.wy
         )
 
+    @classmethod
+    def _post_spawn_floor_levels(cls, rooms: Sequence[Room]) -> Tuple[int, ...]:
+        """Return the terrace bands that survive spawn-floor normalization.
+
+        The Atlas subset search runs before ``_normalize_spawn_arena_floor``.
+        A candidate that appears vertical at that point can nevertheless be
+        flattened when a higher overlapping room is lowered to the selected
+        spawn-arena floor.  Evaluate that exact non-mutating projection while
+        selecting the retained subset so ``arena_vertical`` remains a real
+        vertical style instead of merely retaining an authored high cell.
+        """
+
+        arenas = [room for room in rooms if room.kind == "arena"]
+        if not arenas:
+            return ()
+        anchor = max(
+            arenas,
+            key=lambda room: (
+                room.w * room.d,
+                room.floor_z,
+                -room.wy,
+                -room.wx,
+            ),
+        )
+        levels = set()
+        for room in rooms:
+            floor_z = room.floor_z
+            if (
+                room is not anchor
+                and floor_z > anchor.floor_z
+                and cls._room_footprints_overlap(anchor, room)
+            ):
+                floor_z = anchor.floor_z
+            levels.add(floor_z)
+        return tuple(sorted(levels))
+
     def _ensure_spawn_arena(self, grid_n: int) -> None:
         """Guarantee one deterministic map-spanning spawn domain.
 
@@ -909,6 +963,432 @@ class MapGenerator:
         anchor.w = 3 * GRID_SIZE
         anchor.d = 3 * GRID_SIZE
         anchor.ceil_z = anchor.floor_z + max(384, authored_height)
+
+    def _constrain_arena_style_footprint(self, grid_n: int) -> None:
+        """Keep arena-sized floor plates inside the Atlas-safe core.
+
+        This is a deterministic pre-geometry normalization, not a seed retry
+        or an Atlas-side omission.  The authoritative analyzer must retain
+        every proved hurt and hook cell, and its 1200-chunk bound is frozen.
+        Large 3x3 arena rooms on the outer authoring ring inflate the union of
+        reachable floor and lethal-edge columns enough to leave no room for
+        that mandatory evidence.  Demote only those outer *arena* selections
+        to compact ordinary rooms before any connection, guard, spawn, or
+        feature geometry is emitted.  The RNG stream is intentionally not
+        touched, so a seed remains one deterministic layout.
+        """
+
+        if self.style not in ARENA_STYLES:
+            return
+        lower = ARENA_FOOTPRINT_BORDER_CELLS
+        upper = grid_n - 1 - ARENA_FOOTPRINT_BORDER_CELLS
+        if lower > upper:
+            raise RuntimeError("arena footprint core is empty")
+        elevation_anchors: List[Room] = []
+        arenas = [room for room in self.rooms if room.kind == "arena"]
+        if (
+            self.style == "arena_vertical"
+            and arenas
+            and max(room.floor_z for room in arenas) > min(room.floor_z for room in arenas)
+        ):
+            # Keep the highest terrace plus one highest outer terrace as
+            # arenas.  The inner high band preserves vertical aim/hook
+            # traversal, while the outer band retains an unburied building
+            # site instead of letting overlapping inner floor plates erase
+            # the arena-style building proportion.  The later exact subset
+            # search still owns the final footprint bound.
+            elevation_anchors.append(max(
+                arenas,
+                key=lambda room: (
+                    room.floor_z,
+                    room.w * room.d,
+                    -room.wy,
+                    -room.wx,
+                ),
+            ))
+            outer_arenas = [
+                room for room in arenas
+                if not (
+                    lower <= room.gx <= upper
+                    and lower <= room.gy <= upper
+                )
+            ]
+            if outer_arenas:
+                outer_anchor = max(
+                    outer_arenas,
+                    key=lambda room: (
+                        room.floor_z,
+                        room.w * room.d,
+                        -room.wy,
+                        -room.wx,
+                    ),
+                )
+                if all(outer_anchor is not anchor for anchor in elevation_anchors):
+                    elevation_anchors.append(outer_anchor)
+        for room in self.rooms:
+            if any(room is anchor for anchor in elevation_anchors) or room.kind != "arena" or (
+                lower <= room.gx <= upper and lower <= room.gy <= upper
+            ):
+                continue
+            room.kind = "room"
+            # A two-cell ordinary room retains enough overlap to avoid
+            # replacing one broad arena boundary with a jagged fringe of
+            # one-cell void notches, while still stopping the outer 3x3
+            # expansion that breaches the sparse-L0 envelope.
+            room.w = 2 * GRID_SIZE
+            room.d = 2 * GRID_SIZE
+            room.ceil_z = room.floor_z + 320
+
+    def _ensure_arena_vertical_band(self, grid_n: int) -> None:
+        """Make ``arena_vertical`` retain a real elevated combat terrace.
+
+        Terrain assignment can place every authored arena on the low band even
+        when ordinary rooms have already been terraced.  The spawn-floor
+        normalizer then legitimately lowers those overlapping ordinary rooms,
+        silently converting the vertical preset into a flat arena.  Promote a
+        deterministic highest terrace to the arena role before the footprint
+        clamp; the clamp preserves that one elevated anchor and the later
+        subset search still enforces the fixed Atlas bound.
+
+        A rare all-flat random walk gets one 96-unit authored terrace as part
+        of this style contract.  It is a deterministic layout choice, not a
+        seed retry or post-geometry rescue.
+        """
+
+        if self.style != "arena_vertical" or not self.rooms:
+            return
+        center = grid_n // 2
+        lowest_floor = min(room.floor_z for room in self.rooms)
+        highest_floor = max(room.floor_z for room in self.rooms)
+        if highest_floor > lowest_floor and any(
+            room.kind == "arena" and room.floor_z == highest_floor
+            for room in self.rooms
+        ):
+            return
+        candidates = [
+            room for room in self.rooms if room.floor_z == highest_floor
+        ]
+        candidate = min(
+            candidates,
+            key=lambda room: (
+                abs(room.gx - center) + abs(room.gy - center),
+                -(room.w * room.d),
+                room.gy,
+                room.gx,
+            ),
+        )
+        if highest_floor == lowest_floor:
+            candidate.floor_z += TERRACE_STEP
+            candidate.ceil_z += TERRACE_STEP
+        authored_height = candidate.ceil_z - candidate.floor_z
+        candidate.kind = "arena"
+        candidate.w = 3 * GRID_SIZE
+        candidate.d = 3 * GRID_SIZE
+        candidate.ceil_z = candidate.floor_z + max(384, authored_height)
+
+    def _ensure_arena_style_composition(self, grid_n: int) -> None:
+        """Retain the minimum combat-bowl composition after envelope clamping."""
+
+        if self.style not in ARENA_STYLES:
+            return
+        needed = max(
+            0,
+            MIN_ARENA_STYLE_ARENAS
+            - sum(room.kind == "arena" for room in self.rooms),
+        )
+        if not needed:
+            return
+        lower = ARENA_FOOTPRINT_BORDER_CELLS
+        upper = grid_n - 1 - ARENA_FOOTPRINT_BORDER_CELLS
+        center = grid_n // 2
+        candidates = sorted(
+            (
+                room for room in self.rooms
+                if room.kind != "arena"
+                and lower <= room.gx <= upper
+                and lower <= room.gy <= upper
+            ),
+            key=lambda room: (
+                abs(room.gx - center) + abs(room.gy - center),
+                -(room.w * room.d),
+                -room.floor_z,
+                room.wy,
+                room.wx,
+            ),
+        )
+        if len(candidates) < needed:
+            raise RuntimeError("arena style lacks enough core rooms for combat composition")
+        for room in candidates[:needed]:
+            authored_height = room.ceil_z - room.floor_z
+            room.kind = "arena"
+            room.w = 3 * GRID_SIZE
+            room.d = 3 * GRID_SIZE
+            room.ceil_z = room.floor_z + max(384, authored_height)
+
+    @staticmethod
+    def _floor_union_boundary_segments(rooms: Sequence[Room]) -> List[dict]:
+        """Return the raw outer perimeter of the highest room-floor union.
+
+        This is the source counterpart of the analyzer's generated-hurt scope.
+        It intentionally has no clearance or standing-witness filtering: the
+        footprint normalizer needs a conservative pre-geometry bound, while
+        ``_plan_lethal_drop_guards`` later applies the exact source witness
+        check before emitting every guard.
+        """
+
+        if not rooms:
+            return []
+        xs = sorted({value for room in rooms for value in (room.wx, room.wx + room.w)})
+        ys = sorted({value for room in rooms for value in (room.wy, room.wy + room.d)})
+        covered: dict[Tuple[int, int], int] = {}
+        for ix, (x0, x1) in enumerate(zip(xs, xs[1:])):
+            x = (x0 + x1) / 2.0
+            for iy, (y0, y1) in enumerate(zip(ys, ys[1:])):
+                y = (y0 + y1) / 2.0
+                floors = [
+                    room.floor_z for room in rooms
+                    if room.wx <= x < room.wx + room.w
+                    and room.wy <= y < room.wy + room.d
+                ]
+                if floors:
+                    covered[(ix, iy)] = max(floors)
+
+        segments: List[dict] = []
+        directions = (
+            ("west", -1, 0), ("east", 1, 0),
+            ("south", 0, -1), ("north", 0, 1),
+        )
+        for (ix, iy), floor_z in sorted(covered.items()):
+            x0, x1 = xs[ix], xs[ix + 1]
+            y0, y1 = ys[iy], ys[iy + 1]
+            for side, dx, dy in directions:
+                if (ix + dx, iy + dy) in covered:
+                    continue
+                if side == "west":
+                    edge = [x0, y0, x0, y1, floor_z]
+                elif side == "east":
+                    edge = [x1, y0, x1, y1, floor_z]
+                elif side == "south":
+                    edge = [x0, y0, x1, y0, floor_z]
+                else:
+                    edge = [x0, y1, x1, y1, floor_z]
+                segments.append({"side": side, "segment": edge})
+        return segments
+
+    @staticmethod
+    def _atlas_hurt_columns(boundary_segments: Sequence[dict]) -> set[Tuple[int, int]]:
+        """Project raw lethal-edge candidates to source-invariant L0 columns.
+
+        Generated coordinates are integral 512-unit geometry and Atlas origins
+        are snapped at 256 units, hence every valid origin differs by an exact
+        number of 64-unit L0 chunks.  The cardinality of this world-zero
+        projection is therefore exactly the cardinality of the analyzer's
+        origin-relative ``_claimed_hurt_boundary_chunks`` XY columns.
+        """
+
+        columns: set[Tuple[int, int]] = set()
+        for edge in boundary_segments:
+            side = edge["side"]
+            x0, y0, x1, y1, _ = edge["segment"]
+            if side in ("west", "east"):
+                fixed_x = x0 + LETHAL_EDGE_INWARD_OFFSET if side == "west" else x0 - LETHAL_EDGE_INWARD_OFFSET
+                low = math.floor(y0 / ATLAS_L0_CHUNK_UNITS)
+                high = math.floor((y1 - 1e-6) / ATLAS_L0_CHUNK_UNITS)
+                fixed = math.floor(fixed_x / ATLAS_L0_CHUNK_UNITS)
+                columns.update((fixed, chunk_y) for chunk_y in range(low, high + 1))
+            elif side in ("south", "north"):
+                fixed_y = y0 + LETHAL_EDGE_INWARD_OFFSET if side == "south" else y0 - LETHAL_EDGE_INWARD_OFFSET
+                low = math.floor(x0 / ATLAS_L0_CHUNK_UNITS)
+                high = math.floor((x1 - 1e-6) / ATLAS_L0_CHUNK_UNITS)
+                fixed = math.floor(fixed_y / ATLAS_L0_CHUNK_UNITS)
+                columns.update((chunk_x, fixed) for chunk_x in range(low, high + 1))
+            else:
+                raise RuntimeError("generated lethal-edge side is invalid")
+        return columns
+
+    @classmethod
+    def _atlas_hurt_boundary_column_count(cls, rooms: Sequence[Room]) -> int:
+        return len(cls._atlas_hurt_columns(cls._floor_union_boundary_segments(rooms)))
+
+    def _normalize_atlas_l0_footprint(self, grid_n: int) -> None:
+        """Deterministically compact arena layouts before source geometry.
+
+        The Atlas budget is a hard prototype property, not an analyzer tuning
+        knob.  This normalizer retains all resulting floor boundaries and lets
+        later stages prove every hurt and hook cell.  It searches canonical
+        retained-room subsets rather than greedily deleting one grid vertex:
+        wide arena footprints routinely overlap beyond their nominal 5x5
+        anchor cells, so a nominal grid-connectivity constraint can reject a
+        physically sound compact layout.  The first safe cardinality is the
+        largest retained layout; within it, the exact projected hurt footprint
+        and stable room keys select one result.  There is no seed retry, map
+        substitution, or evidence fallback.
+        """
+
+        if self.style not in ARENA_STYLES:
+            return
+        arenas = [room for room in self.rooms if room.kind == "arena"]
+        if not arenas:
+            raise RuntimeError("arena style lacks a spawn arena before Atlas compaction")
+        anchor = max(
+            arenas,
+            key=lambda room: (
+                room.w * room.d,
+                room.floor_z,
+                -room.wy,
+                -room.wx,
+            ),
+        )
+        anchor_index = self.rooms.index(anchor)
+        optional_indices = tuple(
+            index for index in range(len(self.rooms)) if index != anchor_index
+        )
+        center = grid_n // 2
+        preserve_vertical_bands = (
+            self.style == "arena_vertical"
+            and len(self._post_spawn_floor_levels(self.rooms)) > 1
+        )
+
+        def candidate_key(
+            indices: Tuple[int, ...],
+            columns: int,
+            corridor_replacements: Tuple[int, ...],
+        ) -> tuple:
+            """Prefer safer margins, then remove peripheral low-impact rooms."""
+
+            removed = [
+                room for index, room in enumerate(self.rooms) if index not in indices
+            ]
+            removal_key = tuple(sorted(
+                (
+                    {"room": 0, "corridor": 1, "arena": 2}[room.kind],
+                    -(abs(room.gx - center) + abs(room.gy - center)),
+                    -(room.w * room.d),
+                    room.gy,
+                    room.gx,
+                )
+                for room in removed
+            ))
+            replacement_key = tuple(
+                (self.rooms[index].gy, self.rooms[index].gx)
+                for index in corridor_replacements
+            )
+            retained_key = tuple(
+                (room.gy, room.gx, room.kind, room.w, room.d,
+                 room.floor_z, room.ceil_z)
+                for room in (self.rooms[index] for index in indices)
+            )
+            return columns, removal_key, replacement_key, retained_key
+
+        vertical_best: Optional[
+            Tuple[tuple, Tuple[int, ...], Tuple[int, ...], int]
+        ] = None
+        selected: Optional[Tuple[Tuple[int, ...], Tuple[int, ...], int]] = None
+        for retained_count in range(
+            len(self.rooms), MIN_ARENA_STYLE_LAYOUT_ROOMS - 1, -1,
+        ):
+            best: Optional[Tuple[tuple, Tuple[int, ...], Tuple[int, ...], int]] = None
+            for optional in combinations(optional_indices, retained_count - 1):
+                indices = tuple(sorted((anchor_index, *optional)))
+                candidate_rooms = [self.rooms[index] for index in indices]
+                if sum(room.kind == "arena" for room in candidate_rooms) < MIN_ARENA_STYLE_ARENAS:
+                    continue
+                corridor_count = sum(
+                    room.kind == "corridor" for room in candidate_rooms
+                )
+                corridor_replacements: Tuple[int, ...] = ()
+                if corridor_count < MIN_ARENA_STYLE_HALLWAYS:
+                    needed = MIN_ARENA_STYLE_HALLWAYS - corridor_count
+                    convertible = sorted(
+                        (
+                            index for index in indices
+                            if self.rooms[index].kind == "room"
+                        ),
+                        key=lambda index: (
+                            -(abs(self.rooms[index].gx - center)
+                              + abs(self.rooms[index].gy - center)),
+                            abs(self.rooms[index].w - self.rooms[index].d),
+                            self.rooms[index].w * self.rooms[index].d,
+                            self.rooms[index].gy,
+                            self.rooms[index].gx,
+                        ),
+                    )
+                    if len(convertible) < needed:
+                        continue
+                    corridor_replacements = tuple(convertible[:needed])
+                columns = self._atlas_hurt_boundary_column_count(candidate_rooms)
+                if columns > MAX_ATLAS_HURT_BOUNDARY_COLUMNS:
+                    continue
+                stability_key = candidate_key(
+                    indices, columns, corridor_replacements,
+                )
+                selection_key: tuple = stability_key
+                if preserve_vertical_bands:
+                    selection_key = (
+                        -len(self._post_spawn_floor_levels(candidate_rooms)),
+                        stability_key,
+                    )
+                candidate = (
+                    selection_key,
+                    indices,
+                    corridor_replacements,
+                    columns,
+                )
+                if best is None or candidate[0] < best[0]:
+                    best = candidate
+            if best is None:
+                continue
+
+            if not preserve_vertical_bands:
+                _, indices, corridor_replacements, columns = best
+                selected = indices, corridor_replacements, columns
+                break
+
+            # A true vertical candidate may need to drop one extra peripheral
+            # room compared with a flatter subset.  Score bands before room
+            # cardinality; an arena_vertical map is not allowed to trade away
+            # its vertical gameplay simply to shave a few L0 columns.
+            _, indices, corridor_replacements, columns = best
+            levels = len(self._post_spawn_floor_levels(
+                [self.rooms[index] for index in indices]
+            ))
+            vertical_candidate = (
+                (-levels, -len(indices), best[0]),
+                indices,
+                corridor_replacements,
+                columns,
+            )
+            if vertical_best is None or vertical_candidate[0] < vertical_best[0]:
+                vertical_best = vertical_candidate
+
+        if preserve_vertical_bands:
+            if vertical_best is None or -vertical_best[0][0] < 2:
+                raise RuntimeError(
+                    "arena_vertical layout cannot retain a post-spawn vertical band "
+                    "inside the Atlas hurt-column envelope"
+                )
+            _, indices, corridor_replacements, columns = vertical_best
+            selected = indices, corridor_replacements, columns
+
+        if selected is not None:
+            indices, corridor_replacements, columns = selected
+            prior_count = len(self.rooms)
+            self.rooms = [self.rooms[index] for index in indices]
+            retained_positions = {
+                original_index: position
+                for position, original_index in enumerate(indices)
+            }
+            for original_index in corridor_replacements:
+                replacement = self.rooms[retained_positions[original_index]]
+                replacement.kind = "corridor"
+                replacement.ceil_z = replacement.floor_z + 224
+            self.atlas_l0_compaction_count = prior_count - len(self.rooms)
+            self.atlas_hurt_boundary_columns = columns
+            return
+
+        raise RuntimeError(
+            "generated arena layout cannot compact into the Atlas hurt-column envelope"
+        )
 
     def _normalize_spawn_arena_floor(self) -> None:
         """Keep one arena perimeter available as a standing component.
@@ -1133,11 +1613,21 @@ class MapGenerator:
                     room.w, room.d, height = self._room_params('room')
                     room.ceil_z = room.floor_z + height
 
+        self._ensure_arena_vertical_band(N)
+        self._constrain_arena_style_footprint(N)
+        self._ensure_arena_style_composition(N)
+
         self._ensure_spawn_arena(N)
+        self._normalize_atlas_l0_footprint(N)
 
         # Establish one map-spanning standing-floor domain before connections,
         # platforms, and static blockers are derived from the room geometry.
         self._normalize_spawn_arena_floor()
+
+        # Atlas compaction can remove a peripheral source room before this
+        # point. Reconstruct the topology map from the surviving deterministic
+        # layout so no connection refers to a compacted room index.
+        grid_rooms = {(room.gx, room.gy): index for index, room in enumerate(self.rooms)}
 
         # 3. Connect adjacent rooms
         dirs = [(1,0),(0,1),(-1,0),(0,-1)]
@@ -1189,61 +1679,30 @@ class MapGenerator:
         """Build guard walls around playable floor-union edges facing void."""
         self.lethal_edges = []
         self.lethal_guard_walls = []
-        if not self.rooms:
-            return
-
-        xs = sorted({value for room in self.rooms
-                     for value in (room.wx, room.wx + room.w)})
-        ys = sorted({value for room in self.rooms
-                     for value in (room.wy, room.wy + room.d)})
-        covered: dict[Tuple[int, int], int] = {}
-        for ix, (x0, x1) in enumerate(zip(xs, xs[1:])):
-            x = (x0 + x1) / 2.0
-            for iy, (y0, y1) in enumerate(zip(ys, ys[1:])):
-                y = (y0 + y1) / 2.0
-                floors = [
-                    room.floor_z for room in self.rooms
-                    if room.wx <= x < room.wx + room.w
-                    and room.wy <= y < room.wy + room.d
-                ]
-                if floors:
-                    covered[(ix, iy)] = max(floors)
-
-        directions = (
-            ("west", -1, 0), ("east", 1, 0),
-            ("south", 0, -1), ("north", 0, 1),
-        )
         thickness = LETHAL_GUARD_THICKNESS
         planned: List[Tuple[dict, SolidBox]] = []
-        for (ix, iy), floor_z in sorted(covered.items()):
-            x0, x1 = xs[ix], xs[ix + 1]
-            y0, y1 = ys[iy], ys[iy + 1]
-            for side, dx, dy in directions:
-                if (ix + dx, iy + dy) in covered:
-                    continue
-                if side == "west":
-                    wall = SolidBox(x0, y0, floor_z,
-                                    x0 + thickness, y1,
-                                    floor_z + LETHAL_GUARD_HEIGHT)
-                    edge = [x0, y0, x0, y1, floor_z]
-                elif side == "east":
-                    wall = SolidBox(x1 - thickness, y0, floor_z,
-                                    x1, y1,
-                                    floor_z + LETHAL_GUARD_HEIGHT)
-                    edge = [x1, y0, x1, y1, floor_z]
-                elif side == "south":
-                    wall = SolidBox(x0, y0, floor_z,
-                                    x1, y0 + thickness,
-                                    floor_z + LETHAL_GUARD_HEIGHT)
-                    edge = [x0, y0, x1, y0, floor_z]
-                else:
-                    wall = SolidBox(x0, y1 - thickness, floor_z,
-                                    x1, y1,
-                                    floor_z + LETHAL_GUARD_HEIGHT)
-                    edge = [x0, y1, x1, y1, floor_z]
-                if not self._lethal_edge_has_standing_witness(side, edge):
-                    continue
-                planned.append(({"side": side, "segment": edge}, wall))
+        for candidate in self._floor_union_boundary_segments(self.rooms):
+            side = candidate["side"]
+            x0, y0, x1, y1, floor_z = candidate["segment"]
+            if side == "west":
+                wall = SolidBox(x0, y0, floor_z,
+                                x0 + thickness, y1,
+                                floor_z + LETHAL_GUARD_HEIGHT)
+            elif side == "east":
+                wall = SolidBox(x0 - thickness, y0, floor_z,
+                                x0, y1,
+                                floor_z + LETHAL_GUARD_HEIGHT)
+            elif side == "south":
+                wall = SolidBox(x0, y0, floor_z,
+                                x1, y0 + thickness,
+                                floor_z + LETHAL_GUARD_HEIGHT)
+            else:
+                wall = SolidBox(x0, y0 - thickness, floor_z,
+                                x1, y0,
+                                floor_z + LETHAL_GUARD_HEIGHT)
+            if not self._lethal_edge_has_standing_witness(side, candidate["segment"]):
+                continue
+            planned.append((candidate, wall))
 
         # Do not let an earlier planned guard influence a later source-geometry
         # witness.  All claims are challenged against the same pre-guard solid
@@ -3947,6 +4406,8 @@ class MapGenerator:
             "kill_planes": 1 if self.rooms else 0,
             "lethal_edges": len(self.lethal_edges),
             "lethal_guard_walls": len(self.lethal_guard_walls),
+            "atlas_hurt_boundary_columns": self.atlas_hurt_boundary_columns,
+            "atlas_l0_compactions": self.atlas_l0_compaction_count,
             "terrace_levels": len(levels),
             "max_elevation": max(levels) if levels else 0,
             "stairs": self.stair_count,
