@@ -103,6 +103,50 @@ activate a fresh disjoint 71454 declaration. Gate publication, deployment,
 trainer, and TensorBoard remain forbidden until that successor and every
 B2-B6 cutover gate pass.
 
+The qualified implementation freezes the sole 71454 activation-successor
+policy in the qualification report: its cohort, direct immutable declaration
+path, and exact twelve-path delta. `ACTIVE_FINAL_AUTHORITY` supplies the later
+declaration digest only; it cannot self-authorize an extra activation edit.
+
+The 71454 pre-declaration lifecycle is now a single hash-reviewed driver,
+`tools/validate_b2_final_cohort_plan.py`. Its immutable plan covers, in order,
+Dyn Phase A, source generation, compile and both membership checks, static and
+compiled-CM checks, materialization, claims, generated Atlas/promotion, the
+atomic q2dm1..q2dm8 stock campaign, Dyn Phase B binding and the sole Dyn
+execution, the atomic test suite, and gate assembly. A dry run must be reviewed
+first; execute mode requires that exact plan SHA-256 plus
+`I_ACKNOWLEDGE_MUTATING_FINAL_COHORT_EXECUTION`. Every declaration-bearing
+stage receives the absolute direct
+`docs/multires/B2-GENERATED-COHORT-<N>-DECLARATION.json` path. The current alias,
+symlinks, byte-identical copies, changed bytes, and filename/cohort mismatches
+are rejected. Do not run or retry individual final-lane stages manually. This
+tooling does not create or activate 71454 and does not weaken the fresh 28/28
+qualification and separate declaration commit requirements above.
+
+The reviewed final plan is executable only on `DESKTOP-RTX2080` WSL. It requires
+an explicit, pre-provisioned `--authorization-state-root` outside both the
+repository and final workspace, owned by the executing UID with mode `0700`.
+The plan pins that directory's device/inode, the effective UID, hostname, exact
+WSL2 kernel release, and canonical `/etc/machine-id` digest; each validation
+and the write-ahead source journal recheck all of them. Marker leaves are
+opened only through the validated root directory descriptor, bind the exact
+qualified implementation plus declaration/source-output identities, and are
+created exclusively before source bytes exist. A legacy, malformed, partial,
+or pre-existing marker is terminal. The final assembler additionally requires
+the driver's canonical preassembly lifecycle evidence, including the reviewed
+plan digest, source marker, ordered stage executions, and exact assembly argv.
+Before source, the driver rejects a symlinked repository/tool identity and
+proves its planned assembly hash equals the child assembler's actual argv hash;
+manual report collection cannot publish a gate. Consequently a copied reviewed
+plan cannot run on another LAN host or account. This is operational
+attestation, not a cryptographic defense against a hostile same-UID local
+writer: keep the state root, workspace, and repository private and free of
+concurrent writers. Before the separate activation commit, the clean qualified
+implementation must also publish a green external
+`b2-test-report.json`; final planning and assembly replay the 28/28
+qualification and require that preactivation report to bind the qualified
+implementation, never the declaration-bearing successor.
+
 Disposable qualification `b2q26_825984f_71811000` and seed range beginning
 at `71811000` are also permanently forensic-only and must not be resumed or
 reused. Its plan bound zstandard's inactive `_cffi` extension even though the

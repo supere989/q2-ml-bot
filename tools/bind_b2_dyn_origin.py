@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import sys
@@ -40,6 +41,9 @@ SCHEMA = "q2-b2-dyn-origin-binding-v1"
 ARTIFACT_PREFLIGHT_SCHEMA = "q2-b2-dyn-artifact-preflight-v1"
 ARTIFACT_PREFLIGHT_STDOUT = canonical_bytes(
     {"passed": True, "schema": ARTIFACT_PREFLIGHT_SCHEMA}
+)
+VERSIONED_DECLARATION_NAME = re.compile(
+    r"^B2-GENERATED-COHORT-([0-9]+)-DECLARATION\.json$"
 )
 
 
@@ -127,6 +131,43 @@ def _load_atlas_compact(path: Path) -> dict[str, Any]:
     return value
 
 
+def require_versioned_declaration_path(
+    repo_root: Path,
+    declaration_path: Path,
+    declaration: dict[str, Any],
+) -> None:
+    """Require the exact immutable declaration leaf, never the current alias."""
+
+    if not declaration_path.is_absolute():
+        raise DynOriginBindingError("Dyn declaration path must be absolute")
+    if declaration_path.is_symlink() or not declaration_path.is_file():
+        raise DynOriginBindingError("Dyn declaration must be a regular file")
+    try:
+        resolved = declaration_path.resolve(strict=True)
+        expected_parent = (repo_root / "docs/multires").resolve(strict=True)
+    except OSError as exc:
+        raise DynOriginBindingError(
+            f"Dyn declaration path cannot be resolved: {exc}"
+        ) from exc
+    if resolved != declaration_path or resolved.parent != expected_parent:
+        raise DynOriginBindingError(
+            "Dyn declaration is not the direct immutable repository path"
+        )
+    matched = VERSIONED_DECLARATION_NAME.fullmatch(declaration_path.name)
+    if matched is None:
+        raise DynOriginBindingError(
+            "Dyn declaration path is not a versioned immutable declaration"
+        )
+    cohort_id = declaration.get("cohort_id")
+    if (
+        not isinstance(cohort_id, str)
+        or not cohort_id.endswith(f"_{matched.group(1)}")
+    ):
+        raise DynOriginBindingError(
+            "Dyn declaration path number differs from cohort identity"
+        )
+
+
 def _mapping(value: object, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise DynOriginBindingError(f"{label} must be an object")
@@ -160,6 +201,7 @@ def _insert_origin(argv_without_origin: list[str], token: str) -> list[str]:
 def bind_origin(
     shape_path: Path,
     promotion_path: Path,
+    declaration_path: Path,
     report_path: Path,
 ) -> dict[str, object]:
     if not shape_path.is_absolute():
@@ -205,10 +247,8 @@ def bind_origin(
     if executable_record != shape["executable"]:
         raise DynOriginBindingError("Dyn executable bytes differ from Phase A")
 
-    declaration_path = (
-        repo_root / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
     declaration = _load_canonical(declaration_path, "active cohort declaration")
+    require_versioned_declaration_path(repo_root, declaration_path, declaration)
     declaration_maps = declaration.get("maps")
     if (
         not isinstance(declaration.get("cohort_id"), str)
@@ -442,6 +482,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shape-preflight-report", type=Path, required=True)
     parser.add_argument("--generated-promotion-report", type=Path, required=True)
+    parser.add_argument("--declaration", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     return parser
 
@@ -452,6 +493,7 @@ def main(argv: list[str] | None = None) -> int:
         report = bind_origin(
             args.shape_preflight_report,
             args.generated_promotion_report,
+            args.declaration,
             args.report,
         )
         payload = canonical_bytes(report)

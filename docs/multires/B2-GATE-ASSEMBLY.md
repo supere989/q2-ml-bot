@@ -712,6 +712,80 @@ may add an immutable, disjoint 71454 declaration, update the schema, and set
 active authority. No green gate, declaration, cohort run, deployment, or
 training authority exists yet.
 
+The fresh qualification report itself freezes the only permitted activation
+successor in `q2-b2-final-activation-successor-policy-v1`:
+`b2g26_final_71454`, the direct immutable
+`docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json` path, and its exact
+twelve changed paths. The later `ACTIVE_FINAL_AUTHORITY` may identify the
+declaration digest, but cannot add paths to that replayed policy.
+
+The successor's operational lane is implemented as one complete preauthorized
+lifecycle in `tools/validate_b2_final_cohort_plan.py`; it is not a collection of
+operator-run stage commands. The canonical plan orders Dyn's no-write Phase A
+before the source authorization boundary, then source, compile, compiled
+membership/static/CM, materialization and membership, claims, generated Atlas
+and promotion, one atomic q2dm1..q2dm8 stock campaign, Dyn origin binding and
+the sole Dyn execution, the atomic final test publisher, and assembly. The
+driver pins the clean repository and every tool/input digest, validates every
+stage CLI before source, and refuses execute mode unless its rebuilt plan hash
+equals the SHA-256 reviewed from dry-run evidence and the explicit mutating
+acknowledgement is present. Source authorization is journaled before source
+bytes can be produced; any later failure is terminal and cannot be resumed by
+running a stage separately. All declaration consumers receive the same
+absolute immutable versioned declaration path. The current alias, symlinks,
+copies, post-plan mutations, retired identities, and filename/cohort mismatch
+are rejected. This lifecycle tooling creates no 71454 authority by itself.
+Before the source boundary, the driver also requires a direct canonical
+repository/tool path and proves its planned assembly command hash is exactly
+the hash the child assembler will reconstruct from its actual argv.
+
+The final driver additionally requires an explicit
+`--authorization-state-root` on `DESKTOP-RTX2080` WSL. The root must already
+exist outside the repository and final workspace, be owned by the executing
+UID, and have mode `0700`. Its device/inode, that UID, the fixed hostname, the
+WSL2 kernel release, and strict `/etc/machine-id` digest become part of the
+reviewed plan and are revalidated before every stage and source-marker
+operation. This closes the
+LAN/account replay hole of a home-relative marker: an exact reviewed plan
+copied elsewhere fails before Dyn Phase A. The exclusive declaration marker is
+`q2-b2-source-authorization-consumed-v4` canonical evidence containing the same execution binding, plan
+digest, implementation identity, immutable declaration, and exact
+primary/cold/source-freeze outputs; any legacy, unreadable, malformed, or
+pre-existing marker remains a terminal tombstone.
+
+Immediately after the atomic post-source test suite succeeds and before the
+assembly process starts, the driver writes one canonical
+`q2-b2-final-lifecycle-preassembly-v1` record inside the final workspace. It
+contains the ordered zero-exit prefix from Dyn Phase A through the test suite,
+the source-marker file record, execution binding, implementation and plan
+digests, and the exact assembly-command digest. `assemble_b2_gate.py` requires
+that file through `--final-lifecycle-evidence`; it reopens the marker through
+its bound descriptor and verifies it authorizes the supplied immutable
+declaration and exact source, cold, and source-freeze paths. A hand-collected
+set of reports, a missing lifecycle record, a reordered/failed stage, or a
+rebound assembly argv cannot publish a gate. This is an operational
+same-principal attestation, not a cryptographic guarantee against a hostile
+actor who controls the same UID.
+
+`tools/run_b2_stock_campaign.py` is the stock producer used by that plan. It
+builds and validates exactly q2dm1 through q2dm8 in a private root, checks exact
+BSP/analysis/validation membership and repository stability, then publishes the
+three-directory stock root with one no-replace rename and a canonical reserved
+report. It leaves no partially published stock root on a builder or validation
+failure.
+
+Before the activation commit adds its immutable final declaration, the exact
+clean implementation that will be qualified must run the full atomic suite
+through `tools/run_b2_test_suite.py` and retain its external
+`b2-test-report.json` plus all eight raw logs. Final assembly requires that
+report separately as `--preactivation-test-report`. It replays the 28/28
+qualification, requires the preactivation report to bind that *qualified*
+implementation exactly, and then proves the active declaration-bearing commit
+is only the authorized qualification successor. The post-source
+`--test-report` remains a separate final-implementation report; it cannot
+substitute for the preactivation report. Both evidence roots must remain
+outside the repository and the final workspace.
+
 Backend-correct qualification `b2q26_ede2bff_71812000`, plan SHA-256
 `57ee59f442d2ccb0b545b1f18988ab8aba57bf7be762c73f16cb6dc24ddddcdf`,
 completed all 28 source, compile, compiled-CM, materialization, and claims
@@ -1134,8 +1208,10 @@ python tools/assemble_b2_gate.py \
   --dyn-argv-preflight-report "$DYN_ARGV_PREFLIGHT_REPORT" \
   --dyn-origin-binding-report "$DYN_ORIGIN_BINDING_REPORT" \
   --dyn-evidence-report "$DYN_EVIDENCE/b2-dyn-evidence.json" \
+  --preactivation-test-report "$PREACTIVATION_TEST_EVIDENCE/b2-test-report.json" \
   --test-report "$TEST_EVIDENCE/b2-test-report.json" \
   --qualification-report "$QUALIFICATION_REPORT" \
+  --final-lifecycle-evidence "$FINAL_LIFECYCLE_EVIDENCE" \
   --output "$OUT"
 ```
 

@@ -30,18 +30,21 @@ from tools.assemble_b3_gate import (
     validate_b3_gate,
 )
 from tools.assemble_b2_gate import ActiveFinalAuthority, RETIRED_COHORT_71446
+from tools.assemble_b2_qualification import activation_successor_policy
 from tools.run_b3_design_prior_campaign import canonical_bytes
 from tests.test_b3_design_prior_campaign import build_green_campaign
 
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = {"repository_commit": "1" * 40, "repository_tree": "2" * 40, "git_clean": True}
-AUTHORITY_PATH = "docs/multires/B2-GENERATED-COHORT-99999-DECLARATION.json"
+AUTHORITY_PATH = activation_successor_policy()["immutable_declaration_path"]
 AUTHORITY = ActiveFinalAuthority(
-    cohort_id="b2g99_final_99999",
+    cohort_id=activation_successor_policy()["cohort_id"],
     declaration_sha256="3" * 64,
     immutable_declaration_path=AUTHORITY_PATH,
-    qualification_successor_paths=frozenset({AUTHORITY_PATH}),
+    qualification_successor_paths=frozenset(
+        activation_successor_policy()["allowed_changed_paths"]
+    ),
 )
 
 
@@ -147,6 +150,59 @@ def _bundle(closure: dict) -> dict:
     }
 
 
+def _b2_final_lifecycle(authority: ActiveFinalAuthority) -> dict:
+    """Minimal but exact-shape B2 lifecycle summary for B3 predecessor tests."""
+
+    return {
+        "evidence": {"bytes": 1, "sha256": "7" * 64},
+        "schema": b2_gate.FINAL_LIFECYCLE_EVIDENCE_SCHEMA,
+        "status": "ready-for-assembly",
+        "cohort_id": authority.cohort_id,
+        "declaration": {
+            "path": str((ROOT / authority.immutable_declaration_path).resolve()),
+            "sha256": authority.declaration_sha256,
+        },
+        "plan_sha256": "8" * 64,
+        "implementation": {},
+        "execution_binding": {
+            "schema": "q2-b2-final-execution-binding-v2",
+            "host": {
+                "hostname": "DESKTOP-RTX2080",
+                "kernel_release": "5.15.153.1-microsoft-standard-WSL2",
+                "machine_identity": {
+                    "path": "/etc/machine-id",
+                    "sha256": "9" * 64,
+                },
+                "euid": 1000,
+            },
+            "state_root": {
+                "path": "/tmp/q2-b2-final-journal",
+                "owner_uid": 1000,
+                "mode": "0700",
+                "device": 1,
+                "inode": 1,
+            },
+        },
+        "source_authorization_marker": {
+            "path": "/tmp/q2-b2-final-journal/marker.json",
+            "bytes": 1,
+            "sha256": "a" * 64,
+        },
+        "completed_stages": list(b2_gate.FINAL_LIFECYCLE_PREASSEMBLY_STAGES),
+        "stage_executions": [
+            {
+                "stage": stage,
+                "command_sha256": "b" * 64,
+                "returncode": 0,
+                "stdout": {"bytes": 0, "sha256": "c" * 64},
+                "stderr": {"bytes": 0, "sha256": "d" * 64},
+            }
+            for stage in b2_gate.FINAL_LIFECYCLE_PREASSEMBLY_STAGES
+        ],
+        "assembly_command_sha256": "e" * 64,
+    }
+
+
 def _b2(authority: ActiveFinalAuthority = AUTHORITY) -> dict:
     design = ROOT / "docs/MULTIRES-LATTICE-MAP-ATLAS-DESIGN-2026-07-14.md"
     plan = ROOT / "docs/MULTIRES-LATTICE-MAP-ATLAS-PLAN-2026-07-14.md"
@@ -171,7 +227,20 @@ def _b2(authority: ActiveFinalAuthority = AUTHORITY) -> dict:
             "non_admissible": True,
             "retryable": True,
             "final_cohort_authorized": False,
+            "end_to_end_pass_count": b2_gate.FINAL_QUALIFICATION_END_TO_END_PASSES,
+            "activation_successor_policy": activation_successor_policy(),
+            "implementation_successor": {
+                "changed_paths": sorted(
+                    activation_successor_policy()["allowed_changed_paths"]
+                ),
+            },
+            "preactivation_tests": {
+                "report": {"bytes": 1, "sha256": "0" * 64},
+                "run_count": 8,
+                "passed_count": 8,
+            },
         },
+        "final_lifecycle": _b2_final_lifecycle(authority),
         "generated_cohort": {
             "cohort_id": authority.cohort_id,
             "declaration_sha256": authority.declaration_sha256,
@@ -319,6 +388,20 @@ def test_gate_rejects_b2_cohort_and_declaration_authority_mismatch(tmp_path: Pat
     wrong_declaration["generated_cohort"]["declaration_sha256"] = "5" * 64
     _write(paths.b2_gate, wrong_declaration)
     with pytest.raises(B3GateError, match="declaration differs from active authority"):
+        _build_b3_gate_report(paths, repository=REPOSITORY)
+
+
+def test_gate_rejects_b2_successor_paths_rebound_from_the_frozen_policy(
+    tmp_path: Path,
+) -> None:
+    paths, _recovery_doc, _bundle_doc = _fixture(tmp_path)
+    rebound = copy.deepcopy(_b2())
+    rebound["toolchain_qualification"]["implementation_successor"][
+        "changed_paths"
+    ].append("tools/unauthorized_activation_tool.py")
+    _write(paths.b2_gate, rebound)
+
+    with pytest.raises(B3GateError, match="successor paths differ"):
         _build_b3_gate_report(paths, repository=REPOSITORY)
 
 

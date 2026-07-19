@@ -43,7 +43,8 @@ remains forbidden. Report publication is outside the repository and cannot
 dirty the snapshot it attests.
 
 Only after generated promotion, Phase B runs `tools/bind_b2_dyn_origin.py`.
-It accepts no operator origin. It reads the commit-bound current declaration,
+It accepts no operator origin. It reads the explicitly supplied, commit-bound
+immutable versioned declaration (never the current alias),
 Phase-A report, canonical Atlas and analysis manifests, raw Atlas, BSP, and
 generated-promotion report; requires the declaration/cohort/map IDs,
 their map IDs, digests, analyzer authority, and origins to agree; derives the
@@ -81,11 +82,13 @@ python tools/preflight_b2_dyn_invocation.py \
 python tools/bind_b2_dyn_origin.py \
   --shape-preflight-report "$NEW_DYN_ARGV_SHAPE_PREFLIGHT_REPORT" \
   --generated-promotion-report "$GENERATED_PROMOTION_REPORT" \
+  --declaration "$IMMUTABLE_VERSIONED_DECLARATION" \
   --report "$NEW_DYN_ORIGIN_BINDING_REPORT"
 
 python tools/run_preflighted_b2_dyn.py \
   --shape-preflight-report "$NEW_DYN_ARGV_SHAPE_PREFLIGHT_REPORT" \
-  --origin-binding-report "$NEW_DYN_ORIGIN_BINDING_REPORT"
+  --origin-binding-report "$NEW_DYN_ORIGIN_BINDING_REPORT" \
+  --declaration "$IMMUTABLE_VERSIONED_DECLARATION"
 ```
 
 The command atomically publishes exactly these files. Publication uses Linux

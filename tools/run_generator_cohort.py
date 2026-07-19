@@ -35,6 +35,10 @@ from tools.source_route_contract import (  # noqa: E402
     SourceRouteContractError,
     load_source_route_contract,
 )
+from tools.final_execution_binding import (  # noqa: E402
+    FinalExecutionBindingError,
+    validate_final_source_authorization,
+)
 
 
 DECLARATION_SCHEMA = "q2-b2-generated-cohort-declaration-v1"
@@ -348,6 +352,110 @@ def repository_binding(repo_root: Path) -> dict[str, Any]:
     }
 
 
+def _active_final_authority() -> object | None:
+    """Load the final authority lazily to avoid the gate/source import cycle."""
+
+    try:
+        from tools import assemble_b2_gate as final_gate
+
+        if final_gate.ACTIVE_FINAL_AUTHORITY is None:
+            return None
+        return final_gate._require_active_final_authority()
+    except Exception as error:
+        raise GeneratorCohortError(
+            f"cannot establish active final source authority: {error}"
+        ) from error
+
+
+def _absolute_direct_path(path: Path | str, label: str) -> Path:
+    """Normalize a path and reject aliases/symlinked ancestry for final use."""
+
+    candidate = Path(path).expanduser()
+    absolute = Path(os.path.abspath(candidate))
+    try:
+        resolved = absolute.resolve(strict=True)
+    except OSError as error:
+        raise GeneratorCohortError(f"{label} cannot be resolved: {absolute}") from error
+    if absolute.is_symlink() or resolved != absolute:
+        raise GeneratorCohortError(
+            f"{label} must be the direct immutable path, not a symlink or alias"
+        )
+    return absolute
+
+
+def _require_final_source_authorization(
+    *,
+    declaration_path: Path,
+    declaration: Mapping[str, Any],
+    declaration_sha256: str,
+    output_dir: Path,
+    cold_dir: Path,
+    report_path: Path,
+    final_source_authorization: Path | None,
+    repo_root: Path,
+    implementation: Mapping[str, Any],
+) -> None:
+    """Require the lifecycle capability only for the explicitly active cohort.
+
+    Disposable/qualification declarations remain reusable.  Any path, digest,
+    or cohort that overlaps the active authority must instead be the exact
+    immutable declaration and present the one-shot host-bound marker created
+    by the final lifecycle before this generic producer writes a source byte.
+    """
+
+    authority = _active_final_authority()
+    if authority is None:
+        return
+    try:
+        authority_path_value = getattr(authority, "immutable_declaration_path")
+        authority_cohort = getattr(authority, "cohort_id")
+        authority_digest = getattr(authority, "declaration_sha256")
+        authority_path = Path(authority_path_value).expanduser()
+    except (AttributeError, TypeError) as error:
+        raise GeneratorCohortError("active final source authority is malformed") from error
+    if not authority_path.is_absolute():
+        authority_path = ROOT / authority_path
+    authority_path = _absolute_direct_path(
+        authority_path, "active final declaration"
+    )
+    supplied_path = _absolute_direct_path(declaration_path, "source declaration")
+    identity_related = (
+        supplied_path == authority_path
+        or declaration.get("cohort_id") == authority_cohort
+        or declaration_sha256 == authority_digest
+    )
+    if not identity_related:
+        return
+    if (
+        supplied_path != authority_path
+        or declaration.get("cohort_id") != authority_cohort
+        or declaration_sha256 != authority_digest
+    ):
+        raise GeneratorCohortError(
+            "active final declaration must use the exact immutable path, cohort, and bytes"
+        )
+    if final_source_authorization is None:
+        raise GeneratorCohortError(
+            "active final source generation requires --final-source-authorization"
+        )
+    try:
+        validate_final_source_authorization(
+            final_source_authorization,
+            declaration_path=supplied_path,
+            declaration_sha256=declaration_sha256,
+            cohort_id=declaration["cohort_id"],
+            source_output=output_dir,
+            source_cold=cold_dir,
+            source_report=report_path,
+            repo_root=repo_root,
+            implementation=implementation,
+        )
+    except FinalExecutionBindingError as error:
+        raise GeneratorCohortError(
+            f"active final source authorization rejected: {error}"
+        ) from error
+
+
 def _require_empty_directory(path: Path, label: str) -> None:
     if path.exists():
         if not path.is_dir():
@@ -642,6 +750,7 @@ def generate_source_freeze(
     _generator: Callable[..., None] = _default_generator,
     _static_validator: Callable[[Path], Mapping[str, Any]] = _default_static_validator,
     _binding: Mapping[str, Any] | None = None,
+    final_source_authorization: Path | None = None,
 ) -> dict[str, Any]:
     declaration, declaration_sha256 = load_declaration(declaration_path)
     # Imported here to avoid a module-import cycle: the retirement authority
@@ -651,14 +760,6 @@ def generate_source_freeze(
     require_unretired_declaration(
         declaration_path, declaration, declaration_sha256
     )
-    if output_dir.resolve() == cold_dir.resolve():
-        raise GeneratorCohortError("primary and cold directories must differ")
-    if _path_is_within(report_path, output_dir) or _path_is_within(
-        report_path, cold_dir
-    ):
-        raise GeneratorCohortError("source-freeze report must be outside stage directories")
-    if report_path.exists():
-        raise GeneratorCohortError("source-freeze report already exists")
     binding = dict(_binding) if _binding is not None else repository_binding(repo_root)
     expected_binding_keys = {
         "repository_commit",
@@ -684,7 +785,25 @@ def generate_source_freeze(
         "analyzer authority file count",
         minimum=1,
     )
-
+    _require_final_source_authorization(
+        declaration_path=declaration_path,
+        declaration=declaration,
+        declaration_sha256=declaration_sha256,
+        output_dir=output_dir,
+        cold_dir=cold_dir,
+        report_path=report_path,
+        final_source_authorization=final_source_authorization,
+        repo_root=repo_root,
+        implementation=binding,
+    )
+    if output_dir.resolve() == cold_dir.resolve():
+        raise GeneratorCohortError("primary and cold directories must differ")
+    if _path_is_within(report_path, output_dir) or _path_is_within(
+        report_path, cold_dir
+    ):
+        raise GeneratorCohortError("source-freeze report must be outside stage directories")
+    if report_path.exists():
+        raise GeneratorCohortError("source-freeze report already exists")
     # The clean binding is captured before creating any artifact directory.
     _require_empty_directory(output_dir, "primary source directory")
     _require_empty_directory(cold_dir, "cold source directory")
@@ -812,6 +931,7 @@ def _main_generate(args: argparse.Namespace) -> int:
         args.output_dir,
         args.cold_dir,
         args.report,
+        final_source_authorization=args.final_source_authorization,
     )
     sys.stdout.buffer.write(canonical_bytes({
         "schema": SOURCE_FREEZE_SCHEMA,
@@ -838,7 +958,7 @@ def _main_verify_stage(args: argparse.Namespace) -> int:
     return 0 if report["passed"] else 1
 
 
-def main() -> int:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     default_declaration = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
@@ -850,6 +970,15 @@ def main() -> int:
     generate.add_argument("--output-dir", type=Path, required=True)
     generate.add_argument("--cold-dir", type=Path, required=True)
     generate.add_argument("--report", type=Path, required=True)
+    generate.add_argument(
+        "--final-source-authorization",
+        type=Path,
+        default=None,
+        help=(
+            "required only for the explicitly active final declaration; "
+            "must be the host-bound lifecycle source marker"
+        ),
+    )
     generate.set_defaults(handler=_main_generate)
 
     verify = subparsers.add_parser(
@@ -861,7 +990,11 @@ def main() -> int:
     verify.add_argument("--output", type=Path)
     verify.set_defaults(handler=_main_verify_stage)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
     try:
         return args.handler(args)
     except GeneratorCohortError as exc:

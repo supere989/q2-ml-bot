@@ -340,7 +340,23 @@ def test_assembles_20_of_28_non_admissible_qualification(
         "qualification_artifact_reuse_as_final_evidence": False,
         "passing_subset_admissible": False,
     }
+    assert report["activation_successor_policy"] == gate.activation_successor_policy()
     assert gate.validate_qualification(report) == report
+
+
+def test_qualification_rejects_a_mutable_activation_successor_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = gate.assemble_qualification(_inputs(tmp_path, monkeypatch))
+    report["activation_successor_policy"]["allowed_changed_paths"].append(
+        "tools/unauthorized_activation_tool.py"
+    )
+
+    with pytest.raises(
+        gate.B2QualificationError,
+        match="activation-successor policy",
+    ):
+        gate.validate_qualification(report)
 
 
 def test_final_gate_rejects_generic_green_27_of_28_qualification(

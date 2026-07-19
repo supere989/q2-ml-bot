@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -566,3 +567,158 @@ def test_declaration_mutation_cannot_enable_salvage() -> None:
 
     with pytest.raises(cohort.GeneratorCohortError, match="salvage_allowed"):
         cohort.validate_declaration(declaration)
+
+
+def _active_authority_for(path: Path) -> SimpleNamespace:
+    declaration, digest = cohort.load_declaration(path)
+    return SimpleNamespace(
+        cohort_id=declaration["cohort_id"],
+        declaration_sha256=digest,
+        immutable_declaration_path=str(path),
+    )
+
+
+def test_active_final_source_requires_marker_before_creating_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cohort, "_active_final_authority", lambda: _active_authority_for(DECLARATION)
+    )
+    primary = tmp_path / "primary"
+    cold = tmp_path / "cold"
+    report = tmp_path / "reports/source-freeze.json"
+
+    with pytest.raises(
+        cohort.GeneratorCohortError,
+        match="requires --final-source-authorization",
+    ):
+        cohort.generate_source_freeze(
+            DECLARATION,
+            primary,
+            cold,
+            report,
+            _generator=fake_generator_factory([]),
+            _static_validator=static_pass,
+            _binding=binding(),
+        )
+    assert not primary.exists()
+    assert not cold.exists()
+    assert not report.exists()
+
+
+def test_active_final_source_rejects_byte_identical_copy_before_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cohort, "_active_final_authority", lambda: _active_authority_for(DECLARATION)
+    )
+    copied = tmp_path / "copied-declaration.json"
+    copied.write_bytes(DECLARATION.read_bytes())
+
+    with pytest.raises(
+        cohort.GeneratorCohortError,
+        match="exact immutable path, cohort, and bytes",
+    ):
+        cohort.generate_source_freeze(
+            copied,
+            tmp_path / "primary",
+            tmp_path / "cold",
+            tmp_path / "source-freeze.json",
+            final_source_authorization=tmp_path / "marker.json",
+            _generator=fake_generator_factory([]),
+            _static_validator=static_pass,
+            _binding=binding(),
+        )
+    assert not (tmp_path / "primary").exists()
+    assert not (tmp_path / "cold").exists()
+
+
+def test_active_final_source_consumes_exact_marker_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cohort, "_active_final_authority", lambda: _active_authority_for(DECLARATION)
+    )
+    calls: list[dict[str, object]] = []
+    marker = tmp_path / "authorization-marker.json"
+    primary = tmp_path / "primary"
+    cold = tmp_path / "cold"
+    report_path = tmp_path / "reports/source-freeze.json"
+    observed: dict[str, object] = {}
+
+    def validate(marker_path: Path, **kwargs: object) -> dict[str, object]:
+        observed["marker"] = marker_path
+        observed.update(kwargs)
+        return {"schema": "fixture"}
+
+    monkeypatch.setattr(cohort, "validate_final_source_authorization", validate)
+    report = cohort.generate_source_freeze(
+        DECLARATION,
+        primary,
+        cold,
+        report_path,
+        final_source_authorization=marker,
+        _generator=fake_generator_factory(calls),
+        _static_validator=static_pass,
+        _binding=binding(),
+    )
+
+    declaration, digest = cohort.load_declaration(DECLARATION)
+    assert report["passed"] is True
+    assert len(calls) == 56
+    assert observed == {
+        "marker": marker,
+        "declaration_path": DECLARATION,
+        "declaration_sha256": digest,
+        "cohort_id": declaration["cohort_id"],
+        "source_output": primary,
+        "source_cold": cold,
+        "source_report": report_path,
+        "repo_root": ROOT,
+        "implementation": binding(),
+    }
+
+
+def test_active_final_source_rejects_marker_bound_to_other_implementation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cohort, "_active_final_authority", lambda: _active_authority_for(DECLARATION)
+    )
+
+    def reject_implementation(_marker_path: Path, **_kwargs: object) -> dict[str, object]:
+        raise cohort.FinalExecutionBindingError(
+            "source authorization marker implementation binding differs"
+        )
+
+    monkeypatch.setattr(
+        cohort, "validate_final_source_authorization", reject_implementation
+    )
+    primary = tmp_path / "primary"
+    cold = tmp_path / "cold"
+    with pytest.raises(
+        cohort.GeneratorCohortError, match="implementation binding differs"
+    ):
+        cohort.generate_source_freeze(
+            DECLARATION,
+            primary,
+            cold,
+            tmp_path / "reports/source-freeze.json",
+            final_source_authorization=tmp_path / "marker.json",
+            _generator=fake_generator_factory([]),
+            _static_validator=static_pass,
+            _binding=binding(),
+        )
+    assert not primary.exists()
+    assert not cold.exists()
+
+
+def test_generator_cli_exposes_final_source_authorization_option() -> None:
+    parsed = cohort._parser().parse_args([
+        "generate",
+        "--output-dir", "/tmp/primary",
+        "--cold-dir", "/tmp/cold",
+        "--report", "/tmp/report.json",
+        "--final-source-authorization", "/tmp/marker.json",
+    ])
+    assert parsed.final_source_authorization == Path("/tmp/marker.json")

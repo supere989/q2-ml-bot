@@ -15,6 +15,7 @@ from tools.bind_b2_dyn_origin import (
     DynOriginBindingError,
     _load_atlas_compact,
     bind_origin,
+    main as bind_main,
 )
 from tools.preflight_b2_dyn_invocation import (
     DynInvocationPreflightError,
@@ -26,6 +27,7 @@ from tools.preflight_b2_dyn_invocation import (
 from tools.run_preflighted_b2_dyn import (
     execute,
     load_origin_binding,
+    main as dyn_main,
 )
 from tools.run_generator_cohort import canonical_bytes
 from tools.retired_cohort_registry import RetiredCohortRegistryError
@@ -36,19 +38,21 @@ MAP_ID = "map"
 ORIGIN = [-512, 0, -512]
 
 
+def _immutable_declaration(repo: Path) -> Path:
+    return repo / "docs/multires/B2-GENERATED-COHORT-99000-DECLARATION.json"
+
+
 def _repo(tmp_path: Path) -> tuple[Path, str, dict[str, object]]:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", repo], check=True)
     (repo / "tracked").write_text("authority\n")
-    declaration_path = (
-        repo / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
+    declaration_path = _immutable_declaration(repo)
     declaration_path.parent.mkdir(parents=True)
     declaration_path.write_bytes(
         canonical_bytes(
             {
-                "cohort_id": "b2g26_final_test",
+                "cohort_id": "b2g26_final_99000",
                 "maps": [
                     {"map": MAP_ID if ordinal == 0 else f"map_{ordinal:02d}"}
                     for ordinal in range(28)
@@ -56,6 +60,8 @@ def _repo(tmp_path: Path) -> tuple[Path, str, dict[str, object]]:
             }
         )
     )
+    alias = repo / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+    alias.write_bytes(declaration_path.read_bytes())
     subprocess.run(["git", "-C", repo, "add", "."], check=True)
     subprocess.run(
         [
@@ -205,9 +211,7 @@ def _write_artifacts(args: argparse.Namespace) -> Path:
     analysis_sha = hashlib.sha256(analysis_path.read_bytes()).hexdigest()
     promotion_path = args.output.parent / "reports" / "generated-promotion.json"
     promotion_path.parent.mkdir(parents=True)
-    declaration_path = (
-        args.repo_root / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
+    declaration_path = _immutable_declaration(args.repo_root)
     promotion_maps = [
         {
             "atlas_sha256": atlas_sha if ordinal == 0 else f"{ordinal + 1:064x}",
@@ -225,7 +229,7 @@ def _write_artifacts(args: argparse.Namespace) -> Path:
         for ordinal in range(28)
     ]
     promotion = {
-        "cohort_id": "b2g26_final_test",
+        "cohort_id": "b2g26_final_99000",
         "declaration_sha256": hashlib.sha256(
             declaration_path.read_bytes()
         ).hexdigest(),
@@ -254,6 +258,27 @@ def _stub_binding(
         monkeypatch.setattr(f"{module}.repository_binding", lambda _: binding)
 
 
+def _bind(
+    args: argparse.Namespace,
+    promotion: Path,
+    report: Path,
+) -> dict[str, object]:
+    return bind_origin(
+        args.report,
+        promotion,
+        _immutable_declaration(args.repo_root),
+        report,
+    )
+
+
+def _execute(args: argparse.Namespace, shape: Path, binding: Path) -> Path:
+    return execute(
+        load_shape_preflight(shape),
+        load_origin_binding(binding),
+        _immutable_declaration(args.repo_root),
+    )
+
+
 def _phase_a_and_b(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -265,7 +290,7 @@ def _phase_a_and_b(
     args.report.write_bytes(canonical_bytes(shape))
     promotion = _write_artifacts(args)
     binding_path = tmp_path / "dyn-origin-binding.json"
-    binding = bind_origin(args.report, promotion, binding_path)
+    binding = _bind(args, promotion, binding_path)
     binding_path.write_bytes(canonical_bytes(binding))
     return args, args.report, binding_path, shape, binding
 
@@ -339,7 +364,7 @@ def test_phase_b_accepts_sorted_compact_form_then_rejects_digest_drift(
         DynOriginBindingError,
         match="promoted artifact digest authority differs",
     ):
-        bind_origin(args.report, promotion, tmp_path / "binding.json")
+        _bind(args, promotion, tmp_path / "binding.json")
 
 
 def test_phase_b_rejects_coordinated_manifest_rewrite_at_promotion_anchor(
@@ -367,7 +392,7 @@ def test_phase_b_rejects_coordinated_manifest_rewrite_at_promotion_anchor(
         DynOriginBindingError,
         match="representative Dyn artifacts are not admitted by promotion",
     ):
-        bind_origin(args.report, promotion, tmp_path / "binding.json")
+        _bind(args, promotion, tmp_path / "binding.json")
 
 
 @pytest.mark.parametrize(
@@ -414,7 +439,7 @@ def test_phase_b_rejects_noncanonical_atlas_manifest_bytes(
     args.manifest.write_bytes(payload)
 
     with pytest.raises(DynOriginBindingError, match=message):
-        bind_origin(args.report, promotion, tmp_path / "binding.json")
+        _bind(args, promotion, tmp_path / "binding.json")
 
 
 def test_dual_authority_runner_executes_exact_bound_argv(
@@ -425,13 +450,116 @@ def test_dual_authority_runner_executes_exact_bound_argv(
         tmp_path, monkeypatch
     )
 
-    published = execute(
-        load_shape_preflight(shape_path),
-        load_origin_binding(binding_path),
-    )
+    published = _execute(args, shape_path, binding_path)
 
     assert published == args.output / "b2-dyn-evidence.json"
     assert published.read_bytes() == b"{}\n"
+
+
+def test_versioned_named_declaration_cli_binds_and_executes_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, commit, repository = _repo(tmp_path)
+    _stub_binding(monkeypatch, repository)
+    args = _args(tmp_path, repo, commit, _executable(tmp_path))
+    shape = preflight(args)
+    args.report.write_bytes(canonical_bytes(shape))
+    promotion = _write_artifacts(args)
+    declaration = _immutable_declaration(repo)
+    binding_path = tmp_path / "dyn-origin-binding.json"
+
+    assert bind_main(
+        [
+            "--shape-preflight-report",
+            str(args.report),
+            "--generated-promotion-report",
+            str(promotion),
+            "--declaration",
+            str(declaration),
+            "--report",
+            str(binding_path),
+        ]
+    ) == 0
+    capsys.readouterr()
+    binding = load_origin_binding(binding_path)
+    assert binding["declaration"]["path"] == str(declaration)
+
+    assert dyn_main(
+        [
+            "--shape-preflight-report",
+            str(args.report),
+            "--origin-binding-report",
+            str(binding_path),
+            "--declaration",
+            str(declaration),
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert (args.output / "b2-dyn-evidence.json").read_bytes() == b"{}\n"
+
+
+@pytest.mark.parametrize(
+    ("declaration_kind", "message"),
+    (
+        ("current-alias", "versioned immutable declaration"),
+        ("symlink", "regular file"),
+        ("wrong-number", "number differs from cohort identity"),
+    ),
+)
+def test_phase_b_rejects_nonimmutable_declaration_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    declaration_kind: str,
+    message: str,
+) -> None:
+    repo, commit, repository = _repo(tmp_path)
+    _stub_binding(monkeypatch, repository)
+    args = _args(tmp_path, repo, commit, _executable(tmp_path))
+    shape = preflight(args)
+    args.report.write_bytes(canonical_bytes(shape))
+    promotion = _write_artifacts(args)
+    immutable = _immutable_declaration(repo)
+    if declaration_kind == "current-alias":
+        declaration = repo / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+    elif declaration_kind == "symlink":
+        declaration = (
+            repo / "docs/multires/B2-GENERATED-COHORT-99001-DECLARATION.json"
+        )
+        declaration.symlink_to(immutable)
+    else:
+        declaration = (
+            repo / "docs/multires/B2-GENERATED-COHORT-99001-DECLARATION.json"
+        )
+        declaration.write_bytes(immutable.read_bytes())
+
+    with pytest.raises(DynOriginBindingError, match=message):
+        bind_origin(
+            args.report,
+            promotion,
+            declaration,
+            tmp_path / "dyn-origin-binding.json",
+        )
+    assert not args.output.exists()
+
+
+def test_runner_rejects_alias_even_when_binding_names_immutable_declaration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args, shape_path, binding_path, _shape, _binding = _phase_a_and_b(
+        tmp_path, monkeypatch
+    )
+    alias = args.repo_root / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
+
+    with pytest.raises(ValueError, match="active-declaration path differs"):
+        execute(
+            load_shape_preflight(shape_path),
+            load_origin_binding(binding_path),
+            alias,
+        )
+    assert not args.output.exists()
 
 
 def test_phase_b_rejects_manifest_analysis_origin_disagreement(
@@ -450,7 +578,7 @@ def test_phase_b_rejects_manifest_analysis_origin_disagreement(
     analysis_path.write_bytes(canonical_bytes(analysis))
 
     with pytest.raises(DynOriginBindingError, match="origins differ"):
-        bind_origin(args.report, promotion, tmp_path / "binding.json")
+        _bind(args, promotion, tmp_path / "binding.json")
 
 
 def test_phase_b_rejects_retired_identity_before_artifact_binding(
@@ -474,7 +602,7 @@ def test_phase_b_rejects_retired_identity_before_artifact_binding(
         DynOriginBindingError,
         match="active cohort declaration is permanently retired",
     ):
-        bind_origin(args.report, promotion, tmp_path / "binding.json")
+        _bind(args, promotion, tmp_path / "binding.json")
     assert not args.output.exists()
 
 
@@ -493,7 +621,7 @@ def test_phase_b_rejects_artifacts_absent_from_promotion(
     promotion.write_bytes(canonical_bytes(report))
 
     with pytest.raises(DynOriginBindingError, match="not admitted by promotion"):
-        bind_origin(args.report, promotion, tmp_path / "binding.json")
+        _bind(args, promotion, tmp_path / "binding.json")
 
 
 def test_runner_refuses_artifact_mutation_after_binding(
@@ -506,7 +634,7 @@ def test_runner_refuses_artifact_mutation_after_binding(
     args.atlas.write_bytes(b"mutated")
 
     with pytest.raises(ValueError, match="artifact bytes differ"):
-        execute(load_shape_preflight(shape_path), load_origin_binding(binding_path))
+        _execute(args, shape_path, binding_path)
 
 
 def test_runner_repeats_rust_origin_fence_before_irreversible_execute(
@@ -525,7 +653,7 @@ def test_runner_repeats_rust_origin_fence_before_irreversible_execute(
     binding_path.write_bytes(canonical_bytes(binding))
 
     with pytest.raises(ValueError, match="final no-write Dyn artifact verification"):
-        execute(load_shape_preflight(shape_path), load_origin_binding(binding_path))
+        _execute(args, shape_path, binding_path)
     assert not args.output.exists()
 
 
@@ -536,13 +664,11 @@ def test_runner_refuses_declaration_mutation_after_phase_b(
     args, shape_path, binding_path, _shape, _binding = _phase_a_and_b(
         tmp_path, monkeypatch
     )
-    declaration = (
-        args.repo_root / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    )
+    declaration = _immutable_declaration(args.repo_root)
     declaration.write_bytes(declaration.read_bytes() + b" ")
 
     with pytest.raises(ValueError, match="active-declaration bytes differ"):
-        execute(load_shape_preflight(shape_path), load_origin_binding(binding_path))
+        _execute(args, shape_path, binding_path)
 
 
 def test_origin_binding_rejects_equals_glued_origin(tmp_path: Path) -> None:

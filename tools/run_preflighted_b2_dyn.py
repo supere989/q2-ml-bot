@@ -19,6 +19,9 @@ if str(ROOT) not in sys.path:
 from tools.bind_b2_dyn_origin import (  # noqa: E402
     ARTIFACT_PREFLIGHT_STDOUT,
     SCHEMA as ORIGIN_BINDING_SCHEMA,
+    DynOriginBindingError,
+    _load_canonical,
+    require_versioned_declaration_path,
 )
 from tools.preflight_b2_dyn_invocation import (  # noqa: E402
     EXPECTED_STDOUT,
@@ -156,7 +159,11 @@ def _bound_argv(shape_argv: list[str], origin_token: str) -> list[str]:
     ]
 
 
-def execute(shape: dict[str, Any], binding: dict[str, Any]) -> Path:
+def execute(
+    shape: dict[str, Any],
+    binding: dict[str, Any],
+    declaration_path: Path,
+) -> Path:
     shape_argv = list(shape["producer_argv_without_origin"])
     producer_argv = list(binding["producer_argv"])
     identity = binding.get("identity")
@@ -179,11 +186,13 @@ def execute(shape: dict[str, Any], binding: dict[str, Any]) -> Path:
     if not _record_matches(shape_record, shape_path):
         raise PreflightedDynError("Dyn Phase-A report bytes differ")
     declaration_record = binding.get("declaration")
-    declaration_path = (
+    bound_declaration_path = (
         Path(declaration_record.get("path", ""))
         if isinstance(declaration_record, dict)
         else Path()
     )
+    if bound_declaration_path != declaration_path:
+        raise PreflightedDynError("Dyn active-declaration path differs")
     if not _record_matches(declaration_record, declaration_path):
         raise PreflightedDynError("Dyn active-declaration bytes differ")
     promotion_record = binding.get("promotion")
@@ -206,10 +215,15 @@ def execute(shape: dict[str, Any], binding: dict[str, Any]) -> Path:
         or repository_binding(repo_root) != binding.get("repository")
     ):
         raise PreflightedDynError("origin-bound Dyn repository binding differs")
-    if declaration_path != (
-        repo_root / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    ):
-        raise PreflightedDynError("Dyn active-declaration path differs")
+    try:
+        declaration = _load_canonical(
+            declaration_path, "active cohort declaration"
+        )
+        require_versioned_declaration_path(
+            repo_root, declaration_path, declaration
+        )
+    except DynOriginBindingError as exc:
+        raise PreflightedDynError(str(exc)) from exc
     output = Path(argv_flag(producer_argv, "--output"))
     if promotion_path != output.parent / "reports/generated-promotion.json":
         raise PreflightedDynError("Dyn generated-promotion path differs")
@@ -295,6 +309,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shape-preflight-report", type=Path, required=True)
     parser.add_argument("--origin-binding-report", type=Path, required=True)
+    parser.add_argument("--declaration", type=Path, required=True)
     return parser
 
 
@@ -309,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
             raise PreflightedDynError(
                 "Dyn origin binding names a different Phase-A report"
             )
-        report_path = execute(shape, binding)
+        report_path = execute(shape, binding, args.declaration)
         print(report_path)
         return 0
     except (
