@@ -196,7 +196,7 @@ def test_current_producer_contract_is_complete_and_fail_closed(path: Path) -> No
     assert '--basedir "$FUTURE_ROOT/assets"' not in text
 
 
-def test_current_gate_contract_retires_71453_and_prepares_71454() -> None:
+def test_current_gate_contract_retires_71453_and_activates_71454() -> None:
     text = (ROOT / "docs/multires/B2-GATE-ASSEMBLY.md").read_text(
         encoding="utf-8"
     )
@@ -331,13 +331,25 @@ def test_current_gate_contract_retires_71453_and_prepares_71454() -> None:
         "compiled-CM declaration binding differs",
         "unauthorized diagnostic replay",
         "zero gate publication",
-        "There is currently no active final cohort",
         "pre-declaration",
         "b2q26_14dfc40_71810000",
         "30e9e6e044ef49ec6b3352b7c57580833ff182b11cfddc909c32b840c3297d0d",
         "14dfc409b047611cb0722e53cad57d8c8584acb5",
         "725815ca68b1a44cbb8699656e214f4d19e60409",
         "28/28",
+        "Active 71454 final cohort",
+        "b2g26_final_71454",
+        "B2-GENERATED-COHORT-71454-DECLARATION.json",
+        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986",
+        "71454000..71454003",
+        "71454600..71454603",
+        "b2q26_7c482c9_71815000",
+        "e33b0a469b98fb11ab05603b54d29484d07d7a3a1fd629f345ac8c766eeff2fb",
+        "7c482c9087262f065add58461a2b6f00644bb83a",
+        "f1f19982e382c95cb2ea30fc285cb2d44956cf3b",
+        "568648911b135102a6ddb3bd0d5938c906ccd047be720c1aff93fa056283336a",
+        "exact twelve-path",
+        "The active authority and schema pin only 71454",
     ):
         assert required in text
     for stale_claim in (
@@ -364,6 +376,8 @@ def test_current_gate_contract_retires_71453_and_prepares_71454() -> None:
         "The active authority and schema pin only 71452",
         "Active 71453 final cohort",
         "The active authority and schema pin only 71453",
+        "There is currently no active final cohort",
+        "No final cohort is active",
     ):
         assert stale_claim not in text
 

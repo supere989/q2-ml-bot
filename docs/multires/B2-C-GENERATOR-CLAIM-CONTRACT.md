@@ -1378,6 +1378,33 @@ clearance, separation, span, or component admission checks. The failed seed is
 retained only as a regression; a new clean commit and disjoint qualification
 are required.
 
+### Active 71454 final cohort
+
+Corrective commit `7c482c9087262f065add58461a2b6f00644bb83a`, tree
+`f1f19982e382c95cb2ea30fc285cb2d44956cf3b`, passed completely fresh
+disposable qualification `b2q26_7c482c9_71815000` 28/28 end to end with all
+eight infrastructure checks green. Its canonical non-admissible qualification
+report SHA-256 is
+`e33b0a469b98fb11ab05603b54d29484d07d7a3a1fd629f345ac8c766eeff2fb`;
+the frozen qualification plan SHA-256 is
+`9e63790c6fe350f1462e4787eec82faa4cbcbe08ae433d0f5d387ddf4626358f`.
+The same exact qualified implementation passed the complete eight-part
+preactivation suite, report SHA-256
+`568648911b135102a6ddb3bd0d5938c906ccd047be720c1aff93fa056283336a`.
+Neither qualification nor test evidence is final-cohort population evidence.
+
+The separately committed immutable
+`B2-GENERATED-COHORT-71454-DECLARATION.json` and current alias are
+byte-identical with SHA-256
+`8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986`.
+They name `b2g26_final_71454`; its 28 disjoint members use seed blocks
+71454000..71454003 through 71454600..71454603. `ACTIVE_FINAL_AUTHORITY`
+explicitly pins only that identity, digest, immutable path, and the exact twelve-path
+qualification-successor delta frozen in the green report. Cohort
+71454 has exactly one source authorization and no repair, resume, salvage,
+substitution, or retry lane after consumption. Retired 71453 and qualification
+bytes cannot cross into its final root.
+
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
 proved ancestry, the exact qualified commit/tree and report binding,

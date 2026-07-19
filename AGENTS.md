@@ -81,27 +81,25 @@ passing component tests or an isolated staging checkout cannot. The old
 in-process public ONNX runtime is retired and has no operational selector or
 rollback role.
 
-**Current B2 authority (updated 2026-07-18):** final cohorts through 71453 are
-permanently retired. Cohort 71453's first and only authorized final gate
-invocation used the current alias while compiled-CM evidence bound the
-byte-identical immutable path; `compiled-CM declaration binding differs` was
-terminal and no gate was published. A second invocation was an unauthorized
-diagnostic replay only. It exposed a separate blocker: the generic compact
-JSON loader rejected the exact committed stock provenance writer bytes
-(pretty/sorted JSON plus LF, SHA-256
-`3ed2e930dcccf3abdabc7b5e1d9a1a95d74db4915a481bd523c51688c2bad030`).
-Its canonical terminal authority is
-`docs/multires/B2-GENERATED-COHORT-71453-FAILURE.json`; its named declaration,
-current alias, maps, seeds, stages, reports, and artifacts are forensic only.
-`ACTIVE_FINAL_AUTHORITY = None`. The 71454 lane is pre-declaration: its final
-plan must preauthorize the exact immutable declaration path, and the
-dedicated hash-pinned provenance writer-format loader and non-vacuous real-byte
-regressions must first pass a completely fresh disposable qualification with
-all eight retained infrastructure checks, including
-`stock-provenance-writer-format`. Only a later, separate commit may add and
-activate a fresh disjoint 71454 declaration. Gate publication, deployment,
-trainer, and TensorBoard remain forbidden until that successor and every
-B2-B6 cutover gate pass.
+**Current B2 authority (updated 2026-07-18):** final cohorts through 71453
+remain permanently retired. Corrective commit
+`7c482c9087262f065add58461a2b6f00644bb83a`, tree
+`f1f19982e382c95cb2ea30fc285cb2d44956cf3b`, passed fresh disposable
+qualification `b2q26_7c482c9_71815000` 28/28 plus all eight retained
+infrastructure checks. Its canonical green, non-admissible report SHA-256 is
+`e33b0a469b98fb11ab05603b54d29484d07d7a3a1fd629f345ac8c766eeff2fb`.
+The same qualified implementation passed the complete eight-part
+preactivation suite; report SHA-256
+`568648911b135102a6ddb3bd0d5938c906ccd047be720c1aff93fa056283336a`.
+Qualification and test bytes remain non-admissible. `ACTIVE_FINAL_AUTHORITY`
+now pins only fresh disjoint cohort `b2g26_final_71454`, immutable declaration
+`docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json`, declaration
+SHA-256
+`8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986`,
+and the exact twelve-path qualified-successor delta. Its first source attempt
+consumes its sole authorization. Gate publication, deployment, trainer, and
+TensorBoard remain forbidden until that one-shot final cohort and every B2-B6
+cutover gate pass.
 
 The qualified implementation freezes the sole 71454 activation-successor
 policy in the qualification report: its cohort, direct immutable declaration

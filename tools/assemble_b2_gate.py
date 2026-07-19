@@ -273,6 +273,20 @@ RETIRED_71453_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
     "tests/test_retired_cohort_registry.py",
     "tools/assemble_b2_gate.py",
 })
+ACTIVE_71454_QUALIFICATION_SUCCESSOR_PATHS = frozenset({
+    "AGENTS.md",
+    "docs/multires/B2-C-GENERATOR-CLAIM-CONTRACT.md",
+    "docs/multires/B2-GATE-ASSEMBLY.md",
+    "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json",
+    "docs/multires/B2-GENERATED-COHORT-DECLARATION.json",
+    "schemas/q2-multires-b2-gate-v1.schema.json",
+    "tests/test_b2_gate.py",
+    "tests/test_b2_operational_docs.py",
+    "tests/test_generator_claim_campaign.py",
+    "tests/test_generator_cohort.py",
+    "tests/test_retired_cohort_registry.py",
+    "tools/assemble_b2_gate.py",
+})
 
 
 class B2GateError(ValueError):
@@ -287,14 +301,21 @@ class ActiveFinalAuthority:
     qualification_successor_paths: frozenset[str]
 
 
-# Cohort 71453's sole authorized assembly failed before gate publication on
-# alias-versus-immutable compiled-CM declaration path binding.  An unauthorized
-# diagnostic replay then exposed that stock provenance uses the committed
-# corpus writer's pretty/sorted form while the gate used the unrelated compact
-# loader.  Its declaration and current alias are forensic only.
-# A 71454 declaration must not exist until this corrective implementation has
-# passed a completely fresh disposable qualification.
-ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = None
+# Corrective commit 7c482c9087262f065add58461a2b6f00644bb83a passed a
+# completely fresh disposable qualification 28/28 with all eight retained
+# infrastructure checks. Cohort 71454 is the separately committed, disjoint,
+# one-shot successor; qualification bytes and retired 71453 bytes remain
+# inadmissible.
+ACTIVE_FINAL_AUTHORITY: ActiveFinalAuthority | None = ActiveFinalAuthority(
+    cohort_id="b2g26_final_71454",
+    declaration_sha256=(
+        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"
+    ),
+    immutable_declaration_path=(
+        "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
+    ),
+    qualification_successor_paths=ACTIVE_71454_QUALIFICATION_SUCCESSOR_PATHS,
+)
 
 # The reusable disposable-qualification contract remains green at 20/28, as
 # required by the normative plan.  Final-cohort assembly is intentionally

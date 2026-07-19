@@ -337,6 +337,18 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "14dfc409b047611cb0722e53cad57d8c8584acb5",
         "725815ca68b1a44cbb8699656e214f4d19e60409",
         "28/28",
+        "Active 71454 final cohort",
+        "b2g26_final_71454",
+        "B2-GENERATED-COHORT-71454-DECLARATION.json",
+        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986",
+        "71454000..71454003",
+        "71454600..71454603",
+        "b2q26_7c482c9_71815000",
+        "e33b0a469b98fb11ab05603b54d29484d07d7a3a1fd629f345ac8c766eeff2fb",
+        "7c482c9087262f065add58461a2b6f00644bb83a",
+        "f1f19982e382c95cb2ea30fc285cb2d44956cf3b",
+        "568648911b135102a6ddb3bd0d5938c906ccd047be720c1aff93fa056283336a",
+        "exact twelve-path",
         "4b26c670ed54585787505cf7dfbb35bdc1830fdfbd42585a16d0484622ea306f",
         "oracle batch timeout must be finite and in (0, 60]",
         "not a 3,600-second runtime timeout",
@@ -393,6 +405,8 @@ def test_campaign_v2_schema_and_operator_contract_are_exact() -> None:
         "Active 71452 final cohort",
         "`ACTIVE_FINAL_AUTHORITY` explicitly pins `b2g26_final_71452`",
         "Active 71453 final cohort",
+        "There is currently no active final cohort",
+        "No final cohort is active",
     ):
         assert stale_claim not in contract
 

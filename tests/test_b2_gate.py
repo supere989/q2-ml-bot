@@ -23,6 +23,7 @@ import tools.assemble_b2_gate as b2_gate
 import tools.run_b2_test_suite as b2_test_suite
 import tools.validate_b2_final_cohort_plan as final_plan
 from tools.assemble_b2_gate import (
+    ACTIVE_71454_QUALIFICATION_SUCCESSOR_PATHS,
     ACTIVE_FINAL_AUTHORITY,
     ActiveFinalAuthority,
     B2GateError,
@@ -965,10 +966,20 @@ def test_gate_refuses_retired_declaration_before_evidence(
         _validate_declaration(declaration)
 
 
-def test_71453_is_retired_and_no_final_authority_is_active() -> None:
-    assert ACTIVE_FINAL_AUTHORITY is None
-    with pytest.raises(B2GateError, match="no active final cohort"):
-        _require_active_final_authority()
+def test_71453_is_retired_and_71454_is_the_active_final_authority() -> None:
+    authority = _require_active_final_authority()
+    assert ACTIVE_FINAL_AUTHORITY == authority
+    assert authority.cohort_id == "b2g26_final_71454"
+    assert authority.declaration_sha256 == (
+        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"
+    )
+    assert authority.immutable_declaration_path == (
+        "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
+    )
+    assert (
+        authority.qualification_successor_paths
+        == ACTIVE_71454_QUALIFICATION_SUCCESSOR_PATHS
+    )
     assert RETIRED_COHORT_71453 == "b2g26_final_71453"
     assert (
         "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
@@ -1006,15 +1017,15 @@ def test_71453_is_retired_and_no_final_authority_is_active() -> None:
     )
 
 
-def test_current_alias_is_forensic_71453_and_is_rejected() -> None:
+def test_current_alias_is_byte_identical_but_only_immutable_71454_is_active() -> None:
     alias = ROOT / "docs/multires/B2-GENERATED-COHORT-DECLARATION.json"
-    assert (
-        alias
-    ).read_bytes() == (
-        ROOT / "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
-    ).read_bytes()
-    with pytest.raises(B2GateError, match="71453.*permanently retired"):
+    immutable = ROOT / "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
+    assert alias.read_bytes() == immutable.read_bytes()
+    with pytest.raises(B2GateError, match="explicitly activated immutable path"):
         _validate_declaration(alias)
+    declaration, digest = _validate_declaration(immutable)
+    assert declaration["cohort_id"] == "b2g26_final_71454"
+    assert digest == ACTIVE_FINAL_AUTHORITY.declaration_sha256
 
 
 def test_gate_requires_the_exact_activated_immutable_declaration_path(
@@ -2044,11 +2055,11 @@ def test_b2_gate_schemas_are_strict() -> None:
     cohort_schema = gate_schema["properties"]["generated_cohort"]["properties"][
         "cohort_id"
     ]
-    assert cohort_schema["const"] == "b2g26_final_71453"
+    assert cohort_schema["const"] == "b2g26_final_71454"
     assert gate_schema["properties"]["generated_cohort"]["properties"][
         "declaration_sha256"
     ]["const"] == (
-        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810"
+        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"
     )
     assert gate_schema["properties"]["generated_cohort"]["properties"][
         "compiled_cm_preflight"

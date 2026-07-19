@@ -823,6 +823,32 @@ failed seed now passes the unchanged clearance, separation, dual-span, and
 single-source-component gates as a regression fixture only. A new committed
 implementation and a disjoint qualification remain mandatory.
 
+### Active 71454 final cohort
+
+Corrective commit `7c482c9087262f065add58461a2b6f00644bb83a`, tree
+`f1f19982e382c95cb2ea30fc285cb2d44956cf3b`, passed fresh disposable
+qualification `b2q26_7c482c9_71815000` 28/28 end to end with all eight retained
+infrastructure checks green. The canonical green, non-admissible report
+SHA-256 is
+`e33b0a469b98fb11ab05603b54d29484d07d7a3a1fd629f345ac8c766eeff2fb`;
+its reviewed qualification plan SHA-256 is
+`9e63790c6fe350f1462e4787eec82faa4cbcbe08ae433d0f5d387ddf4626358f`.
+The same qualified implementation passed the atomic eight-part preactivation
+suite, report SHA-256
+`568648911b135102a6ddb3bd0d5938c906ccd047be720c1aff93fa056283336a`.
+Qualification and test outputs remain non-admissible final inputs.
+
+The separately committed immutable
+`B2-GENERATED-COHORT-71454-DECLARATION.json` and current alias are
+byte-identical with SHA-256
+`8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986`.
+They name `b2g26_final_71454` and seed blocks 71454000..71454003 through
+71454600..71454603. `ACTIVE_FINAL_AUTHORITY` explicitly pins only that cohort,
+digest, direct immutable path, and the exact twelve-path successor delta
+frozen by the green qualification. Its first source invocation consumes its
+sole authorization; retry, repair, resume, salvage, and substitution are
+forbidden. Retired 71453 and qualification bytes cannot enter the final root.
+
 The declaration-bearing 71451 producer commit was a strict successor of
 qualified commit `a4500d2634ae0876ef9725dc94f729dbea2cb3fd`. Gate replay
 proved ancestry, the exact qualified commit/tree and report binding,
@@ -939,9 +965,10 @@ syntax report must never be required to identify the execution runtime.
 The assembler rejects declarations for retired cohorts 71426 through 71453
 before reading campaign evidence. The immutable 71447, 71448, 71449, 71450,
 71451, 71452, and 71453 declarations are historical only.
-There is currently no active final cohort. The schema's 71453 identity is
-historical and cannot infer authority; a separately committed successor must
-update it only after a fresh qualification passes.
+The active authority and schema pin only 71454. Executable authority still
+requires replay of the exact qualified-successor relation, preactivation test
+binding, and all one-shot lifecycle evidence; neither the schema nor a
+declaration can infer authority by itself.
 Existing clean-repository, source-freeze, Atlas, test, manifest, and Dyn
 requirements remain part of the frozen gate contract; all earlier B1/B2
 admission evidence is historical only.

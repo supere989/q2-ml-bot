@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:q2-ml:q2-multires-b2-gate-v1",
   "title": "Fail-closed multi-resolution Atlas Batch B2 gate",
-  "$comment": "Historical 71453 field pins remain forensic only. A future activation is executable only through the assembler's exact qualified-successor and one-shot evidence checks; the schema alone grants no authority.",
+  "$comment": "Active 71454 field pins are executable only through the assembler's exact qualified-successor and one-shot evidence checks; the schema alone grants no authority.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -99,10 +99,10 @@
       ],
       "properties": {
         "cohort_id": {
-          "const": "b2g26_final_71453"
+          "const": "b2g26_final_71454"
         },
         "declaration": {"$ref": "#/$defs/file"},
-        "declaration_sha256": {"const": "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810"},
+        "declaration_sha256": {"const": "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"},
         "source": {"$ref": "#/$defs/source_stage"},
         "compiled": {"$ref": "#/$defs/compiled_stage"},
         "compiled_cm_preflight": {"$ref": "#/$defs/compiled_cm_preflight_stage"},

@@ -65,6 +65,9 @@ NAMED_71452 = (
 NAMED_71453 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71453-DECLARATION.json"
 )
+NAMED_71454 = (
+    ROOT / "docs/multires/B2-GENERATED-COHORT-71454-DECLARATION.json"
+)
 FAILURE_71443 = (
     ROOT / "docs/multires/B2-GENERATED-COHORT-71443-FAILURE.json"
 )
@@ -381,20 +384,17 @@ def test_named_71450_is_retired() -> None:
         )
 
 
-def test_current_alias_and_named_71453_are_retired() -> None:
+def test_current_alias_is_active_71454_while_named_71453_remains_retired() -> None:
     current, current_sha256 = cohort.load_declaration(CURRENT_ALIAS)
 
-    assert current["cohort_id"] == "b2g26_final_71453"
-    assert CURRENT_ALIAS.read_bytes() == NAMED_71453.read_bytes()
+    assert current["cohort_id"] == "b2g26_final_71454"
+    assert CURRENT_ALIAS.read_bytes() == NAMED_71454.read_bytes()
     assert current_sha256 == (
-        "5e77d080b17491eb54787571c50e26253bef12a38c3224d3d1c6cde1dca2c810"
+        "8c20d51dd59f1f1cdbdd8171c7d8a75ae98fd68af49fa72992035142134e3986"
     )
-    with pytest.raises(
-        registry.RetiredCohortRegistryError, match="71453.*permanently retired"
-    ):
-        registry.require_unretired_declaration(
-            CURRENT_ALIAS, current, current_sha256
-        )
+    registry.require_unretired_declaration(
+        CURRENT_ALIAS, current, current_sha256
+    )
 
     named, named_sha256 = cohort.load_declaration(NAMED_71453)
     with pytest.raises(
