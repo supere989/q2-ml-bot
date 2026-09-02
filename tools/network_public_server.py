@@ -119,8 +119,8 @@ def _write_config(
         # clients are excluded by the zc.ml_enabled guard in the C path.
         "set ml_teacher_enabled 1",
         "set ml_teacher_humans 1",
-        f"set ml_teacher_addr {args.teacher_addr}",
-        f"set ml_teacher_port {args.teacher_port}",
+        f"set ml_teacher_addr {getattr(args, 'teacher_addr', '100.86.206.50')}",
+        f"set ml_teacher_port {getattr(args, 'teacher_port', 32511)}",
         "set ml_teacher_stride 1",
         "set ml_client_telemetry 1",
         f"set ml_client_telemetry_port {telemetry.port}",
