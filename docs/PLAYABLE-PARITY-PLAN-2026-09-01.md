@@ -33,12 +33,20 @@
 ## Campaign phases (in order)
 
 ### Phase 1 — Restore the fast lane (bulk pretraining engine)
-- Rebuild the classic in-process lane's `game.so` from
-  `q2-lithium-3zb2` branch `ml-wip-20260611` (`make clean && make -j4`,
-  deploy as `lithium/game.so`). The Jul-11 build speaks a 1032-byte obs;
-  current Python expects 1060 (fire-gate fields). This is the only breakage.
-- The June-era degenerate policies were observation/reward bugs, NOT a lane
-  defect. The lane is trusted once rebuilt; it did 39.9M steps in weeks.
+- **DONE 2026-09-01.** The wire-v5 C changes (`ML_CLIENT_WIRE_VERSION` 5,
+  `ml_obs_t` 1060 bytes) were uncommitted in BOTH engine trees; committed
+  as `q2-lithium-3zb2` `3b67d7d` on `ml-wip-20260611` and pushed.
+  Rebuilt `game.so` (`make clean && make -j8` in `~/merge_mod/lithium` on
+  wsl-box) and deployed to `~/q2_lithium_merge/lithium/game.so`
+  (Jul-11 wire-v4 build backed up as `game.so.bak-wire4-20260901`).
+- Lane verified live: trainer relaunched (tmux `q2_ppo`), ZERO invalid-obs
+  errors, ~87 accepted env steps/sec (12 servers × 4 ML bots + 4 AI each,
+  timescale 8), real episode returns from update 1. Checkpoints save every
+  100k steps to `~/q2-ml-bot/checkpoints/`.
+- This run is from-zero with the fixed (post-July) reward/view stack —
+  treat it as the clean-room test of whether the July fixes cured the
+  down-look/backward-command pathology, and as the bulk pretraining
+  engine for Phase 3. It does NOT replace the Phase 2 BC baseline.
 
 ### Phase 2 — Imitation corpus and BC baseline
 - Maximize collection from BOTH existing pipes: 3ZB2 teacher demos
@@ -88,6 +96,6 @@
   (public, UDP 28000 + telemetry 28049), `q2-teacher-server.service`
   (loopback 28001), `q2mlbot-gamedata.service` (HTTP 32494). WSL user
   services: `q2-map-farm`, `q2-teacher-map-farm`, `q2-teacher-receiver`.
-- Restore runbook: `q2-training-box` skill. NOTE: its `launch-trainer.sh`
-  still targets the classic lane — do not run it until the Phase 1
-  `game.so` rebuild lands.
+- Restore runbook: `q2-training-box` skill. `launch-trainer.sh` targets
+  the classic lane and is safe again since the Phase 1 rebuild
+  (2026-09-01).
