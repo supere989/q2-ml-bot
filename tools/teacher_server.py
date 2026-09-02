@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Run a dedicated legacy-3ZB2 teacher server with an interlaced rotation."""
+"""Run a dedicated legacy-3ZB2 teacher server with an interlaced rotation.
+
+Rotation is wrapper-driven (process restart per map), not in-engine: the
+lithium/3ZB2 build never exits intermission without a human pressing attack,
+and the rare in-engine ``gamemap`` it does attempt segfaults (observed
+2026-09-02). The wrapper watches server stdout for the round-end markers,
+restarts q2ded on the next map, and persists the stock-rotation draw count
+so systemd restarts resume the rotation instead of resetting to the first
+map (which is why the teacher corpus was 100% q2dm2).
+"""
 
 from __future__ import annotations
 
@@ -9,6 +18,7 @@ import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -18,10 +28,13 @@ sys.path.insert(0, str(ROOT))
 from tools.map_farm_client import (
     FarmMapGenerator,
     ShuffledStockRotation,
-    query_live_mapname,
 )
 
 TEACHER_PREFIX = "mlteacher"
+ROUND_END_MARKERS = ("Timelimit hit.", "Fraglimit hit.")
+STOCK_DRAWS_FILE = ".teacher_stock_draws"
+MIN_ROUND_SECONDS = 15.0
+CRASH_BACKOFF_SECONDS = 5.0
 ML6_SECTION = r"""
 [ml6sk1]
 \\Evil Zeep	\male	\claymore	\1\2\3\1\3\0\3	\060\060\0\0	\0\0\0\1\0	\R\1
@@ -39,11 +52,42 @@ def _stop(_signum, _frame):
     STOP = True
 
 
-def _server_command(proc: subprocess.Popen, command: str) -> None:
-    if proc.stdin is None or proc.poll() is not None:
-        raise RuntimeError("teacher q2ded console is unavailable")
-    proc.stdin.write((command.rstrip() + "\n").encode())
-    proc.stdin.flush()
+def _watch_stdout(stream, hit_event: threading.Event) -> None:
+    """Tee server stdout and flag round end on the engine's own markers."""
+    try:
+        for raw in iter(stream.readline, b""):
+            line = raw.decode(errors="replace").rstrip()
+            if not line:
+                continue
+            print(line, flush=True)
+            if any(marker in line for marker in ROUND_END_MARKERS):
+                hit_event.set()
+    except (OSError, ValueError):
+        pass
+
+
+def _load_stock_draws(q2_root: Path) -> int:
+    try:
+        return max(0, int((q2_root / STOCK_DRAWS_FILE).read_text().strip()))
+    except (OSError, ValueError):
+        return 0
+
+
+def _save_stock_draws(q2_root: Path, draws: int) -> None:
+    target = q2_root / STOCK_DRAWS_FILE
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temporary.write_text(f"{draws}\n")
+    os.replace(temporary, target)
+
+
+def _select_next_map(current: str, staged_generated: str | None,
+                     draw_stock) -> tuple[str, str | None]:
+    """Interleave generated maps with stock; fall back stock->stock on outage."""
+    if current.startswith(f"{TEACHER_PREFIX}_"):
+        return draw_stock(), staged_generated
+    if staged_generated is not None:
+        return staged_generated, None
+    return draw_stock(), staged_generated
 
 
 def _ensure_botlist(q2_root: Path, name: str) -> None:
@@ -88,6 +132,38 @@ def _write_config(q2_root: Path, args, first_map: str) -> Path:
     return path
 
 
+def _launch_server(q2_root: Path, args, map_name: str):
+    cfg = _write_config(q2_root, args, map_name)
+    cmd = [
+        "stdbuf", "-oL", "-eL", str(q2_root / "q2ded"),
+        "+set", "game", "lithium",
+        "+set", "ip", os.environ.get("Q2_BIND_IP", "127.0.0.1"),
+        "+set", "port", str(args.port), "+exec", cfg.name,
+    ]
+    proc = subprocess.Popen(
+        cmd, cwd=q2_root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, preexec_fn=os.setsid,
+    )
+    round_hit = threading.Event()
+    threading.Thread(
+        target=_watch_stdout, args=(proc.stdout, round_hit),
+        name="q2ded-stdout-watch", daemon=True,
+    ).start()
+    return proc, round_hit, time.monotonic()
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        proc.wait(timeout=5)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--map_farm_url", default="http://100.86.206.50:32513")
@@ -108,79 +184,63 @@ def main() -> int:
         parser.error("q2dm1 is reserved for the public lane, not the teacher rotation")
     stock = ShuffledStockRotation(stock_names, args.rotation_seed)
     q2_root = Path(os.environ.get("Q2_ROOT", str(Path.home() / "q2_teacher_runtime")))
-    q2ded = q2_root / "q2ded"
-    if not q2ded.is_file():
-        parser.error(f"q2ded not found at {q2ded}")
+    if not (q2_root / "q2ded").is_file():
+        parser.error(f"q2ded not found at {q2_root / 'q2ded'}")
     _ensure_botlist(q2_root, args.botlist)
 
+    stock_draws = _load_stock_draws(q2_root)
+    for _ in range(stock_draws):
+        stock.next()
+
+    def draw_stock() -> str:
+        nonlocal stock_draws
+        result = stock.next()
+        stock_draws += 1
+        _save_stock_draws(q2_root, stock_draws)
+        return result
+
     mapgen = FarmMapGenerator(args.map_farm_url, prefix=TEACHER_PREFIX)
-    first_map = stock.next()
-    cfg = _write_config(q2_root, args, first_map)
-    cmd = [
-        "stdbuf", "-oL", "-eL", str(q2ded), "+set", "game", "lithium",
-        "+set", "ip", os.environ.get("Q2_BIND_IP", "127.0.0.1"),
-        "+set", "port", str(args.port), "+exec", cfg.name,
-    ]
-    proc = subprocess.Popen(
-        cmd, cwd=q2_root, stdin=subprocess.PIPE, preexec_fn=os.setsid,
-    )
+    mapgen.start()
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
-    current = first_map
-    armed = None
+    current = draw_stock()
     staged_generated = None
-    last_check = 0.0
-    mapgen.start()
-    print(f"[teacher] pid={proc.pid} port={args.port} first={first_map} "
-          f"stock={stock_names} generated={TEACHER_PREFIX}_*", flush=True)
+    proc, round_hit, launched_at = _launch_server(q2_root, args, current)
+    print(f"[teacher] pid={proc.pid} port={args.port} first={current} "
+          f"stock={stock_names} generated={TEACHER_PREFIX}_* "
+          f"stock_draws={stock_draws}", flush=True)
     try:
-        while not STOP and proc.poll() is None:
+        while not STOP:
+            code = proc.poll()
+            if round_hit.is_set() or code is not None:
+                reason = "round end" if round_hit.is_set() else f"exit={code}"
+                uptime = time.monotonic() - launched_at
+                if code is None:
+                    _terminate(proc)
+                next_map, staged_generated = _select_next_map(
+                    current, staged_generated, draw_stock)
+                print(f"[teacher] rotating {current} -> {next_map} ({reason}, "
+                      f"after {uptime:.0f}s)", flush=True)
+                if uptime < MIN_ROUND_SECONDS:
+                    time.sleep(CRASH_BACKOFF_SECONDS)
+                current = next_map
+                proc, round_hit, launched_at = _launch_server(q2_root, args, current)
+                if staged_generated is None and not mapgen.busy:
+                    mapgen.start()
+                continue
+
             if mapgen.busy:
                 finished = mapgen.poll()
                 if finished:
                     staged_generated = finished
             elif staged_generated is None:
                 mapgen.start()
-
-            if armed is None:
-                if current.startswith(f"{TEACHER_PREFIX}_"):
-                    armed = stock.next()
-                elif staged_generated is not None:
-                    armed = staged_generated
-                    staged_generated = None
-                else:
-                    # Farm outage fallback: without an armed sv_maplist the
-                    # engine wedges in intermission at timelimit with zero
-                    # bots and zero telemetry (observed 2026-08-27). Rotate
-                    # stock->stock until a generated map stages again.
-                    armed = stock.next()
-                if armed:
-                    _server_command(proc, f'set sv_maplist "{current} {armed}"')
-                    print(f"[teacher] armed {current} -> {armed}", flush=True)
-
-            now = time.monotonic()
-            if now - last_check >= 2.0:
-                last_check = now
-                live = query_live_mapname(args.port)
-                if live and live != current:
-                    current = live
-                    armed = None
-                    if staged_generated is None and not mapgen.busy:
-                        mapgen.start()
-                    print(f"[teacher] advanced to {current}", flush=True)
-            time.sleep(0.1)
+            time.sleep(0.2)
     finally:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            proc.wait(timeout=5)
-    return proc.returncode or 0
+        if proc.poll() is None:
+            _terminate(proc)
+    return 0
 
 
 if __name__ == "__main__":
