@@ -149,6 +149,12 @@ def main() -> int:
                 elif staged_generated is not None:
                     armed = staged_generated
                     staged_generated = None
+                else:
+                    # Farm outage fallback: without an armed sv_maplist the
+                    # engine wedges in intermission at timelimit with zero
+                    # bots and zero telemetry (observed 2026-08-27). Rotate
+                    # stock->stock until a generated map stages again.
+                    armed = stock.next()
                 if armed:
                     _server_command(proc, f'set sv_maplist "{current} {armed}"')
                     print(f"[teacher] armed {current} -> {armed}", flush=True)
