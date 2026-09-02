@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+> **Campaign plan:** `docs/PLAYABLE-PARITY-PLAN-2026-09-01.md` is the
+> current plan of record for maps/bots/training. Read it first; do not
+> re-litigate its settled findings or anti-goals.
+
 ML-driven bot system for Quake 2 (Yamagi engine + Lithium II mod + 3ZB2 bots).
 A PPO-trained LSTM policy controls in-game bots over a UDP bridge; a voxel
 spatial-memory system supplies tactical context. See `docs/ML_FRAMEWORK.md`.
