@@ -154,6 +154,13 @@
   network-native lane (real engine conditions). The RTX 2080 runs ~15% GPU
   with two Phase B workers — 3-4 workers fit.
 - Causal ladder order is fixed: posture → movement → aim → combat.
+- **Season `bc_v3` progress (2026-09-02 13:30 PDT):** 618k steps at 137 min
+  (~75 sps alongside the control). Latest windows show ep_r spikes to
+  +13.08 with kd 0.67 (2/3) — early but clearly ahead of where the
+  from-zero control was at comparable wall time. Control healthy at 4.77M
+  steps (78 sps). Season gate runs at ~1M steps. Teacher corpus: 2.85M
+  rows, 42 distinct maps, still 0 human rows (no public-lane human session
+  yet; the AI-bot lane on 28002 now also captures humans).
 
 ### Phase 4 — Maps and public play
 - Maps are a curation problem now, not a generation problem. Generator v6 +
