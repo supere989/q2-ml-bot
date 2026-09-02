@@ -164,8 +164,27 @@
   good for generalization, bad for humans learning a map and for policy
   consistency. Public server runs the curated pool; live-maps on
   designated chaos/training windows only.
-- Public roster: 2 ML bots + 2 3ZB2 fillers, humans anytime
-  (`maxclients=6` leaves slots by design).
+- **Public roster directive (2026-09-02, supersedes the old 2ML+2-3ZB2
+  mix): the game initializes with AI (policy-driven) bots, NOT 3ZB2.**
+  - Capability verified 2026-09-02: `tools/live_match_onnx.py` (ONNX
+    Runtime, CPU-only, no torch on the VPS) boots a dedicated server with
+    policy bots in the top slots; probe showed navigation (~170 ups mean),
+    target acquisition, aligned fire, damage, kills and deaths inside 90s.
+  - **Deployed: `q2-ai-bots.service` on the VPS, public UDP 28002** —
+    4 AI bots (bc_demos_v3 clone, `serve_bc_v3.onnx`) + 2 human slots,
+    mllive-farm maps interlaced with q2dm1/2/4/6/8, fast downloads via the
+    gamedata service, human-capture cvars armed (bots excluded engine-side
+    by the `zc.ml_enabled` guard). First live combat confirmed in the
+    service journal. Note: bot entities are spawned through the mod's bot
+    scaffolding, but slots >= ml_bot_slot are 100% policy-driven — 3ZB2 AI
+    never thinks for them.
+  - Transitional: this lane currently interlaces live maps (a chaos window
+    per the rule above). When the curated pool lands, it becomes the map
+    source. Policy served is the current best checkpoint's ONNX; promotion
+    = export a gated checkpoint, restart the unit. When a season-gated
+    policy exists, this roster becomes the competitive target.
+  - 28000 (`q2mlbot.service`, human/network-native lane) is untouched; the
+    AI-bot lane proves itself on 28002 before any merge onto 28000.
 
 ## Anti-goals (things that will not help)
 
