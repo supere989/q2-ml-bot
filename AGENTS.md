@@ -150,11 +150,15 @@ clobbered). WSL box remains the sole active training location; this is
 backup/visibility only, not a compute migration.
 
 - `~/merge_mod/lithium` is the C git checkout on branch
-  `ml-wip-20260611`. `~/q2-ml-bot` is currently an operational mirror with
-  **no `.git` directory**; GitHub/local canonical changes must be copied there
-  deliberately and checksum-verified. Do not assume `git pull` works in that
-  Python tree, and do not rsync it blindly over its gitignored checkpoints,
-  runs, maps, or machine-local diagnostics.
+  `ml-wip-20260611`. **2026-09-01: `~/q2-ml-bot` on the WSL box is now the
+  canonical git working tree** (real clone of `supere989/q2-ml-bot`,
+  branch `feature/rust-lattice`, with the historical checkpoints/runs/maps
+  data migrated in; the old no-git mirror is parked beside it as
+  `~/q2-ml-bot.mirror-bak-20260901`). Commit and push from there; the
+  procreator checkout and the nobara sync are downstream copies. Do not
+  rsync over its gitignored checkpoints, runs, maps, or machine-local
+  diagnostics. The old `yquake-ml-workspace` repo on nobara is frozen at
+  the 2026-07-11 era and carries a superseded-workspace note.
 - Trainer runs in tmux session `q2_ppo`; log at `/tmp/q2_train.log.ppo`.
 - TensorBoard on port 6006 (`http://100.86.206.50:6006` direct, the
   Windows portproxy at `http://100.104.16.95:6006`, or `http://127.0.0.1:6006`
