@@ -128,6 +128,25 @@
   session since capture went live).
 
 ### Phase 3 — PPO polish under the season gate
+- **Direction approved by project owner 2026-09-02:** option (c)+(d) from
+  the Phase 2 decision point — `bc_demos_v3` is the movement/posture prior,
+  aim quality comes from RL, and the fast-lane PPO policy becomes the
+  distillation teacher once it passes the season gate. The 3ZB2 gates stay
+  as-is (historical bar, not a blocker).
+- **Season 1 (`bc_v3`) LAUNCHED 2026-09-02:** PPO warm-started from
+  `checkpoints/bc_demos_v3/policy_bc_final.pt` (copied to
+  `checkpoints/warm_bc_v3/policy_00000000.pt`), `--resume
+  --reset_optimizer 1` (fresh Adam moments), `Q2_EXT_OBS=1` (219-dim input
+  to match the prior — the ext block is always on the wire; the from-zero
+  run consumes the same packets at 209-dim), `Q2_RUN_TAG=bc_v3` (isolated
+  ckpt dir + TB run), disjoint port slabs (`Q2_SV_PORT_BASE=28410`,
+  `Q2_ML_PORT_BASE=28600`). Half-size fleet: `--n_servers 6
+  --n_bots_per_server 8 --n_ml_bots 2`, same reward stack and
+  `mltrain_*` curriculum as the canonical run, tmux `q2_ppo_bc` on wsl-box,
+  log `/tmp/q2_train.log.ppo_bc`. Runs alongside the from-zero control
+  (`q2_ppo`, 209-dim), which continues as the Phase 1 clean-room test and
+  the option-(d) distillation source. Warm start verified in log ("Resumed
+  from ... policy_00000000.pt (env_steps=0)"); both lanes hold ~77 sps.
 - Short PPO seasons warm-started from the BC baseline, judged by
   `tools/season_quality_gate.py` (100 generations / 1M steps / per-map
   episode coverage / KL and clip bounds / no-regression ladder).
