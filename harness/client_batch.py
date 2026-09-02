@@ -833,6 +833,328 @@ class Q2NetworkClientBatch:
             )
             return observations, [result[1] for result in results]
 
+    def _begin_round(self, policy_version: int) -> tuple[int, int]:
+        """Validate policy monotonicity and allocate the next round id."""
+        version = self._policy_version(policy_version)
+        if (
+            self._latest_policy_version is not None
+            and version < self._latest_policy_version
+        ):
+            self._stale_policy_rounds_rejected += 1
+            raise StalePolicyVersionError(
+                f"policy {version} is older than active policy "
+                f"{self._latest_policy_version}"
+            )
+        round_id = self._next_round_id
+        self._next_round_id += 1
+        self._latest_policy_version = version
+        return version, round_id
+
+    def _drain_all(self) -> list[ClientTelemetryDrain]:
+        drain_futures = [
+            self._executor.submit(env.drain_latest_telemetry)
+            for env in self.envs
+        ]
+        return [future.result() for future in drain_futures]
+
+    def _dispatch_all(
+        self,
+        actions: Sequence[Action],
+        version: int,
+        round_id: int,
+    ) -> tuple[list[ClientActionDispatch], tuple[BatchActionTag, ...]]:
+        dispatches = [
+            env.dispatch_action(action)
+            for env, action in zip(self.envs, actions)
+        ]
+        self._rounds_dispatched += 1
+        self._actions_dispatched += len(dispatches)
+        tags = tuple(
+            BatchActionTag(
+                round_id=round_id,
+                policy_version=version,
+                client_index=index,
+                client_id=dispatch.client_id,
+                client_slot=dispatch.client_slot,
+                action_tick=dispatch.action_tick,
+            )
+            for index, dispatch in enumerate(dispatches)
+        )
+        return dispatches, tags
+
+    def _submit_echoes(
+        self,
+        dispatches: Sequence[ClientActionDispatch],
+        deadline: float,
+    ) -> list:
+        return [
+            self._executor.submit(self._collect_echo, env, dispatch, deadline)
+            for env, dispatch in zip(self.envs, dispatches)
+        ]
+
+    def _gather_echoes(
+        self,
+        futures: Sequence,
+    ) -> tuple[list, list[AuthoritativeEchoError], bool]:
+        """Collect echo futures and apply rejection accounting.
+
+        Returns (echo_results, errors, synchronized_gap). Raises nothing; the
+        caller decides whether the errors are fatal, matching the historical
+        ordering of the serial collect_round.
+        """
+        echo_results: list[
+            _MatchedEcho | _MapEpoch | _ActionStateResync | None
+        ] = [None] * len(futures)
+        errors: list[AuthoritativeEchoError] = []
+        for index, future in enumerate(futures):
+            try:
+                echo_results[index] = future.result()
+            except AuthoritativeEchoError as error:
+                errors.append(error)
+
+        synchronized_gap = (
+            len(self.envs) > 1
+            and len(errors) == len(self.envs)
+            and all(error.timed_out for error in errors)
+            and all(result is None for result in echo_results)
+        )
+
+        for result in echo_results:
+            stale, mismatched = self._result_rejections(result)
+            self._stale_echoes_rejected += stale
+            self._mismatched_echoes_rejected += mismatched
+        for error in errors:
+            self._stale_echoes_rejected += error.stale_echoes
+            self._mismatched_echoes_rejected += error.mismatched_echoes
+            if not synchronized_gap:
+                self._echo_timeouts += int(error.timed_out)
+        return echo_results, errors, synchronized_gap
+
+    def _echo_boundary_round(
+        self,
+        echo_results: Sequence,
+        errors: Sequence[AuthoritativeEchoError],
+        synchronized_gap: bool,
+        dispatches: Sequence[ClientActionDispatch],
+        tags: tuple[BatchActionTag, ...],
+        version: int,
+        round_id: int,
+    ) -> BatchRound | None:
+        """Post-echo boundary handling; None means the round was accepted."""
+        map_epochs = [
+            result for result in echo_results if isinstance(result, _MapEpoch)
+        ]
+        if map_epochs:
+            source_maps = {dispatch.map_name for dispatch in dispatches}
+            if len(source_maps) != 1:
+                self._failed_rounds += 1
+                raise AuthoritativeEchoError(
+                    "map boundary crossed multiple source maps: "
+                    + ", ".join(sorted(source_maps))
+                )
+            self._begin_map_epoch(next(iter(source_maps)))
+            boundary_drains = [
+                env.drain_latest_telemetry() for env in self.envs
+            ]
+            return self._pending_map_boundary(
+                boundary_drains,
+                round_id=round_id,
+                policy_version=version,
+                poll=False,
+                tags=tags,
+                action_dispatched=True,
+                rejections=[
+                    self._result_rejections(result)
+                    for result in echo_results
+                ],
+            )
+
+        if synchronized_gap:
+            self._telemetry_gap_pending = True
+            self._telemetry_gap_resyncs += 1
+            boundary_drains = [
+                env.drain_latest_telemetry() for env in self.envs
+            ]
+            return self._preflight_boundary(
+                boundary_drains,
+                round_id=round_id,
+                policy_version=version,
+                action_dispatched=True,
+                tags=tags,
+                rejections=[
+                    (error.stale_echoes, error.mismatched_echoes)
+                    for error in errors
+                ],
+                telemetry_gap_resync=True,
+            )
+
+        if errors:
+            self._failed_rounds += 1
+            raise AuthoritativeEchoError(
+                f"batch round {round_id} rejected for {len(errors)} client(s)",
+                stale_echoes=sum(error.stale_echoes for error in errors),
+                mismatched_echoes=sum(
+                    error.mismatched_echoes for error in errors
+                ),
+                timed_out=any(error.timed_out for error in errors),
+            ) from errors[0]
+
+        state_resyncs = [
+            result for result in echo_results
+            if isinstance(result, _ActionStateResync)
+        ]
+        if state_resyncs:
+            boundary_drains = [
+                env.drain_latest_telemetry() for env in self.envs
+            ]
+            return self._preflight_boundary(
+                boundary_drains,
+                round_id=round_id,
+                policy_version=version,
+                action_dispatched=True,
+                tags=tags,
+                rejections=[
+                    self._result_rejections(result)
+                    for result in echo_results
+                ],
+                action_state_resync=True,
+            )
+
+        return None
+
+    def _collate_accepted(
+        self,
+        accepted: Sequence[_MatchedEcho],
+    ) -> list:
+        """Stateful per-env post-processing for one accepted round.
+
+        This is the only part of accepted-round handling that touches the
+        lattice/feature state, so it must run before the next round's
+        deposits. Everything after it is pure assembly.
+        """
+        return [
+            env.transition_result(match.telemetry, vector=self.vector)
+            for env, match in zip(self.envs, accepted)
+        ]
+
+    def _assemble_accepted_round(
+        self,
+        accepted: Sequence[_MatchedEcho],
+        results: Sequence,
+        tags: tuple[BatchActionTag, ...],
+        version: int,
+        round_id: int,
+    ) -> BatchRound:
+        """Pure assembly of an accepted BatchRound.
+
+        Reads only the matched telemetry and the precomputed per-env
+        results, so it is safe to run after the next round has been
+        dispatched (pipelined driver) or inline (serial collect_round).
+        """
+        infos = []
+        for result, tag, match in zip(results, tags, accepted):
+            info = dict(result[4])
+            debug = match.telemetry.observation.action_debug
+            gate_flags = int(debug[11]) if len(debug) >= 12 else 0
+            fire_suppressed = bool(
+                gate_flags & ML_FIRE_GATE_SUPPRESSED
+            )
+            info.update({
+                "batch_round_id": tag.round_id,
+                "policy_version": tag.policy_version,
+                "action_tick": tag.action_tick,
+                "authoritative_echo_tick": match.echo_tick,
+                "authoritative_echo_valid": True,
+                "authoritative_echo_stale": False,
+                "trainable_transition": True,
+                "stale_echoes_rejected": match.stale_echoes,
+                "mismatched_echoes_rejected": match.mismatched_echoes,
+                "fire_gate_protected": bool(
+                    gate_flags & ML_FIRE_GATE_PROTECTED
+                ),
+                "fire_gate_target": bool(
+                    gate_flags & ML_FIRE_GATE_TARGET
+                ),
+                "fire_gate_suppressed": fire_suppressed,
+                "effective_action_fire": bool(int(debug[9])),
+                "effective_action_look_yaw": float(debug[6]),
+                "effective_action_look_pitch": float(debug[7]),
+            })
+            infos.append(info)
+
+        self._fire_gate_suppressions += sum(
+            int(info["fire_gate_suppressed"]) for info in infos
+        )
+
+        frame_values = [match.telemetry.server_frame for match in accepted]
+        frame_span = max(frame_values) - min(frame_values)
+        self._max_observed_frame_span = max(
+            self._max_observed_frame_span, frame_span
+        )
+        self._rounds_accepted += 1
+        self._transitions_accepted += len(results)
+        return BatchRound(
+            round_id=round_id,
+            policy_version=version,
+            observations=self._collate_observations(
+                [result[0] for result in results], self.vector
+            ),
+            rewards=np.asarray([result[1] for result in results], dtype=np.float32),
+            terminated=np.asarray(
+                [result[2] for result in results], dtype=np.bool_
+            ),
+            truncated=np.asarray(
+                [result[3] for result in results], dtype=np.bool_
+            ),
+            infos=tuple(infos),
+            tags=tags,
+        )
+
+    def _round_from_drains(
+        self,
+        drains: Sequence[ClientTelemetryDrain],
+        actions: Sequence[Action],
+        version: int,
+        round_id: int,
+    ) -> BatchRound:
+        """The full serial round body once preflight drains are known."""
+        if self._map_epoch_source is not None:
+            return self._pending_map_boundary(
+                drains,
+                round_id=round_id,
+                policy_version=version,
+                poll=True,
+            )
+        if self._telemetry_gap_pending:
+            return self._poll_telemetry_gap(
+                drains,
+                round_id=round_id,
+                policy_version=version,
+            )
+        if any(drain.advanced for drain in drains):
+            return self._preflight_boundary(
+                drains,
+                round_id=round_id,
+                policy_version=version,
+            )
+        dispatches, tags = self._dispatch_all(actions, version, round_id)
+        deadline = time.monotonic() + self.round_timeout
+        futures = self._submit_echoes(dispatches, deadline)
+        echo_results, errors, synchronized_gap = self._gather_echoes(futures)
+        boundary = self._echo_boundary_round(
+            echo_results, errors, synchronized_gap,
+            dispatches, tags, version, round_id,
+        )
+        if boundary is not None:
+            return boundary
+        accepted = [
+            result for result in echo_results if isinstance(result, _MatchedEcho)
+        ]
+        results = self._collate_accepted(accepted)
+        return self._assemble_accepted_round(
+            accepted, results, tags, version, round_id
+        )
+
     def collect_round(
         self,
         actions: Sequence[Action],
@@ -849,241 +1171,133 @@ class Q2NetworkClientBatch:
                 raise ValueError(
                     f"expected {len(self.envs)} actions, received {len(actions)}"
                 )
-            version = self._policy_version(policy_version)
-            if (
-                self._latest_policy_version is not None
-                and version < self._latest_policy_version
-            ):
-                self._stale_policy_rounds_rejected += 1
-                raise StalePolicyVersionError(
-                    f"policy {version} is older than active policy "
-                    f"{self._latest_policy_version}"
-                )
+            version, round_id = self._begin_round(policy_version)
+            drains = self._drain_all()
+            return self._round_from_drains(drains, actions, version, round_id)
 
-            round_id = self._next_round_id
-            self._next_round_id += 1
-            self._latest_policy_version = version
-            drain_futures = [
-                self._executor.submit(env.drain_latest_telemetry)
-                for env in self.envs
-            ]
-            drains = [future.result() for future in drain_futures]
-            if self._map_epoch_source is not None:
-                return self._pending_map_boundary(
-                    drains,
-                    round_id=round_id,
-                    policy_version=version,
-                    poll=True,
-                )
-            if self._telemetry_gap_pending:
-                return self._poll_telemetry_gap(
-                    drains,
-                    round_id=round_id,
-                    policy_version=version,
-                )
-            if any(drain.advanced for drain in drains):
-                return self._preflight_boundary(
-                    drains,
-                    round_id=round_id,
-                    policy_version=version,
-                )
-            dispatches = [
-                env.dispatch_action(action)
-                for env, action in zip(self.envs, actions)
-            ]
-            self._rounds_dispatched += 1
-            self._actions_dispatched += len(dispatches)
-            deadline = time.monotonic() + self.round_timeout
-            futures = [
-                self._executor.submit(self._collect_echo, env, dispatch, deadline)
-                for env, dispatch in zip(self.envs, dispatches)
-            ]
-            echo_results: list[
-                _MatchedEcho | _MapEpoch | _ActionStateResync | None
-            ] = [None] * len(
-                futures
-            )
-            errors: list[AuthoritativeEchoError] = []
-            for index, future in enumerate(futures):
-                try:
-                    echo_results[index] = future.result()
-                except AuthoritativeEchoError as error:
-                    errors.append(error)
+    def collect_rounds_pipelined(
+        self,
+        observations,
+        *,
+        rounds: int,
+        infer,
+        policy_version: int,
+        on_round=None,
+        should_stop=None,
+        after_collate=None,
+    ):
+        """Drive ``rounds`` rounds with one round in flight.
 
-            synchronized_gap = (
-                len(self.envs) > 1
-                and len(errors) == len(self.envs)
-                and all(error.timed_out for error in errors)
-                and all(result is None for result in echo_results)
-            )
+        Steady state per iteration: validate+collate the echoes that just
+        arrived (the minimal stateful work inference needs), infer, dispatch
+        the next round, then assemble and emit the PREVIOUS round's
+        BatchRound while the new echoes are in flight. Boundary rounds
+        (preflight catchup, map epoch, telemetry gap, action-state resync)
+        flush the in-flight round first and then run the exact serial
+        boundary path, so the emitted BatchRound sequence is identical to
+        serial ``collect_round`` calls given the same action sequence.
 
-            for result in echo_results:
-                stale, mismatched = self._result_rejections(result)
-                self._stale_echoes_rejected += stale
-                self._mismatched_echoes_rejected += mismatched
-            for error in errors:
-                self._stale_echoes_rejected += error.stale_echoes
-                self._mismatched_echoes_rejected += error.mismatched_echoes
-                if not synchronized_gap:
-                    self._echo_timeouts += int(error.timed_out)
+        ``infer(observations, round_id)`` must return one Action per env; it
+        receives the freshest collated observations, exactly as a serial
+        trainer's loop would. The round id is allocated before inference so
+        the caller can key per-round inference context (values, hidden
+        state, log-probs) for the matching ``on_round`` call later.
+        ``on_round(BatchRound)`` is invoked in round order under
+        ``_round_lock`` and must not re-enter the batch. Metrics counters
+        for an accepted round are posted when its BatchRound is assembled
+        (one iteration later than serial); totals match after the tail
+        flush. ``should_stop()`` is checked at each iteration start and
+        before the tail flush: when true the driver stops early (an
+        un-emitted in-flight round is discarded exactly the way a serial
+        trainer simply stops collecting). ``after_collate(round_id,
+        results)`` runs right after the stateful per-env collate and may
+        return replacement observations used ONLY for the next inference
+        (e.g. episode-reset vectors for terminated envs); the emitted
+        BatchRound always carries the original collated observations.
+        Returns the final inference observations.
+        """
+        with self._round_lock:
+            if self._closed:
+                raise RuntimeError("network client batch is closed")
+            if not self._started:
+                raise RuntimeError("call reset() before collect_rounds_pipelined()")
+            base_version = self._policy_version(policy_version)
+            vectors = observations
+            pending: tuple | None = None
 
-            tags = tuple(
-                BatchActionTag(
-                    round_id=round_id,
-                    policy_version=version,
-                    client_index=index,
-                    client_id=dispatch.client_id,
-                    client_slot=dispatch.client_slot,
-                    action_tick=dispatch.action_tick,
-                )
-                for index, dispatch in enumerate(dispatches)
-            )
-            map_epochs = [
-                result for result in echo_results if isinstance(result, _MapEpoch)
-            ]
-            if map_epochs:
-                source_maps = {dispatch.map_name for dispatch in dispatches}
-                if len(source_maps) != 1:
-                    self._failed_rounds += 1
-                    raise AuthoritativeEchoError(
-                        "map boundary crossed multiple source maps: "
-                        + ", ".join(sorted(source_maps))
+            def flush_pending() -> None:
+                nonlocal pending
+                if pending is not None and on_round is not None:
+                    on_round(self._assemble_accepted_round(*pending))
+                pending = None
+
+            for _ in range(int(rounds)):
+                if should_stop is not None and should_stop():
+                    break
+                version, round_id = self._begin_round(base_version)
+                actions = list(infer(vectors, round_id))
+                if len(actions) != len(self.envs):
+                    raise ValueError(
+                        f"expected {len(self.envs)} actions, "
+                        f"received {len(actions)}"
                     )
-                self._begin_map_epoch(next(iter(source_maps)))
-                boundary_drains = [
-                    env.drain_latest_telemetry() for env in self.envs
+                drains = self._drain_all()
+                boundary_imminent = (
+                    self._map_epoch_source is not None
+                    or self._telemetry_gap_pending
+                    or any(drain.advanced for drain in drains)
+                )
+                if boundary_imminent:
+                    # Serial order: the in-flight round's BatchRound exists
+                    # before this boundary round.
+                    flush_pending()
+                    round_result = self._round_from_drains(
+                        drains, actions, version, round_id
+                    )
+                    if on_round is not None:
+                        on_round(round_result)
+                    vectors = round_result.observations
+                    continue
+
+                dispatches, tags = self._dispatch_all(actions, version, round_id)
+                deadline = time.monotonic() + self.round_timeout
+                futures = self._submit_echoes(dispatches, deadline)
+                # Overlap: assemble/emit the previous round while this
+                # round's echoes are in flight.
+                flush_pending()
+                echo_results, errors, synchronized_gap = self._gather_echoes(
+                    futures
+                )
+                boundary = self._echo_boundary_round(
+                    echo_results, errors, synchronized_gap,
+                    dispatches, tags, version, round_id,
+                )
+                if boundary is not None:
+                    if on_round is not None:
+                        on_round(boundary)
+                    vectors = boundary.observations
+                    continue
+                accepted = [
+                    result for result in echo_results
+                    if isinstance(result, _MatchedEcho)
                 ]
-                return self._pending_map_boundary(
-                    boundary_drains,
-                    round_id=round_id,
-                    policy_version=version,
-                    poll=False,
-                    tags=tags,
-                    action_dispatched=True,
-                    rejections=[
-                        self._result_rejections(result)
-                        for result in echo_results
-                    ],
-                )
-
-            if synchronized_gap:
-                self._telemetry_gap_pending = True
-                self._telemetry_gap_resyncs += 1
-                boundary_drains = [
-                    env.drain_latest_telemetry() for env in self.envs
-                ]
-                return self._preflight_boundary(
-                    boundary_drains,
-                    round_id=round_id,
-                    policy_version=version,
-                    action_dispatched=True,
-                    tags=tags,
-                    rejections=[
-                        (error.stale_echoes, error.mismatched_echoes)
-                        for error in errors
-                    ],
-                    telemetry_gap_resync=True,
-                )
-
-            if errors:
-                self._failed_rounds += 1
-                raise AuthoritativeEchoError(
-                    f"batch round {round_id} rejected for {len(errors)} client(s)",
-                    stale_echoes=sum(error.stale_echoes for error in errors),
-                    mismatched_echoes=sum(
-                        error.mismatched_echoes for error in errors
-                    ),
-                    timed_out=any(error.timed_out for error in errors),
-                ) from errors[0]
-
-            state_resyncs = [
-                result for result in echo_results
-                if isinstance(result, _ActionStateResync)
-            ]
-            if state_resyncs:
-                boundary_drains = [
-                    env.drain_latest_telemetry() for env in self.envs
-                ]
-                return self._preflight_boundary(
-                    boundary_drains,
-                    round_id=round_id,
-                    policy_version=version,
-                    action_dispatched=True,
-                    tags=tags,
-                    rejections=[
-                        self._result_rejections(result)
-                        for result in echo_results
-                    ],
-                    action_state_resync=True,
-                )
-
-            accepted = [
-                result
-                for result in echo_results
-                if isinstance(result, _MatchedEcho)
-            ]
-            results = [
-                env.transition_result(match.telemetry, vector=self.vector)
-                for env, match in zip(self.envs, accepted)
-            ]
-            infos = []
-            for result, tag, match in zip(results, tags, accepted):
-                info = dict(result[4])
-                debug = match.telemetry.observation.action_debug
-                gate_flags = int(debug[11]) if len(debug) >= 12 else 0
-                fire_suppressed = bool(
-                    gate_flags & ML_FIRE_GATE_SUPPRESSED
-                )
-                info.update({
-                    "batch_round_id": tag.round_id,
-                    "policy_version": tag.policy_version,
-                    "action_tick": tag.action_tick,
-                    "authoritative_echo_tick": match.echo_tick,
-                    "authoritative_echo_valid": True,
-                    "authoritative_echo_stale": False,
-                    "trainable_transition": True,
-                    "stale_echoes_rejected": match.stale_echoes,
-                    "mismatched_echoes_rejected": match.mismatched_echoes,
-                    "fire_gate_protected": bool(
-                        gate_flags & ML_FIRE_GATE_PROTECTED
-                    ),
-                    "fire_gate_target": bool(
-                        gate_flags & ML_FIRE_GATE_TARGET
-                    ),
-                    "fire_gate_suppressed": fire_suppressed,
-                    "effective_action_fire": bool(int(debug[9])),
-                    "effective_action_look_yaw": float(debug[6]),
-                    "effective_action_look_pitch": float(debug[7]),
-                })
-                infos.append(info)
-
-            self._fire_gate_suppressions += sum(
-                int(info["fire_gate_suppressed"]) for info in infos
-            )
-
-            frame_values = [match.telemetry.server_frame for match in accepted]
-            frame_span = max(frame_values) - min(frame_values)
-            self._max_observed_frame_span = max(
-                self._max_observed_frame_span, frame_span
-            )
-            self._rounds_accepted += 1
-            self._transitions_accepted += len(results)
-            return BatchRound(
-                round_id=round_id,
-                policy_version=version,
-                observations=self._collate_observations(
+                results = self._collate_accepted(accepted)
+                collated = self._collate_observations(
                     [result[0] for result in results], self.vector
-                ),
-                rewards=np.asarray([result[1] for result in results], dtype=np.float32),
-                terminated=np.asarray(
-                    [result[2] for result in results], dtype=np.bool_
-                ),
-                truncated=np.asarray(
-                    [result[3] for result in results], dtype=np.bool_
-                ),
-                infos=tuple(infos),
-                tags=tags,
-            )
+                )
+                vectors = collated
+                if after_collate is not None:
+                    replacement = after_collate(round_id, results)
+                    if replacement is not None:
+                        vectors = replacement
+                pending = (accepted, results, tags, version, round_id)
+
+            if not (should_stop is not None and should_stop()):
+                flush_pending()
+            else:
+                pending = None
+            return vectors
+
 
     def step(self, actions: Sequence[Action], *, policy_version: int):
         return self.collect_round(

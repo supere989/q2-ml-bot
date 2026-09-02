@@ -218,7 +218,7 @@ timeout remains fatal. TensorBoard exposes
 `network_client/telemetry_gap_resyncs`; do not turn arbitrary one-client echo
 timeouts into map boundaries.
 
-The public client conduit is wire version 4. Its protocol-34 impulse and five
+The public client conduit is wire version 5. Its protocol-34 impulse and five
 unused button bits carry a modulo-192 action generation plus hook/weapon
 request; the server strips the private button bits before gameplay. Same-frame
 action echoes are admissible only when that generation matches; C records the
@@ -341,6 +341,11 @@ for the applied action actually being zero.
   sides and a note in `docs/ML_FRAMEWORK.md`.
 - Reward weights are env-var overrides (`R_*`) today; record the full set in
   the run log when launching. Do not tune rewards mid-run.
+- Lattice role gates are env-var consumption switches, not storage switches:
+  `Q2_LATTICE_OBS`, `Q2_LATTICE_REWARD`, `Q2_LATTICE_IMMEDIATE`,
+  `Q2_LATTICE_DIRECTIVES` (see `docs/LATTICE-ROLE-GATES-2026-07-23.md`).
+  Ablations must keep deposits live (`Q2_SESSION_MEMORY=1`) so runs remain
+  scorable; gate at the consumption point only.
 - Checkpoints (`*.pt`, `*.onnx`) and `runs/` stay out of git.
 - Commit style: short imperative subject, body explains the why
   (see `engine/lithium` history).

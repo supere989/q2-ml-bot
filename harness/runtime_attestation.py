@@ -46,6 +46,9 @@ _NON_SEMANTIC_Q2_KEYS = {
     "Q2_BIND_IP",
     "Q2_CKPT_DIR",
     "Q2_HEAT_DIR",
+    # Credential: must never appear in an attested manifest, and lane
+    # credentials are deployment detail, not runtime identity.
+    "Q2_ML_CLIENT_TELEMETRY_TOKEN",
     "Q2_ML_PORT_BASE",
     "Q2_RESUME_DIR",
     "Q2_ROOT",
@@ -57,6 +60,11 @@ _NON_SEMANTIC_Q2_KEYS = {
 }
 _NON_SEMANTIC_Q2_PREFIXES = (
     "Q2_DISTRIBUTED_",
+    # Lane topology (loopback server/telemetry ports, harness/qport bases,
+    # client data roots, client ID prefixes) is deployment detail, not
+    # semantic runtime identity: two network-native workers in one quorum
+    # must share one manifest while binding distinct local ports.
+    "Q2_NETWORK_",
     "Q2_OLLAMA_",
     "Q2_ROLLOUT_",
 )

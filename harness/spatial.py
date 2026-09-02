@@ -9,6 +9,7 @@ later without invalidating the current bridge.
 
 import gzip
 import json
+import logging
 import os
 import random
 from dataclasses import dataclass, field, fields
@@ -19,6 +20,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import numpy as np
 
 from .protocol import (
+    ENVIRONMENTAL_MODS,
     ML_ENTITY_DUCKED,
     ML_ENTITY_EPOCH_MASK,
     ML_ENTITY_EPOCH_SHIFT,
@@ -36,11 +38,39 @@ from tools.map_bundle import (
     verify_installed_artifact,
 )
 
+log = logging.getLogger(__name__)
+
 HOOK_REQUIRED = 4
 BLASTER_ITEM_INDEX = 8
 # Fixed policy-readout contract: immediate hostile thermal direction/heat.
 # Persistent engagement is the fallback producer for the same tactical signal.
 IMMEDIATE_ENGAGEMENT_SLICE = slice(5, 9)
+
+# Columns mirrored into the fast nearest-signal numpy cache. Order is fixed;
+# _CELL_COL_INDEX maps field name -> column. Keep in sync with
+# SessionMemoryCell's scored fields.
+_CELL_COL_FIELDS = (
+    "engagement_count",
+    "enemy_seen",
+    "enemy_lost",
+    "damage_dealt",
+    "damage_taken",
+    "kills",
+    "deaths",
+    "hazard_damage",
+    "hazard_deaths",
+    "bad_fight_taken",
+    "good_disengage",
+    "self_fire",
+    "hook_engagement",
+    "item_contested",
+    "successful_escape",
+    "prior_opportunity",
+    "prior_threat",
+    "readiness",
+    "route_bias",
+)
+_CELL_COL_INDEX = {name: index for index, name in enumerate(_CELL_COL_FIELDS)}
 
 
 @dataclass
@@ -54,6 +84,16 @@ class SessionMemoryCell:
     damage_taken: float = 0.0
     kills: float = 0.0
     deaths: float = 0.0
+    # wire v5: environmental damage/deaths (MOD water/slime/lava/crush/
+    # falling) are deposited here instead of the combat channels, so threat
+    # scoring stops blaming enemies for what the map did (de-conflation).
+    hazard_damage: float = 0.0
+    hazard_deaths: float = 0.0
+    # Decision-quality memory (fight bias): fights taken at strongly
+    # negative bias that ended in death, and rewarded disengages from bad
+    # fights. Typed channels — never folded into combat counters.
+    bad_fight_taken: float = 0.0
+    good_disengage: float = 0.0
     self_fire: float = 0.0
     hook_engagement: float = 0.0
     item_contested: float = 0.0
@@ -74,6 +114,10 @@ class SessionMemoryCell:
             + self.enemy_lost
             + self.kills
             + self.deaths
+            + self.hazard_deaths
+            + self.hazard_damage / 100.0
+            + 0.5 * self.bad_fight_taken
+            + 0.5 * self.good_disengage
             + self.self_fire
             + self.hook_engagement
             + self.item_contested
@@ -176,13 +220,37 @@ class VoxelSpatialReward:
     audio_fire_alert_min: float = 0.2
     audio_fire_max_age: float = 30.0
     session_memory_enabled: bool = True
+    # Role gates (design: one store, per-role channels, consumption-point
+    # gates). Storage (deposits) is governed by session_memory_enabled and
+    # stays on during ablations so runs still collect scoring data. The three
+    # consumption points gate independently: policy input (obs tail), reward
+    # shaping, and the trainer's direction loss (lattice_direction_coef).
+    lattice_obs_enabled: bool = True
+    lattice_reward_enabled: bool = True
+    # When off, the immediate-engagement obs slice (5:9) is zeroed regardless
+    # of producer (thermal-hot or persistent fallback) — the clean ablation
+    # switch for that channel.
+    immediate_engagement_enabled: bool = True
+    # External coach writes (apply_directive) bypass gameplay validation, so
+    # they are gated and logged like sidecar attestation.
+    directives_enabled: bool = True
     session_memory_search_radius: float = 2048.0
     session_memory_score_scale: float = 8.0
     session_memory_limit: int = 4096
+    # Fast nearest-signal path: vectorized numpy filter over a dirty-tracked
+    # column cache, with exact Python recomputation of finalist cells so the
+    # result is bit-identical to the pure-Python traversal. Q2_FAST_NEAREST=0
+    # restores the traversal; Q2_NEAREST_VERIFY=1 cross-checks every call.
+    fast_nearest_enabled: bool = True
+    nearest_verify: bool = False
     session_memory_engagement_reward: float = 0.004
     session_memory_opportunity_reward: float = 0.006
     session_memory_threat_penalty: float = 0.006
     session_memory_death_aversion: float = 0.010
+    # Hazard (environmental MOD) aversion, patterned on death aversion but
+    # fed by the typed hazard channel — lava/crush/fall memory repels
+    # without polluting combat threat.
+    session_memory_hazard_aversion: float = 0.010
     session_memory_self_fire_penalty: float = 0.012
     session_memory_camp_penalty: float = 0.004
     thermal_target_enabled: bool = True
@@ -201,6 +269,27 @@ class VoxelSpatialReward:
     damage_prox_aversion: float = 0.004
     offense_rune_reward: float = 0.004
     survival_rune_reward: float = 0.004
+    # wire v5 self-exposure shaping: pay a penalty while a visible enemy can
+    # see me, pay a covered bonus when I was recently damaged, no enemy is
+    # visible, and enemies can no longer see me.
+    exposure_penalty: float = 0.004
+    cover_reward: float = 0.002
+    # Fight decision bias (advisory; reward/deposit path only — it never
+    # masks or alters actions). Weighted sum of exchange projection,
+    # exposure asymmetry, typed-hazard proximity, outnumbered penalty, and
+    # escape readiness, clipped to [-1, 1].
+    bias_w_margin: float = 0.5
+    bias_w_exposure: float = 0.3
+    bias_w_hazard: float = 0.4
+    bias_w_outnumbered: float = 0.15
+    bias_w_escape: float = 0.1
+    bad_fight_penalty: float = 0.010
+    disengage_reward: float = 0.006
+    good_fight_reward: float = 0.004
+    # Decision memory feeds the EXISTING threat read channel only (the
+    # 24-float policy tail layout is frozen): cells where I repeatedly took
+    # bad fights read as slightly more threatening.
+    bad_fight_threat_weight: float = 0.5
     survival_tick_reward: float = 0.0002
     survival_threat_reward: float = 0.0015
     survival_low_health_reward: float = 0.002
@@ -260,6 +349,7 @@ class VoxelSpatialReward:
     _feature_cache_key: Optional[Tuple[str, int]] = field(default=None, init=False)
     _feature_cache: Optional[np.ndarray] = field(default=None, init=False, repr=False)
     _feature_nearest_deaths: float = field(default=0.0, init=False)
+    _feature_nearest_hazard: float = field(default=0.0, init=False)
     _rust_indices: Dict[str, object] = field(default_factory=dict, init=False, repr=False)
     _rust_dirty_cells: Dict[str, Set[Tuple[int, int, int]]] = field(
         default_factory=dict, init=False, repr=False
@@ -272,6 +362,13 @@ class VoxelSpatialReward:
     ] = field(default_factory=dict, init=False, repr=False)
     _rust_fallback_reason: str = field(default="", init=False)
     _rust_event_rows_applied: int = field(default=0, init=False)
+    # Column cache for the fast nearest-signal path (per map).
+    _cell_col_cache: Dict[str, dict] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _cell_col_dirty: Dict[str, Dict[Tuple[int, int, int], None]] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _thermal_tracks: Dict[int, ThermalTargetTrack] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -306,15 +403,25 @@ class VoxelSpatialReward:
     episode_damage_taken: float = 0.0
     episode_kills: float = 0.0
     episode_deaths: float = 0.0
+    episode_bad_fights: float = 0.0
+    episode_good_disengages: float = 0.0
     episode_contact_events: float = 0.0
     recent_threat_steps: int = 0
     rng: random.Random = field(default_factory=random.Random, repr=False)
 
     @classmethod
     def from_env(cls, seed: Optional[int] = None) -> "VoxelSpatialReward":
-        enabled = os.environ.get("Q2_SPATIAL_REWARD", "1").lower() not in {
-            "0", "false", "off", "no"
-        }
+        def _flag(name: str, default: str = "1") -> bool:
+            return os.environ.get(name, default).lower() not in {
+                "0", "false", "off", "no"
+            }
+
+        enabled = _flag("Q2_SPATIAL_REWARD")
+        # Storage gate first: the consumption gates default to following it
+        # (preserving the historical Q2_SESSION_MEMORY=0 semantics) but can be
+        # overridden independently for role ablations.
+        session_memory_enabled = _flag("Q2_SESSION_MEMORY")
+        sm_default = "1" if session_memory_enabled else "0"
         return cls(
             enabled=enabled,
             voxel_size=_env_float("Q2_VOXEL_SIZE", 256.0),
@@ -395,9 +502,11 @@ class VoxelSpatialReward:
             splash_max_distance=_env_float("Q2_SPLASH_MAX_DISTANCE", 1200.0),
             audio_fire_alert_min=_env_float("Q2_FIRE_AUDIO_ALERT_MIN", 0.2),
             audio_fire_max_age=_env_float("Q2_FIRE_AUDIO_MAX_AGE", 30.0),
-            session_memory_enabled=os.environ.get(
-                "Q2_SESSION_MEMORY", "1"
-            ).lower() not in {"0", "false", "off", "no"},
+            session_memory_enabled=session_memory_enabled,
+            lattice_obs_enabled=_flag("Q2_LATTICE_OBS", sm_default),
+            lattice_reward_enabled=_flag("Q2_LATTICE_REWARD", sm_default),
+            immediate_engagement_enabled=_flag("Q2_LATTICE_IMMEDIATE"),
+            directives_enabled=_flag("Q2_LATTICE_DIRECTIVES"),
             session_memory_search_radius=_env_float(
                 "Q2_SESSION_MEMORY_RADIUS", 2048.0
             ),
@@ -405,6 +514,12 @@ class VoxelSpatialReward:
                 "Q2_SESSION_MEMORY_SCORE_SCALE", 8.0
             ),
             session_memory_limit=_env_int("Q2_SESSION_MEMORY_LIMIT", 4096),
+            fast_nearest_enabled=os.environ.get(
+                "Q2_FAST_NEAREST", "1"
+            ).lower() not in {"0", "false", "off", "no"},
+            nearest_verify=os.environ.get(
+                "Q2_NEAREST_VERIFY", "0"
+            ).lower() not in {"0", "false", "off", "no"},
             session_memory_engagement_reward=_env_float(
                 "R_SESSION_MEMORY_ENGAGEMENT", 0.004
             ),
@@ -416,6 +531,9 @@ class VoxelSpatialReward:
             ),
             session_memory_death_aversion=_env_float(
                 "R_SESSION_MEMORY_DEATH_AVERSION", 0.010
+            ),
+            session_memory_hazard_aversion=_env_float(
+                "R_SESSION_MEMORY_HAZARD", 0.010
             ),
             session_memory_self_fire_penalty=_env_float(
                 "R_SESSION_MEMORY_SELF_FIRE", 0.012
@@ -449,6 +567,19 @@ class VoxelSpatialReward:
             damage_prox_aversion=_env_float("R_DAMAGE_PROX_AVERSION", 0.004),
             offense_rune_reward=_env_float("R_OFFENSE_RUNE", 0.004),
             survival_rune_reward=_env_float("R_SURVIVAL_RUNE", 0.004),
+            exposure_penalty=_env_float("R_EXPOSURE_PENALTY", 0.004),
+            cover_reward=_env_float("R_COVER_REWARD", 0.002),
+            bias_w_margin=_env_float("Q2_BIAS_W_MARGIN", 0.5),
+            bias_w_exposure=_env_float("Q2_BIAS_W_EXPOSURE", 0.3),
+            bias_w_hazard=_env_float("Q2_BIAS_W_HAZARD", 0.4),
+            bias_w_outnumbered=_env_float("Q2_BIAS_W_OUTNUMBERED", 0.15),
+            bias_w_escape=_env_float("Q2_BIAS_W_ESCAPE", 0.1),
+            bad_fight_penalty=_env_float("R_BAD_FIGHT_PENALTY", 0.010),
+            disengage_reward=_env_float("R_DISENGAGE_REWARD", 0.006),
+            good_fight_reward=_env_float("R_GOOD_FIGHT_REWARD", 0.004),
+            bad_fight_threat_weight=_env_float(
+                "R_BAD_FIGHT_THREAT_WEIGHT", 0.5
+            ),
             survival_tick_reward=_env_float("R_SURVIVE_TICK", 0.0002),
             survival_threat_reward=_env_float("R_SURVIVE_THREAT", 0.0015),
             survival_low_health_reward=_env_float(
@@ -623,6 +754,7 @@ class VoxelSpatialReward:
     def _preload_lattice_payload(self, map_name: str, payload: dict) -> None:
         scale = max(0.1, float(self.lattice_prior_scale))
         memory = self._memory_for_map(map_name)
+        self._invalidate_cell_col_cache(map_name)
         for objective in payload.get("objectives", []):
             pos = (objective["x"], objective["y"], objective["z"])
             cell = self.cell_for_pos(pos)
@@ -649,6 +781,7 @@ class VoxelSpatialReward:
         self._feature_cache_key = None
         self._feature_cache = None
         self._feature_nearest_deaths = 0.0
+        self._feature_nearest_hazard = 0.0
 
     def _mark_rust_dirty(
         self, cell: Tuple[int, int, int], map_name: Optional[str] = None
@@ -781,6 +914,7 @@ class VoxelSpatialReward:
                 )
                 entry.readiness = 0.0
                 entry.route_bias = 0.0
+                self._mark_cell_col_dirty(cell, map_name)
                 self._mark_rust_score_event(
                     cell,
                     threat=-old_threat,
@@ -820,6 +954,7 @@ class VoxelSpatialReward:
                     entry.readiness += amount * self.lattice_route_scale * weight
                     entry.route_bias += route_bias * weight
                     touched.add(cell)
+                    self._mark_cell_col_dirty(cell, map_name)
                     new_threat = max(0.0, -entry.readiness)
                     new_opportunity = (
                         max(0.0, entry.readiness) + max(0.0, entry.route_bias)
@@ -1096,7 +1231,11 @@ class VoxelSpatialReward:
         # repeatedly issuing hook cannot manufacture reward.  The destination
         # must be reachable through a live hook zone and advance toward a
         # positive opportunity/readiness lattice cell.
-        hook_candidate = self._heated_hook_correction(obs)
+        hook_candidate = (
+            self._heated_hook_correction(obs)
+            if self.lattice_reward_enabled
+            else None
+        )
         damage_now = max(0.0, float(getattr(obs, "reward_damage_taken", 0.0)))
         recent_damage = (
             0 <= int(obs.tick) - int(self.last_damage_tick)
@@ -1178,8 +1317,12 @@ class VoxelSpatialReward:
                 )
                 hook_correction_started = True
             elif self._hook_correction_target is None:
-                hook_blind = True
-                hook_delta -= self.hook_blind_penalty
+                # Blind-hook discipline only applies while the lattice-guided
+                # correction role is live; with that role ablated the hook is
+                # an unguided actuator and pays cost/discipline terms only.
+                if self.lattice_reward_enabled:
+                    hook_blind = True
+                    hook_delta -= self.hook_blind_penalty
             if overspeed:
                 hook_overspeed = True
                 hook_delta -= self.hook_overspeed_penalty
@@ -1246,6 +1389,10 @@ class VoxelSpatialReward:
         )
         bonus += threat_delta
 
+        # Captured before _update_session_memory refreshes last_visible_count:
+        # "lost sight of them this tick" is the disengage signal.
+        disengage_now = self.last_visible_count > 0 and visible_count == 0
+
         self._update_session_memory(
             obs=obs,
             cell=cell,
@@ -1256,9 +1403,10 @@ class VoxelSpatialReward:
             audio_contact=audio_contact,
         )
         # Session marks, DPS state, and possibly route heat changed this tick.
-        # Compute once below; env._obs_vector() reuses the exact cached vector.
+        # Compute once below; env._obs_vector() reuses the exact cached vector
+        # (gated view). Reward terms read the ungated internal vector.
         self._invalidate_feature_cache()
-        memory_features = self.memory_features(obs)
+        memory_features = self._memory_features_internal(obs)
         memory_delta = 0.0
         current_engagement = float(memory_features[0])
         current_threat = float(memory_features[1])
@@ -1272,11 +1420,11 @@ class VoxelSpatialReward:
             not ammo_depleted
         )
 
-        if combat_ready and visible_count <= 0:
+        if self.lattice_reward_enabled and combat_ready and visible_count <= 0:
             memory_delta += self.session_memory_engagement_reward * nearest_engagement
             memory_delta += self.session_memory_opportunity_reward * nearest_opportunity
 
-        if float(obs.self_state[6]) <= 35.0:
+        if self.lattice_reward_enabled and float(obs.self_state[6]) <= 35.0:
             memory_delta -= self.session_memory_threat_penalty * max(
                 current_threat, nearest_threat
             )
@@ -1292,10 +1440,30 @@ class VoxelSpatialReward:
             current_deaths = (self._norm_memory_score(3.0 * entry_here.deaths)
                               * self._memory_confidence(entry_here))
         death_aversion = max(current_deaths, nearest_deaths)
-        if death_aversion > 0.0:
+        if self.lattice_reward_enabled and death_aversion > 0.0:
             memory_delta -= self.session_memory_death_aversion * death_aversion
 
+        # Hazard aversion: typed environmental memory (lava/slime/water/
+        # crush/falling) repels like the death channel, but lives in its own
+        # channel so combat threat stays de-conflated.
+        nearest_hazard = self._feature_nearest_hazard
+        current_hazard = 0.0
+        if entry_here is not None and (
+            entry_here.hazard_damage > 0.0 or entry_here.hazard_deaths > 0.0
+        ):
+            current_hazard = (
+                self._norm_memory_score(
+                    0.03 * entry_here.hazard_damage
+                    + 3.0 * entry_here.hazard_deaths
+                )
+                * self._memory_confidence(entry_here)
+            )
+        hazard_aversion = max(current_hazard, nearest_hazard)
+        if self.lattice_reward_enabled and hazard_aversion > 0.0:
+            memory_delta -= self.session_memory_hazard_aversion * hazard_aversion
+
         if (
+            self.lattice_reward_enabled and
             fired and
             visible_count <= 0 and
             not audio_contact and
@@ -1305,6 +1473,7 @@ class VoxelSpatialReward:
             memory_delta -= self.session_memory_self_fire_penalty * current_self_fire
 
         if (
+            self.lattice_reward_enabled and
             stagnated and
             visible_count <= 0 and
             not audio_contact and
@@ -1313,6 +1482,70 @@ class VoxelSpatialReward:
             memory_delta -= self.session_memory_camp_penalty * current_engagement
 
         bonus += memory_delta
+
+        # ── fight decision bias (advisory) ────────────────────────────
+        # Scalar in [-1, +1]: should I take this fight? Reward shaping and
+        # typed lattice deposits only — it NEVER masks or alters actions.
+        # Active while alive; the death tick itself stays active so the
+        # fatal-bias deposit can land (corpse frames read 0.0).
+        deaths_now = max(0.0, float(getattr(obs, "reward_death", 0.0)))
+        health_now = (
+            float(obs.self_state[6]) if len(obs.self_state) > 6 else 100.0
+        )
+        bias_active = health_now > 0.0 or deaths_now > 0.0
+        margin_now, _ehp_now, _share_now = self._win_margin(obs)
+        my_exposure_now = float(fire_context["enemy_visible_exposure_max"])
+        self_exposure_now = float(
+            np.clip(getattr(obs, "self_exposure", 0.0), 0.0, 1.0)
+        )
+        escape_ready = int(getattr(obs, "hook_zone_count", 0)) > 0
+        margin_term = self.bias_w_margin * margin_now
+        exposure_term = self.bias_w_exposure * (
+            my_exposure_now - self_exposure_now
+        )
+        hazard_term = self.bias_w_hazard * hazard_aversion
+        outnumbered_term = self.bias_w_outnumbered * max(0, enemy_count - 1)
+        escape_term = self.bias_w_escape * (1.0 if escape_ready else 0.0)
+        fight_bias = (
+            float(np.clip(
+                margin_term + exposure_term - hazard_term
+                - outnumbered_term + escape_term,
+                -1.0, 1.0,
+            ))
+            if bias_active else 0.0
+        )
+
+        engaging = bool(
+            (fired and visible_count > 0)
+            or (aim_aligned and tactical_engagement)
+        )
+        bad_fight_penalty_now = 0.0
+        disengage_reward_now = 0.0
+        good_fight_reward_now = 0.0
+        if self.lattice_reward_enabled and bias_active:
+            if fight_bias < -0.2 and engaging:
+                bad_fight_penalty_now = self.bad_fight_penalty * abs(fight_bias)
+                bonus -= bad_fight_penalty_now
+                self.episode_bad_fights += 1.0
+            if fight_bias < -0.2 and disengage_now:
+                disengage_reward_now = self.disengage_reward * abs(fight_bias)
+                bonus += disengage_reward_now
+                self.episode_good_disengages += 1.0
+            if fight_bias > 0.3 and engaging:
+                good_fight_reward_now = self.good_fight_reward * fight_bias
+                bonus += good_fight_reward_now
+
+        # Decision-quality deposits (storage gate: session_memory_enabled;
+        # typed channels, never folded into combat counters).
+        if self.session_memory_enabled and bias_active:
+            if deaths_now > 0.0 and fight_bias < -0.2:
+                self._memory_cell(
+                    cell, int(obs.tick)
+                ).bad_fight_taken += deaths_now
+            if disengage_reward_now > 0.0:
+                self._memory_cell(
+                    cell, int(obs.tick)
+                ).good_disengage += 1.0
 
         # Engine-supplied extended channels (both runs feel these even when
         # Run A can't see them in its obs vector):
@@ -1355,6 +1588,24 @@ class VoxelSpatialReward:
                 bonus += rune_switch_delta
             self._prev_rune_idx = cur_rune
 
+        # wire v5 self-exposure shaping: being seen by an enemy I can also
+        # see is risk I should manage; having no enemy able to see me right
+        # after I took damage means I found cover — pay both asymmetrically.
+        self_exposure = float(
+            np.clip(getattr(obs, "self_exposure", 0.0), 0.0, 1.0)
+        )
+        exposure_delta = 0.0
+        exposed_while_visible = False
+        covered_after_damage = False
+        if self.lattice_reward_enabled:
+            if visible_count > 0 and self_exposure > 0.0:
+                exposed_while_visible = True
+                exposure_delta -= self.exposure_penalty * self_exposure
+            elif visible_count <= 0 and recent_damage and self_exposure < 1.0:
+                covered_after_damage = True
+                exposure_delta += self.cover_reward * (1.0 - self_exposure)
+        bonus += exposure_delta
+
         info.update({
             "spatial_bonus": float(bonus),
             "ext_damage_prox": float(prox_dmg),
@@ -1392,6 +1643,23 @@ class VoxelSpatialReward:
             ),
             "target_kill_event": float(kills > 0.0),
             "memory_death_aversion": float(death_aversion),
+            "memory_hazard_aversion": float(hazard_aversion),
+            "fight_bias": float(fight_bias),
+            "bias_margin": float(margin_term),
+            "bias_exposure": float(exposure_term),
+            "bias_hazard": float(-hazard_term),
+            "bias_outnumbered": float(-outnumbered_term),
+            "bias_escape": float(escape_term),
+            "bias_engaging": float(engaging),
+            "bad_fight_penalty": float(bad_fight_penalty_now),
+            "disengage_reward": float(disengage_reward_now),
+            "good_fight_reward": float(good_fight_reward_now),
+            "episode_bad_fights": float(self.episode_bad_fights),
+            "episode_good_disengages": float(self.episode_good_disengages),
+            "self_exposure": float(self_exposure),
+            "exposed_while_visible": float(exposed_while_visible),
+            "covered_after_damage": float(covered_after_damage),
+            "exposure_shaping": float(exposure_delta),
             "hook_required_near": float(hook_required_near),
             "hook_action": float(hook_action > 0),
             "hook_action_code": float(hook_action),
@@ -1581,6 +1849,24 @@ class VoxelSpatialReward:
         return float(outcome_delta), info
 
     def memory_features(self, obs: Observation) -> np.ndarray:
+        """Public, gated view of the memory tail for the policy input.
+
+        Role gates are applied here, at the consumption point, never at
+        storage: Q2_LATTICE_OBS=0 zeroes the whole tail, and
+        Q2_LATTICE_IMMEDIATE=0 zeroes only the immediate-engagement slice
+        (5:9) regardless of producer. Reward computation uses the ungated
+        internal vector so an obs ablation never silently changes reward
+        semantics mid-run.
+        """
+        features = self._memory_features_internal(obs)
+        if not self.lattice_obs_enabled:
+            return np.zeros(OBS_SESSION_MEMORY_DIM, dtype=np.float32)
+        if not self.immediate_engagement_enabled:
+            features = features.copy()
+            features[IMMEDIATE_ENGAGEMENT_SLICE] = 0.0
+        return features
+
+    def _memory_features_internal(self, obs: Observation) -> np.ndarray:
         """Compact non-decaying session memory features for the policy input.
         Last 3 slots are the survivability projection (always set)."""
         self._update_thermal_tracks(obs)
@@ -1606,11 +1892,15 @@ class VoxelSpatialReward:
         features = np.zeros(OBS_SESSION_MEMORY_DIM, dtype=np.float32)
         nearest = {
             kind: (0.0, 0.0, 0.0, 0.0)
-            for kind in ("engagement", "threat", "opportunity", "self_fire", "deaths")
+            for kind in (
+                "engagement", "threat", "opportunity", "self_fire",
+                "deaths", "hazard",
+            )
         }
         if self.session_memory_enabled:
             nearest = self._nearest_memory_signals(obs, tuple(nearest))
         self._feature_nearest_deaths = float(nearest["deaths"][3])
+        self._feature_nearest_hazard = float(nearest["hazard"][3])
 
         # Survivability projection (slots 21-23) — always computed so the bot
         # perceives "will I win this race" every step, not just when memory
@@ -1680,6 +1970,7 @@ class VoxelSpatialReward:
             entry = SessionMemoryCell()
             memory[cell] = entry
         entry.last_tick = int(tick)
+        self._mark_cell_col_dirty(cell)
         self._prune_memory(memory)
         return entry
 
@@ -1697,6 +1988,9 @@ class VoxelSpatialReward:
         for cell, _entry in victims:
             memory.pop(cell, None)
             self._mark_rust_removed(cell)
+        if victims:
+            # Row removal would reorder the column cache; rebuild it.
+            self._invalidate_cell_col_cache(self.map_name)
 
     def _update_session_memory(
         self,
@@ -1717,6 +2011,20 @@ class VoxelSpatialReward:
         kills = max(0.0, float(obs.reward_kill))
         deaths = max(0.0, float(obs.reward_death))
         items = max(0.0, float(obs.reward_item_pickup))
+        # wire v5 threat de-conflation: the reward channels are per-tick
+        # deltas, so the MOD read in this same packet attributes them. A
+        # stale/zero MOD falls back to the combat channel — never lose a
+        # damage or death event.
+        env_damage = (
+            damage_taken > 0.0
+            and int(getattr(obs, "last_damage_mod", 0)) in ENVIRONMENTAL_MODS
+        )
+        env_death = (
+            deaths > 0.0
+            and int(getattr(obs, "last_death_mod", 0)) in ENVIRONMENTAL_MODS
+        )
+        combat_damage_taken = 0.0 if env_damage else damage_taken
+        combat_deaths = 0.0 if env_death else deaths
         visible_contact = visible_count > 0
         exposure_sum, _exposure_max = self._visible_enemy_exposure(obs)
         contact = (
@@ -1741,9 +2049,11 @@ class VoxelSpatialReward:
             if items > 0.0 and contact:
                 here.item_contested += items
             here.damage_dealt += damage_dealt
-            here.damage_taken += damage_taken
+            here.hazard_damage += damage_taken - combat_damage_taken
+            here.damage_taken += combat_damage_taken
             here.kills += kills
-            here.deaths += deaths
+            here.hazard_deaths += deaths - combat_deaths
+            here.deaths += combat_deaths
             self._mark_rust_score_event(
                 cell,
                 engagement=(
@@ -1752,7 +2062,11 @@ class VoxelSpatialReward:
                     + (0.50 if hook_enemy else 0.0)
                     + (0.35 * items if contact else 0.0)
                 ),
-                threat=0.15 * exposure_sum + 0.03 * damage_taken + 3.0 * deaths,
+                threat=(
+                    0.15 * exposure_sum
+                    + 0.03 * combat_damage_taken
+                    + 3.0 * combat_deaths
+                ),
                 opportunity=(
                     (0.45 if hook_enemy else 0.0)
                     + (0.45 * items if contact else 0.0)
@@ -1760,7 +2074,7 @@ class VoxelSpatialReward:
                     + 3.0 * kills
                 ),
                 self_fire=(1.0 if fired else 0.0),
-                deaths=3.0 * deaths,
+                deaths=3.0 * combat_deaths,
                 samples=(
                     (1.0 if contact else 0.0)
                     + exposure_sum
@@ -1856,9 +2170,21 @@ class VoxelSpatialReward:
         if tick < self._thermal_last_tick or float(obs.self_state[6]) <= 0.0:
             self._thermal_tracks.clear()
         if float(getattr(obs, "reward_kill", 0.0)) > 0.0:
-            # Hit attribution is not yet target-specific; clearing is safer
-            # than retaining a dead hostile as actionable thermal evidence.
-            self._thermal_tracks.clear()
+            # wire v5 per-target hit attribution: the kill tick names the
+            # victim as (edict_index, 14-bit life epoch) — the same packing
+            # entity_debug uses for track keys — so only the dead hostile's
+            # track clears and other tracks keep cooling. Attribution of
+            # zero means the server could not name the target; clearing all
+            # tracks is still safer than retaining a dead hostile as
+            # actionable thermal evidence.
+            kill_edict = int(getattr(obs, "last_hit_target_edict", 0))
+            kill_epoch = int(getattr(obs, "last_hit_target_epoch", 0))
+            if kill_edict > 0:
+                self._thermal_tracks.pop(
+                    (kill_edict << 14) | (kill_epoch & 0x3FFF), None
+                )
+            else:
+                self._thermal_tracks.clear()
 
         count = max(0, min(int(obs.entity_count), obs.entities.shape[0]))
         for index, ent in enumerate(obs.entities[:count]):
@@ -1972,6 +2298,15 @@ class VoxelSpatialReward:
           engage -> engagement  (combat-anticipation pull)
           danger -> damage_taken (threat shading without full aversion)
         """
+        # External writes bypass gameplay validation, so they are gated
+        # (Q2_LATTICE_DIRECTIVES) and logged like sidecar attestation.
+        if not self.directives_enabled:
+            log.warning(
+                "lattice directive REJECTED (directives disabled): "
+                "map=%s action=%s pos=(%.0f,%.0f,%.0f)",
+                map_name or self.map_name, action, x, y, z,
+            )
+            return False
         target = map_name or self.map_name
         memory = self._memory_for_map(target)
         cell = self.cell_for_pos((float(x), float(y), float(z)))
@@ -1979,6 +2314,7 @@ class VoxelSpatialReward:
         if entry is None:
             entry = SessionMemoryCell()
             memory[cell] = entry
+        self._mark_cell_col_dirty(cell, target)
         amt = max(0.0, float(strength))
         if action == "avoid":
             entry.deaths += amt
@@ -1990,6 +2326,10 @@ class VoxelSpatialReward:
             entry.damage_taken += amt * 33.0
         else:
             return False
+        log.info(
+            "lattice directive applied: map=%s action=%s cell=%s strength=%.2f",
+            target, action, cell, amt,
+        )
         if target == self.map_name:
             self._invalidate_feature_cache()
         self._mark_rust_dirty(cell, target)
@@ -2001,6 +2341,270 @@ class VoxelSpatialReward:
         return self._nearest_memory_signals(obs, (kind,))[kind]
 
     def _nearest_memory_signals(
+        self, obs: Observation, kinds: Tuple[str, ...]
+    ) -> Dict[str, Tuple[float, float, float, float]]:
+        """Find every requested channel, fast path first.
+
+        The fast path is required to be bit-identical to the pure-Python
+        traversal: numpy only shortlists finalist cells, and the finalists
+        are rescored with the exact slow-loop semantics. Q2_NEAREST_VERIFY=1
+        cross-checks every call; Q2_FAST_NEAREST=0 forces the traversal.
+        """
+        if not self.fast_nearest_enabled:
+            return self._nearest_memory_signals_slow(obs, kinds)
+        if self.nearest_verify:
+            fast = self._nearest_memory_signals_fast(obs, kinds)
+            slow = self._nearest_memory_signals_slow(obs, kinds)
+            if fast != slow:
+                raise AssertionError(
+                    f"fast nearest-signal path diverged: {fast} != {slow}"
+                )
+            return fast
+        return self._nearest_memory_signals_fast(obs, kinds)
+
+    def _mark_cell_col_dirty(
+        self, cell: Tuple[int, int, int], map_name: Optional[str] = None
+    ) -> None:
+        key = map_name or self.map_name or "unknown"
+        normalized = tuple(int(value) for value in cell)
+        self._cell_col_dirty.setdefault(key, {})[normalized] = None
+
+    def _invalidate_cell_col_cache(self, map_name: str) -> None:
+        key = map_name or "unknown"
+        self._cell_col_cache.pop(key, None)
+        self._cell_col_dirty.pop(key, None)
+
+    def _cell_columns(self, map_name: str) -> dict:
+        """Numpy mirror of the session-memory dict, updated by dirty rows."""
+        memory = self._memory_for_map(map_name)
+        cache = self._cell_col_cache.get(map_name)
+        if cache is None:
+            keys = list(memory.keys())
+            cells = (
+                np.asarray(keys, dtype=np.float64).reshape(-1, 3)
+                if keys else np.zeros((0, 3), dtype=np.float64)
+            )
+            cols = np.zeros((len(keys), len(_CELL_COL_FIELDS)), dtype=np.float64)
+            for row, cell in enumerate(keys):
+                entry = memory[cell]
+                cols[row] = [
+                    float(getattr(entry, name)) for name in _CELL_COL_FIELDS
+                ]
+            cache = {
+                "keys": keys,
+                "row_of": {cell: row for row, cell in enumerate(keys)},
+                "cells": cells,
+                "cols": cols,
+            }
+            self._cell_col_cache[map_name] = cache
+            self._cell_col_dirty.pop(map_name, None)
+            return cache
+
+        dirty = self._cell_col_dirty.pop(map_name, None)
+        if dirty:
+            keys = cache["keys"]
+            row_of = cache["row_of"]
+            new_cells = []
+            new_rows = []
+            for cell in dirty:
+                entry = memory.get(cell)
+                if entry is None:
+                    # Pruned cells invalidate the whole cache via
+                    # _prune_memory; a missing entry here means that
+                    # rebuild already covered this row.
+                    continue
+                values = [float(getattr(entry, name))
+                          for name in _CELL_COL_FIELDS]
+                row = row_of.get(cell)
+                if row is None:
+                    row_of[cell] = len(keys)
+                    keys.append(cell)
+                    new_cells.append(cell)
+                    new_rows.append(values)
+                else:
+                    cache["cols"][row] = values
+            if new_cells:
+                cache["cells"] = np.vstack([
+                    cache["cells"],
+                    np.asarray(new_cells, dtype=np.float64).reshape(-1, 3),
+                ])
+                cache["cols"] = np.vstack([
+                    cache["cols"],
+                    np.asarray(new_rows, dtype=np.float64),
+                ])
+        return cache
+
+    def _exact_cell_rank(
+        self,
+        entry: SessionMemoryCell,
+        cell: Tuple[int, int, int],
+        px: float, py: float, pz: float,
+        radius: float, voxel_size: float,
+        kind: str,
+    ) -> Optional[Tuple[float, float]]:
+        """One slow-loop iteration for one cell; None when it cannot win."""
+        cx = (float(cell[0]) + 0.5) * voxel_size
+        cy = (float(cell[1]) + 0.5) * voxel_size
+        cz = (float(cell[2]) + 0.5) * voxel_size
+        dist = float(hypot(cx - px, cy - py, cz - pz))
+        if dist > radius:
+            return None
+        raw_score = self._memory_score(entry, kind)
+        if raw_score <= 0.0:
+            return None
+        confidence = self._memory_confidence(entry)
+        distance_scale = max(1.0, dist / voxel_size)
+        score = self._norm_memory_score(raw_score) * confidence
+        return score / distance_scale, score
+
+    def _col_raw_score(self, cols: np.ndarray, kind: str) -> np.ndarray:
+        """Vectorized _memory_score; elementwise op order matches Python."""
+        fi = _CELL_COL_INDEX
+        if kind == "engagement":
+            return (
+                cols[:, fi["engagement_count"]]
+                + 0.35 * cols[:, fi["enemy_seen"]]
+                + 0.25 * cols[:, fi["enemy_lost"]]
+                + 0.50 * cols[:, fi["hook_engagement"]]
+                + 0.35 * cols[:, fi["item_contested"]]
+            )
+        if kind == "threat":
+            return (
+                0.03 * cols[:, fi["damage_taken"]]
+                + 3.0 * cols[:, fi["deaths"]]
+                + 0.15 * cols[:, fi["enemy_seen"]]
+                + 0.20 * cols[:, fi["enemy_lost"]]
+                + cols[:, fi["prior_threat"]]
+                + np.maximum(0.0, -cols[:, fi["readiness"]])
+                + self.bad_fight_threat_weight * cols[:, fi["bad_fight_taken"]]
+            )
+        if kind == "opportunity":
+            return (
+                0.03 * cols[:, fi["damage_dealt"]]
+                + 3.0 * cols[:, fi["kills"]]
+                + 0.45 * cols[:, fi["hook_engagement"]]
+                + 0.45 * cols[:, fi["item_contested"]]
+                + 0.20 * cols[:, fi["successful_escape"]]
+                + cols[:, fi["prior_opportunity"]]
+                + np.maximum(0.0, cols[:, fi["readiness"]])
+                + np.maximum(0.0, cols[:, fi["route_bias"]])
+            )
+        if kind == "self_fire":
+            return cols[:, fi["self_fire"]].astype(np.float64)
+        if kind == "deaths":
+            return 3.0 * cols[:, fi["deaths"]]
+        if kind == "hazard":
+            return (
+                0.03 * cols[:, fi["hazard_damage"]]
+                + 3.0 * cols[:, fi["hazard_deaths"]]
+            )
+        return np.zeros(cols.shape[0], dtype=np.float64)
+
+    def _col_confidence(self, cols: np.ndarray) -> np.ndarray:
+        """Vectorized _memory_confidence estimate (finalists recomputed)."""
+        fi = _CELL_COL_INDEX
+        samples = (
+            cols[:, fi["engagement_count"]]
+            + cols[:, fi["enemy_seen"]]
+            + cols[:, fi["enemy_lost"]]
+            + cols[:, fi["kills"]]
+            + cols[:, fi["deaths"]]
+            + cols[:, fi["hazard_deaths"]]
+            + cols[:, fi["hazard_damage"]] / 100.0
+            + 0.5 * cols[:, fi["bad_fight_taken"]]
+            + 0.5 * cols[:, fi["good_disengage"]]
+            + cols[:, fi["self_fire"]]
+            + cols[:, fi["hook_engagement"]]
+            + cols[:, fi["item_contested"]]
+            + cols[:, fi["successful_escape"]]
+            + np.abs(cols[:, fi["prior_opportunity"]])
+            + np.abs(cols[:, fi["prior_threat"]])
+        )
+        learned = np.minimum(
+            1.0, np.log1p(np.maximum(0.0, samples)) / log1p(24.0)
+        )
+        known_map_signal = (
+            (np.abs(cols[:, fi["prior_opportunity"]]) > 0.0)
+            | (np.abs(cols[:, fi["prior_threat"]]) > 0.0)
+            | (np.abs(cols[:, fi["readiness"]]) > 0.0)
+            | (np.abs(cols[:, fi["route_bias"]]) > 0.0)
+        )
+        return np.maximum(learned, np.where(known_map_signal, 1.0, 0.0))
+
+    def _nearest_memory_signals_fast(
+        self, obs: Observation, kinds: Tuple[str, ...]
+    ) -> Dict[str, Tuple[float, float, float, float]]:
+        zero = (0.0, 0.0, 0.0, 0.0)
+        results = {kind: zero for kind in kinds}
+        memory = self._memory_for_map(self.map_name)
+        if not memory:
+            return results
+
+        pos = obs.self_state[:3]
+        px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+        radius = max(self.session_memory_search_radius, self.voxel_size)
+        voxel_size = max(self.voxel_size, 1.0)
+        scale = max(0.1, float(self.session_memory_score_scale))
+
+        bundle = self._cell_columns(self.map_name)
+        if not bundle["keys"]:
+            return results
+        cells = bundle["cells"]
+        cols = bundle["cols"]
+        centers = (cells + 0.5) * voxel_size
+        delta = centers - np.asarray([px, py, pz], dtype=np.float64)
+        # dist/confidence here are estimates (numpy libm differs by ~1 ulp);
+        # they only shortlist finalists. Generous margins keep every cell
+        # that could win under the exact semantics, and the exact rescore
+        # below applies the real filters.
+        dist = np.sqrt(np.einsum("ij,ij->i", delta, delta))
+        within = dist <= radius * (1.0 + 1e-9) + 1e-9
+        confidence = self._col_confidence(cols)
+
+        for kind in kinds:
+            raw = self._col_raw_score(cols, kind)
+            eligible = within & (raw > 0.0)
+            if not bool(eligible.any()):
+                continue
+            score = np.tanh(np.maximum(0.0, raw) / scale) * confidence
+            rank = np.where(
+                eligible, score / np.maximum(1.0, dist / voxel_size), -1.0
+            )
+            top_rank = float(np.max(rank))
+            if top_rank < 0.0:
+                continue
+            finalists = np.nonzero(
+                rank >= top_rank * (1.0 - 1e-9) - 1e-12
+            )[0]
+            best_rank = -1.0
+            best_row = -1
+            best_score = 0.0
+            # np.nonzero order is row order == dict insertion order, so the
+            # strict-greater scan reproduces the slow loop's tie-breaking.
+            for row in finalists:
+                cell = bundle["keys"][row]
+                exact = self._exact_cell_rank(
+                    memory[cell], cell, px, py, pz, radius, voxel_size, kind
+                )
+                if exact is None:
+                    continue
+                exact_rank, exact_score = exact
+                if exact_rank > best_rank:
+                    best_rank = exact_rank
+                    best_row = int(row)
+                    best_score = exact_score
+            if best_row < 0:
+                continue
+            center = centers[best_row]
+            results[kind] = (
+                float(np.clip((center[0] - px) / radius, -1.0, 1.0)),
+                float(np.clip((center[1] - py) / radius, -1.0, 1.0)),
+                float(np.clip((center[2] - pz) / radius, -1.0, 1.0)),
+                float(best_score),
+            )
+        return results
+
+    def _nearest_memory_signals_slow(
         self, obs: Observation, kinds: Tuple[str, ...]
     ) -> Dict[str, Tuple[float, float, float, float]]:
         """Find every requested channel in one traversal of the voxel map."""
@@ -2070,6 +2674,10 @@ class VoxelSpatialReward:
             return float(entry.self_fire)
         if kind == "deaths":
             return 3.0 * float(entry.deaths)
+        if kind == "hazard":
+            return 0.03 * float(entry.hazard_damage) + 3.0 * float(
+                entry.hazard_deaths
+            )
         return 0.0
 
     def _engagement_score(self, entry: SessionMemoryCell) -> float:
@@ -2089,6 +2697,11 @@ class VoxelSpatialReward:
             + 0.20 * entry.enemy_lost
             + entry.prior_threat
             + max(0.0, -entry.readiness)
+            # Decision-quality memory: cells where I kept taking (and dying
+            # in) fights the bias said to avoid read as slightly more
+            # threatening. This is the ONLY read path for bad_fight_taken;
+            # the 24-float policy tail layout is frozen.
+            + self.bad_fight_threat_weight * entry.bad_fight_taken
         )
 
     def _opportunity_score(self, entry: SessionMemoryCell) -> float:
@@ -2132,6 +2745,8 @@ class VoxelSpatialReward:
         self.episode_damage_taken = 0.0
         self.episode_kills = 0.0
         self.episode_deaths = 0.0
+        self.episode_bad_fights = 0.0
+        self.episode_good_disengages = 0.0
         self.episode_contact_events = 0.0
         self.recent_threat_steps = 0
 
@@ -2756,11 +3371,15 @@ def load_lattice_state(instances, path) -> dict:
                 kwargs = {name: raw[name] for name in valid_fields if name in raw}
                 memory[cell] = SessionMemoryCell(**kwargs)
                 restored_cells += 1
-            inst.preloaded_maps.add(map_name)
+            # Do NOT mark restored maps as preloaded: generator priors must
+            # re-merge (max-merge is idempotent) on the next reset, so a
+            # resumed run trains on the same prior substrate as a fresh one
+            # instead of shadowing it.
             inst._rust_indices.pop(map_name, None)
             inst._rust_dirty_cells.pop(map_name, None)
             inst._rust_removed_cells.pop(map_name, None)
             inst._rust_score_events.pop(map_name, None)
+            inst._invalidate_cell_col_cache(map_name)
         inst._invalidate_feature_cache()
     return {
         "env_steps": int(payload.get("env_steps", 0)),

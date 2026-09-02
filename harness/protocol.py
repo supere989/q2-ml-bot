@@ -47,6 +47,22 @@ ML_TERMINAL_NONE         = 0
 ML_TERMINAL_DEATH        = 1
 ML_TERMINAL_INTERMISSION = 2
 
+# MOD_* means-of-death taxonomy (g_local.h:473+). Wire v5 carries these in
+# last_damage_mod / last_death_mod for hazard-vs-combat attribution.
+MOD_UNKNOWN = 0
+MOD_RAILGUN = 11
+MOD_WATER = 17
+MOD_SLIME = 18
+MOD_LAVA = 19
+MOD_CRUSH = 20
+MOD_TELEFRAG = 21
+MOD_FALLING = 22
+# Environmental (non-combat) damage classes: the hazard channel owns these;
+# combat threat scoring must never see them.
+ENVIRONMENTAL_MODS = frozenset(
+    {MOD_WATER, MOD_SLIME, MOD_LAVA, MOD_CRUSH, MOD_FALLING}
+)
+
 # action_debug[11] flags emitted by game.so. These are debug/control-plane
 # metadata and intentionally remain outside the policy observation vector.
 ML_FIRE_GATE_PROTECTED  = 0x01
@@ -99,6 +115,9 @@ OBS_FMT = (
     + "3f"                                  # inbound_dmg_dir[3]
     + "2f"                                  # inbound_dmg_dist, inbound_dmg_recency
     + "4B"                                  # is_terminal, terminal_reason, 2 pad bytes
+    + "HH"                                  # v5: last_damage_mod, last_death_mod
+    + "II"                                  # v5: last_hit_target_edict, last_hit_target_epoch
+    + "4f"                                  # v5: self_exposure, score_self, score_leader, time_remaining
     + _DEBUG_FMT                            # self_debug
     + _DEBUG_FMT * ML_MAX_ENTITIES          # entity_debug[8]
     + _ACTION_DEBUG_FMT                     # action_debug
@@ -189,6 +208,17 @@ class Observation:
     self_debug:     np.ndarray  # shape (4,) [edict_index, client_slot, source, flags]
     entity_debug:   np.ndarray  # shape (ML_MAX_ENTITIES, 4)
     action_debug:   np.ndarray  # shape (12,) engine-applied action echo
+
+    # wire v5 survival pack — reward/attribution/metrics channels only;
+    # none of these enter the policy input vector.
+    last_damage_mod: int = 0        # MOD_* of most recent damage taken
+    last_death_mod: int = 0         # MOD_* of most recent death
+    last_hit_target_edict: int = 0  # g_edicts index of last hit/kill target
+    last_hit_target_epoch: int = 0  # its 14-bit connection/life epoch
+    self_exposure: float = 0.0      # max exposure any live enemy has of me
+    score_self: float = 0.0         # my scoreboard frags
+    score_leader: float = 0.0       # best score on the server
+    time_remaining: float = 0.0     # seconds left, 0 when timelimit is 0
 
     @property
     def round_intermission(self) -> bool:
@@ -326,6 +356,9 @@ def parse_obs(data: bytes) -> Optional[Observation]:
     is_terminal = bool(v[i])
     terminal_reason = int(v[i+1])
     i += 4
+    last_damage_mod, last_death_mod = int(v[i]), int(v[i+1]); i += 2
+    last_hit_target_edict, last_hit_target_epoch = int(v[i]), int(v[i+1]); i += 2
+    self_exposure, score_self, score_leader, time_remaining = v[i:i+4]; i += 4
     self_debug = np.array(v[i:i+4], dtype=np.uint32); i += 4
     entity_debug_flat = v[i:i + ML_MAX_ENTITIES * 4]; i += ML_MAX_ENTITIES * 4
     entity_debug = np.array(entity_debug_flat, dtype=np.uint32).reshape(ML_MAX_ENTITIES, 4)
@@ -349,6 +382,14 @@ def parse_obs(data: bytes) -> Optional[Observation]:
         inbound_dmg_recency=inbound_dmg_recency,
         is_terminal=is_terminal,
         terminal_reason=terminal_reason,
+        last_damage_mod=last_damage_mod,
+        last_death_mod=last_death_mod,
+        last_hit_target_edict=last_hit_target_edict,
+        last_hit_target_epoch=last_hit_target_epoch,
+        self_exposure=self_exposure,
+        score_self=score_self,
+        score_leader=score_leader,
+        time_remaining=time_remaining,
         self_debug=self_debug,
         entity_debug=entity_debug,
         action_debug=action_debug,

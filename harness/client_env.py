@@ -143,6 +143,9 @@ class Q2NetworkClientEnv:
         self._process: subprocess.Popen | None = None
         self._client_address: tuple[str, int] | None = None
         self._last: ClientTelemetry | None = None
+        # Raw packet capture for the session replay/verification tooling.
+        self._last_raw: bytes = b""
+        self._drain_raws: list[bytes] = []
         self._target_alignment_map: str | None = None
         self._target_was_aligned = False
         self._last_target_acquire_frame = -TARGET_ACQUIRE_COOLDOWN_FRAMES
@@ -226,6 +229,7 @@ class Q2NetworkClientEnv:
                 continue
             self._client_address = address
             self._last = telemetry
+            self._last_raw = data  # raw capture for session replay tooling
             return telemetry
         raise TimeoutError(
             f"no telemetry for client_id={self.client_id} from {self.telemetry_server}"
@@ -271,6 +275,7 @@ class Q2NetworkClientEnv:
         latest = previous
         packet_count = 0
         map_names = []
+        drain_raws = []
         previous_timeout = self._socket.gettimeout()
         self._socket.setblocking(False)
         try:
@@ -287,9 +292,11 @@ class Q2NetworkClientEnv:
                 latest = telemetry
                 packet_count += 1
                 map_names.append(telemetry.map_name)
+                drain_raws.append(data)  # raw capture for replay tooling
                 self._client_address = address
         finally:
             self._socket.settimeout(previous_timeout)
+        self._drain_raws = drain_raws
         self._last = latest
         return ClientTelemetryDrain(
             previous=previous,

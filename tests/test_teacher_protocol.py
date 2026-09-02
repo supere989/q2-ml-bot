@@ -24,7 +24,9 @@ def test_target_solution_teacher_semantics_are_versioned():
 def _packet(*, source=ML_CONTROL_LEGACY_BOT, yaw=12.0):
     values = list(struct.unpack(OBS_FMT, bytes(OBS_SIZE)))
     values[0:3] = [ML_OBS_MAGIC, 77, 2]
-    values[215] = source
+    # self_debug.control_source: self_debug[0] sits at flat index 221 after
+    # the wire v5 block (8 values) was inserted before the debug section.
+    values[223] = source
     obs = struct.pack(OBS_FMT, *values)
     action = struct.pack(
         ACT_FMT, ML_ACT_MAGIC, 77,
@@ -62,5 +64,6 @@ def test_teacher_packet_rejects_nonlegacy_source_and_bad_action():
 
 
 def test_teacher_packet_size_stays_below_tailscale_mtu():
-    assert TEACHER_PACKET_SIZE == 1120
+    # wire v5: ml_obs_t grew 1032 → 1060, so the teacher packet follows.
+    assert TEACHER_PACKET_SIZE == 1148
     assert TEACHER_PACKET_SIZE < 1280

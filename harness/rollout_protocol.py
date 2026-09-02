@@ -395,6 +395,28 @@ class RolloutBatch:
             raise ValueError("PPO floating arrays must be float32")
         if self.arrays["dones"].dtype != np.dtype("uint8"):
             raise ValueError("PPO dones must be uint8")
+        # fire_allowed carries the post-reconciliation authoritative fire
+        # mask for network-native producers. Presence is metadata-explicit:
+        # "explicit" requires the array; older producers omit both and the
+        # learner keeps its all-ones default.
+        fire_mask = str(self.metadata.get("fire_mask", "ones"))
+        if fire_mask not in {"ones", "explicit"}:
+            raise ValueError("PPO fire_mask must be 'ones' or 'explicit'")
+        has_fire_allowed = "fire_allowed" in self.arrays
+        if fire_mask == "explicit" and not has_fire_allowed:
+            raise ValueError(
+                "PPO fire_mask=explicit requires a fire_allowed array"
+            )
+        if has_fire_allowed:
+            if fire_mask != "explicit":
+                raise ValueError(
+                    "PPO fire_allowed array requires fire_mask=explicit"
+                )
+            fire_allowed = self.arrays["fire_allowed"]
+            if fire_allowed.shape != (steps, envs):
+                raise ValueError("fire_allowed must have shape (steps, envs)")
+            if fire_allowed.dtype != np.dtype("uint8"):
+                raise ValueError("PPO fire_allowed must be uint8")
         episode_summaries = self.arrays["episode_summaries"]
         if episode_summaries.ndim != 2 or episode_summaries.shape[1] != len(
             PPO_EPISODE_SUMMARY_COLUMNS
@@ -1417,6 +1439,9 @@ def merge_ppo_batches(batches: Iterable[RolloutBatch]) -> dict[str, object]:
         str(reference.metadata["runtime_manifest_sha256"]),
         str(reference.metadata["lattice_mode"]),
         bool(reference.metadata["deterministic_actions"]),
+        # A quorum must agree on the fire-mask channel: all producers carry
+        # the explicit reconciled mask, or none do.
+        str(reference.metadata.get("fire_mask", "ones")),
     )
     step_shape = reference.arrays["obs"].shape[::2]
     for batch in batches[1:]:
@@ -1427,6 +1452,7 @@ def merge_ppo_batches(batches: Iterable[RolloutBatch]) -> dict[str, object]:
             str(batch.metadata["runtime_manifest_sha256"]),
             str(batch.metadata["lattice_mode"]),
             bool(batch.metadata["deterministic_actions"]),
+            str(batch.metadata.get("fire_mask", "ones")),
         )
         if candidate != generation:
             raise ValueError("cannot merge rollout batches from different policies")
@@ -1441,6 +1467,10 @@ def merge_ppo_batches(batches: Iterable[RolloutBatch]) -> dict[str, object]:
         name: np.concatenate([batch.arrays[name] for batch in batches], axis=1)
         for name in time_major
     }
+    if "fire_allowed" in reference.arrays:
+        merged["fire_allowed"] = np.concatenate(
+            [batch.arrays["fire_allowed"] for batch in batches], axis=1
+        )
     merged.update({
         name: np.concatenate([batch.arrays[name] for batch in batches], axis=0)
         for name in final_state

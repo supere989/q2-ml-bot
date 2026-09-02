@@ -492,6 +492,344 @@ def collect_q2_batch(
     return RolloutBatch(metadata, arrays)
 
 
+def _build_network_env(args, *, initial_policy_version):
+    """Build the network-native multi-env from Q2_NETWORK_* env vars.
+
+    Mirrors the env-var contract train/ppo.py uses for its network-native
+    training lane; the telemetry token is read from the environment and
+    never logged.
+    """
+    from harness.client_batch import build_network_client_multi_env
+
+    token = os.environ.get("Q2_ML_CLIENT_TELEMETRY_TOKEN", "")
+    if not token:
+        raise ValueError(
+            "network rollout worker requires Q2_ML_CLIENT_TELEMETRY_TOKEN"
+        )
+    client_binary = os.environ.get("Q2_NETWORK_CLIENT_BINARY", "")
+    client_root = os.environ.get("Q2_NETWORK_CLIENT_ROOT", "")
+    if not client_binary or not client_root:
+        raise ValueError(
+            "network rollout worker requires Q2_NETWORK_CLIENT_BINARY "
+            "and Q2_NETWORK_CLIENT_ROOT"
+        )
+    return build_network_client_multi_env(
+        n_clients=args.n_ml,
+        server=os.environ.get("Q2_NETWORK_SERVER", "127.0.0.1:28000"),
+        telemetry_server=os.environ.get(
+            "Q2_NETWORK_TELEMETRY_SERVER", "127.0.0.1:28049"
+        ),
+        telemetry_token=token,
+        client_binary=client_binary,
+        client_root=client_root,
+        client_data_root=os.environ.get(
+            "Q2_NETWORK_CLIENT_DATA_ROOT",
+            str(Path(client_root) / ".ml-clients"),
+        ),
+        harness_host=os.environ.get("Q2_NETWORK_HARNESS_HOST", "127.0.0.1"),
+        harness_port_base=int(os.environ.get(
+            "Q2_NETWORK_HARNESS_PORT_BASE", "39000"
+        )),
+        qport_base=int(os.environ.get("Q2_NETWORK_QPORT_BASE", "49000")),
+        client_id_prefix=os.environ.get(
+            "Q2_NETWORK_CLIENT_ID_PREFIX", "public-trainer"
+        ),
+        name_prefix=os.environ.get(
+            "Q2_NETWORK_CLIENT_NAME_PREFIX", "Lattice"
+        ),
+        client_timeout=float(os.environ.get("Q2_NETWORK_CLIENT_TIMEOUT", "30")),
+        round_timeout=float(os.environ.get("Q2_NETWORK_ROUND_TIMEOUT", "2")),
+        max_rejected_echoes=int(os.environ.get(
+            "Q2_NETWORK_MAX_REJECTED_ECHOES", "16"
+        )),
+        max_ep_steps=args.max_ep_steps,
+        initial_policy_version=initial_policy_version,
+        spatial_seed=args.seed,
+        extra_args=tuple(os.environ.get(
+            "Q2_NETWORK_CLIENT_EXTRA_ARGS", ""
+        ).split()),
+    )
+
+
+def _drive_network_rollout(
+    env,
+    *,
+    steps,
+    policy_version,
+    obs,
+    hidden,
+    act,
+    init_hidden,
+    episode_accumulators,
+    batch_telemetry,
+    hidden_dim,
+):
+    """Drive PipelinedNetworkRollout into PPO array layout (torch-free).
+
+    The pipelined driver owns the round cycle; this core maps it onto the
+    same arrays collect_q2_batch produces, applying the authoritative
+    fire-suppression reconciliation before any row is written. Boundary
+    rounds (map epoch, telemetry gap, realtime catchup, action-state
+    resync) are never buffered, so every written row is trainable.
+    """
+    from harness.fire_gate import reconcile_server_fire_suppressions
+    from harness.pipelined_trainer import PipelinedNetworkRollout
+
+    n_envs = env.n_ml
+    obs_dim = int(obs.shape[1])
+    arrays = {
+        "obs": np.empty((steps, n_envs, obs_dim), np.float32),
+        "actions": np.empty((steps, n_envs, 8), np.float32),
+        "rewards": np.empty((steps, n_envs), np.float32),
+        "dones": np.empty((steps, n_envs), np.uint8),
+        "values": np.empty((steps, n_envs), np.float32),
+        "log_probs": np.empty((steps, n_envs), np.float32),
+        "h_states": np.empty((steps, n_envs, hidden_dim), np.float32),
+        "c_states": np.empty((steps, n_envs, hidden_dim), np.float32),
+        "fire_allowed": np.empty((steps, n_envs), np.uint8),
+    }
+    row = [0]
+
+    def buf_add(ctx, rewards, dones):
+        step = row[0]
+        arrays["obs"][step] = ctx["current_obs"]
+        arrays["actions"][step] = ctx["actions"]
+        arrays["rewards"][step] = rewards
+        arrays["dones"][step] = dones
+        arrays["values"][step] = ctx["values"]
+        arrays["log_probs"][step] = ctx["log_probs"]
+        arrays["h_states"][step] = ctx["h_step"]
+        arrays["c_states"][step] = ctx["c_step"]
+        arrays["fire_allowed"][step] = ctx["fire_allowed"]
+        row[0] += 1
+
+    def on_accepted(ctx, results, rewards, dones):
+        reconcile_server_fire_suppressions(
+            ctx["actions"],
+            ctx["log_probs"],
+            ctx["fire_allowed"],
+            ctx.get("fire_metadata"),
+            [(0, results)],
+            n_ml=n_envs,
+        )
+        for index, (_o, _r, _t, _tr, info) in enumerate(results):
+            _record_q2_telemetry(
+                episode_accumulators,
+                batch_telemetry,
+                index,
+                float(rewards[index]),
+                bool(dones[index] > 0.0),
+                info,
+            )
+
+    def on_boundary(infos):
+        for bi in range(n_envs):
+            for values in episode_accumulators.values():
+                values[bi] = 0
+
+    def reset_hidden(bi):
+        hidden[bi] = init_hidden(bi)
+
+    glue = PipelinedNetworkRollout(env, n_steps=steps,
+                                   policy_version=policy_version)
+    final = glue.collect(
+        obs,
+        act=act,
+        buf_add=buf_add,
+        reset_hidden=reset_hidden,
+        on_boundary=on_boundary,
+        on_accepted=on_accepted,
+    )
+    if glue.accepted_steps != steps:
+        raise RuntimeError(
+            f"network collection stopped at {glue.accepted_steps}/{steps} "
+            "accepted rounds"
+        )
+    return arrays, final, glue.accepted_steps
+
+
+def collect_network_batch(
+    artifact,
+    args,
+    runtime=None,
+):
+    """Collect one rollout on the network-native lane (non-leased v1).
+
+    Same RolloutBatch contract as collect_q2_batch, driven through
+    PipelinedNetworkRollout with the reconciled authoritative fire mask
+    recorded per row (metadata fire_mask=explicit). Determinism on network
+    lanes is limited to policy-sampling and spatial seeds — the public
+    server runs free between rounds — and metadata says so honestly.
+    """
+    owns_runtime = runtime is None
+    runtime = {} if runtime is None else runtime
+    if not runtime:
+        # Attestation-visible process settings must be in place before
+        # Torch creates a CUDA context.
+        _prepare_deterministic_environment(args)
+    import torch
+    from models.policy import ACTION_DIM, HIDDEN_DIM, OBS_DIM
+
+    if not runtime:
+        if args.deterministic:
+            torch.use_deterministic_algorithms(True)
+            if hasattr(torch.backends, "cudnn"):
+                torch.backends.cudnn.benchmark = False
+                torch.backends.cudnn.deterministic = True
+        device = torch.device(
+            "cuda" if args.device == "auto" and torch.cuda.is_available() else
+            "cpu" if args.device == "auto" else args.device
+        )
+        runtime_manifest_sha256 = _attest_worker_runtime(
+            artifact, args, str(device)
+        )
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(args.seed)
+        from models.policy import Q2BotPolicy
+
+        policy = Q2BotPolicy().to(device)
+        env = _build_network_env(args, initial_policy_version=artifact.version)
+        n_envs = env.n_ml
+        obs = np.zeros((n_envs, OBS_DIM), dtype=np.float32)
+        hidden = [policy.init_hidden(1, device) for _ in range(n_envs)]
+        runtime.update({
+            "device": device,
+            "policy": policy,
+            "env": env,
+            "n_envs": n_envs,
+            "obs": obs,
+            "hidden": hidden,
+            "started": False,
+            "runtime_manifest_sha256": runtime_manifest_sha256,
+            "episode_accumulators": _new_episode_accumulators(n_envs),
+        })
+    else:
+        device = runtime["device"]
+        policy = runtime["policy"]
+        env = runtime["env"]
+        n_envs = runtime["n_envs"]
+        obs = runtime["obs"]
+        hidden = runtime["hidden"]
+        if artifact.runtime_manifest_sha256 != runtime["runtime_manifest_sha256"]:
+            raise RuntimeError("policy generation changed runtime manifest")
+    episode_accumulators = runtime.setdefault(
+        "episode_accumulators", _new_episode_accumulators(n_envs)
+    )
+    batch_telemetry = _new_batch_telemetry()
+    env.set_policy_version(artifact.version)
+    state = torch.load(io.BytesIO(artifact.payload), map_location=device)
+    policy.load_state_dict(state)
+    policy.eval()
+    try:
+        if not runtime["started"]:
+            for index, value in enumerate(env.reset_all()):
+                obs[index] = value
+            runtime["started"] = True
+            if args.lattice_dir:
+                latest = args.lattice_dir / "lattice_latest.json.gz"
+                if latest.is_file():
+                    from harness.spatial import load_lattice_state
+
+                    load_lattice_state(env._spatial_rewards, latest)
+
+        def act(obs_in):
+            nonlocal hidden
+            ctx = {"current_obs": obs_in.copy()}
+            ctx["h_step"] = torch.cat(
+                [hx[0] for hx in hidden], dim=1
+            ).squeeze(0).cpu().numpy()
+            ctx["c_step"] = torch.cat(
+                [hx[1] for hx in hidden], dim=1
+            ).squeeze(0).cpu().numpy()
+            (
+                actions,
+                values,
+                log_probs,
+                hx_new,
+                fire_metadata,
+            ) = policy.act_batch(
+                obs_in,
+                hidden,
+                device,
+                deterministic=args.deterministic_actions,
+                return_fire_metadata=True,
+            )
+            hidden = hx_new
+            ctx["actions"] = actions
+            ctx["values"] = values
+            ctx["log_probs"] = log_probs
+            # The mask is mutated in place by the reconciliation; keep the
+            # inference-time original out of the mutable path.
+            ctx["fire_allowed"] = fire_metadata["fire_allowed"].copy()
+            ctx["fire_metadata"] = fire_metadata
+            return ctx
+
+        with torch.no_grad():
+            arrays, final, _accepted = _drive_network_rollout(
+                env,
+                steps=args.steps,
+                policy_version=artifact.version,
+                obs=obs,
+                hidden=hidden,
+                act=act,
+                init_hidden=lambda bi: policy.init_hidden(1, device),
+                episode_accumulators=episode_accumulators,
+                batch_telemetry=batch_telemetry,
+                hidden_dim=HIDDEN_DIM,
+            )
+        obs = np.asarray(final, dtype=np.float32)
+        arrays["last_obs"] = obs.copy()
+        arrays["last_h"] = torch.cat(
+            [hx[0] for hx in hidden], dim=1
+        ).squeeze(0).cpu().numpy()
+        arrays["last_c"] = torch.cat(
+            [hx[1] for hx in hidden], dim=1
+        ).squeeze(0).cpu().numpy()
+        arrays.update(_finalize_batch_telemetry(batch_telemetry))
+        runtime["obs"] = obs
+        runtime["hidden"] = hidden
+    finally:
+        if owns_runtime:
+            env.close()
+
+    metadata = {
+        "worker_id": args.worker_id,
+        "sequence": args.sequence,
+        "policy_version": artifact.version,
+        "policy_sha256": artifact.sha256,
+        "config_hash": artifact.config_hash,
+        "seed": args.seed,
+        "game_seed": args.game_seed,
+        "rollout_index": args.rollout_index,
+        "determinism_key": (
+            f"q2-network:v{artifact.version}:{artifact.sha256}:"
+            f"cfg={artifact.config_hash}:seed={args.seed}:"
+            f"game={args.game_seed}:rollout={args.rollout_index}:"
+            f"map={args.map_name}:steps={args.steps}:envs={n_envs}"
+        ),
+        "producer": "q2",
+        "collection_mode": "network",
+        "fire_mask": "explicit",
+        # The public server runs free between rounds, so game-state
+        # determinism does not hold on network lanes; only the policy
+        # sampling and lattice seeds are meaningful.
+        "seed_semantics": "policy_sampling_and_spatial_only",
+        "map_name": args.map_name,
+        "n_envs": n_envs,
+        "device": str(device),
+        "deterministic_actions": bool(args.deterministic_actions),
+        "telemetry_schema": PPO_TELEMETRY_SCHEMA,
+        "runtime_manifest_sha256": runtime["runtime_manifest_sha256"],
+        "lattice_mode": (
+            "persistent" if not owns_runtime else "fresh_worker_session"
+        ),
+    }
+    return RolloutBatch(metadata, arrays)
+
+
 def _configure_leased_assignment(args, lease, runtime):
     assignment = lease.assignment
     if runtime:
@@ -675,7 +1013,8 @@ def _run_leased_worker(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("synthetic", "q2"), default="synthetic")
+    parser.add_argument("--mode", choices=("synthetic", "q2", "network"),
+                        default="synthetic")
     parser.add_argument("--coordinator", required=True)
     parser.add_argument("--token", default="")
     parser.add_argument("--worker-id", default=socket.gethostname())
@@ -726,12 +1065,15 @@ def main():
     if args.policy_out:
         args.policy_out.parent.mkdir(parents=True, exist_ok=True)
         args.policy_out.write_bytes(artifact.payload)
-    runtime = {} if args.continuous and args.mode == "q2" else None
-    if args.mode == "q2":
-        batch = collect_q2_batch(artifact, args, runtime=runtime)
-    else:
-        batch = deterministic_synthetic_batch(
-            artifact,
+    runtime = {} if args.continuous and args.mode in ("q2", "network") else None
+
+    def _collect(art):
+        if args.mode == "q2":
+            return collect_q2_batch(art, args, runtime=runtime)
+        if args.mode == "network":
+            return collect_network_batch(art, args, runtime=runtime)
+        return deterministic_synthetic_batch(
+            art,
             args.worker_id,
             args.sequence,
             args.seed,
@@ -741,22 +1083,10 @@ def main():
             obs_dim=args.obs_dim,
             action_dim=args.action_dim,
         )
+
+    batch = _collect(artifact)
     if args.verify_determinism:
-        repeated = (
-            collect_q2_batch(artifact, args)
-            if args.mode == "q2"
-            else deterministic_synthetic_batch(
-                artifact,
-                args.worker_id,
-                args.sequence,
-                args.seed,
-                args.game_seed,
-                args.rollout_index,
-                steps=args.steps,
-                obs_dim=args.obs_dim,
-                action_dim=args.action_dim,
-            )
-        )
+        repeated = _collect(artifact)
         if repeated.rollout_hash() != batch.rollout_hash():
             differences = {}
             for name in sorted(batch.arrays):
@@ -812,21 +1142,7 @@ def main():
             artifact = client.fetch_policy()
             args.sequence += 1
             args.rollout_index += 1
-            batch = (
-                collect_q2_batch(artifact, args, runtime=runtime)
-                if args.mode == "q2"
-                else deterministic_synthetic_batch(
-                    artifact,
-                    args.worker_id,
-                    args.sequence,
-                    args.seed,
-                    args.game_seed,
-                    args.rollout_index,
-                    steps=args.steps,
-                    obs_dim=args.obs_dim,
-                    action_dim=args.action_dim,
-                )
-            )
+            batch = _collect(artifact)
     finally:
         if runtime and runtime.get("env") is not None:
             runtime["env"].close()

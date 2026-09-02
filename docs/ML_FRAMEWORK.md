@@ -66,6 +66,36 @@ gap (i.e. does `R_FIRE_ALIGNED_REWARD`/`R_FIRE_UNALIGNED_PENALTY` actually
 train the coupling, or is aim reward too weak relative to move/survive
 reward to shape it) before assuming richer sensors alone will fix it.
 
+## Wire v5 survival pack (2026-07-24)
+
+`ML_CLIENT_WIRE_VERSION` is **5** on both sides; no mixed-version support.
+The bump is coordinated across `ml_client_wire.h` + `ml_obs.c` (server,
+q2-lithium-3zb2), `cl_ml_harness.c` (client, q2-ml-client), and
+`harness/protocol.py` + `harness/client_protocol.py` (Python). Deploy
+local lanes atomically.
+
+`ml_obs_t` grew 1032 → **1060** bytes; `ml_client_telemetry_t` is 1156 and
+`ml_teacher_sample_t` is 1148. Eight fields were appended after the
+terminal bytes, before the debug blocks (which stay last):
+
+- `uint16 last_damage_mod`, `uint16 last_death_mod` — MOD\_\* taxonomy
+  (`g_local.h`) of the most recent damage taken / death, recorded in
+  `T_Damage` / `player_die`. Python classifies MOD ∈ {WATER, SLIME, LAVA,
+  CRUSH, FALLING} as environmental: those events deposit into the lattice
+  hazard channel (`hazard_damage`/`hazard_deaths`) and no longer feed
+  combat threat scoring (threat de-conflation).
+- `uint32 last_hit_target_edict`, `uint32 last_hit_target_epoch` —
+  per-target hit attribution; on a kill tick the streak chain has already
+  cleared the live focus fields, so the victim snapshot taken at kill
+  credit rides instead. Python clears only the matching thermal track.
+- `float self_exposure` — max exposure any live enemy has of me, computed
+  by running `ML_TargetSolution` symmetrically from each live enemy.
+- `float score_self`, `float score_leader`, `float time_remaining` —
+  scoreboard game frame; `time_remaining` is 0 when `timelimit` is 0.
+
+All v5 fields are reward/attribution/metrics channels only; the 219-dim
+policy input vector is unchanged. Design: `docs/SURVIVAL-SUCCESS-CORPUS-2026-07-24.md`.
+
 ## Modernization Goals
 
 - Isolate ML code into `ml_*` modules with small headers.

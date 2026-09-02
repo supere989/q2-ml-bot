@@ -29,6 +29,9 @@ from harness.rollout_protocol import (
     PPO_BEHAVIOR_METRIC_KEYS,
     PPO_EPISODE_SUMMARY_COLUMNS,
 )
+from harness.fire_gate import (
+    reconcile_server_fire_suppressions as _reconcile_server_fire_suppressions,
+)
 from models.policy import (
     ACTION_DIM,
     ENT_CNT,
@@ -267,54 +270,6 @@ class RolloutBuffer:
         self.returns = advantages + self.values
         self.advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         self.ptr = 0
-
-
-def _reconcile_server_fire_suppressions(
-    actions: np.ndarray,
-    log_probs: np.ndarray,
-    fire_allowed: np.ndarray,
-    fire_metadata: dict | None,
-    step_results,
-    *,
-    n_ml: int,
-) -> int:
-    """Replace server-suppressed fire with its exact hard-mask likelihood.
-
-    The network server may invalidate a shot after collection-time inference
-    because protection or target state changed. The applied action is no-fire,
-    whose log-probability under the resulting closed gate is zero. Remove the
-    sampled fire log-probability from the recorded joint likelihood and store
-    the closed mask so every later PPO evaluation uses that same distribution.
-    """
-    suppressions = 0
-    for server_index, results in step_results:
-        base = server_index * n_ml
-        for bot_index, (_obs, _reward, _term, _trunc, info) in enumerate(results):
-            if not info.get("fire_gate_suppressed", False):
-                continue
-            vector_index = base + bot_index
-            if (
-                fire_metadata is None
-                or actions[vector_index, 5] <= 0.5
-                or not fire_allowed[vector_index]
-            ):
-                raise RuntimeError(
-                    "server suppressed fire outside the recorded network "
-                    "target-gate distribution"
-                )
-            fire_log_probability = float(
-                fire_metadata["raw_fire_log_probability"][vector_index]
-            )
-            if not np.isfinite(fire_log_probability):
-                raise RuntimeError(
-                    "server-suppressed fire has a non-finite behavior "
-                    "log-probability"
-                )
-            log_probs[vector_index] -= fire_log_probability
-            actions[vector_index, 5] = 0.0
-            fire_allowed[vector_index] = False
-            suppressions += 1
-    return suppressions
 
 
 def _forward_sequence_with_done_masks(
@@ -813,6 +768,15 @@ def train(cfg: dict):
             "hidden_dim": HIDDEN_DIM,
             "ext_obs": os.environ.get("Q2_EXT_OBS", "0"),
             "rust_lattice": os.environ.get("Q2_RUST_LATTICE", "0"),
+            # Lattice role gates (see harness/spatial.py): storage vs
+            # consumption-point ablation switches, recorded for provenance.
+            "session_memory": os.environ.get("Q2_SESSION_MEMORY", "1"),
+            "lattice_obs": os.environ.get("Q2_LATTICE_OBS", ""),
+            "lattice_reward": os.environ.get("Q2_LATTICE_REWARD", ""),
+            "lattice_immediate": os.environ.get("Q2_LATTICE_IMMEDIATE", "1"),
+            "lattice_preload": os.environ.get("Q2_LATTICE_PRELOAD", "1"),
+            "lattice_routes": os.environ.get("Q2_LATTICE_ROUTES", "1"),
+            "lattice_directives": os.environ.get("Q2_LATTICE_DIRECTIVES", "1"),
             "worker_envs": remote_envs,
             "runtime_manifest_sha256": runtime_manifest_sha256,
             "recovery_enabled": recovery_enabled,
@@ -954,6 +918,11 @@ def train(cfg: dict):
             max_ep_steps=int(cfg["max_ep_steps"]),
             initial_policy_version=resume_steps,
             spatial_seed=seed,
+            # Extra argv for the headless clients (e.g. "+set cl_maxfps 100"
+            # when the local lane runs faster than real time).  Space-separated.
+            extra_args=tuple(os.environ.get(
+                "Q2_NETWORK_CLIENT_EXTRA_ARGS", ""
+            ).split()),
         )]
         print(
             "Network-native clients: "
@@ -993,6 +962,18 @@ def train(cfg: dict):
     lattice_instances = [
         sr for server in servers for sr in server._spatial_rewards
     ]
+    # Opt-in pipelined collection for network-native runs (2x-tick lanes).
+    # Default off: the serial collect_round loop below is unchanged. When
+    # on, the batch driver owns the round cycle and the trainer's inference
+    # and buffer writes become callbacks with identical per-round content
+    # (see docs/PIPELINED-COLLECT-2026-07-24.md).
+    pipelined_collect = (
+        network_native
+        and os.environ.get("Q2_PIPELINED_COLLECT", "0").lower()
+        in {"1", "true", "yes", "on"}
+    )
+    if pipelined_collect:
+        print("Network collection: PIPELINED driver (Q2_PIPELINED_COLLECT=1)")
     if resume_dir is not None and not reset_lattice:
         from harness.spatial import load_lattice_state
         lattice_candidates = (
@@ -1124,6 +1105,230 @@ def train(cfg: dict):
         accepted_rollout_steps = 0
         target_rollout_steps = 0 if distributed else int(cfg["n_steps"])
         while accepted_rollout_steps < target_rollout_steps:
+            if pipelined_collect:
+                # Pipelined rollout: the batch driver owns the round cycle;
+                # inference and buffering are callbacks with identical
+                # per-round content to the serial block below.
+                from harness.pipelined_trainer import PipelinedNetworkRollout
+
+                glue = PipelinedNetworkRollout(
+                    servers[0],
+                    n_steps=target_rollout_steps - accepted_rollout_steps,
+                    policy_version=total_env_steps,
+                )
+
+                def _pipelined_act(obs_in):
+                    nonlocal hx_list
+                    ctx = {"current_obs": obs_in.copy()}
+                    if stateful:
+                        ctx["h_step"] = torch.cat(
+                            [hx[0] for hx in hx_list], dim=1
+                        ).squeeze(0)
+                        ctx["c_step"] = torch.cat(
+                            [hx[1] for hx in hx_list], dim=1
+                        ).squeeze(0)
+                    else:
+                        ctx["h_step"] = torch.zeros(
+                            total_venvs, HIDDEN_DIM, device=device
+                        )
+                        ctx["c_step"] = torch.zeros(
+                            total_venvs, HIDDEN_DIM, device=device
+                        )
+                    (
+                        actions_np,
+                        values_np,
+                        lps_np,
+                        hx_list_new,
+                        fire_metadata,
+                    ) = policy.act_batch(
+                        obs_in,
+                        hx_list,
+                        device,
+                        gate_fire=target_fire_gate,
+                        fire_gate_yaw_deg=aim_anchor_yaw_deg,
+                        fire_gate_pitch_deg=aim_anchor_pitch_deg,
+                        return_fire_metadata=True,
+                    )
+                    hx_list = hx_list_new
+                    ctx["actions"] = actions_np
+                    ctx["values"] = values_np
+                    ctx["log_probs"] = lps_np
+                    ctx["fire_allowed"] = fire_metadata["fire_allowed"]
+                    ctx["fire_metadata"] = fire_metadata
+                    return ctx
+
+                def _pipelined_buf_add(ctx, rewards, dones):
+                    buf.add(
+                        torch.from_numpy(ctx["current_obs"]).to(
+                            device, dtype=torch.float32
+                        ),
+                        torch.from_numpy(ctx["actions"]).to(
+                            device, dtype=torch.float32
+                        ),
+                        torch.from_numpy(rewards).to(
+                            device, dtype=torch.float32
+                        ),
+                        torch.from_numpy(dones).to(
+                            device, dtype=torch.float32
+                        ),
+                        torch.from_numpy(ctx["values"]).to(
+                            device, dtype=torch.float32
+                        ),
+                        torch.from_numpy(ctx["log_probs"]).to(
+                            device, dtype=torch.float32
+                        ),
+                        ctx["h_step"],
+                        ctx["c_step"],
+                        torch.from_numpy(ctx["fire_allowed"]).to(
+                            device, dtype=torch.bool
+                        ),
+                    )
+
+                def _pipelined_reset_hidden(bi):
+                    hx_list[bi] = policy.init_hidden(1, device)
+
+                def _pipelined_on_boundary(infos):
+                    target_maps = set()
+                    preflight_packets_drained = 0
+                    map_epoch_resync = False
+                    telemetry_gap_resync = False
+                    for bi, info in enumerate(infos):
+                        target_maps.add(str(info.get("map", "unknown")))
+                        preflight_packets_drained += int(
+                            info.get("preflight_packets_drained", 0)
+                        )
+                        map_epoch_resync |= bool(
+                            info.get("map_epoch_resync", False)
+                        )
+                        telemetry_gap_resync |= bool(
+                            info.get("telemetry_gap_resync", False)
+                        )
+                        ep_rewards[bi] = 0.0
+                        ep_base_rewards[bi] = 0.0
+                        ep_spatial_rewards[bi] = 0.0
+                        ep_kills[bi] = 0.0
+                        ep_deaths[bi] = 0.0
+                        ep_lengths[bi] = 0
+                    boundary_kind = (
+                        "map-epoch" if map_epoch_resync else
+                        "telemetry-gap" if telemetry_gap_resync else
+                        "realtime-catchup"
+                    )
+                    print(
+                        "Network client synchronization boundary: "
+                        f"kind={boundary_kind} "
+                        f"maps={','.join(sorted(target_maps))} "
+                        f"drained={preflight_packets_drained}"
+                    )
+
+                def _pipelined_on_accepted(ctx, results, rewards, dones):
+                    nonlocal rollout_behavior_samples, rollout_fire_gate_samples
+                    nonlocal rollout_fire_gate_allowed, rollout_fire_gate_executed
+                    nonlocal rollout_fire_gate_blocked_probability
+                    nonlocal rollout_posture_samples, rollout_signed_forward
+                    nonlocal rollout_forward_commands, rollout_backward_commands
+                    nonlocal rollout_look_pitch, rollout_look_pitch_abs
+                    nonlocal rollout_view_pitch, rollout_view_pitch_abs
+                    nonlocal rollout_downlook_frames
+                    _reconcile_server_fire_suppressions(
+                        ctx["actions"],
+                        ctx["log_probs"],
+                        ctx["fire_allowed"],
+                        ctx["fire_metadata"],
+                        [(0, results)],
+                        n_ml=n_ml,
+                    )
+                    if target_fire_gate:
+                        rollout_fire_gate_samples += int(
+                            ctx["fire_allowed"].size
+                        )
+                        rollout_fire_gate_allowed += int(
+                            ctx["fire_allowed"].sum()
+                        )
+                        rollout_fire_gate_executed += int(
+                            (ctx["actions"][:, 5] > 0.5).sum()
+                        )
+                        closed = ~ctx["fire_allowed"]
+                        rollout_fire_gate_blocked_probability += float(
+                            ctx["fire_metadata"]["raw_fire_probability"][
+                                closed
+                            ].sum()
+                        )
+                    effective_forward = np.clip(ctx["actions"][:, 0], -1.0, 1.0)
+                    effective_look_pitch = np.clip(
+                        ctx["actions"][:, 3], -30.0, 30.0
+                    )
+                    view_pitch = (
+                        ctx["current_obs"][:, _AIM_PITCH_OBS_INDEX] * 90.0
+                    )
+                    rollout_posture_samples += int(effective_forward.size)
+                    rollout_signed_forward += float(effective_forward.sum())
+                    rollout_forward_commands += int(
+                        (effective_forward > 0.15).sum()
+                    )
+                    rollout_backward_commands += int(
+                        (effective_forward < -0.15).sum()
+                    )
+                    rollout_look_pitch += float(effective_look_pitch.sum())
+                    rollout_look_pitch_abs += float(
+                        np.abs(effective_look_pitch).sum()
+                    )
+                    rollout_view_pitch += float(view_pitch.sum())
+                    rollout_view_pitch_abs += float(np.abs(view_pitch).sum())
+                    # Quake pitch is positive when looking down.
+                    rollout_downlook_frames += int(
+                        (view_pitch > _POSTURE_DOWNLOOK_DEG).sum()
+                    )
+                    for bi, (o, r, _term, _trunc, info) in enumerate(results):
+                        spatial_bonus = float(info.get("spatial_bonus", 0.0))
+                        base_reward = float(
+                            info.get("reward_base", r - spatial_bonus)
+                        )
+                        kills = float(info.get("kills", 0.0))
+                        deaths = float(info.get("deaths", 0.0))
+                        for key in behavior_metric_keys:
+                            rollout_behavior[key] += float(info.get(key, 0.0))
+                        rollout_behavior_samples += 1
+                        obs_np[bi] = o
+                        ep_rewards[bi] += rewards[bi]
+                        ep_base_rewards[bi] += base_reward
+                        ep_spatial_rewards[bi] += spatial_bonus
+                        ep_kills[bi] += kills
+                        ep_deaths[bi] += deaths
+                        ep_lengths[bi] += 1
+                        if dones[bi] > 0.0:
+                            completed_ep_rewards.append(float(ep_rewards[bi]))
+                            completed_ep_base_rewards.append(
+                                float(ep_base_rewards[bi])
+                            )
+                            completed_ep_spatial_rewards.append(
+                                float(ep_spatial_rewards[bi])
+                            )
+                            completed_ep_kills.append(float(ep_kills[bi]))
+                            completed_ep_deaths.append(float(ep_deaths[bi]))
+                            completed_ep_lengths.append(int(ep_lengths[bi]))
+                            completed_map_rewards.setdefault(
+                                str(info.get("map", "unknown")), []
+                            ).append(float(ep_rewards[bi]))
+                            ep_rewards[bi] = 0.0
+                            ep_base_rewards[bi] = 0.0
+                            ep_spatial_rewards[bi] = 0.0
+                            ep_kills[bi] = 0.0
+                            ep_deaths[bi] = 0.0
+                            ep_lengths[bi] = 0
+
+                final_vectors = glue.collect(
+                    obs_np,
+                    act=_pipelined_act,
+                    buf_add=_pipelined_buf_add,
+                    reset_hidden=_pipelined_reset_hidden,
+                    on_boundary=_pipelined_on_boundary,
+                    on_accepted=_pipelined_on_accepted,
+                )
+                accepted_rollout_steps += glue.accepted_steps
+                obs_np = np.asarray(final_vectors, dtype=np.float32)
+                continue
+
             # Store the current observation which produced the actions!
             current_obs = obs_np.copy()
 
@@ -1375,6 +1580,12 @@ def train(cfg: dict):
                 target.copy_(torch.from_numpy(merged[name]).to(
                     device, dtype=target.dtype
                 ))
+            # Network-native producers carry the reconciled authoritative
+            # fire mask; older producers leave the all-ones default intact.
+            if "fire_allowed" in merged:
+                buf.fire_allowed.copy_(torch.from_numpy(
+                    merged["fire_allowed"]
+                ).to(device, dtype=buf.fire_allowed.dtype))
             episode_columns = {
                 name: index
                 for index, name in enumerate(PPO_EPISODE_SUMMARY_COLUMNS)
