@@ -161,6 +161,20 @@
   steps (78 sps). Season gate runs at ~1M steps. Teacher corpus: 2.85M
   rows, 42 distinct maps, still 0 human rows (no public-lane human session
   yet; the AI-bot lane on 28002 now also captures humans).
+- **Season `bc_v3` gate attempt (2026-09-02 15:30 PDT, 1.197M steps):**
+  `tools/season_quality_gate.py` is not directly applicable — it consumes
+  structured JSON season reports from the retired distributed runtime,
+  which the fast-lane `train.ppo` does not emit. Criteria applied by proxy
+  from TensorBoard (`runs/ppo_bc_v3_*`): env_steps 1.197M ✓ (≥1M),
+  clip_fraction p95 0.183 ✓ (<0.20), **approx_kl p95 0.0475 ✗ (>0.03)**.
+  Verdict: **NO PROMOTION** — the bc_demos_v3 clone stays serving on
+  `q2-ai-bots.service`. The elevated KL is typical of a warm-started policy
+  still adapting; re-gate later in the season. Gap recorded: the fast lane
+  needs to emit season reports (or a gate adapter) for formal verdicts.
+  Performance signal remains strong: recent windows ep_r +22…+24, kd
+  1.0–1.5 vs control's +0.45 / 0.14 at 5.35M steps. AI-bot lane health:
+  18 map rotations in 3h, combat continuous (96 kill-events by 22:28 UTC),
+  service active. Corpus 3.27M rows, human rows still 0.
 
 ### Phase 4 — Maps and public play
 - Maps are a curation problem now, not a generation problem. Generator v6 +
