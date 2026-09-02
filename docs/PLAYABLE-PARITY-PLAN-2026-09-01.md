@@ -49,12 +49,38 @@
   engine for Phase 3. It does NOT replace the Phase 2 BC baseline.
 
 ### Phase 2 — Imitation corpus and BC baseline
-- Maximize collection from BOTH existing pipes: 3ZB2 teacher demos
-  (receiver on wsl-box:32511, batches under
-  `~/q2-rollout/live-3zb2/teacher_batches`) and human telemetry from real
-  public-server sessions (007Bond, LordNiKON).
-- Behavior-clone to the EXISTING holdout gates (yaw/pitch MAE, aligned-fire
-  precision, movement drift). Do not invent new gates mid-campaign.
+- **IN PROGRESS 2026-09-01, two pipes fixed/built:**
+  - **Teacher pipe was silently dead since 2026-07-14.** Root causes found
+    and fixed: (1) `teacher_server.py` (and `network_public_server.py`) only
+    armed `sv_maplist` when a generated map was staged — during the
+    2026-08-27→30 farm outage the teacher lane hit timelimit with no armed
+    map and **wedged in intermission for 5 days** (zero bots, zero
+    telemetry); both controllers now fall back to stock→stock rotation
+    (commit `3334596`). (2) The teacher runtime's `game.so` still emitted
+    the 1032-byte wire-v4 obs while the receiver expects 1148-byte packets
+    — all packets rejected; rebuilt from `q2-lithium-3zb2` `3b67d7d` and
+    deployed. Collection verified live (~55 samples/s, rejected=0 lost=0).
+  - **Human pipe BUILT (it never existed):** teacher capture only ran in
+    the 3ZB2 `Bot_Think` path and the receiver rejected
+    `ML_CONTROL_HUMAN`. Added opt-in `ml_teacher_humans` cvar
+    (`ML_TeacherSendHuman`, engine commit `9b91b91`) taking the action
+    straight from the player's usercmd in `ClientThink`; receiver
+    `--allow_humans` + per-row `control` column in the npz
+    (commit `ca13ef1`). Enabled on the public lane. **End-to-end human
+    verification is pending a real player session** (007Bond/LordNiKON) —
+    confirm `control == 1` rows appear in the next batches after they play.
+- **BC tooling:** `tools/behavior_clone_demos.py` (new, tested) — the
+  teacher_batches corpus previously had NO consumer; this is the demo-BC
+  path. Gates match the bc_live_v2 acceptance bar (no new gates invented).
+- **First BC run (`bc_demos_v1`, 32 epochs, 248k rows):** yaw MAE 10.61°,
+  pitch MAE 4.73°, move drift 0.238, fire P/R 73.4%/59.6%, hidden-fire
+  7.7%, weapon top-1 57.9% — **MISSES the bc_live_v2 gate** (2.23°/1.69°/
+  0.0041/92.7%/0). Not promoted. Confounds: the corpus was only 6 episodes
+  (6 bots × 1 map, q2dm2 — collection had been dead since Jul 14) and 3ZB2
+  snap-aim is a harder imitation target than a distilled policy. Train loss
+  was still descending at epoch 32. **Next: rerun with more epochs and a
+  grown corpus** (the fixed teacher lane now rotates stock+generated maps
+  again, adding map/slot diversity continuously); revisit gates then.
 
 ### Phase 3 — PPO polish under the season gate
 - Short PPO seasons warm-started from the BC baseline, judged by
