@@ -211,6 +211,10 @@ def main() -> int:
     parser.add_argument("--teacher_humans", action="store_true",
                          help="also capture human players (ml_teacher_humans 1); "
                               "ML-controlled bots stay excluded by the engine-side guard")
+    parser.add_argument("--intermission_maxtime", type=float, default=0,
+                         help="force-exit intermission after N seconds (engine cvar); "
+                              "0 keeps the engine default. Guards against bot-only "
+                              "intermission wedges.")
     args = parser.parse_args()
 
     policy = OnnxPolicy(Path(args.onnx))
@@ -264,6 +268,7 @@ def main() -> int:
         timescale=1.0,
         fraglimit=args.fraglimit,
         timelimit=args.timelimit,
+        intermission_maxtime=(args.intermission_maxtime or None),
         console_pipe=args.live_maps or bool(args.dlserver) or bool(args.teacher_addr),
     )
 
