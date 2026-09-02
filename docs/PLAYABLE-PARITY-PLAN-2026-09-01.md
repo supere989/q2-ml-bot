@@ -178,6 +178,15 @@
     service journal. Note: bot entities are spawned through the mod's bot
     scaffolding, but slots >= ml_bot_slot are 100% policy-driven — 3ZB2 AI
     never thinks for them.
+  - **Verified 2026-09-02 ~19:25 UTC:** bots fight (kills/deaths accrue),
+    round ends at timelimit, and the engine rotates stock↔generated
+    in-engine (`sv_maplist` + ML intermission auto-exit) — this works on
+    ml_enabled lanes, unlike the pure-3ZB2 teacher lane. Two deployment
+    fixes landed: the VPS harness/ tree was stale wire-v4 (expected 1032;
+    synced to HEAD, 1060) and bot-only intermission can wedge — the lane
+    runs `--intermission_maxtime 30` as the force-exit lever, with q2ded
+    stdout captured via `Q2_SERVER_STDOUT_LOG=/home/q2mlbot/q2-ai-bots-server.log`.
+    The unit currently runs timelimit 5 during the soak window.
   - Transitional: this lane currently interlaces live maps (a chaos window
     per the rule above). When the curated pool lands, it becomes the map
     source. Policy served is the current best checkpoint's ONNX; promotion
