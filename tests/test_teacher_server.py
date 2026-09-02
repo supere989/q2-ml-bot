@@ -57,14 +57,21 @@ def test_select_next_map_stock_fallback_during_farm_outage():
 
 def test_watch_stdout_flags_round_end_markers(capsys):
     stream = io.BytesIO(b"Korn was blasted by Sodom.\nTimelimit hit.\n")
-    hit = threading.Event()
-    _watch_stdout(stream, hit)
-    assert hit.is_set()
+    hit, fatal = threading.Event(), threading.Event()
+    _watch_stdout(stream, hit, fatal)
+    assert hit.is_set() and not fatal.is_set()
     assert "Timelimit hit." in capsys.readouterr().out
+
+
+def test_watch_stdout_flags_fatal_map_load_failure():
+    stream = io.BytesIO(b"Can't find maps/mlteacher_12345678.bsp\n")
+    hit, fatal = threading.Event(), threading.Event()
+    _watch_stdout(stream, hit, fatal)
+    assert fatal.is_set() and not hit.is_set()
 
 
 def test_watch_stdout_ignores_normal_lines():
     stream = io.BytesIO(b"Evil Zeep entered the game\n")
-    hit = threading.Event()
-    _watch_stdout(stream, hit)
-    assert not hit.is_set()
+    hit, fatal = threading.Event(), threading.Event()
+    _watch_stdout(stream, hit, fatal)
+    assert not hit.is_set() and not fatal.is_set()

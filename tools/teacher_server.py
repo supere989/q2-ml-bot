@@ -32,6 +32,7 @@ from tools.map_farm_client import (
 
 TEACHER_PREFIX = "mlteacher"
 ROUND_END_MARKERS = ("Timelimit hit.", "Fraglimit hit.")
+FATAL_MARKERS = ("Can't find maps/",)
 STOCK_DRAWS_FILE = ".teacher_stock_draws"
 MIN_ROUND_SECONDS = 15.0
 CRASH_BACKOFF_SECONDS = 5.0
@@ -52,8 +53,9 @@ def _stop(_signum, _frame):
     STOP = True
 
 
-def _watch_stdout(stream, hit_event: threading.Event) -> None:
-    """Tee server stdout and flag round end on the engine's own markers."""
+def _watch_stdout(stream, hit_event: threading.Event,
+                  fatal_event: threading.Event) -> None:
+    """Tee server stdout; flag round end and unrecoverable map-load failures."""
     try:
         for raw in iter(stream.readline, b""):
             line = raw.decode(errors="replace").rstrip()
@@ -62,6 +64,8 @@ def _watch_stdout(stream, hit_event: threading.Event) -> None:
             print(line, flush=True)
             if any(marker in line for marker in ROUND_END_MARKERS):
                 hit_event.set()
+            if any(marker in line for marker in FATAL_MARKERS):
+                fatal_event.set()
     except (OSError, ValueError):
         pass
 
@@ -145,11 +149,12 @@ def _launch_server(q2_root: Path, args, map_name: str):
         stderr=subprocess.STDOUT, preexec_fn=os.setsid,
     )
     round_hit = threading.Event()
+    fatal = threading.Event()
     threading.Thread(
-        target=_watch_stdout, args=(proc.stdout, round_hit),
+        target=_watch_stdout, args=(proc.stdout, round_hit, fatal),
         name="q2ded-stdout-watch", daemon=True,
     ).start()
-    return proc, round_hit, time.monotonic()
+    return proc, round_hit, fatal, time.monotonic()
 
 
 def _terminate(proc: subprocess.Popen) -> None:
@@ -206,13 +211,18 @@ def main() -> int:
 
     current = draw_stock()
     staged_generated = None
-    proc, round_hit, launched_at = _launch_server(q2_root, args, current)
+    proc, round_hit, fatal, launched_at = _launch_server(q2_root, args, current)
     print(f"[teacher] pid={proc.pid} port={args.port} first={current} "
           f"stock={stock_names} generated={TEACHER_PREFIX}_* "
           f"stock_draws={stock_draws}", flush=True)
     try:
         while not STOP:
             code = proc.poll()
+            if fatal.is_set() and code is None:
+                print(f"[teacher] {current} failed to load; skipping",
+                      flush=True)
+                _terminate(proc)
+                code = proc.returncode
             if round_hit.is_set() or code is not None:
                 reason = "round end" if round_hit.is_set() else f"exit={code}"
                 uptime = time.monotonic() - launched_at
@@ -225,7 +235,8 @@ def main() -> int:
                 if uptime < MIN_ROUND_SECONDS:
                     time.sleep(CRASH_BACKOFF_SECONDS)
                 current = next_map
-                proc, round_hit, launched_at = _launch_server(q2_root, args, current)
+                proc, round_hit, fatal, launched_at = _launch_server(
+                    q2_root, args, current)
                 if staged_generated is None and not mapgen.busy:
                     mapgen.start()
                 continue
