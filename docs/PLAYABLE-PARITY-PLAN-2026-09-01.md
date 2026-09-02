@@ -102,12 +102,30 @@
   lane's human-driven rotations — needs a C-level investigation (backtrace
   capture was inconclusive; no core). Not blocking while the public lane
   rotates rarely and has crashed 0 times in 3 days.
-- **Next:** let the diversified corpus accrue (rotations every ~10 min
-  across q2dm2/4/6/8 + mlteacher_*), then rerun BC (`bc_demos_v3`) and
-  re-judge against the same gates. Do NOT relax the gates mid-campaign; if
-  a diverse corpus still caps yaw MAE, the 3ZB2 snap-aim target
-  distribution is the limiter and that becomes a documented design
-  decision, not a silent gate edit.
+- **Third BC run (`bc_demos_v3`, 96 epochs, 1.73M rows, 150 episodes,
+  2026-09-02):** first run on the diversified corpus. yaw MAE 9.63° (best
+  epoch ~8.5° around epoch 15), pitch 3.26°, drift 0.215, fire P/R
+  78.9%/68.0%, hidden-fire 4.8%, weapon top-1 75.1% — **still MISSES every
+  gate**, but improves on v2 across the board (13.51°→9.63°, 5.13→3.26,
+  0.247→0.215, 61.8%→75.1%) with 5.6× the rows and 25× the episodes, and
+  the holdout now includes generated maps. Diversity was real leverage.
+- **Ceiling analysis (2026-09-02):** yaw MAE plateaus at ~8.5–9.6° while
+  train loss keeps falling — the residual is irreducible per-tick jitter in
+  the 3ZB2 snap-aim target, not a data or capacity shortfall. The
+  bc_live_v2 bar (2.23°) was set cloning a *distilled policy* (smooth
+  trajectories); 3ZB2 is a different, spikier distribution. Per the rule
+  above, gates are NOT relaxed. **Open decision for the project owner:**
+  (a) keep 3ZB2 as teacher and accept a re-based Phase 2 bar measured
+  against 3ZB2's own conditional predictability, (b) switch the teacher to
+  human capture (pipe is deployed; needs real sessions on the public
+  lane), (c) treat `bc_demos_v3` as a good-enough prior and let Phase 3
+  PPO do the polishing, or (d) distill from the fast-lane PPO policy once
+  it passes the season gate. Default recommendation: (c)+(d) — v3 is a
+  sane movement/posture prior, and aim quality should come from RL, not
+  from imitating snap-aim jitter.
+- **Corpus state:** ~860 batches / 1.73M rows, rotating every ~10 min
+  across q2dm2/4/6/8 + mlteacher_*; human rows still 0 (no public-lane
+  session since capture went live).
 
 ### Phase 3 — PPO polish under the season gate
 - Short PPO seasons warm-started from the BC baseline, judged by
