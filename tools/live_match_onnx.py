@@ -205,6 +205,12 @@ def main() -> int:
     parser.add_argument("--dlserver", default="",
                          help="HTTP URL serving the game data root (sv_downloadserver) -- "
                               "fast client downloads instead of the legacy in-game transfer")
+    parser.add_argument("--teacher_addr", default="",
+                         help="teacher receiver address; enables ml_teacher capture on this lane")
+    parser.add_argument("--teacher_port", type=int, default=32511)
+    parser.add_argument("--teacher_humans", action="store_true",
+                         help="also capture human players (ml_teacher_humans 1); "
+                              "ML-controlled bots stay excluded by the engine-side guard")
     args = parser.parse_args()
 
     policy = OnnxPolicy(Path(args.onnx))
@@ -258,7 +264,7 @@ def main() -> int:
         timescale=1.0,
         fraglimit=args.fraglimit,
         timelimit=args.timelimit,
-        console_pipe=args.live_maps or bool(args.dlserver),
+        console_pipe=args.live_maps or bool(args.dlserver) or bool(args.teacher_addr),
     )
 
     signal.signal(signal.SIGINT, _handle_stop)
@@ -275,6 +281,14 @@ def main() -> int:
         if args.dlserver:
             env.set_cvar("sv_downloadserver", args.dlserver)
             print(f"[mapgen] sv_downloadserver = {args.dlserver}", flush=True)
+
+        if args.teacher_addr:
+            env.set_cvar("ml_teacher_enabled", "1")
+            env.set_cvar("ml_teacher_addr", args.teacher_addr)
+            env.set_cvar("ml_teacher_port", str(args.teacher_port))
+            env.set_cvar("ml_teacher_humans", "1" if args.teacher_humans else "0")
+            print(f"[teacher] capture -> {args.teacher_addr}:{args.teacher_port} "
+                  f"humans={int(args.teacher_humans)}", flush=True)
 
         if args.live_maps:
             mapgen.start()  # begin generating the NEXT map in the background now
