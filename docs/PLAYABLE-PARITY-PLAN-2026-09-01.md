@@ -78,9 +78,36 @@
   0.0041/92.7%/0). Not promoted. Confounds: the corpus was only 6 episodes
   (6 bots × 1 map, q2dm2 — collection had been dead since Jul 14) and 3ZB2
   snap-aim is a harder imitation target than a distilled policy. Train loss
-  was still descending at epoch 32. **Next: rerun with more epochs and a
-  grown corpus** (the fixed teacher lane now rotates stock+generated maps
-  again, adding map/slot diversity continuously); revisit gates then.
+  was still descending at epoch 32.
+- **Second BC run (`bc_demos_v2`, 96 epochs, 308k rows, 2026-09-02):** yaw
+  MAE 13.51°, pitch 5.13°, drift 0.247, fire P/R 75.2%/60.5%, hidden-fire
+  7.4%, weapon top-1 61.8% — **MISSES, worse than v1.** Train loss fell
+  98→47 while holdout-adjacent MAE *rose* monotonically from epoch 1:
+  textbook overfitting to a corpus with zero diversity. Conclusion: the
+  binding constraint is corpus diversity, not model capacity or epochs.
+- **Rotation root cause found 2026-09-02 (why the corpus is 100% q2dm2):**
+  the in-engine `sv_maplist` rotation on this lithium/3ZB2 build has NEVER
+  worked — journal shows zero `advanced to` lines in 5 days. With no human
+  to press attack, intermission never exits (the wedge); the rare in-engine
+  `gamemap` it does attempt **segfaults** (Signal 11, twice on 2026-09-02),
+  and every systemd restart re-seeded the deterministic rotation back to
+  q2dm2. **Fix:** wrapper-driven process-restart rotation in
+  `tools/teacher_server.py` (commits `72de5a5`, `ca55961`): watch q2ded
+  stdout for `Timelimit hit.`/`Fraglimit hit.`, relaunch on the next map
+  (stock↔generated interleave kept), persist the stock draw count so
+  service restarts resume mid-rotation, skip unmountable maps, crash
+  backoff. Smoke-tested on the VPS: 4 clean rotations in 4 minutes,
+  generated maps load and serve. **Deployed to `q2-teacher-server.service`.**
+  Latent follow-up: the in-engine gamemap segfault also lurks on the public
+  lane's human-driven rotations — needs a C-level investigation (backtrace
+  capture was inconclusive; no core). Not blocking while the public lane
+  rotates rarely and has crashed 0 times in 3 days.
+- **Next:** let the diversified corpus accrue (rotations every ~10 min
+  across q2dm2/4/6/8 + mlteacher_*), then rerun BC (`bc_demos_v3`) and
+  re-judge against the same gates. Do NOT relax the gates mid-campaign; if
+  a diverse corpus still caps yaw MAE, the 3ZB2 snap-aim target
+  distribution is the limiter and that becomes a documented design
+  decision, not a silent gate edit.
 
 ### Phase 3 — PPO polish under the season gate
 - Short PPO seasons warm-started from the BC baseline, judged by
