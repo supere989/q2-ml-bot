@@ -114,7 +114,14 @@ def _write_config(
         f"set maxclients {args.maxclients}",
         "set ml_enabled 0",
         "set ml_bot_slot 99",
-        "set ml_teacher_enabled 0",
+        # Human imitation capture (Phase 2, 2026-09-01): record real players'
+        # usercmds as teacher samples to the WSL receiver. ML-registered
+        # clients are excluded by the zc.ml_enabled guard in the C path.
+        "set ml_teacher_enabled 1",
+        "set ml_teacher_humans 1",
+        f"set ml_teacher_addr {args.teacher_addr}",
+        f"set ml_teacher_port {args.teacher_port}",
+        "set ml_teacher_stride 1",
         "set ml_client_telemetry 1",
         f"set ml_client_telemetry_port {telemetry.port}",
         f'set ml_client_telemetry_token "{telemetry.token}"',
@@ -235,6 +242,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timelimit", type=float, default=15.0)
     parser.add_argument("--fraglimit", type=int, default=20)
     parser.add_argument("--dlserver", default="http://5.78.204.86:32494")
+    parser.add_argument("--teacher_addr", default="100.86.206.50")
+    parser.add_argument("--teacher_port", type=int, default=32511)
     return parser
 
 

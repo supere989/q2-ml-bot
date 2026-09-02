@@ -11,6 +11,7 @@ from .protocol import (
     ACT_FMT,
     ACT_SIZE,
     ML_ACT_MAGIC,
+    ML_CONTROL_HUMAN,
     ML_CONTROL_LEGACY_BOT,
     OBS_SIZE,
     Action,
@@ -36,7 +37,7 @@ class TeacherSample:
     action: np.ndarray
 
 
-def parse_teacher_sample(data: bytes) -> TeacherSample | None:
+def parse_teacher_sample(data: bytes, allow_humans: bool = False) -> TeacherSample | None:
     if len(data) != TEACHER_PACKET_SIZE:
         return None
     header = struct.unpack_from(TEACHER_HEADER_FMT, data)
@@ -56,12 +57,16 @@ def parse_teacher_sample(data: bytes) -> TeacherSample | None:
         return None
     action_values = struct.unpack_from(ACT_FMT, data, obs_start + OBS_SIZE)
     action_magic, action_tick = action_values[:2]
+    control = int(observation.self_debug[2])
+    allowed_controls = {ML_CONTROL_LEGACY_BOT}
+    if allow_humans:
+        allowed_controls.add(ML_CONTROL_HUMAN)
     if (
         action_magic != ML_ACT_MAGIC
         or action_tick != tick
         or observation.tick != tick
         or observation.bot_slot != slot
-        or int(observation.self_debug[2]) != ML_CONTROL_LEGACY_BOT
+        or control not in allowed_controls
     ):
         return None
     action = np.asarray(action_values[2:], dtype=np.float32)

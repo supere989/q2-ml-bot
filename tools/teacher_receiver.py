@@ -32,6 +32,7 @@ def _flush(output_dir: Path, batch_id: int, rows: dict[str, list]) -> Path:
             ticks=np.asarray(rows["ticks"], dtype=np.uint32),
             slots=np.asarray(rows["slots"], dtype=np.uint16),
             maps=np.asarray(rows["maps"], dtype="U32"),
+            control=np.asarray(rows["control"], dtype=np.uint8),
         )
         stream.flush()
         os.fsync(stream.fileno())
@@ -47,6 +48,8 @@ def main() -> int:
     parser.add_argument("--output_dir", default="data/live_3zb2")
     parser.add_argument("--batch_size", type=int, default=2048)
     parser.add_argument("--flush_seconds", type=float, default=120.0)
+    parser.add_argument("--allow_humans", action="store_true",
+                        help="also accept ML_CONTROL_HUMAN samples (ml_teacher_humans capture)")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -58,7 +61,7 @@ def main() -> int:
     sock.settimeout(1.0)
     print(f"teacher_receiver={args.bind}:{args.port} source={args.source} packet={TEACHER_PACKET_SIZE}", flush=True)
 
-    rows = {key: [] for key in ("obs", "actions", "sequence", "ticks", "slots", "maps")}
+    rows = {key: [] for key in ("obs", "actions", "sequence", "ticks", "slots", "maps", "control")}
     memories: dict[tuple[str, int], VoxelSpatialReward] = {}
     last_sequence = 0
     accepted = rejected = lost = 0
@@ -72,7 +75,7 @@ def main() -> int:
             address = ("", 0)
         now = time.monotonic()
         if data:
-            sample = parse_teacher_sample(data) if address[0] == args.source else None
+            sample = parse_teacher_sample(data, allow_humans=args.allow_humans) if address[0] == args.source else None
             if sample is None:
                 rejected += 1
             else:
@@ -105,6 +108,7 @@ def main() -> int:
                 rows["ticks"].append(sample.tick)
                 rows["slots"].append(sample.bot_slot)
                 rows["maps"].append(sample.map_name)
+                rows["control"].append(int(sample.observation.self_debug[2]))
                 memory.update(sample.observation)
                 accepted += 1
 
