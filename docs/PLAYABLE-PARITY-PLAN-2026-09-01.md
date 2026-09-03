@@ -200,6 +200,24 @@
   +9.97 spike in the first 2 min. Gate = same bounds on last-300 window:
   KL p95 ≤ 0.03, clip p95 ≤ 0.20, ep_r clearly above control → promote
   to `q2-ai-bots.service`.
+- **Season 2 first gate (2026-09-03 11:30 PDT, 837k steps): STABILITY
+  FIXED** — lr 5e-6 is decisively calmer: last-300 KL p95 0.0054 and clip
+  p95 0.058 (vs s1's 0.0475/0.183 at the same age; bounds 0.03/0.20),
+  kd last-300 mean 0.523 (control ~0.12–0.23). Stability gates pass, so
+  the checkpoint was promoted to `q2-ai-bots.service`… **and immediately
+  REVERTED on behavioral grounds:** a self-play probe (4× the s2 policy on
+  q2dm1, 90s) showed **zero enemy sightings** — the policy is evasive;
+  its kd comes from counter-play against 3ZB2 hunters, and a server full
+  of evasive policies never engages (0 kills in 5.5 min live, vs the BC
+  clone's first kill by minute ~3). **New promotion criterion added:**
+  beyond stability bounds, a candidate must pass a 90-second self-play
+  engagement probe (enemy_visible > 0, fire > 0, damage > 0). kd vs
+  hunters measures retaliation, not initiative. Design implication:
+  future seasons need an engagement incentive (reward for closing /
+  initiating contact) or a mixed all-AI roster (aggressive BC-anchor bots
+  + RL bots — still no 3ZB2). The passive export is kept at
+  `checkpoints/serve_s2_800k_passive.onnx` on the VPS for reference.
+  bc_demos_v3 clone continues serving. Corpus 7.22M rows, human rows 0.
 
 ### Phase 4 — Maps and public play
 - Maps are a curation problem now, not a generation problem. Generator v6 +
