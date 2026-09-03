@@ -186,6 +186,20 @@
   Serving policy unchanged (bc_demos_v3 clone). AI-bot lane: 14 rotations
   in 90 min, 268 kill-events cumulative, active. Corpus 4.30M rows,
   human rows still 0. Control healthy at 6.81M steps.
+- **Season `bc_v3` TERMINATED at 5.63M steps (2026-09-03 ~07:20 PDT, user
+  decision):** KL/clip deterioration was monotonic (last-300 KL p95 0.077,
+  clip p95 0.334) — 1e-5 is simply too hot for the warm-started phase and
+  the run had no path through the stability bounds. Its answer stands:
+  the warm-start itself works (whole-run kd mean 0.439 vs control ~0.12).
+- **Season 2 (`bc_v3_s2`) LAUNCHED 2026-09-03:** identical config to
+  season 1 except `--lr 5e-6`, same warm-start point
+  (`warm_bc_v3/policy_00000000.pt` = the bc_demos_v3 prior), fresh Adam,
+  `Q2_RUN_TAG=bc_v3_s2` (own ckpt dir + TB run), same port slab
+  (28410/28600), tmux `q2_ppo_bc`, log `/tmp/q2_train.log.ppo_bc2`.
+  Warm start verified ("Resumed from ... env_steps=0"), 75 sps, ep_r
+  +9.97 spike in the first 2 min. Gate = same bounds on last-300 window:
+  KL p95 ≤ 0.03, clip p95 ≤ 0.20, ep_r clearly above control → promote
+  to `q2-ai-bots.service`.
 
 ### Phase 4 — Maps and public play
 - Maps are a curation problem now, not a generation problem. Generator v6 +
