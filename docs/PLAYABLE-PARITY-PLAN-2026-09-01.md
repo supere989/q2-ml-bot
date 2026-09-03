@@ -175,6 +175,17 @@
   1.0–1.5 vs control's +0.45 / 0.14 at 5.35M steps. AI-bot lane health:
   18 map rotations in 3h, combat continuous (96 kill-events by 22:28 UTC),
   service active. Corpus 3.27M rows, human rows still 0.
+- **Season `bc_v3` re-gate (2026-09-02 20:45 PDT, 2.62M steps):** still
+  **NO PROMOTION** — stability moved the wrong way: approx_kl whole-run
+  p95 0.060 / last-300 p95 0.047 (bound 0.03), clip_fraction last-300 p95
+  0.264 (bound 0.20, was 0.183 at 1.2M). Latest windows ep_r -0.18, kd
+  0.00 — the +22/kd>1 burst did not hold. Reading: the warm-started
+  policy is churning through adaptation, not calmly polishing; if
+  stability doesn't recover by ~5M steps, next season should lower lr
+  from 1e-5 and/or add a KL-to-prior anchor rather than relaxing gates.
+  Serving policy unchanged (bc_demos_v3 clone). AI-bot lane: 14 rotations
+  in 90 min, 268 kill-events cumulative, active. Corpus 4.30M rows,
+  human rows still 0. Control healthy at 6.81M steps.
 
 ### Phase 4 — Maps and public play
 - Maps are a curation problem now, not a generation problem. Generator v6 +
