@@ -218,6 +218,17 @@
   + RL bots — still no 3ZB2). The passive export is kept at
   `checkpoints/serve_s2_800k_passive.onnx` on the VPS for reference.
   bc_demos_v3 clone continues serving. Corpus 7.22M rows, human rows 0.
+- **Ops note (2026-09-03 22:40 PDT):** wsl-box (RTX 2080) went dark at
+  ~11:35 PDT — tailscale unreachable, both trainers, the teacher
+  receiver, and both map farms are on it. Season 2 is interrupted
+  mid-flight; resume by relaunching `q2_ppo_bc` per the Phase 3 launch
+  spec once the box is back (its checkpoints persist to
+  `checkpoints/bc_v3_s2/`; resume with `--resume` pointing at that dir
+  rather than the warm-start dir to continue rather than restart).
+  VPS-side lanes are unaffected and healthy: AI-bot game rotating stock
+  maps on farm-outage fallback (5 rotations/30 min, combat continuous),
+  teacher server up but its telemetry is dropped while the receiver is
+  down (UDP, no queue — samples lost during the outage).
 
 ### Phase 4 — Maps and public play
 - Maps are a curation problem now, not a generation problem. Generator v6 +
